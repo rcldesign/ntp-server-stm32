@@ -267,7 +267,7 @@ R11,1,1.5M,1.5M 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF1504X,,RES SMD
 R12,1,1.5M,1.5M 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF1504X,,RES SMD 1.5M OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,PoE,STD
 R13,1,232,232 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF2320X,,RES SMD 232 OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,PoE,STD
 R14,1,909,909 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF9090X,,RES SMD 909 OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,PoE,STD
-R15,1,26.1k,26.1k 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF2612X,,RES SMD 26.1k OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,PoE,STD
+R15,1,26.1k,RES 26.1K OHM 1% 1/10W 0402,402,"KOA Speer Electronics, Inc.",RK73H1ETTP2612F,2019-RK73H1ETTP2612FTR-ND,RES 26.1K OHM 1% 1/10W 0402,https://www.koaspeer.com/pdfs/RK73H.pdf,PoE,SPECIAL-KEEP
 R16,1,25m,25m shunt - select 0.5% per INA rail (TBD),1206,YAGEO,,,RES 25m OHM 0.5% SENSE 0805 (value TBD per rail),https://www.yageo.com/upload/media/product/app/datasheet/rchip/pyu-rl_group_521_rohs_l.pdf,PoE,SHUNT-REVIEW
 R17,1,10k,10k 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF1002X,,RES SMD 10k OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,PoE,STD
 R18,1,24.9k,24.9k 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF2492X,,RES SMD 24.9k OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,PoE,STD
@@ -462,8 +462,8 @@ R206,1,10k,10k 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF1002X,,RES SMD 
 R207,1,10k,10k 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF1002X,,RES SMD 10k OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,SPI Peripherals,STD
 R208,1,10k,10k 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF1002X,,RES SMD 10k OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,SPI Peripherals,STD
 R209,1,10k,10k 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF1002X,,RES SMD 10k OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,SPI Peripherals,STD
-R210,1,22,RES 0.15 OHM 0.5% 1/4W 0805,0805,Ohmite,KDV08DR150ET,273-KDV08DR150ETCT-ND,RES 0.15 OHM 0.5% 1/4W 0805,https://www.ohmite.com/assets/images/res-kdv.pdf,SPI Peripherals,SPECIAL-KEEP
-R211,1,22,RES 0.15 OHM 0.5% 1/4W 0805,0805,Ohmite,KDV08DR150ET,273-KDV08DR150ETCT-ND,RES 0.15 OHM 0.5% 1/4W 0805,https://www.ohmite.com/assets/images/res-kdv.pdf,SPI Peripherals,SPECIAL-KEEP
+R210,1,22,22 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF22R0X,,RES SMD 22 OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,SPI Peripherals,STD
+R211,1,22,22 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF22R0X,,RES SMD 22 OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,SPI Peripherals,STD
 R212,1,10k,10k 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF1002X,,RES SMD 10k OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,SPI Peripherals,STD
 R213,1,100k,100k 1% 1/10W 0402,R_0402_1005Metric,Panasonic,ERJ-2RKF1003X,,RES SMD 100k OHM 1% 1/10W 0402,https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf,WDT,STD
 TP1,1,TestPoint,TestPoint,,,,,test point,,Connectors,KEEP

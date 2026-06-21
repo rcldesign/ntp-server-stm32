@@ -15374,7 +15374,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "402"
 			(at 210.058 74.93 90)
 			(hide yes)
 			(show_name no)
@@ -15396,7 +15396,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 26.1k OHM 1% 1/10W 0402"
+		(property "Description" "RES 26.1K OHM 1% 1/10W 0402"
 			(at 208.28 74.93 0)
 			(hide yes)
 			(show_name no)
@@ -15407,7 +15407,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "KOA Speer Electronics, Inc."
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -15440,7 +15440,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF2612X"
+		(property "MANUFACTURER_PART_NUMBER" "RK73H1ETTP2612F"
 			(at 208.28 74.93 0)
 			(hide yes)
 			(show_name no)

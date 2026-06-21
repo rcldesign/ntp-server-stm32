@@ -2083,7 +2083,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 152.4 109.982 90)
 			(hide yes)
 			(show_name no)
@@ -2105,7 +2105,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 0.15 OHM 0.5% 1/4W 0805"
+		(property "Description" "RES SMD 22 OHM 1% 1/10W 0402"
 			(at 152.4 111.76 90)
 			(hide yes)
 			(show_name no)
@@ -2138,7 +2138,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "KDV08DR150ET"
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF22R0X"
 			(at 152.4 111.76 90)
 			(hide yes)
 			(show_name no)
@@ -2149,7 +2149,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Ohmite"
+		(property "MANUFACTURER" "Panasonic"
 			(at 152.4 111.76 90)
 			(hide yes)
 			(show_name no)
@@ -2208,7 +2208,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 152.4 116.078 90)
 			(hide yes)
 			(show_name no)
@@ -2230,7 +2230,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 0.15 OHM 0.5% 1/4W 0805"
+		(property "Description" "RES SMD 22 OHM 1% 1/10W 0402"
 			(at 152.4 114.3 90)
 			(hide yes)
 			(show_name no)
@@ -2263,7 +2263,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "KDV08DR150ET"
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF22R0X"
 			(at 152.4 114.3 90)
 			(hide yes)
 			(show_name no)
@@ -2274,7 +2274,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Ohmite"
+		(property "MANUFACTURER" "Panasonic"
 			(at 152.4 114.3 90)
 			(hide yes)
 			(show_name no)
