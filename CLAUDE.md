@@ -45,6 +45,9 @@ touches in the same change**. Do not leave docs disagreeing with each other.
 | `rb_rs232_interface.md` | FE-5680A serial/control path: SN65C3221E, RS-232/CMOS DPDT relay, opto lock-status. | Design ref |
 | `sts1000_fault_aggregation.md` | MCP23017 ×2 fault/UI aggregation, three active-low wire-OR interrupts. As-built. | As-built |
 | `sts1000_3v3p_i2c_peripherals.md` | I²C peripheral group + display/touch subsystem + e-compass; records the 3V3_P-rail elimination. | Design ref |
+| `sts1000_net_naming.md` | **Net/rail naming convention** + the applied rename map (plain `3V3`, `_N` active-low, `<rail>_PG`). | Authoritative |
+| `sts1000_bom.md` | **BOM standardization rules** + the lines still needing a sourcing decision. CSV: `hardware/ntp-server-stm32/sts1000_bom.csv`. | Active |
+| `sts1000_schematic_error_review.md` | Netlist-driven error/consistency review (wiring defects, ESD-scheme gaps, doc-vs-as-built deltas, reliability items). | Review |
 | `sts1000_product_page.html` | Customer-facing product/spec page (feature framing, positioning). | Reference |
 
 **Authority rule:** the peripheral map wins on electrical facts; the software spec owns
