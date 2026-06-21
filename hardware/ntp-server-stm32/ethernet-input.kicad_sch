@@ -2137,7 +2137,7 @@
 					)
 				)
 			)
-			(property "Value" "+3.3V"
+			(property "Value" "3V3"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -3648,7 +3648,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_LAN"
+		(property "Value" "3V3_LAN"
 			(at 119.38 76.2 0)
 			(show_name no)
 			(do_not_autoplace no)

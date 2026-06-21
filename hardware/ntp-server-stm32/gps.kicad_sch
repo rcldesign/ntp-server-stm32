@@ -3105,7 +3105,7 @@
 					)
 				)
 			)
-			(property "Value" "+3.3V"
+			(property "Value" "3V3"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -5221,7 +5221,7 @@
 		)
 		(uuid "f97089eb-a86d-491c-9391-9be924747ad5")
 	)
-	(global_label "INA_ALERT_3.3V_GPS"
+	(global_label "INA_ALERT_3V3_GPS"
 		(shape output)
 		(at 283.21 111.76 180)
 		(fields_autoplaced yes)
@@ -5485,7 +5485,7 @@
 			)
 		)
 	)
-	(global_label "3V3_LDO_GPS_PG"
+	(global_label "3V3_GPS_LDO_PG"
 		(shape output)
 		(at 308.61 59.69 0)
 		(fields_autoplaced yes)
@@ -5557,7 +5557,7 @@
 			)
 		)
 	)
-	(global_label "GPS_nSAFEBOOT"
+	(global_label "GPS_SAFEBOOT_N"
 		(shape input)
 		(at 148.59 194.31 0)
 		(fields_autoplaced yes)
@@ -5605,7 +5605,7 @@
 			)
 		)
 	)
-	(global_label "GPS_nRST"
+	(global_label "GPS_RST_N"
 		(shape input)
 		(at 148.59 227.33 0)
 		(fields_autoplaced yes)
@@ -5724,7 +5724,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_GPS"
+		(property "Value" "3V3_GPS"
 			(at 346.71 58.42 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7127,7 +7127,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_GPS"
+		(property "Value" "3V3_GPS"
 			(at 48.26 224.79 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7205,7 +7205,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_GPS"
+		(property "Value" "3V3_GPS"
 			(at 219.71 173.99 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8134,7 +8134,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 289.306 97.79 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8290,7 +8290,7 @@
 				)
 			)
 		)
-		(property "Value" "+5V"
+		(property "Value" "5V"
 			(at 220.98 50.8 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8564,7 +8564,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 342.646 111.76 0)
 			(show_name no)
 			(do_not_autoplace no)

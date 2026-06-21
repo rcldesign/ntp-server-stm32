@@ -1487,7 +1487,7 @@
 					)
 				)
 			)
-			(property "Value" "+3.3V"
+			(property "Value" "3V3"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -2938,7 +2938,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 85.09 119.38 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3095,7 +3095,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 283.21 88.9 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3287,7 +3287,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 250.19 182.88 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3365,7 +3365,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 48.26 54.61 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3959,7 +3959,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 83.82 29.21 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4037,7 +4037,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 148.59 92.71 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5139,7 +5139,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 361.95 76.2 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5532,7 +5532,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 226.06 81.28 0)
 			(show_name no)
 			(do_not_autoplace no)

@@ -1916,7 +1916,7 @@
 					)
 				)
 			)
-			(property "Value" "+3.3V"
+			(property "Value" "3V3"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -3312,7 +3312,7 @@
 			)
 		)
 	)
-	(global_label "3.0V_RF_LDO_PG"
+	(global_label "3V0_RF_LDO_PG"
 		(shape output)
 		(at 334.01 100.33 0)
 		(fields_autoplaced yes)
@@ -3591,7 +3591,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.0V_RF"
+		(property "Value" "3V0_RF"
 			(at 100.33 160.02 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3669,7 +3669,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.0V_RF"
+		(property "Value" "3V0_RF"
 			(at 76.2 99.06 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3904,7 +3904,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.0V_RF"
+		(property "Value" "3V0_RF"
 			(at 128.27 217.17 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5214,7 +5214,7 @@
 				)
 			)
 		)
-		(property "Value" "+5V"
+		(property "Value" "5V"
 			(at 262.89 59.69 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6097,7 +6097,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.0V_RF"
+		(property "Value" "3V0_RF"
 			(at 110.49 86.36 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6335,7 +6335,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.0V_RF"
+		(property "Value" "3V0_RF"
 			(at 181.61 67.31 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6413,7 +6413,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.0V_RF"
+		(property "Value" "3V0_RF"
 			(at 341.63 45.72 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6491,7 +6491,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.0V_RF"
+		(property "Value" "3V0_RF"
 			(at 138.43 124.46 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6569,7 +6569,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 87.63 218.44 0)
 			(show_name no)
 			(do_not_autoplace no)

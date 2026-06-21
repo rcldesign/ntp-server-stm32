@@ -2443,7 +2443,7 @@
 					)
 				)
 			)
-			(property "Value" "+3.3V"
+			(property "Value" "3V3"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -5403,7 +5403,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_GPS"
+		(property "Value" "3V3_GPS"
 			(at 179.07 125.73 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5765,7 +5765,7 @@
 				)
 			)
 		)
-		(property "Value" "+5V"
+		(property "Value" "5V"
 			(at 292.1 146.05 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6167,7 +6167,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 346.71 194.31 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7124,7 +7124,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_GPS"
+		(property "Value" "3V3_GPS"
 			(at 104.14 113.03 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7750,7 +7750,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_GPS"
+		(property "Value" "3V3_GPS"
 			(at 116.84 60.96 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7906,7 +7906,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_GPS"
+		(property "Value" "3V3_GPS"
 			(at 143.51 116.84 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8257,7 +8257,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 294.64 181.61 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9850,7 +9850,7 @@
 				)
 			)
 		)
-		(property "Value" "+5V"
+		(property "Value" "5V"
 			(at 219.71 73.66 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10242,7 +10242,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_GPS"
+		(property "Value" "3V3_GPS"
 			(at 146.05 71.12 0)
 			(show_name no)
 			(do_not_autoplace no)

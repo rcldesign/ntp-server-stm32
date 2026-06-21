@@ -949,7 +949,7 @@
 					)
 				)
 			)
-			(property "Value" "+3.3V"
+			(property "Value" "3V3"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -2499,7 +2499,7 @@
 		)
 		(uuid "ffe2a0c8-5d36-4c9f-b976-4c44a7fed237")
 	)
-	(global_label "INA_ALERT_V_DISP_5V"
+	(global_label "INA_ALERT_5V_DISP"
 		(shape input)
 		(at 182.88 186.69 180)
 		(fields_autoplaced yes)
@@ -2811,7 +2811,7 @@
 			)
 		)
 	)
-	(global_label "3V3_LDO_GPS_PG"
+	(global_label "3V3_GPS_LDO_PG"
 		(shape input)
 		(at 187.96 68.58 180)
 		(fields_autoplaced yes)
@@ -2907,7 +2907,7 @@
 			)
 		)
 	)
-	(global_label "EXP_RESET"
+	(global_label "EXP_RST_N"
 		(shape input)
 		(at 215.9 179.07 0)
 		(fields_autoplaced yes)
@@ -2979,7 +2979,7 @@
 			)
 		)
 	)
-	(global_label "INA_ALERT_3.3V_STM"
+	(global_label "INA_ALERT_3V3_STM"
 		(shape input)
 		(at 182.88 184.15 180)
 		(fields_autoplaced yes)
@@ -3051,7 +3051,7 @@
 			)
 		)
 	)
-	(global_label "POE_PGO"
+	(global_label "POE_PG"
 		(shape input)
 		(at 187.96 86.36 180)
 		(fields_autoplaced yes)
@@ -3075,7 +3075,7 @@
 			)
 		)
 	)
-	(global_label "EXP_RESET"
+	(global_label "EXP_RST_N"
 		(shape input)
 		(at 233.68 91.44 0)
 		(fields_autoplaced yes)
@@ -3147,7 +3147,7 @@
 			)
 		)
 	)
-	(global_label "3.0V_RF_LDO_PG"
+	(global_label "3V0_RF_LDO_PG"
 		(shape input)
 		(at 187.96 73.66 180)
 		(fields_autoplaced yes)
@@ -3243,7 +3243,7 @@
 			)
 		)
 	)
-	(global_label "INA_ALERT_3.3V_GPS"
+	(global_label "INA_ALERT_3V3_GPS"
 		(shape input)
 		(at 182.88 189.23 180)
 		(fields_autoplaced yes)
@@ -3291,7 +3291,7 @@
 			)
 		)
 	)
-	(global_label "INA_ALERT_3.3V"
+	(global_label "INA_ALERT_3V3"
 		(shape input)
 		(at 182.88 181.61 180)
 		(fields_autoplaced yes)
@@ -3444,7 +3444,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 208.28 133.3499 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3602,7 +3602,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 214.63 45.7199 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3681,7 +3681,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 166.37 138.4299 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4772,7 +4772,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 82.55 138.4299 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5098,7 +5098,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 257.81 158.7499 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5580,7 +5580,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 49.53 138.4299 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6102,7 +6102,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 246.38 72.3899 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6373,7 +6373,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 219.71 187.9599 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6727,7 +6727,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 116.84 138.4299 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7113,7 +7113,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 133.35 138.4299 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7271,7 +7271,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 241.3 158.7499 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7350,7 +7350,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 66.04 138.4299 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7751,7 +7751,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 149.86 138.4299 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7830,7 +7830,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V_STM"
+		(property "Value" "3V3_STM"
 			(at 99.06 138.4299 0)
 			(show_name no)
 			(do_not_autoplace no)

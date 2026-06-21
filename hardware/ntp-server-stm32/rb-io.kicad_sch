@@ -3190,7 +3190,7 @@
 					)
 				)
 			)
-			(property "Value" "+3.3V"
+			(property "Value" "3V3"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -5797,7 +5797,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 184.15 77.47 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5875,7 +5875,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 41.91 48.26 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6786,7 +6786,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 66.04 93.98 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8264,7 +8264,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 116.84 72.39 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8498,7 +8498,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 361.95 26.67 0)
 			(show_name no)
 			(do_not_autoplace no)

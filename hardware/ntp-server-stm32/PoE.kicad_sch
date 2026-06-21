@@ -4264,7 +4264,7 @@
 					)
 				)
 			)
-			(property "Value" "+3.3V"
+			(property "Value" "3V3"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -4403,7 +4403,7 @@
 					)
 				)
 			)
-			(property "Value" "+5V"
+			(property "Value" "5V"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -8463,7 +8463,7 @@
 			)
 		)
 	)
-	(global_label "POE_PGO"
+	(global_label "POE_PG"
 		(shape output)
 		(at 256.54 57.15 0)
 		(fields_autoplaced yes)
@@ -10106,7 +10106,7 @@
 				)
 			)
 		)
-		(property "Value" "+5V"
+		(property "Value" "5V"
 			(at 92.71 231.14 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10704,7 +10704,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 385.826 76.2 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13407,7 +13407,7 @@
 				)
 			)
 		)
-		(property "Value" "+5V"
+		(property "Value" "5V"
 			(at 69.85 232.41 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -14319,7 +14319,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 311.15 190.5 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -14654,7 +14654,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 30.734 221.488 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18031,7 +18031,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 99.06 198.12 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18524,7 +18524,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 293.37 198.12 0)
 			(show_name no)
 			(do_not_autoplace no)

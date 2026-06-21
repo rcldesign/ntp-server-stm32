@@ -906,7 +906,7 @@
 					)
 				)
 			)
-			(property "Value" "+5V"
+			(property "Value" "5V"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -1923,7 +1923,7 @@
 				)
 			)
 		)
-		(property "Value" "+5V"
+		(property "Value" "5V"
 			(at 200.66 67.31 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2001,7 +2001,7 @@
 				)
 			)
 		)
-		(property "Value" "+5V"
+		(property "Value" "5V"
 			(at 191.77 67.31 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3015,7 +3015,7 @@
 				)
 			)
 		)
-		(property "Value" "+5V"
+		(property "Value" "5V"
 			(at 209.55 67.31 0)
 			(show_name no)
 			(do_not_autoplace no)

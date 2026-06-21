@@ -1498,7 +1498,7 @@
 					)
 				)
 			)
-			(property "Value" "+3.3V"
+			(property "Value" "3V3"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -1637,7 +1637,7 @@
 					)
 				)
 			)
-			(property "Value" "+5V"
+			(property "Value" "5V"
 				(at 0 3.556 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -5819,7 +5819,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 99.06 154.94 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7855,7 +7855,7 @@
 				)
 			)
 		)
-		(property "Value" "+3.3V"
+		(property "Value" "3V3"
 			(at 99.06 63.5 0)
 			(show_name no)
 			(do_not_autoplace no)
