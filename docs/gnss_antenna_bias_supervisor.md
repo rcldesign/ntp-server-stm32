@@ -8,7 +8,7 @@
 | **Host receiver** | u-blox ZED-F9T-00B (multi-band timing receiver) |
 | **Host MCU** | STM32H563VIT6 |
 | **Antenna rail** | 5 V, 150 mA maximum |
-| **Logic domain** | 3V3_GPS (F9T VCC_IO); comparators powered from +5V_LDO |
+| **Logic domain** | 3V3_GPS (F9T VCC_IO); comparators powered from 5V_LDO |
 
 ---
 
@@ -163,7 +163,7 @@ In the short state the limiter holds ~180 mA, so the DETECT leg still reads "pre
 
 | Ref | Part | Value | Function |
 |-----|------|-------|----------|
-| U25C | LMV393 (power-pin unit of the dual) | — | V+ = +5V_LDO, V− = GND. |
+| U25C | LMV393 (power-pin unit of the dual) | — | V+ = 5V_LDO, V− = GND. |
 | C31 | — | 0.1 µF | LMV393 supply decoupling. <!-- TODO verify designator: C31 — one of the two 5V (U25C V+) 0.1µF decouplers C57/C58 --> |
 
 The LMV393 is powered from **+5 V** (not 3.3 V) so its input common-mode range (0 to V+ − 1.5 V ≈ 0–3.5 V) spans every supervisor input: U24 OUT (0–3.0 V), node A ÷ 2 (0–2.5 V), and both references (≤0.76 V).
@@ -221,7 +221,7 @@ Because the only connection to the F9T pin is Q14's base through R79, the 5 V ra
 | Current-sense linear ceiling | ~45 mA | INA181A1 gain 20 on 3.3 V (present/absent only) |
 | Bias-T choke impedance @ 1.575 GHz | ~554 Ω | L1 = 56 nH (250 mA, 820 mΩ DCR) |
 | Supervisor logic level | 3.3 V | 3V3_GPS pull-ups |
-| Comparator supply | 5 V | +5V_LDO |
+| Comparator supply | 5 V | 5V_LDO |
 
 Tolerance: the dividers are 1 % resistors feeding an LMV393 (few-mV offset) and an INA181A1 (low offset, ~±1 % gain error). The DETECT threshold (5 mA) has wide margin against any real antenna (≥ ~10 mA); the SHORT threshold (1.5 V) sits far from both normal (≥ 4.3 V) and fault (~0 V), so hysteresis is not required for clean switching.
 

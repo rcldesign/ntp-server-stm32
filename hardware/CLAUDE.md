@@ -16,18 +16,18 @@ preamble, not a re-statement of those docs.
 - Keep `sym-lib-table` / `fp-lib-table` pointing at in-repo libraries where parts are custom;
   note any external library dependencies.
 - **Net names must match the canonical names** in the peripheral map (`OSC_IN`, `MUX_SEL`,
-  `RB_PWR_EN`, `INA_ALERT_INT_N`, `EXP_RESET`, `V_DISP_5V`, `VCC_RB`, …). A schematic net that
+  `RB_PWR_EN`, `INA_ALERT_INT_N`, `EXP_RST_N`, `5V_DISP`, `VCC_RB`, …). A schematic net that
   drifts from the doc name is a defect.
 
 ---
 
 ## Standing KiCad actions (verify done)
 
-- [ ] **Drop legacy R44 at PC12** — R153 is the `INA_ALERT_INT_N` pull-up; both present =
-      10k∥10k = 5k.
-- [ ] **Fix net label `PG_IN_N` → `PG_INT_N`** (one-pin-net otherwise).
-- [ ] Confirm INT nets + `EXP_RESET` land on the correct MCU pins: `PG_INT_N`=PA10,
-      `BTN_INT_N`=PE0, `INA_ALERT_INT_N`=PC12, `EXP_RESET`=PC0.
+- [ ] **Drop legacy R44 at PC12** — R199 is the `INA_ALERT_INT_N` pull-up; both present =
+      10k∥10k = 5k. <!-- TODO verify against re-annotated schematic: R44 is now a 49.9 Ω Ethernet PHY term; the only INA_ALERT_INT_N pull-up is R199 -->
+- [ ] **Fix net label `PG_IN_N` → `PG_INT_N`** (one-pin-net otherwise). <!-- TODO verify against re-annotated schematic: net is `PG_INT_N` -->
+- [ ] Confirm INT nets + `EXP_RST_N` land on the correct MCU pins: `PG_INT_N`=PA10,
+      `BTN_INT_N`=PE0, `INA_ALERT_INT_N`=PC12, `EXP_RST_N`=PC0.
 - [ ] Confirm peripheral-map §2 wording reads "OCXO → PH0 via §2.1 clock mux" (not "directly").
 
 ---
@@ -36,28 +36,28 @@ preamble, not a re-statement of those docs.
 
 | Block | Canonical doc | Anchor designators |
 |---|---|---|
-| MCU & core | peripheral_map | STM32H563VIT6 (LQFP100) |
-| OCXO + supply | checklist §2 | OH300-61003CV-010.0M, TPS7A52 (LDO), **R98 22 Ω** source term, INA228 #5 @0x46 |
-| Clock mux | `sts1000_clock_mux.md` | **U45** 74LVC1G157, **U46** 74LVC1G34, R149/R150/R151, C141, D16 |
-| RF front end | `ntp_server_rf_frontend.md` | **U42** TMUX1101, **U43** LTC6752xS5, **U44** LT3045, D11/D12/D13/D14/D15, R144 33 Ω |
-| Rb buck (VCC_RB) | `sts1000_vcc_rb_supply.md` | **U31A** MIC28516, **U35** MCP41U83 digipot, **U36** OPA320, **U34** MCP1502-40, **U38A** LMV393 OV latch, U37 INA228 @0x47, 1.5SMCJ28A TVS |
-| FE-5680A serial | `rb_rs232_interface.md` | **U40** SN65C3221E, **K1** G6K-2F-Y DC3 relay, **U41** APC-817C1 opto, U39 PESD15VL2BT |
-| GNSS | checklist §6 | ZED-F9T-00B, INA228 #3 @0x44 |
-| Antenna bias/supervisor | `gnss_antenna_bias_supervisor.md` | **U11** INA181A1, **U12** LMV393, Q1/Q2/Q4/Q5, L1 56 nH, R30 3.3 Ω, INA228 #4 @0x45 |
-| Ethernet/PTP | checklist §8 | LAN8742AI-CZ-TR + 25 MHz xtal, magjack |
-| PoE + power tree | checklist §9 | FDMQ8205A bridge, NCP1095 PD, INA228 #1/#2/#8 |
-| Supercap backup | checklist §10 | TPS61094 ×2, DSF305Q3R0 |
-| I²C housekeeping | checklist §11 | LTC4311ISC6, TMP117 ×2, ATECC608B, IIS2MDC, LIS2DH12 |
-| Fault/UI aggregation | `sts1000_fault_aggregation.md` | **U47** MCP23017 @0x20 (MIRROR=1), **U48** MCP23017 @0x21 (MIRROR=0), R148/R152/R153/R154 |
-| Display/touch | `sts1000_3v3p_i2c_peripherals.md` | LCDwiki MSP4030, **U56** RT9742, **U57** PCA9306, **U58/U59** TPD4E02B04, **U60** TPD4E05U06DQAR, INA228 #7 @0x42, R161/R163/R164 |
+| MCU & core | peripheral_map | **U12** STM32H563VIT6 (LQFP100), **U64** TPS3430 WDT |
+| OCXO + supply | checklist §2 | **Y3** OH300-61003CV-010.0M, **U39** TPS7A52 (LDO), **U38** AP3441 buck, **U36** OPA320 Vc buf, **R123 22 Ω** source term, **U37** INA228 #5 @0x46 |
+| Clock mux | `sts1000_clock_mux.md` | **U52** 74LVC1G157, **U53** 74LVC1G34, R187/R188/R189, C160, D16 <!-- TODO verify designators: C141→C160?, D16 --> |
+| RF front end | `ntp_server_rf_frontend.md` | **U49** TMUX1101, **U50** LTC6752xS5, **U51** LT3045, D18/D19/D20/D21, R184 33 Ω <!-- TODO verify clamp-diode designators: old D11/D12/D13/D14/D15 --> |
+| Rb buck (VCC_RB) | `sts1000_vcc_rb_supply.md` | **U40A** MIC28516, **U43** MCP41U83 digipot, **U42** OPA320, **U45** MCP1502-40, **U41A** LMV393 OV latch, **U44** INA228 @0x47, 1.5SMCJ28A TVS |
+| FE-5680A serial | `rb_rs232_interface.md` | **U46** SN65C3221E, **K1** G6K-2F-Y DC3 relay, **U48** APC-817C1 opto, **U47** PESD15VL2BT |
+| GNSS | checklist §6 | **U21** ZED-F9T-00B, **U22** LT3045 GPS LDO, **U23** INA228 #3 @0x44 |
+| Antenna bias/supervisor | `gnss_antenna_bias_supervisor.md` | **U24** INA181A1, **U25** LMV393, Q11/Q12/Q14, L1 47 nH, R77 3.3 Ω, **U26** INA228 #4 @0x45 <!-- TODO verify transistor designators: old Q1/Q2/Q4/Q5 --> |
+| Ethernet/PTP | checklist §8 | **U11** LAN8742AI-CZ-TR + Y1 25 MHz xtal, magjack |
+| PoE + power tree | checklist §9 | **U7/U8** FDMQ8205A bridge, **U9** NCP1095 PD, **U28** MIC28516 / **U29** AP3441 bucks, INA228 **U10**/#1 **U31**/#2 **U30**/#8 |
+| Supercap backup | checklist §10 | **U34/U35** TPS61094 ×2, DSF305Q3R0 |
+| I²C housekeeping | checklist §11 | **U56** LTC4311ISC6, **U57/U58** TMP117 ×2, **U60** ATECC608B, **U61** IIS2MDC, **U59** LIS2DH12 |
+| Fault/UI aggregation | `sts1000_fault_aggregation.md` | **U55** MCP23017 @0x20 (MIRROR=1, PG), **U54** MCP23017 @0x21 (MIRROR=0, buttons/INA-alert/touch), R198/R199/R200/R201 |
+| Display/touch | `sts1000_3v3p_i2c_peripherals.md` | LCDwiki MSP4030, **U33** RT9742, **U63** PCA9306, **U17/U18** TPD4E05U06DQAR, **U32** INA228 #7 @0x42, R104/R210/R211 <!-- TODO verify 3.3 V-line ESD array designators: old U58/U59 TPD4E02B04 → U15/U16/U19/U20 --> |
 
 ### INA228 address map
-| # | Addr | Rail | # | Addr | Rail |
+| # | Addr | Rail (designator) | # | Addr | Rail (designator) |
 |---|---|---|---|---|---|
-| 1 | 0x40 | PoE input | 5 | 0x46 | OCXO |
-| 2 | 0x41 | STM 3V3 | 6 | 0x47 | Rb (VCC_RB) |
-| 3 | 0x44 | GPS VCC | 7 | 0x42 | V_DISP_5V |
-| 4 | 0x45 | Antenna bias | 8 | 0x43 | main/general 3V3 |
+| 1 | 0x40 | PoE input (U10) | 5 | 0x46 | OCXO (U37) |
+| 2 | 0x41 | STM 3V3 (U31) | 6 | 0x47 | Rb (VCC_RB) (U44) |
+| 3 | 0x44 | GPS VCC (U23) | 7 | 0x42 | 5V_DISP (U32) |
+| 4 | 0x45 | Antenna bias (U26) | 8 | 0x43 | main/general 3V3 (U30) |
 
 ---
 
@@ -89,7 +89,7 @@ preamble, not a re-statement of those docs.
 - **Rb FB node:** keep wiper/SPI switching noise off the high-impedance feedback node. The
   fixed bounding resistors (not the digipot) set the absolute min/max VCC_RB — verify no wiper
   code (POR/mid-scale/SPI-fault) can exit the Rb-safe envelope.
-- **Source termination at the driver** (e.g. R98 at OCXO output → mux I0). No redundant
+- **Source termination at the driver** (e.g. R123 at OCXO output → mux I0). No redundant
   receiver-end series resistor on the same net.
 - **GPS SMA ESD (RF + bias):** the line carries 1.5 GHz RF (needs Cj ≤ 0.2–0.3 pF) **and** 5 V
   antenna bias (needs V_RWM ≥ ~6.5 V). Use a polymer ESD suppressor + a separate coaxial
@@ -141,6 +141,6 @@ preamble, not a re-statement of those docs.
 ## Conventions
 
 - **Editor: vi only** for CLI text editing — never pico/nano.
-- Review by **designator and pin** (R152, U47 GPB2, PA10), not node labels.
+- Review by **designator and pin** (R199, U54 GPB2, PA10), not node labels.
 - When a part or value changes, update the owning subsystem doc **and** propagate the delta to
   the peripheral map / checklist in the same change; keep docs mutually consistent.

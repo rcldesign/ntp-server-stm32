@@ -94,7 +94,7 @@ refdes collision is resolved — C120 is now this part only.
 | C119 | 10 nF | SS — soft-start cap |
 | C124 | 0.1 µF | BST — bootstrap cap (SW↔BST) |
 | R140 | 2.21 kΩ | ILIM / RCL — current-limit set |
-| R143 | 10 kΩ | PG pull-up to +3.3V (RB_PSU_PG) |
+| R143 | 10 kΩ | PG pull-up to 3V3 (RB_PSU_PG) |
 | R132 / R133 | 200 k / 100 k | EN sense divider, VOUT_P → EN |
 | Q19, Q20 | BC847W | RB_PWR_EN gate / level-shift (power-up interlock) |
 | R157, R158, R160, R161 | 10 kΩ | EN gate network |

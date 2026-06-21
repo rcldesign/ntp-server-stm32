@@ -81,7 +81,7 @@ must stay consistent with the two masters.
 |---|---|---|---|---|---|
 | 1 | 0x40 | PoE input | 5 | 0x46 | OCXO |
 | 2 | 0x41 | STM 3V3 | 6 | 0x47 | Rb (VCC_RB) |
-| 3 | 0x44 | GPS VCC | 7 | 0x42 | V_DISP_5V |
+| 3 | 0x44 | GPS VCC | 7 | 0x42 | 5V_DISP |
 | 4 | 0x45 | Antenna bias | 8 | 0x43 | main/general 3V3 |
 
 ### Software stack
@@ -127,7 +127,7 @@ also custom. Fallback platform documented: FreeRTOS + lwIP + mbedTLS + MCUboot.
 - **MCP23017 INT:** no open-source mode exists; use open-drain active-low wire-OR
   (active-high push-pull with pull-down does not work).
 - **Source termination placement:** series termination belongs at the driver (e.g.
-  R98 at the OCXO output). Remove redundant receiver-end series resistors on the same net.
+  R123 at the OCXO output). Remove redundant receiver-end series resistors on the same net.
 - **GPS backup sizing:** ZED-F9T has no useful warm-start state beyond ephemeris validity
   (~4 h). Size the supercap to the ephemeris window, not arbitrarily large.
 - **ESD on the GPS SMA (RF + bias):** carries 1.5 GHz RF (needs Cj ≤ 0.2–0.3 pF) *and*
@@ -143,9 +143,9 @@ also custom. Fallback platform documented: FreeRTOS + lwIP + mbedTLS + MCUboot.
 ## Standing open items
 
 **KiCad actions (verify done):**
-- [ ] Drop legacy **R44** at PC12 (R153 is the `INA_ALERT_INT_N` pull-up; else 10k∥10k = 5k).
+- [ ] Drop legacy **R44** at PC12 (R199 is the `INA_ALERT_INT_N` pull-up; else 10k∥10k = 5k). <!-- TODO verify against re-annotated schematic -->
 - [ ] Fix net label **`PG_IN_N` → `PG_INT_N`** (one-pin-net otherwise).
-- [ ] Confirm INT nets + `EXP_RESET` land on the correct MCU pins (PA10 / PE0 / PC12 / PC0).
+- [ ] Confirm INT nets + `EXP_RST_N` land on the correct MCU pins (PA10 / PE0 / PC12 / PC0).
 - [ ] Cross-doc: peripheral-map §2 wording "OCXO → PH0 directly" → "→ PH0 via §2.1 clock mux".
 
 **Design verifications before layout / fab:**
@@ -169,7 +169,7 @@ See `peripheral_map §14` and `software_spec §15` for the complete open-items l
 - **Editor:** use **vi** for any CLI text editing — never pico/nano.
 - **Style:** terse, dense, conclusions first, table-driven. No filler, no design-history
   framing in docs.
-- **Schematic reviews:** reference components by **designator and pin** (R152, U47 GPB2,
+- **Schematic reviews:** reference components by **designator and pin** (R200, U55 GPB2,
   PA10), not node labels. Flag issues against the relevant datasheet; re-verify rather
   than defend a first claim if corrected.
 - **Edits to docs:** keep them as unified authoritative references and propagate every

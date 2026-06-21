@@ -24,7 +24,7 @@
 |PB15     |ETH_RMII_TXD1   |out|only TXD1 pin on this package                          |
 |PB10     |ETH_RMII_RX_ER  |in |LAN8742 RXER / PHYAD0 strap — keep high-Z through reset|
 |PB5      |ETH_PPS_OUT     |out|PTP pulse output — verification/scope tap              |
-|PD10     |PHY_nRST        |out|LAN8742 reset                                          |
+|PD10     |LAN_RST_N       |out|LAN8742 reset                                          |
 
 **Clock strategy:** PHY runs a 25 MHz crystal and drives 50 MHz out on nINT/REFCLKO into PA1 (REF_CLK-Out mode → strap LAN8742 nINTSEL **low** at reset). RMII clock domain is intentionally separate from the disciplined timing reference.
 
@@ -124,7 +124,7 @@ The one SMA input accepts, from the same connector, **both** input classes:
 |PD9      |USART3_RX ← GPS TXD      |in        |42 (TXD)                       |
 |PA0      |TIM2_CH1 ← TIMEPULSE     |in        |53                             |
 |PC6      |TIM3_CH1 ← TIMEPULSE2    |in        |54                             |
-|PD11     |GPS_RESET_N              |out       |49                             |
+|PD11     |GPS_RST_N                |out       |49                             |
 |PD15     |GPS_SAFEBOOT_N           |out       |50 (firmware recovery)         |
 |PD7      |GPS_DSEL                 |out       |47 (hold UART+I2C mode)        |
 |PD6      |GPS_EXTINT               |out       |51                             |
@@ -153,21 +153,21 @@ Shared bus, 3.3 V, Fast-mode. Suggested 7-bit addresses (collision-free):
 |INA228 #4          |Antenna bias rail                                          |0x45                     |                                                                              |
 |INA228 #5          |OCXO rail (fixed, dedicated low-noise)                     |0x46                     |warm-up vs steady; oven-fault detection                                       |
 |INA228 #6          |Rb rail (adjustable buck, RB_PWR_EN = buck EN)             |0x47                     |independent; **closed-loop verify of the digipot-set voltage** (INA_ALERT_VCC_RB)|
-|INA228 #7          |**V_DISP_5V (display rail, RT9742-switched)**             |0x42                     |INA_ALERT_DISP; 0.1 Ω shunt, ADCRANGE=1, output side; panel-health + backlight draw|
+|INA228 #7          |**5V_DISP (display rail, RT9742-switched)**             |0x42                     |INA_ALERT_DISP; 0.1 Ω shunt, ADCRANGE=1, output side; panel-health + backlight draw|
 |INA228 #8          |main/general 3.3 V rail (3V3_STM)                          |0x43                     |INA_ALERT_3V3 (former "peripheral 3.3 V" assignment retired with the 3V3_P rail)|
-|FT6336U (cap-touch)|Touchscreen — wake-on-touch + UI input                     |0x38 (fixed)             |on **V_DISP_5V** (gated) behind **PCA9306 (U57)**; INT→U48 GPA7; reuses retired TCA9534A slot|
-|MCP23017 (U47)     |PG + EN-fault + UI aggregator (RB_OV excluded — on PE3/PD3): PortA 8×PG, PortB EN-faults + discrete inputs|0x20|**MIRROR=1**; INTA+INTB tied → **PG_INT_N** → PA10/EXTI10 (R152 10k); A0/A1/A2→GND; /RESET=EXP_RESET (PC0, R154 pull-down); **VDD 3V3_STM**. PortB: [0] V_ANT_EN_FAULT, [1] **freed** (3V3_P EN-fault retired with the rail), [2] **V_DISP_EN_FAULT** (RT9742 nFLG, pull-up to 3V3_STM), [3] **PROX_WAKE** (PIR), [4–7] spare. See sts1000_fault_aggregation.md|
-|MCP23017 (U48)     |7-button keypad (PortA GPA0–6) + CTP_INT (GPA7) + 8×INA ALERT (PortB)|0x21|**MIRROR=0**; A0→VS; PortA INTA→**BTN_INT_N**→PE0/EXTI0 (on-change, R148 10k) — GPA7=**DISP_TOUCH_INT** (FT6336U, R167 10k→3V3_STM, **no debounce cap**); PortB INTB→**INA_ALERT_INT_N**→PC12/EXTI12 (INA, level, R153 10k); /RESET=EXP_RESET (PC0); **VDD 3V3_STM**|
+|FT6336U (cap-touch)|Touchscreen — wake-on-touch + UI input                     |0x38 (fixed)             |on **5V_DISP** (gated) behind **PCA9306 (U63)**; INT→U54 GPA7; reuses retired TCA9534A slot|
+|MCP23017 (U55)     |PG + EN-fault + UI aggregator (RB_OV excluded — on PE3/PD3): PortA 8×PG, PortB EN-faults + discrete inputs|0x20|**MIRROR=1**; INTA+INTB tied → **PG_INT_N** → PA10/EXTI10 (R200 10k); A0/A1/A2→GND; /RESET=EXP_RST_N (PC0, R198 pull-down); **VDD 3V3_STM**. PortB: [0] V_ANT_EN_FAULT, [1] **freed** (3V3_P EN-fault retired with the rail), [2] **V_DISP_EN_FAULT** (RT9742 nFLG, pull-up to 3V3_STM), [3] **PROX_WAKE** (PIR), [4–7] spare. See sts1000_fault_aggregation.md|
+|MCP23017 (U54)     |7-button keypad (PortA GPA0–6) + CTP_INT (GPA7) + 8×INA ALERT (PortB)|0x21|**MIRROR=0**; A0→VS; PortA INTA→**BTN_INT_N**→PE0/EXTI0 (on-change, R201 10k) — GPA7=**DISP_TOUCH_INT** (FT6336U, R197 10k→3V3_STM, **no debounce cap**); PortB INTB→**INA_ALERT_INT_N**→PC12/EXTI12 (INA, level, R199 10k); /RESET=EXP_RST_N (PC0); **VDD 3V3_STM**|
 |IIS2MDC (e-compass mag)|Heading (mag) — device facing for sat-plot N (vertical mount)|0x1E (fixed)|industrial; LIS2MDL register-compatible; CS→Vdd_IO; **3V3_STM**; keep-out/cal note below. *Fusion-IMU fallback: BNO086 0x4A/0x4B.*|
 |LIS2DH12 (e-compass accel)|Tilt (gravity vector) for tilt-compensated heading|0x18 / 0x19 (SA0)|LIS2DH/LIS3DH reg family; WHO_AM_I 0x33; CS→Vdd_IO; SA0→Vdd_IO=0x19; **3V3_STM**|
 
 |STM32 pin|Signal          |Note                                                                              |
 |---------|----------------|----------------------------------------------------------------------------------|
-|PC12     |INA_ALERT_INT_N |EXTI12 — INA-alert interrupt = U48 **INTB** (8 INA228 ALERTs, individual bits on U48 PortB, latched; read PortB to identify, then that INA228 for cause). Pull-up = **R153** on U48 sheet — **drop legacy R44** to avoid a double pull-up|
-|PA10     |PG_INT_N        |EXTI10 — PG+EN-fault interrupt = U47 INTA+INTB tied (8 PG on PortA + 2 EN-fault on PortB[0:1]). R152 10k pull-up on U47 sheet|
-|PE0      |BTN_INT_N       |EXTI0 — button interrupt = U48 INTA (8 buttons). R148 10k pull-up on U48 sheet|
+|PC12     |INA_ALERT_INT_N |EXTI12 — INA-alert interrupt = U54 **INTB** (8 INA228 ALERTs, individual bits on U54 PortB, latched; read PortB to identify, then that INA228 for cause). Pull-up = **R199** on U54 sheet — **drop legacy R44** to avoid a double pull-up <!-- TODO verify against re-annotated schematic -->|
+|PA10     |PG_INT_N        |EXTI10 — PG+EN-fault interrupt = U55 INTA+INTB tied (8 PG on PortA + 2 EN-fault on PortB[0:1]). R200 10k pull-up on U55 sheet|
+|PE0      |BTN_INT_N       |EXTI0 — button interrupt = U54 INTA (8 buttons). R201 10k pull-up on U54 sheet|
 
-**Addressing capacity:** INA228 uses 4-level encoding on A0/A1 (each pin → GND/VS/SDA/SCL) = **16 addresses (0x40–0x4F)**, so all eight INA228s live on this one bus — no second bus needed. INA228s occupy **0x40–0x47** and TMP117s **0x48–0x4B** to avoid the INA/TMP address-window overlap. (FT6336U 0x38, MCP23017 U47/U48 0x20/0x21, ATECC608B 0x60, e-compass IIS2MDC 0x1E + LIS2DH12 0x18/0x19 — all clear of the INA/TMP addresses. The proximity wake left I²C entirely — it is a discrete PIR on U47 Port B. The former 0x2C/0x2D digipot addresses are freed — the Rb-buck FB digipot moved to SPI4, §5. The former TCA9534A 0x38 is retired — the keypad is on MCP23017 U48; FT6336U reuses 0x38.)
+**Addressing capacity:** INA228 uses 4-level encoding on A0/A1 (each pin → GND/VS/SDA/SCL) = **16 addresses (0x40–0x4F)**, so all eight INA228s live on this one bus — no second bus needed. INA228s occupy **0x40–0x47** and TMP117s **0x48–0x4B** to avoid the INA/TMP address-window overlap. (FT6336U 0x38, MCP23017 U55/U54 0x20/0x21, ATECC608B 0x60, e-compass IIS2MDC 0x1E + LIS2DH12 0x18/0x19 — all clear of the INA/TMP addresses. The proximity wake left I²C entirely — it is a discrete PIR on U55 Port B. The former 0x2C/0x2D digipot addresses are freed — the Rb-buck FB digipot moved to SPI4, §5. The former TCA9534A 0x38 is retired — the keypad is on MCP23017 U54; FT6336U reuses 0x38.)
 
 **Bus buffer / speed:** with ~15 nodes (eight INA228 + two TMP117 + ATECC608B + IIS2MDC + LIS2DH12 + two MCP23017; the FB digipot moved to SPI, the proximity wake is an off-bus PIR, and the FT6336U sits behind the PCA9306 on the gated 5 V side) the bus capacitance approaches the 400 kHz limit, so an **I²C rise-time accelerator** is fitted — **LTC4311ISC6 (locked)** — to restore clean edges and run **Fast-mode 400 kHz**. **No segmenting buffer is needed:** the 3V3_P rail was removed, so all bus devices are on always-on 3V3_STM and there is nothing gated to back-power (the old PCA9517/TCA4311 segmenting requirement is retired — see sts1000 i2c-peripherals doc §2). The accelerator EN is wired to **I2C_BUF_EN (PA9)** so firmware can isolate/recover a stuck bus (or tie EN high if unused). Zero MCU-bus pins beyond the optional EN.
 
@@ -185,7 +185,7 @@ Shared bus, 3.3 V, Fast-mode. Suggested 7-bit addresses (collision-free):
 
 |STM32 pin|Signal   |Note                         |
 |---------|---------|-----------------------------|
-|PE10     |NOR_RESET|firmware-controlled NOR reset|
+|PE10     |NOR_RST_N|firmware-controlled NOR reset|
 |PD2      |SPI_DPOT_CS|Rb-buck FB digipot chip select (GPIO output, idle high)|
 
 -----
@@ -211,7 +211,7 @@ Shared bus, 3.3 V, Fast-mode. Suggested 7-bit addresses (collision-free):
 |---------|-----------|-------------------------------------------------------------------------------------|
 |PC8      |GPS_PWR_EN |GPS VCC load switch                                                                  |
 |PC9      |ANT_BIAS_EN|Antenna bias-T high-side FET                                                         |
-|PC11     |DISP_EN    |5 V display rail (RT9742 U56) + touch PCA9306 (U57) EN. **Ex-PERIPH_EN** — the 3V3_P housekeeping rail was removed (those devices now on always-on 3V3_STM); this signal now gates only the display/touch. Default-off via R161 pulldown.|
+|PC11     |DISP_EN    |5 V display rail (RT9742 U33) + touch PCA9306 (U63) EN. **Ex-PERIPH_EN** — the 3V3_P housekeeping rail was removed (those devices now on always-on 3V3_STM); this signal now gates only the display/touch. Default-off via R161 pulldown.|
 |PB7      |RB_PWR_EN  |**Rb-rail adjustable buck EN (digipot-set V) — independent enable / warm-up staging**|
 
 
@@ -275,7 +275,7 @@ Approximate load (at the 3.3 V rail):
 |STM32 pin         |Signal            |Timer/Note                                                                                |
 |------------------|------------------|------------------------------------------------------------------------------------------|
 |PD12 / PD13 / PD14|RGB LED #1 (R/G/B)|TIM4_CH1/2/3                                                                              |
-|PE0               |BTN_INT_N         |in (EXTI0) — button interrupt from MCP23017 U48 INTA (0x21, 8 buttons); see sts1000_fault_aggregation.md|
+|PE0               |BTN_INT_N         |in (EXTI0) — button interrupt from MCP23017 U54 INTA (0x21, 8 buttons); see sts1000_fault_aggregation.md|
 |PE5               |FAN_PWM           |out, TIM15_CH1 — 25 kHz 4-wire fan control                                                |
 |PA15              |FAN_TACH          |in, GPIO/EXTI15 — edge-count for RPM (open-collector, pull-up to 3.3 V)                   |
 |PE9               |DISP_CS           |out, GPIO — ST7796 chip select on SPI4                                                    |
@@ -284,9 +284,9 @@ Approximate load (at the 3.3 V rail):
 |PA8               |DISP_RST          |out, GPIO — firmware-controlled ST7796 reset; pull resistor for a defined power-on state  |
 |PA9               |I2C_BUF_EN        |out, GPIO — enable/recover the I²C buffer (firmware bus isolate/reset); tie high if unused|
 
-**Keypad, touch & presence wake:** the 7 buttons hang off **MCP23017 U48 (0x21)** Port A (GPA0–6) — INTA drives **PE0/EXTI0 (`BTN_INT_N`)** on-change, so a press/release wakes the MCU and firmware reads/debounces over I²C. **GPA7 = `DISP_TOUCH_INT`** (FT6336U) on the same on-change path → **wake-on-touch** is the primary wake. U48 Port B carries the 8 INA228 ALERTs → INTB → **PC12/EXTI12 (`INA_ALERT_INT_N`)**. The PG (8) + EN-fault flags and the **PIR proximity wake** (secondary/ambient) sit on **U47 (0x20)** Port B, INTA+INTB → **PA10/EXTI10 (`PG_INT_N`)**. UI carries **switch + wire only**; per-button **10 kΩ to 3V3 + 100 nF** (~1 ms RC) + connector TVS — **but GPA7 (touch INT) gets the 10 kΩ pull-up to 3V3_STM and NO 100 nF** (the cap would swallow the INT pulse). Both expanders on **3V3_STM** with `EXP_RESET` (PC0) shared. See sts1000_fault_aggregation.md.
+**Keypad, touch & presence wake:** the 7 buttons hang off **MCP23017 U54 (0x21)** Port A (GPA0–6) — INTA drives **PE0/EXTI0 (`BTN_INT_N`)** on-change, so a press/release wakes the MCU and firmware reads/debounces over I²C. **GPA7 = `DISP_TOUCH_INT`** (FT6336U) on the same on-change path → **wake-on-touch** is the primary wake. U54 Port B carries the 8 INA228 ALERTs → INTB → **PC12/EXTI12 (`INA_ALERT_INT_N`)**. The PG (8) + EN-fault flags and the **PIR proximity wake** (secondary/ambient) sit on **U55 (0x20)** Port B, INTA+INTB → **PA10/EXTI10 (`PG_INT_N`)**. UI carries **switch + wire only**; per-button **10 kΩ to 3V3 + 100 nF** (~1 ms RC) + connector TVS — **but GPA7 (touch INT) gets the 10 kΩ pull-up to 3V3_STM and NO 100 nF** (the cap would swallow the INT pulse). Both expanders on **3V3_STM** with `EXP_RST_N` (PC0) shared. See sts1000_fault_aggregation.md.
 
-**Display module — LCDwiki MSP4030 (ST7796S, 320×480 IPS, FT6336U touch):** pixel/control on SPI4 (SCK PE12 / MOSI PE14), write-only (module SDO left NC, off the NOR MISO). 320×480×16 bpp ≈ 307 KB/frame → 4 Hz ≈ 1.2 MB/s, fine at 20–40 MHz SPI with DMA; partial-region updates bound traffic. The module level-shifts all write/control lines via an onboard **74LVC245 (U2)** — drive them at 3.3 V; LVC Ioff means they don't back-feed the module when its rail is gated. Backlight is an onboard **BSS138** low-side switch (gate pull-up R7 → backlight defaults full-on when DISP_BL floats); **DISP_BL PWM (TIM15_CH2)** drives the gate directly — no external MOSFET needed. **VCC = 5 V `V_DISP_5V`, gated by `DISP_EN` via RT9742 (U56)**, monitored by INA228 @0x42. Touch (FT6336U @0x38) rides the gated 5 V rail behind **PCA9306 (U57)** (EN=DISP_EN, self-isolating); CTP_RST shares DISP_RST (PA8), CTP_INT → U48 GPA7. ESD arrays at the connector: U59 (control) + U58 (SPI) = TPD4E02B04 (3.3 V, 0.25 pF); **U60 (touch I²C + INT) = TPD4E05U06DQAR** (5.5 V VRWM for the 5 V touch lines, DQA drop-in). Full subsystem: sts1000 i2c-peripherals/display doc §6.
+**Display module — LCDwiki MSP4030 (ST7796S, 320×480 IPS, FT6336U touch):** pixel/control on SPI4 (SCK PE12 / MOSI PE14), write-only (module SDO left NC, off the NOR MISO). 320×480×16 bpp ≈ 307 KB/frame → 4 Hz ≈ 1.2 MB/s, fine at 20–40 MHz SPI with DMA; partial-region updates bound traffic. The module level-shifts all write/control lines via an onboard **74LVC245 (U2)** <!-- TODO verify designator: module-internal 74LVC245, not board U2 (=LMV393) --> — drive them at 3.3 V; LVC Ioff means they don't back-feed the module when its rail is gated. Backlight is an onboard **BSS138** low-side switch (gate pull-up R7 → backlight defaults full-on when DISP_BL floats); **DISP_BL PWM (TIM15_CH2)** drives the gate directly — no external MOSFET needed. **VCC = 5 V `5V_DISP`, gated by `DISP_EN` via RT9742 (U33)**, monitored by INA228 @0x42. Touch (FT6336U @0x38) rides the gated 5 V rail behind **PCA9306 (U63)** (EN=DISP_EN, self-isolating); CTP_RST shares DISP_RST (PA8), CTP_INT → U54 GPA7. ESD arrays at the connector: U19 (control) + U16 (SPI) = TPD4E02B04 <!-- TODO verify designator: TPD4E02B04 is U15/U16/U19/U20 -->  (3.3 V, 0.25 pF); **U17 (touch I²C + INT) = TPD4E05U06DQAR** <!-- TODO verify designator: TPD4E05U06 is U17/U18 --> (5.5 V VRWM for the 5 V touch lines, DQA drop-in). Full subsystem: sts1000 i2c-peripherals/display doc §6.
 
 **Fan / thermal loop:** firmware drives FAN_PWM from a thermal loop using TMP117 #2 (ambient/enclosure), TMP117 #1 (oscillator), and the STM32 die-temp channel. TACH is a low-frequency signal (~100–200 Hz), so EXTI edge-counting over a 1 s window is sufficient for RPM — no timer-capture channel needed. Notes:
 
@@ -341,19 +341,19 @@ Approximate load (at the 3.3 V rail):
 
 |Line|Pin |Source         |
 |----|----|---------------|
-|0   |PE0 |BTN_INT_N (U48 INTA)|
+|0   |PE0 |BTN_INT_N (U54 INTA)|
 |2   |PC2 |POE_NCM        |
 |3   |PC3 |POE_LCF        |
 |4   |PD4 |GPS_ANT_OFF_MON|
 |5   |PD5 |GPS_TXRDY      |
 |7   |PC7 |POE_NCL        |
 |8   |PE8 |PFI            |
-|10  |PA10|PG_INT_N (U47 INTA+INTB)|
-|12  |PC12|INA_ALERT_INT_N (U48 INTB)|
+|10  |PA10|PG_INT_N (U55 INTA+INTB)|
+|12  |PC12|INA_ALERT_INT_N (U54 INTB)|
 |13  |PB13|RB_LOCK        |
 |15  |PA15|FAN_TACH       |
 
-RTC_TAMP (PC13) handled by the RTC/TAMP peripheral, not the EXTI GPIO line. PPS inputs (PA0, PC6) and EXTREF_MON (PB14) are timer-capture (AF), not EXTI. Free EXTI lines: 1, 6, 9, 11, 14. **PA10/EXTI10 = PG_INT_N** (U47 PG+EN-fault) — the former spare is now used. **PC0** = EXP_RESET (GPIO output) sits on EXTI0; as an output it does not contend with PE0. The Rb-input lines PD2 (SPI_DPOT_CS), PD3 (RB_OV_RESET), PE3 (RB_OV_DET, polled), PE4 (RB_SER_MODE) are GPIO/output/polled — none are EXTI sources (PD3/PE3 deliberately avoid the occupied EXTI3, PE4 the occupied EXTI4).
+RTC_TAMP (PC13) handled by the RTC/TAMP peripheral, not the EXTI GPIO line. PPS inputs (PA0, PC6) and EXTREF_MON (PB14) are timer-capture (AF), not EXTI. Free EXTI lines: 1, 6, 9, 11, 14. **PA10/EXTI10 = PG_INT_N** (U55 PG+EN-fault) — the former spare is now used. **PC0** = EXP_RST_N (GPIO output) sits on EXTI0; as an output it does not contend with PE0. The Rb-input lines PD2 (SPI_DPOT_CS), PD3 (RB_OV_RESET), PE3 (RB_OV_DET, polled), PE4 (RB_SER_MODE) are GPIO/output/polled — none are EXTI sources (PD3/PE3 deliberately avoid the occupied EXTI3, PE4 the occupied EXTI4).
 
 -----
 
@@ -367,11 +367,11 @@ RTC_TAMP (PC13) handled by the RTC/TAMP peripheral, not the EXTI GPIO line. PPS 
 |GPS — FW recovery |SAFEBOOT_N + RESET                          |PD15 + PD11     |
 |Antenna           |bias-T FET                                  |PC9             |
 |TMP117 / ATECC608B|rail power-cycle                            |PC11            |
-|NOR flash         |dedicated reset (firmware)                  |PE10 (NOR_RESET)|
+|NOR flash         |dedicated reset (firmware)                  |PE10 (NOR_RST_N)|
 |ST7796 display    |dedicated reset (firmware)                  |PA8 (DISP_RST)  |
 |Whole board (cold)|PoE kill (single-signal)                    |PE15            |
 |MCU               |NRST / internal IWDG / external WDT→POE_KILL|NRST, PB2       |
-|I/O expanders     |EXP_RESET (both MCP23017); I2C_BUF_EN bus clear. VDD=3V3_STM (not gated → no rail-cycle recovery)|PC0 (PA9)|
+|I/O expanders     |EXP_RST_N (both MCP23017); I2C_BUF_EN bus clear. VDD=3V3_STM (not gated → no rail-cycle recovery)|PC0 (PA9)|
 |Rb OV latch       |hardware-autonomous trip @26 V; firmware reset after clear  |PD3 (RB_OV_RESET)|
 
 -----
@@ -382,9 +382,9 @@ RTC_TAMP (PC13) handled by the RTC/TAMP peripheral, not the EXTI GPIO line. PPS 
 
 - **RF front-end collapse (§2.2):** the single-LTC6752xS5 slicer deleted `REF_SLICER_SEL` (freed **PC0**) and the source/termination simplification freed **PA10**. Only `REF_TERM_EN` (PC10) remains committed to the front end.
 - **Backup-manager strapping (§6):** the TPS61094 managers run strapped/autonomous, freeing PD2/PD3/PE3/PE4 — all reassigned: **PD2**→SPI_DPOT_CS (§5), **PD3**→RB_OV_RESET, **PE3**→RB_OV_DET, **PE4**→RB_SER_MODE (§6). (SOC sense remains on PA6/PB1.)
-- **Fault aggregation (§4):** **PC12**→INA_ALERT_INT_N (U48 INTB) and **PE0**→BTN_INT_N (U48 INTA) — reused interrupt pins; **PA10**→PG_INT_N (U47 PG+EN-fault, R152 pull-up); **PC0**→EXP_RESET (shared expander /RESET — its EXTI0 collision with PE0 is irrelevant for an output).
+- **Fault aggregation (§4):** **PC12**→INA_ALERT_INT_N (U54 INTB) and **PE0**→BTN_INT_N (U54 INTA) — reused interrupt pins; **PA10**→PG_INT_N (U55 PG+EN-fault, R200 pull-up); **PC0**→EXP_RST_N (shared expander /RESET — its EXTI0 collision with PE0 is irrelevant for an output).
 
-So both freed pins are now spent — PA10 on the PG interrupt, PC0 on EXP_RESET — and **no uncommitted GPIO remains**.
+So both freed pins are now spent — PA10 on the PG interrupt, PC0 on EXP_RST_N — and **no uncommitted GPIO remains**.
 
 Status indication is the ST7796 display plus RGB #1 (PD12–14). Firmware has dedicated reset control of the display (PA8), NOR (PE10), GPS (PD11), PHY (PD10), and the I/O expanders (PC0), plus the rail power-cycles and POE_KILL. Further expansion is I²C/SPI-bus-only (I²C1 has address headroom behind the buffer, §4) or requires the 144-pin package.
 
@@ -405,12 +405,12 @@ Status indication is the ST7796 display plus RGB #1 (PD12–14). Firmware has de
 - **Rb topology — resolved:** external FE-5680A only; no onboard Rb option. 10 MHz via the SMA front end (§2.2), power/serial/lock/PPS via the FE-5680A housekeeping connector. §15 rewritten to match; OCXO is the only onboard reference.
 - Rb-rail buck: compute fixed bounding resistors so the digipot-set FB range can never exit the Rb’s safe-voltage envelope (incl. POR / mid-scale / SPI-fault); the FB trim is a **single SPI digipot (MCP41U83T-503E/ST, `SPI_DPOT_CS` = PD2, §5)** — resolve the remaining datasheet TBDs (pin numbers, A0/A1 tie in SPI mode, wiper-write opcode/frame, CRC default, SPI CPOL/CPHA, power-on wiper value); tie buck EN to RB_PWR_EN; define firmware read-back-verify thresholds on INA228 #6. Hardware OV latch is autonomous (26 V); RB_OV_DET=PE3 (polled), RB_OV_RESET=PD3.
 - USB: confirm HSI48 + CRS config for the FS device; PE2 VBUS-sense divider values; CDC-ACM descriptor (driverless on host); ESD protection on the USB connector.
-- Display/touch (MSP4030): backlight is an onboard BSS138 (no external MOSFET); module 74LVC245 level-shifts control lines (drive 3.3 V). **Resolved:** U60 = TPD4E05U06DQAR (5.5 V, 5 V touch lines); DISP_EN default-off pulldown R161 present; PCA9306 SCL1/SDA1 share the one main-bus pull-up pair; FT6336U 0x38 (no strap dependence). **Open:** RT9742 inrush vs I_LIM + 0.1 Ω shunt headroom (measure module backlight-full current + Cin).
+- Display/touch (MSP4030): backlight is an onboard BSS138 (no external MOSFET); module 74LVC245 level-shifts control lines (drive 3.3 V). **Resolved:** U17 = TPD4E05U06DQAR (5.5 V, 5 V touch lines) <!-- TODO verify designator: TPD4E05U06 is U17/U18 -->; DISP_EN default-off pulldown R161 present; PCA9306 SCL1/SDA1 share the one main-bus pull-up pair; FT6336U 0x38 (no strap dependence). **Open:** RT9742 inrush vs I_LIM + 0.1 Ω shunt headroom (measure module backlight-full current + Cin).
 - I²C buffer/accelerator: pick LTC4311 (accelerator) vs PCA9517/TCA4311 (segmenting buffer) per measured bus Cb; confirm 400 kHz timing margin; decide whether I2C_BUF_EN (PA9) is driven or tied high.
 - E-compass: maximize distance from Rb/OCXO/bucks/PoE magnetics/fan; in-enclosure hard/soft-iron calibration (store once for the fixed install); WMM/IGRF declination from the GPS fix for true north; tilt-comp via the accelerometer.
-- Keypad/touch & power-fault aggregation (`sts1000_fault_aggregation.md`), as-built: **U47 @0x20** PortA 8×PG; PortB [0] V_ANT_EN_FAULT, [1] freed (3V3_P EN-fault retired), [2] V_DISP_EN_FAULT, [3] PROX_WAKE (PIR), [4–7] spare; **MIRROR=1**, INTA+INTB tied → **PG_INT_N**→PA10 (R152). **U48 @0x21** PortA GPA0–6 = 7 buttons, **GPA7 = DISP_TOUCH_INT** → INTA→**BTN_INT_N**→PE0 (R148, GPA7 no debounce cap); PortB 8×INA ALERT → INTB→**INA_ALERT_INT_N**→PC12 (R153). Both VDD 3V3_STM; shared EXP_RESET (PC0, R154 pull-down). **Drop legacy R44 at PC12**. Fix net label `PG_IN_N`→`PG_INT_N`. Per-bit IPOL asserted=1; latched-ALERT on all 8 INA228; faults level (compare-to-DEFVAL); buttons + touch on-change. RB_OV excluded (PE3/PD3). Proximity wake is the PIR on U47 PortB; touch is the primary UI wake.
+- Keypad/touch & power-fault aggregation (`sts1000_fault_aggregation.md`), as-built: **U55 @0x20** PortA 8×PG; PortB [0] V_ANT_EN_FAULT, [1] freed (3V3_P EN-fault retired), [2] V_DISP_EN_FAULT, [3] PROX_WAKE (PIR), [4–7] spare; **MIRROR=1**, INTA+INTB tied → **PG_INT_N**→PA10 (R200). **U54 @0x21** PortA GPA0–6 = 7 buttons, **GPA7 = DISP_TOUCH_INT** → INTA→**BTN_INT_N**→PE0 (R201, GPA7 no debounce cap); PortB 8×INA ALERT → INTB→**INA_ALERT_INT_N**→PC12 (R199). Both VDD 3V3_STM; shared EXP_RST_N (PC0, R198 pull-down). **Drop legacy R44 at PC12** <!-- TODO verify against re-annotated schematic -->. Fix net label `PG_IN_N`→`PG_INT_N`. Per-bit IPOL asserted=1; latched-ALERT on all 8 INA228; faults level (compare-to-DEFVAL); buttons + touch on-change. RB_OV excluded (PE3/PD3). Proximity wake is the PIR on U55 PortB; touch is the primary UI wake.
 - **PE3 owner conflict:** §6 now assigns PE3 = RB_OV_DET; confirm no residual reference to PE3 as a backup-manager line elsewhere in firmware/schematic.
-- NOR is now on always-on 3V3_STM (3V3_P rail removed) — recovery is via `NOR_RESET` (PE10) only, no rail-cycle path. Confirm that's acceptable for the chosen NOR.
+- NOR is now on always-on 3V3_STM (3V3_P rail removed) — recovery is via `NOR_RST_N` (PE10) only, no rail-cycle path. Confirm that's acceptable for the chosen NOR.
 
 -----
 

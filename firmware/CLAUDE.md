@@ -108,8 +108,8 @@ read a lock-free, double-buffered telemetry snapshot that `discipline` publishes
   clears via `RB_OV_RESET` (PD3). Not on the I/O expander.
 - **Fan fail-safe to cooling:** 4-wire fan runs full speed on float/100 % PWM. Keep
   `FAN_PWM` (PE5/TIM15_CH1) resting state = max airflow so a hung MCU can't cook the box.
-- **Fault interrupts (open-drain wire-OR, active-low):** `PG_INT_N` (PA10, U47 PG+EN-fault),
-  `BTN_INT_N` (PE0, U48 buttons + touch INT), `INA_ALERT_INT_N` (PC12, U48 INA ALERTs). On
+- **Fault interrupts (open-drain wire-OR, active-low):** `PG_INT_N` (PA10, U55 PG+EN-fault),
+  `BTN_INT_N` (PE0, U54 buttons + touch INT), `INA_ALERT_INT_N` (PC12, U54 INA ALERTs). On
   IRQ, read the expander port to identify the bit, then the implicated device for cause.
 - **I²C wedge recovery:** toggle `I2C_BUF_EN` (PA9, LTC4311 EN) to isolate/recover a stuck bus.
 - Front-end control reduced to one bit: **`REF_TERM_EN` (PC10)** (single LTC6752xS5 slicer;
