@@ -1,0 +1,414 @@
+
+(kicad_symbol_lib (version 20211014) (generator kicad_symbol_editor)
+  (symbol "ARJ-199" (pin_names (offset 1.016)) (in_bom yes) (on_board yes)
+    (property "Reference" "J" (id 0) (at -10.16 41.91 0)
+      (effects (font (size 1.27 1.27)) (justify bottom left))
+    )
+    (property "Value" "ARJ-199" (id 1) (at -10.16 -41.91 0)
+      (effects (font (size 1.27 1.27)) (justify top left))
+    )
+    (property "Footprint" "ARJ-199:ABRACON_ARJ-199" (id 2) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "MF" "Abracon LLC" (id 4) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "MAXIMUM_PACKAGE_HEIGHT" "13.50mm" (id 5) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "CREATOR" "RODRIGO" (id 6) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "Price" "None" (id 7) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "Package" "None" (id 8) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "Check_prices" "https://www.snapeda.com/parts/ARJ-199/Abracon/view-part/?ref=eda" (id 9) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "STANDARD" "Manufacturer Recommendations" (id 10) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "PARTREV" "07-30-20" (id 11) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "VERIFIER" "" (id 12) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "SnapEDA_Link" "https://www.snapeda.com/parts/ARJ-199/Abracon/view-part/?ref=snap" (id 13) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "MP" "ARJ-199" (id 14) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "Purchase-URL" "https://www.snapeda.com/api/url_track_click_mouser/?unipart_id=554388&manufacturer=Abracon LLC&part_name=ARJ-199&search_term=arj-199" (id 15) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "Description" "\n                        \n                            1 Port RJ45 Magjack Connector Through Hole 10/100 Base-T, AutoMDIX, Power over Ethernet+ (PoE+)\n                        \n" (id 16) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "Availability" "In Stock" (id 17) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (property "MANUFACTURER" "Abracon" (id 18) (at 0 0 0)
+      (effects (font (size 1.27 1.27)) (justify bottom) hide)
+    )
+    (symbol "ARJ-199_0_0"
+      (polyline
+        (pts (xy -5.334 -18.161) (xy -4.318 -19.812)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -4.318 -19.812) (xy -3.302 -18.161)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -5.461 -19.812) (xy -4.318 -19.812)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -4.318 -19.812) (xy -3.048 -19.812)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -5.334 -18.161) (xy -3.302 -18.161)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy 0.0 -16.891) (xy 1.016 -15.875)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy 1.143 -17.018) (xy 2.159 -16.002)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -4.318 -16.51) (xy -4.318 -18.034)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -4.318 -19.939) (xy -4.318 -21.59)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -5.334 -20.701) (xy -6.35 -21.717)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -6.477 -20.574) (xy -7.493 -21.59)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts
+          (xy 1.016 -15.875)
+          (xy 0.127 -16.256)
+          (xy 0.635 -16.764)
+          (xy 1.016 -15.875)
+        )
+        (stroke (width 0.1524)) (fill (type outline))
+      )
+      (polyline
+        (pts
+          (xy 2.159 -16.002)
+          (xy 1.27 -16.383)
+          (xy 1.778 -16.891)
+          (xy 2.159 -16.002)
+        )
+        (stroke (width 0.1524)) (fill (type outline))
+      )
+      (polyline
+        (pts
+          (xy -6.35 -21.717)
+          (xy -5.461 -21.336)
+          (xy -5.969 -20.828)
+          (xy -6.35 -21.717)
+        )
+        (stroke (width 0.1524)) (fill (type outline))
+      )
+      (polyline
+        (pts
+          (xy -7.493 -21.59)
+          (xy -6.604 -21.209)
+          (xy -7.112 -20.701)
+          (xy -7.493 -21.59)
+        )
+        (stroke (width 0.1524)) (fill (type outline))
+      )
+      (text "ORG" (at 1.016 -18.288 0)
+        (effects (font (size 1.016 1.016)) (justify top left))
+      )
+      (text "GRN" (at -9.144 -18.288 0)
+        (effects (font (size 1.016 1.016)) (justify top left))
+      )
+      (polyline
+        (pts (xy 0.254 -19.939) (xy -0.762 -18.288)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -0.762 -18.288) (xy -1.778 -19.939)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy 0.381 -18.288) (xy -0.762 -18.288)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -0.762 -18.288) (xy -2.032 -18.288)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy 0.254 -19.939) (xy -1.778 -19.939)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -0.762 -21.59) (xy -0.762 -20.066)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -0.762 -18.161) (xy -0.762 -16.51)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -4.318 -16.51) (xy -2.54 -16.51)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -2.54 -16.51) (xy -0.762 -16.51)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -4.318 -21.59) (xy -2.54 -21.59)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -2.54 -21.59) (xy -0.762 -21.59)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -2.54 -16.51) (xy -2.54 -15.24)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -2.54 -15.24) (xy -10.16 -15.24)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -2.54 -21.59) (xy -2.54 -22.86)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -2.54 -22.86) (xy -10.16 -22.86)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -3.556 -28.321) (xy -2.54 -29.972)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -2.54 -29.972) (xy -1.524 -28.321)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -3.683 -29.972) (xy -2.54 -29.972)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -2.54 -29.972) (xy -1.27 -29.972)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -3.556 -28.321) (xy -1.524 -28.321)) (stroke (width 0.254))
+      )
+      (polyline
+        (pts (xy -2.54 -25.4) (xy -2.54 -28.194)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -2.54 -30.099) (xy -2.54 -33.02)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -3.556 -30.861) (xy -4.572 -31.877)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -4.699 -30.734) (xy -5.715 -31.75)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts
+          (xy -4.572 -31.877)
+          (xy -3.683 -31.496)
+          (xy -4.191 -30.988)
+          (xy -4.572 -31.877)
+        )
+        (stroke (width 0.1524)) (fill (type outline))
+      )
+      (polyline
+        (pts
+          (xy -5.715 -31.75)
+          (xy -4.826 -31.369)
+          (xy -5.334 -30.861)
+          (xy -5.715 -31.75)
+        )
+        (stroke (width 0.1524)) (fill (type outline))
+      )
+      (polyline
+        (pts (xy -2.54 -25.4) (xy -10.16 -25.4)) (stroke (width 0.1524))
+      )
+      (polyline
+        (pts (xy -2.54 -33.02) (xy -10.16 -33.02)) (stroke (width 0.1524))
+      )
+      (text "YLW" (at -7.112 -28.448 0)
+        (effects (font (size 1.016 1.016)) (justify top left))
+      )
+      (rectangle (start -10.16 -40.64) (end 10.16 40.64)
+        (stroke (width 0.254)) (fill (type background))
+      )
+      (pin passive line (at -15.24 38.1 0) (length 5.08)
+        (name "P1"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P1"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 35.56 0) (length 5.08)
+        (name "P2"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P2"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 33.02 0) (length 5.08)
+        (name "P3"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P3"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 27.94 0) (length 5.08)
+        (name "P4"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P4"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 25.4 0) (length 5.08)
+        (name "P5"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P5"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 22.86 0) (length 5.08)
+        (name "P6"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P6"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 17.78 0) (length 5.08)
+        (name "P7"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P7"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 15.24 0) (length 5.08)
+        (name "P8"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P8"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 12.7 0) (length 5.08)
+        (name "P9"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P9"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 7.62 0) (length 5.08)
+        (name "P10"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P10"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 5.08 0) (length 5.08)
+        (name "P11"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P11"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 2.54 0) (length 5.08)
+        (name "P12"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P12"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 -2.54 0) (length 5.08)
+        (name "P13"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P13"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 -5.08 0) (length 5.08)
+        (name "P14"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P14"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 -7.62 0) (length 5.08)
+        (name "P15"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P15"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 -10.16 0) (length 5.08)
+        (name "P16"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P16"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 -38.1 0) (length 5.08)
+        (name "SHIELD"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "SH1"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 -38.1 0) (length 5.08) hide
+        (name "SHIELD"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "SH2"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 -15.24 0) (length 5.08)
+        (name "~"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P20"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 -22.86 0) (length 5.08)
+        (name "~"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P19"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 -25.4 0) (length 5.08)
+        (name "~"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P18"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at -15.24 -33.02 0) (length 5.08)
+        (name "~"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "P17"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+    )
+  )
+)
