@@ -1610,7 +1610,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 211.328 78.74 90)
 			(hide yes)
 			(show_name no)
@@ -1632,8 +1632,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 221 OHM 1% 1/10W 0402"
 			(at 209.55 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF2210X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -1692,7 +1714,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 235.458 134.62 90)
 			(hide yes)
 			(show_name no)
@@ -1714,8 +1736,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
 			(at 233.68 134.62 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -1852,7 +1896,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 177.8 156.718 90)
 			(hide yes)
 			(show_name no)
@@ -1874,8 +1918,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 1.5k OHM 1% 1/10W 0402"
 			(at 177.8 154.94 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1501X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2090,7 +2156,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 191.008 162.56 90)
 			(hide yes)
 			(show_name no)
@@ -2112,8 +2178,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
 			(at 189.23 162.56 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2208,6 +2296,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER_PART_NUMBER" "BC847W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Sim.Device" "NPN"
 			(at 198.12 154.94 0)
 			(hide yes)
@@ -2282,7 +2381,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 175.768 134.62 90)
 			(hide yes)
 			(show_name no)
@@ -2304,8 +2403,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
 			(at 173.99 134.62 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2391,6 +2512,17 @@
 		)
 		(property "Description" "0.1A Ic, 45V Vce, NPN Transistor, SOT-323"
 			(at 242.57 127 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "BC847W"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2510,6 +2642,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER_PART_NUMBER" "BC847W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "Sim.Device" "NPN"
 			(at 182.88 127 0)
 			(hide yes)
@@ -2616,6 +2759,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER" "Inolux"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "DIGIKEY_PART_NUMBER" "1830-1098-1-ND"
 			(at 200.66 97.79 0)
 			(hide yes)
@@ -2710,7 +2864,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 193.548 78.74 90)
 			(hide yes)
 			(show_name no)
@@ -2732,8 +2886,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 60.4 OHM 1% 1/10W 0402"
 			(at 191.77 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF60R4X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3104,7 +3280,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 162.56 128.778 90)
 			(hide yes)
 			(show_name no)
@@ -3126,8 +3302,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 1k OHM 1% 1/10W 0402"
 			(at 162.56 127 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1001X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3342,7 +3540,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 202.438 78.74 90)
 			(hide yes)
 			(show_name no)
@@ -3364,8 +3562,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 174 OHM 1% 1/10W 0402"
 			(at 200.66 78.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1740X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3424,7 +3644,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 222.25 128.778 90)
 			(hide yes)
 			(show_name no)
@@ -3446,8 +3666,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 3.01k OHM 1% 1/10W 0402"
 			(at 222.25 127 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF3011X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

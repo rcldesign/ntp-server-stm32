@@ -8940,7 +8940,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 109.728 66.04 90)
 			(hide yes)
 			(show_name no)
@@ -8962,8 +8962,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 5.1k OHM 1% 1/10W 0402"
 			(at 107.95 66.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF5101X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9474,8 +9496,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "TPD4E02B04DQAR"
 			(at 314.96 176.53 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "TPD4E02B04DQAR"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9897,8 +9930,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "USB4120-03-C_REVA6"
 			(at 146.05 64.77 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "USB4120-03-C_REVA6"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10149,7 +10193,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 180.848 74.93 90)
 			(hide yes)
 			(show_name no)
@@ -10171,8 +10215,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 5.1k OHM 1% 1/10W 0402"
 			(at 179.07 74.93 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF5101X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10755,6 +10821,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER_PART_NUMBER" "SMF5V0A"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "1"
 			(uuid "70800aaa-c2e6-4a17-97ff-702647b32cdd")
 		)
@@ -10803,7 +10880,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 223.52 102.108 90)
 			(hide yes)
 			(show_name no)
@@ -10825,8 +10902,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 100k OHM 1% 1/10W 0402"
 			(at 223.52 100.33 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1003X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -11283,7 +11382,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "C_0603_1608Metric"
 			(at 51.1048 200.66 0)
 			(hide yes)
 			(show_name no)
@@ -11305,7 +11404,7 @@
 				)
 			)
 		)
-		(property "Description" "Unpolarized capacitor"
+		(property "Description" "CAP CER 1uF 16V X7R 0603"
 			(at 52.07 196.85 0)
 			(hide yes)
 			(show_name no)
@@ -11678,7 +11777,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 218.948 106.68 90)
 			(hide yes)
 			(show_name no)
@@ -11700,8 +11799,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 121k OHM 1% 1/10W 0402"
 			(at 217.17 106.68 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1213X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12187,7 +12308,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 378.1552 190.5 0)
 			(hide yes)
 			(show_name no)
@@ -12209,7 +12330,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 25V X7R 0805"
+		(property "Description" "CAP CER 1nF 50V C0G 0402"
 			(at 377.19 186.69 0)
 			(hide yes)
 			(show_name no)
@@ -12220,7 +12341,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "445-5972-1-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-GRM1555C1H102FA01JTR-ND"
 			(at 377.19 186.69 0)
 			(hide yes)
 			(show_name no)
@@ -12231,7 +12352,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "TDK"
+		(property "MANUFACTURER" "Murata"
 			(at 377.19 186.69 0)
 			(hide yes)
 			(show_name no)
@@ -12242,7 +12363,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "C2012X7R1E475K125AB"
+		(property "MANUFACTURER_PART_NUMBER" "GRM1555C1H102FA01J"
 			(at 377.19 186.69 0)
 			(hide yes)
 			(show_name no)
@@ -12324,8 +12445,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "SZESD7410MXWT5G"
 			(at 316.23 110.49 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "SZESD7410MXWT5G"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12405,8 +12537,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "TPD4E05U06DQAR"
 			(at 172.72 243.84 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "TPD4E05U06DQAR"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12979,8 +13122,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "TPD4E02B04DQAR"
 			(at 111.76 243.84 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "TPD4E02B04DQAR"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13085,8 +13239,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "TPD4E05U06DQAR"
 			(at 220.98 69.85 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "TPD4E05U06DQAR"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13248,7 +13413,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 118.618 105.41 90)
 			(hide yes)
 			(show_name no)
@@ -13270,8 +13435,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 1M OHM 1% 1/10W 0402"
 			(at 116.84 105.41 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1004X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13352,8 +13539,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "SZESD7410MXWT5G"
 			(at 316.23 85.09 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "SZESD7410MXWT5G"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13434,8 +13632,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "TPD4E02B04DQAR"
 			(at 48.26 243.84 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "TPD4E02B04DQAR"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13596,7 +13805,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "C_0402_1005Metric"
 			(at 59.3852 200.66 0)
 			(hide yes)
 			(show_name no)
@@ -13618,8 +13827,41 @@
 				)
 			)
 		)
-		(property "Description" "Unpolarized capacitor"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 58.42 196.85 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13873,6 +14115,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER" "GCT"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "DIGIKEY_PART_NUMBER" "2073-BG055-06A-1-0450-0530-0350-L-D-ND"
 			(at 27.94 40.64 0)
 			(hide yes)
@@ -13955,7 +14208,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "100nF"
+		(property "Value" "0.1uF"
 			(at 238.76 107.9499 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13966,7 +14219,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 234.6452 110.49 0)
 			(hide yes)
 			(show_name no)
@@ -13988,7 +14241,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 25V X7R 0805"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 233.68 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -13999,7 +14252,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "445-5972-1-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 233.68 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -14010,7 +14263,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "TDK"
+		(property "MANUFACTURER" "Murata"
 			(at 233.68 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -14021,7 +14274,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "C2012X7R1E475K125AB"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 233.68 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -14103,8 +14356,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "TPD4E02B04DQAR"
 			(at 314.96 143.51 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "TPD4E02B04DQAR"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -14186,7 +14450,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 125.4252 109.22 0)
 			(hide yes)
 			(show_name no)
@@ -14208,7 +14472,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 25V X7R 0805"
+		(property "Description" "CAP CER 4.7nF 16V X7R 0402"
 			(at 124.46 105.41 0)
 			(hide yes)
 			(show_name no)
@@ -14219,7 +14483,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "445-5972-1-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-6334-2-ND"
 			(at 124.46 105.41 0)
 			(hide yes)
 			(show_name no)
@@ -14230,7 +14494,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "TDK"
+		(property "MANUFACTURER" "Murata"
 			(at 124.46 105.41 0)
 			(hide yes)
 			(show_name no)
@@ -14241,7 +14505,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "C2012X7R1E475K125AB"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C472KA01D"
 			(at 124.46 105.41 0)
 			(hide yes)
 			(show_name no)

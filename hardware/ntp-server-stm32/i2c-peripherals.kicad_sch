@@ -3183,7 +3183,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 227.0252 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -3205,7 +3205,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 25V X7R 0805"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 226.06 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -3216,7 +3216,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "445-5972-1-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 226.06 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -3227,7 +3227,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "TDK"
+		(property "MANUFACTURER" "Murata"
 			(at 226.06 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -3238,7 +3238,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "C2012X7R1E475K125AB"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 226.06 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -3453,7 +3453,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 86.0552 133.35 0)
 			(hide yes)
 			(show_name no)
@@ -3475,7 +3475,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 25V X7R 0805"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 85.09 129.54 0)
 			(hide yes)
 			(show_name no)
@@ -3486,7 +3486,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "445-5972-1-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 85.09 129.54 0)
 			(hide yes)
 			(show_name no)
@@ -3497,7 +3497,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "TDK"
+		(property "MANUFACTURER" "Murata"
 			(at 85.09 129.54 0)
 			(hide yes)
 			(show_name no)
@@ -3508,7 +3508,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "C2012X7R1E475K125AB"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 85.09 129.54 0)
 			(hide yes)
 			(show_name no)
@@ -3568,7 +3568,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 275.8948 123.19 0)
 			(hide yes)
 			(show_name no)
@@ -3590,7 +3590,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 25V X7R 0805"
+		(property "Description" "CAP CER 220nF 16V X7R 0402"
 			(at 276.86 119.38 0)
 			(hide yes)
 			(show_name no)
@@ -3682,7 +3682,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 362.9152 90.17 0)
 			(hide yes)
 			(show_name no)
@@ -3704,7 +3704,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 25V X7R 0805"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 361.95 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -3715,7 +3715,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "445-5972-1-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 361.95 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -3726,7 +3726,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "TDK"
+		(property "MANUFACTURER" "Murata"
 			(at 361.95 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -3737,7 +3737,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "C2012X7R1E475K125AB"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 361.95 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -3819,8 +3819,19 @@
 				(justify left)
 			)
 		)
-		(property "Description" "Digital Temperature Sensor with I2C/SMBus Interface, 16 bits, ±0.3°C, one-shot conversion, alert, nist traceable, EEPROM, WSON"
+		(property "Description" "Digital Temperature Sensor with I2C/SMBus Interface, 16 bits, Â±0.3Â°C, one-shot conversion, alert, nist traceable, EEPROM, WSON"
 			(at 78.74 59.69 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "TMP117xxDRV"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4125,7 +4136,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 376.8852 90.17 0)
 			(hide yes)
 			(show_name no)
@@ -4147,7 +4158,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 25V X7R 0805"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 375.92 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -4158,7 +4169,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "445-5972-1-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 375.92 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -4169,7 +4180,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "TDK"
+		(property "MANUFACTURER" "Murata"
 			(at 375.92 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -4180,7 +4191,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "C2012X7R1E475K125AB"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 375.92 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -4262,8 +4273,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "LIS2DH12TR"
 			(at 152.4 101.6 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "LIS2DH12TR"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4689,8 +4711,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "IIS2MDCTR"
 			(at 285.75 99.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "IIS2MDCTR"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4803,6 +4836,17 @@
 		)
 		(property "Description" "Cryptographic Co-Processor with Secure Hardware-based 16 Key Storage, ECDSA and ECDH support, I2C, SOIC-8"
 			(at 243.84 212.09 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ATECC608B-SSHDA"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4956,7 +5000,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 240.9952 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -4978,7 +5022,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 25V X7R 0805"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 240.03 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -4989,7 +5033,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "445-5972-1-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 240.03 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -5000,7 +5044,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "TDK"
+		(property "MANUFACTURER" "Murata"
 			(at 240.03 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -5011,7 +5055,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "C2012X7R1E475K125AB"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 240.03 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -5722,8 +5766,19 @@
 				(justify left)
 			)
 		)
-		(property "Description" "Digital Temperature Sensor with I2C/SMBus Interface, 16 bits, ±0.3°C, one-shot conversion, alert, nist traceable, EEPROM, WSON"
+		(property "Description" "Digital Temperature Sensor with I2C/SMBus Interface, 16 bits, Â±0.3Â°C, one-shot conversion, alert, nist traceable, EEPROM, WSON"
 			(at 80.01 149.86 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "TMP117xxDRV"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5793,7 +5848,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 251.1552 196.85 0)
 			(hide yes)
 			(show_name no)
@@ -5815,7 +5870,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 25V X7R 0805"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 250.19 193.04 0)
 			(hide yes)
 			(show_name no)
@@ -5826,7 +5881,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "445-5972-1-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 250.19 193.04 0)
 			(hide yes)
 			(show_name no)
@@ -5837,7 +5892,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "TDK"
+		(property "MANUFACTURER" "Murata"
 			(at 250.19 193.04 0)
 			(hide yes)
 			(show_name no)
@@ -5848,7 +5903,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "C2012X7R1E475K125AB"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 250.19 193.04 0)
 			(hide yes)
 			(show_name no)
@@ -5907,7 +5962,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 84.7852 43.18 0)
 			(hide yes)
 			(show_name no)
@@ -5929,7 +5984,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 25V X7R 0805"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 83.82 39.37 0)
 			(hide yes)
 			(show_name no)
@@ -5940,7 +5995,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "445-5972-1-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 83.82 39.37 0)
 			(hide yes)
 			(show_name no)
@@ -5951,7 +6006,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "TDK"
+		(property "MANUFACTURER" "Murata"
 			(at 83.82 39.37 0)
 			(hide yes)
 			(show_name no)
@@ -5962,7 +6017,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "C2012X7R1E475K125AB"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 83.82 39.37 0)
 			(hide yes)
 			(show_name no)

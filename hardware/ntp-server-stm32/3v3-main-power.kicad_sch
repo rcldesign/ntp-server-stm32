@@ -6090,6 +6090,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER" "Microchip Technology"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "DIGIKEY_PART_NUMBER" "150-MIC28516T-E/PHATR-ND"
 			(at 237.49 45.72 0)
 			(hide yes)
@@ -6344,7 +6355,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "805"
+		(property "Footprint" "C_0805_2012Metric"
 			(at 93.0148 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -6366,8 +6377,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10UF 16V X7R 0805"
+		(property "Description" "CAP CER 10uF 16V X7R 0805"
 			(at 93.98 171.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6491,6 +6513,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER" "Richtek USA Inc."
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "DIGIKEY_PART_NUMBER" "1028-RT9742VGJ5TR-ND"
 			(at 336.55 162.56 0)
 			(hide yes)
@@ -6582,7 +6615,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "805"
+		(property "Footprint" "C_0805_2012Metric"
 			(at 167.3352 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -6604,8 +6637,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10UF 16V X7R 0805"
+		(property "Description" "CAP CER 10uF 16V X7R 0805"
 			(at 166.37 171.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6774,7 +6818,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "805"
+		(property "Footprint" "C_0805_2012Metric"
 			(at 221.9452 55.88 0)
 			(hide yes)
 			(show_name no)
@@ -6796,8 +6840,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7UF 16V X7R 0805"
+		(property "Description" "CAP CER 4.7uF 16V X7R 0805"
 			(at 220.98 52.07 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7045,7 +7100,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 121.412 72.39 90)
 			(hide yes)
 			(show_name no)
@@ -7067,8 +7122,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 15K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 15k OHM 1% 1/10W 0402"
 			(at 123.19 72.39 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7182,7 +7248,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 0.15 OHM 0.5% 1/4W 0805"
+		(property "Description" "RES 75m OHM 0.5% SENSE 0805 (value TBD per rail)"
 			(at 226.06 166.37 90)
 			(hide yes)
 			(show_name no)
@@ -7275,7 +7341,7 @@
 				(justify right)
 			)
 		)
-		(property "Value" "2.2uF 100V"
+		(property "Value" "2.2uF"
 			(at 199.136 74.422 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7286,7 +7352,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "805"
+		(property "Footprint" "C_0805_2012Metric"
 			(at 209.8548 74.93 0)
 			(hide yes)
 			(show_name no)
@@ -7308,8 +7374,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 2.2UF 100V X7T 0805"
+		(property "Description" "CAP CER 2.2uF 100V X7T 0805"
 			(at 210.82 71.12 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7401,7 +7478,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 113.9952 85.09 0)
 			(hide yes)
 			(show_name no)
@@ -7423,8 +7500,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 113.03 81.28 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7670,7 +7758,7 @@
 				)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 196.85 88.392 90)
 			(hide yes)
 			(show_name no)
@@ -7692,8 +7780,19 @@
 				)
 			)
 		)
-		(property "Description" "RES 2.2 OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 2.2 OHM 1% 1/10W 0402"
 			(at 196.85 90.17 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7725,7 +7824,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "ERJ-U02F2R20X"
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF2R20X"
 			(at 196.85 90.17 90)
 			(hide yes)
 			(show_name no)
@@ -7972,6 +8071,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER" "Diodes Incorporated"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "DIGIKEY_PART_NUMBER" "AP3441SHE-7BDITR-ND"
 			(at 113.03 166.37 0)
 			(hide yes)
@@ -8075,7 +8185,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 346.202 137.16 90)
 			(hide yes)
 			(show_name no)
@@ -8097,8 +8207,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
 			(at 347.98 137.16 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8179,6 +8311,17 @@
 		)
 		(property "Description" "FIXED IND 2.2UH 4.15A 16.5 MOHM"
 			(at 133.35 166.37 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Eaton - Electronics Division"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8348,7 +8491,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "603"
+		(property "Footprint" "C_0603_1608Metric"
 			(at 226.3648 85.09 0)
 			(hide yes)
 			(show_name no)
@@ -8370,8 +8513,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 2.2UF 16V X7R 0603"
+		(property "Description" "CAP CER 2.2uF 16V X7R 0603"
 			(at 227.33 81.28 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8463,7 +8617,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "C_0402_1005Metric"
 			(at 385.7752 110.49 0)
 			(hide yes)
 			(show_name no)
@@ -8485,8 +8639,41 @@
 				)
 			)
 		)
-		(property "Description" "Unpolarized capacitor"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 384.81 106.68 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8545,7 +8732,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 41.402 60.96 90)
 			(hide yes)
 			(show_name no)
@@ -8567,8 +8754,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 100K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 100k OHM 1% 1/10W 0402"
 			(at 43.18 60.96 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8649,7 +8847,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "1uF 100V"
+		(property "Value" "1uF"
 			(at 208.28 96.5199 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8660,7 +8858,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "603"
+		(property "Footprint" "C_0603_1608Metric"
 			(at 205.4352 99.06 0)
 			(hide yes)
 			(show_name no)
@@ -8682,8 +8880,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 1UF 100V X7T 0603"
+		(property "Description" "CAP CER 1uF 100V X7T 0603"
 			(at 204.47 95.25 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8932,7 +9141,7 @@
 				)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 88.9 149.098 90)
 			(hide yes)
 			(show_name no)
@@ -8954,8 +9163,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 6.81K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 6.81k OHM 1% 1/10W 0402"
 			(at 88.9 147.32 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9307,7 +9527,7 @@
 				(justify right)
 			)
 		)
-		(property "Value" "2.2uF 100V"
+		(property "Value" "2.2uF"
 			(at 186.436 73.914 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9318,7 +9538,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "805"
+		(property "Footprint" "C_0805_2012Metric"
 			(at 197.1548 74.93 0)
 			(hide yes)
 			(show_name no)
@@ -9340,8 +9560,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 2.2UF 100V X7T 0805"
+		(property "Description" "CAP CER 2.2uF 100V X7T 0805"
 			(at 198.12 71.12 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9590,7 +9821,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "805"
+		(property "Footprint" "C_0805_2012Metric"
 			(at 81.5848 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -9612,8 +9843,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10UF 16V X7R 0805"
+		(property "Description" "CAP CER 10uF 16V X7R 0805"
 			(at 82.55 171.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10097,7 +10339,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 84.328 151.13 90)
 			(hide yes)
 			(show_name no)
@@ -10119,8 +10361,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
 			(at 82.55 151.13 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10212,7 +10465,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 225.552 60.96 90)
 			(hide yes)
 			(show_name no)
@@ -10234,8 +10487,19 @@
 				)
 			)
 		)
-		(property "Description" "RES 2.2 OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 2.2 OHM 1% 1/10W 0402"
 			(at 227.33 60.96 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10267,7 +10531,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "ERJ-U02F2R20X"
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF2R20X"
 			(at 227.33 60.96 0)
 			(hide yes)
 			(show_name no)
@@ -10327,7 +10591,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 107.442 40.64 90)
 			(hide yes)
 			(show_name no)
@@ -10349,8 +10613,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 2.05K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
 			(at 109.22 40.64 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10382,7 +10657,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF2051X"
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
 			(at 109.22 40.64 0)
 			(hide yes)
 			(show_name no)
@@ -10442,7 +10717,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 61.9252 69.85 0)
 			(hide yes)
 			(show_name no)
@@ -10464,8 +10739,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10000PF 16V X7R 0402"
+		(property "Description" "CAP CER 10nF 16V X7R 0402"
 			(at 60.96 66.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10557,7 +10843,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 134.3152 76.2 0)
 			(hide yes)
 			(show_name no)
@@ -10579,8 +10865,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4700PF 16V X7R 0402"
+		(property "Description" "CAP CER 4.7nF 16V X7R 0402"
 			(at 133.35 72.39 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10829,7 +11126,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "805"
+		(property "Footprint" "C_0805_2012Metric"
 			(at 70.1548 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -10851,8 +11148,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10UF 16V X7R 0805"
+		(property "Description" "CAP CER 10uF 16V X7R 0805"
 			(at 71.12 171.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -11100,7 +11408,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1210"
+		(property "Footprint" "C_1210_3225Metric"
 			(at 147.0152 76.2 0)
 			(hide yes)
 			(show_name no)
@@ -11122,8 +11430,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 47UF 16V X6S 1210"
+		(property "Description" "CAP CER 47uF 16V X6S 1210"
 			(at 146.05 72.39 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -11215,7 +11534,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 150.622 181.61 90)
 			(hide yes)
 			(show_name no)
@@ -11237,8 +11556,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 2.2K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 2.2k OHM 1% 1/10W 0402"
 			(at 152.4 181.61 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -11330,7 +11660,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 141.9352 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -11352,8 +11682,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4700PF 16V X7R 0402"
+		(property "Description" "CAP CER 4.7nF 16V X7R 0402"
 			(at 140.97 171.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -11467,7 +11808,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 0.15 OHM 0.5% 1/4W 0805"
+		(property "Description" "RES 100m OHM 0.5% SENSE 0805 (value TBD per rail)"
 			(at 383.54 152.4 90)
 			(hide yes)
 			(show_name no)
@@ -11749,8 +12090,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "INA228AQDGSRQ1"
 			(at 176.53 205.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "INA228AQDGSRQ1"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -11833,7 +12185,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 121.412 93.98 90)
 			(hide yes)
 			(show_name no)
@@ -11855,8 +12207,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 2.05K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 2.05k OHM 1% 1/10W 0402"
 			(at 123.19 93.98 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -11948,7 +12311,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 111.252 72.39 90)
 			(hide yes)
 			(show_name no)
@@ -11970,8 +12333,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 24.9K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 24.9k OHM 1% 1/10W 0402"
 			(at 113.03 72.39 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12296,7 +12670,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "805"
+		(property "Footprint" "C_0805_2012Metric"
 			(at 191.4652 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -12318,8 +12692,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10UF 16V X7R 0805"
+		(property "Description" "CAP CER 10uF 16V X7R 0805"
 			(at 190.5 171.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12411,7 +12796,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "C_0402_1005Metric"
 			(at 387.0452 207.01 0)
 			(hide yes)
 			(show_name no)
@@ -12433,8 +12818,41 @@
 				)
 			)
 		)
-		(property "Description" "Unpolarized capacitor"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 386.08 203.2 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12560,7 +12978,7 @@
 				(justify right)
 			)
 		)
-		(property "Value" "2.2uF 100V"
+		(property "Value" "2.2uF"
 			(at 173.228 73.66 0)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12571,7 +12989,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "805"
+		(property "Footprint" "C_0805_2012Metric"
 			(at 184.4548 74.93 0)
 			(hide yes)
 			(show_name no)
@@ -12593,8 +13011,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 2.2UF 100V X7T 0805"
+		(property "Description" "CAP CER 2.2uF 100V X7T 0805"
 			(at 185.42 71.12 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12684,7 +13113,7 @@
 				)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 36.83 57.658 90)
 			(hide yes)
 			(show_name no)
@@ -12706,8 +13135,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 200K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 200k OHM 1% 1/10W 0402"
 			(at 36.83 55.88 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12955,7 +13395,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 117.8052 58.42 0)
 			(hide yes)
 			(show_name no)
@@ -12977,8 +13417,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 116.84 54.61 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13092,7 +13543,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 0.15 OHM 0.5% 1/4W 0805"
+		(property "Description" "RES 500m OHM 0.5% SENSE 0805 (value TBD per rail)"
 			(at 382.27 55.88 90)
 			(hide yes)
 			(show_name no)
@@ -13274,7 +13725,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 150.622 171.45 90)
 			(hide yes)
 			(show_name no)
@@ -13296,8 +13747,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
 			(at 152.4 171.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13411,8 +13873,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "INA228AQDGSRQ1"
 			(at 335.28 189.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "INA228AQDGSRQ1"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13652,7 +14125,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "805"
+		(property "Footprint" "C_0805_2012Metric"
 			(at 178.7652 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -13674,8 +14147,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10UF 16V X7R 0805"
+		(property "Description" "CAP CER 10uF 16V X7R 0805"
 			(at 177.8 171.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13945,8 +14429,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "INA228AQDGSRQ1"
 			(at 334.01 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "INA228AQDGSRQ1"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -14029,7 +14524,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "C_0402_1005Metric"
 			(at 228.2952 223.52 0)
 			(hide yes)
 			(show_name no)
@@ -14051,8 +14546,41 @@
 				)
 			)
 		)
-		(property "Description" "Unpolarized capacitor"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 227.33 219.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -14189,7 +14717,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "C_0603_1608Metric"
 			(at 317.8048 147.32 0)
 			(hide yes)
 			(show_name no)
@@ -14211,7 +14739,7 @@
 				)
 			)
 		)
-		(property "Description" "Unpolarized capacitor"
+		(property "Description" "CAP CER 1uF 16V X7R 0603"
 			(at 318.77 143.51 0)
 			(hide yes)
 			(show_name no)
@@ -14608,6 +15136,17 @@
 		)
 		(property "Description" "IC REG BUCK ADJ 8A 32VQFN"
 			(at 64.77 50.8 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Microchip Technology"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15028,7 +15567,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "805"
+		(property "Footprint" "C_0805_2012Metric"
 			(at 202.8952 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -15050,8 +15589,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10UF 16V X7R 0805"
+		(property "Description" "CAP CER 10uF 16V X7R 0805"
 			(at 201.93 171.45 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15252,6 +15802,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER" "Bourns Inc."
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "DIGIKEY_PART_NUMBER" "SRP1265A-6R8MTR-ND"
 			(at 118.11 67.31 90)
 			(hide yes)
@@ -15410,7 +15971,7 @@
 				)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 85.09 86.868 90)
 			(hide yes)
 			(show_name no)
@@ -15432,8 +15993,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 2.21K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 2.21k OHM 1% 1/10W 0402"
 			(at 85.09 85.09 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15526,7 +16098,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 328.168 162.56 90)
 			(hide yes)
 			(show_name no)
@@ -15548,8 +16120,19 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
 			(at 326.39 162.56 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15641,7 +16224,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1210"
+		(property "Footprint" "C_1210_3225Metric"
 			(at 160.9852 76.2 0)
 			(hide yes)
 			(show_name no)
@@ -15663,8 +16246,19 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 47UF 16V X6S 1210"
+		(property "Description" "CAP CER 47uF 16V X6S 1210"
 			(at 160.02 72.39 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15912,7 +16506,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "C_0603_1608Metric"
 			(at 366.0648 161.29 0)
 			(hide yes)
 			(show_name no)
@@ -15934,7 +16528,7 @@
 				)
 			)
 		)
-		(property "Description" "Unpolarized capacitor"
+		(property "Description" "CAP CER 1uF 16V X7R 0603"
 			(at 367.03 157.48 0)
 			(hide yes)
 			(show_name no)

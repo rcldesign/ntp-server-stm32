@@ -5228,6 +5228,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER_PART_NUMBER" "BAT54S"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "2"
 			(uuid "bcb0c851-58c9-447b-9a0f-fa7135e8ba0b")
 		)
@@ -5381,6 +5392,17 @@
 		)
 		(property "Description" "Miniature 2-pole relay, Single-side Stable"
 			(at 194.31 113.03 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "G6K-2F-Y DC3"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5644,6 +5666,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER_PART_NUMBER" "BAT54J"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "1"
 			(uuid "85456350-f3ed-47aa-bef7-35a50056f604")
 		)
@@ -5693,7 +5726,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 110.1852 40.64 0)
 			(hide yes)
 			(show_name no)
@@ -5715,7 +5748,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 150PF 50V C0G/NP0 0402"
+		(property "Description" "CAP CER 47pF 16V C0G 0402"
 			(at 109.22 36.83 0)
 			(hide yes)
 			(show_name no)
@@ -5985,8 +6018,19 @@
 				)
 			)
 		)
-		(property "Description" ""
+		(property "Description" "SN65C3221EPWR"
 			(at 90.17 115.57 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "SN65C3221EPWR"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6086,7 +6130,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 369.2652 53.34 0)
 			(hide yes)
 			(show_name no)
@@ -6108,7 +6152,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 150PF 50V C0G/NP0 0402"
+		(property "Description" "CAP CER 10nF 16V X7R 0402"
 			(at 368.3 49.53 0)
 			(hide yes)
 			(show_name no)
@@ -6119,7 +6163,18 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-3229-2-ND"
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-1313-2-ND"
 			(at 368.3 49.53 0)
 			(hide yes)
 			(show_name no)
@@ -6141,7 +6196,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM1555C1H151JA01D"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C103KA01D"
 			(at 368.3 49.53 0)
 			(hide yes)
 			(show_name no)
@@ -6314,6 +6369,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER" "Nexperia USA Inc."
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "DIGIKEY_PART_NUMBER" "1727-3813-2-ND"
 			(at 124.46 40.64 90)
 			(hide yes)
@@ -6477,7 +6543,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 180.34 130.048 90)
 			(hide yes)
 			(show_name no)
@@ -6499,8 +6565,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
 			(at 180.34 128.27 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6637,7 +6725,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 228.092 100.33 90)
 			(hide yes)
 			(show_name no)
@@ -6659,8 +6747,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
 			(at 229.87 100.33 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7031,7 +7141,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 179.07 117.348 90)
 			(hide yes)
 			(show_name no)
@@ -7053,8 +7163,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 220 OHM 1% 1/10W 0402"
 			(at 179.07 115.57 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF2200X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7113,7 +7245,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0603_1608Metric"
 			(at 117.8052 88.9 0)
 			(hide yes)
 			(show_name no)
@@ -7135,7 +7267,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 150PF 50V C0G/NP0 0402"
+		(property "Description" "CAP CER 1uF 16V X7R 0603"
 			(at 116.84 85.09 0)
 			(hide yes)
 			(show_name no)
@@ -7252,6 +7384,17 @@
 		)
 		(property "Description" "30V 200mA Schottky diode, SOD-323F"
 			(at 328.93 49.53 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "BAT54J"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7415,6 +7558,17 @@
 		)
 		(property "Description" "0.1A Ic, 45V Vce, NPN Transistor, SOT-323"
 			(at 220.98 95.25 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "BC847W"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7616,7 +7770,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 130.5052 88.9 0)
 			(hide yes)
 			(show_name no)
@@ -7638,7 +7792,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 150PF 50V C0G/NP0 0402"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 129.54 85.09 0)
 			(hide yes)
 			(show_name no)
@@ -7649,7 +7803,18 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-3229-2-ND"
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 129.54 85.09 0)
 			(hide yes)
 			(show_name no)
@@ -7671,7 +7836,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM1555C1H151JA01D"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 129.54 85.09 0)
 			(hide yes)
 			(show_name no)
@@ -7809,7 +7974,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 363.728 38.1 90)
 			(hide yes)
 			(show_name no)
@@ -7831,8 +7996,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 22k OHM 1% 1/10W 0402"
 			(at 361.95 38.1 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF2202X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7891,7 +8078,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 164.7952 50.8 0)
 			(hide yes)
 			(show_name no)
@@ -7913,7 +8100,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 150PF 50V C0G/NP0 0402"
+		(property "Description" "CAP CER 47pF 16V C0G 0402"
 			(at 163.83 46.99 0)
 			(hide yes)
 			(show_name no)
@@ -8028,6 +8215,17 @@
 		)
 		(property "Description" "FERRITE BEAD 600 OHM 0805 3LN"
 			(at 154.94 25.4 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Fair-Rite Products Corp."
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8587,7 +8785,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 321.31 47.498 90)
 			(hide yes)
 			(show_name no)
@@ -8609,8 +8807,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 470 OHM 1% 1/10W 0402"
 			(at 321.31 45.72 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4700X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8669,7 +8889,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 50.4952 132.08 0)
 			(hide yes)
 			(show_name no)
@@ -8691,7 +8911,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 150PF 50V C0G/NP0 0402"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 49.53 128.27 0)
 			(hide yes)
 			(show_name no)
@@ -8702,7 +8922,18 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-3229-2-ND"
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 49.53 128.27 0)
 			(hide yes)
 			(show_name no)
@@ -8724,7 +8955,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM1555C1H151JA01D"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 49.53 128.27 0)
 			(hide yes)
 			(show_name no)
@@ -8862,7 +9093,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 194.0052 50.8 0)
 			(hide yes)
 			(show_name no)
@@ -8884,7 +9115,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 150PF 50V C0G/NP0 0402"
+		(property "Description" "CAP CER 47pF 16V C0G 0402"
 			(at 193.04 46.99 0)
 			(hide yes)
 			(show_name no)
@@ -8977,7 +9208,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 40.9448 132.08 0)
 			(hide yes)
 			(show_name no)
@@ -8999,7 +9230,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 150PF 50V C0G/NP0 0402"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 41.91 128.27 0)
 			(hide yes)
 			(show_name no)
@@ -9010,7 +9241,18 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-3229-2-ND"
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 41.91 128.27 0)
 			(hide yes)
 			(show_name no)
@@ -9032,7 +9274,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM1555C1H151JA01D"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 41.91 128.27 0)
 			(hide yes)
 			(show_name no)
@@ -9092,7 +9334,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 236.728 99.06 90)
 			(hide yes)
 			(show_name no)
@@ -9114,8 +9356,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 470 OHM 1% 1/10W 0402"
 			(at 234.95 99.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4700X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9196,6 +9460,17 @@
 		)
 		(property "Description" "FERRITE BEAD 600 OHM 0805 3LN"
 			(at 154.94 30.48 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Fair-Rite Products Corp."
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9363,7 +9638,7 @@
 				)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 142.24 28.702 90)
 			(hide yes)
 			(show_name no)
@@ -9387,6 +9662,17 @@
 		)
 		(property "Description" "RES SMD 51 OHM 1% 1/10W 0402"
 			(at 142.24 30.48 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9560,7 +9846,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 39.878 110.49 90)
 			(hide yes)
 			(show_name no)
@@ -9582,8 +9868,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 100k OHM 1% 1/10W 0402"
 			(at 38.1 110.49 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1003X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9720,7 +10028,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "R_0402_1005Metric"
 			(at 304.8 47.498 90)
 			(hide yes)
 			(show_name no)
@@ -9742,8 +10050,30 @@
 				)
 			)
 		)
-		(property "Description" "Resistor"
+		(property "Description" "RES SMD 4.7k OHM 1% 1/10W 0402"
 			(at 304.8 45.72 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4701X"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9826,6 +10156,17 @@
 		)
 		(property "Description" "TVS DIODE 15VWM 24.4VC DO214AC"
 			(at 148.59 46.99 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "WÃ¼rth Elektronik"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10151,7 +10492,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 96.2152 40.64 0)
 			(hide yes)
 			(show_name no)
@@ -10173,7 +10514,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 150PF 50V C0G/NP0 0402"
+		(property "Description" "CAP CER 47pF 16V C0G 0402"
 			(at 95.25 36.83 0)
 			(hide yes)
 			(show_name no)
@@ -10299,6 +10640,17 @@
 				)
 			)
 		)
+		(property "MANUFACTURER" "WÃ¼rth Elektronik"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(property "DIGIKEY_PART_NUMBER" "732-SMAJ15CATR-ND"
 			(at 177.8 46.99 90)
 			(hide yes)
@@ -10379,7 +10731,7 @@
 				)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "R_0402_1005Metric"
 			(at 142.24 27.178 90)
 			(hide yes)
 			(show_name no)
@@ -10403,6 +10755,17 @@
 		)
 		(property "Description" "RES SMD 51 OHM 1% 1/10W 0402"
 			(at 142.24 25.4 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10494,7 +10857,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "402"
+		(property "Footprint" "C_0402_1005Metric"
 			(at 117.8052 138.43 0)
 			(hide yes)
 			(show_name no)
@@ -10516,7 +10879,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 150PF 50V C0G/NP0 0402"
+		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
 			(at 116.84 134.62 0)
 			(hide yes)
 			(show_name no)
@@ -10527,7 +10890,18 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-3229-2-ND"
+		(property "MANUFACTURER" "Murata"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
 			(at 116.84 134.62 0)
 			(hide yes)
 			(show_name no)
@@ -10549,7 +10923,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM1555C1H151JA01D"
+		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
 			(at 116.84 134.62 0)
 			(hide yes)
 			(show_name no)
