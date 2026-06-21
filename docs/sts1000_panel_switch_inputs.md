@@ -1,7 +1,7 @@
 # STS1000 — Panel SPST Switch Inputs (Buttons + Tamper)
 
 **Scope:** the off-board SPST contacts that route through a panel connector to a logic input —
-the **7 keypad buttons** (→ MCP23017 **U48 @0x21** Port A, GPA0–GPA6) and the **enclosure
+the **7 keypad buttons** (→ MCP23017 **U54 @0x21** Port A, GPA0–GPA6) and the **enclosure
 tamper/intrusion switch** (→ STM32 **PC13 / `RTC_TAMP`**). Both use the same conditioning chain:
 **connector TVS → 10 kΩ pull-up → 100 nF debounce → input**. Active-low: switch shorts the line
 to GND on actuation; the pull-up defines the idle-high state.
@@ -26,7 +26,7 @@ Cross-refs: `ntp_server_peripheral_map.md` §8/§9/§11; `sts1000_fault_aggregat
 
 ---
 
-## 2. Button lines — U48 GPA0–GPA6 (`BUTTON_1`…`BUTTON_7`)
+## 2. Button lines — U54 GPA0–GPA6 (`BUTTON_1`…`BUTTON_7`)
 
 | Item | Value / part | Per line | Function |
 |---|---|---|---|
@@ -36,14 +36,14 @@ Cross-refs: `ntp_server_peripheral_map.md` §8/§9/§11; `sts1000_fault_aggregat
 | Switch | SPST, line→GND on press | ×7 (panel) | Momentary, normally-open |
 
 **Designators:** assign per-line R/C in KiCad (the 10 kΩ and 100 nF reuse existing value lines — no
-new BOM parts). **R148 (10 kΩ → 3V3_STM) is *not* one of these** — it is the single pull-up on the
-open-drain `BTN_INT_N` net (U48 INTA → PE0/EXTI0), not a per-button part.
+new BOM parts). **R201 (10 kΩ → 3V3_STM) is *not* one of these** — it is the single pull-up on the
+open-drain `BTN_INT_N` net (U54 INTA → PE0/EXTI0), not a per-button part.
 
 **Register/INT config:** **IPOL=1** (pressed reads as 1); on-change interrupt (`GPINTEN`,
 `INTCON`=0) → INTA → `BTN_INT_N` → PE0/EXTI0. Firmware adds ~20–30 ms debounce on top of the 1 ms RC.
 
 **GPA7 exception (not a button):** GPA7 = `DISP_TOUCH_INT` (FT6336U) gets the 10 kΩ → 3V3_STM
-pull-up (R167) but **no 100 nF** — the cap would swallow the push-pull touch INT pulse. GPA7 rides
+pull-up (R208) but **no 100 nF** — the cap would swallow the push-pull touch INT pulse. GPA7 rides
 the same INTA/`BTN_INT_N` path.
 
 ---
@@ -98,7 +98,7 @@ does not flag a cut wire. Set TAMP active edge/level to match the chosen contact
 
 All TVS placed at the **connector**, clamp return to chassis/GND, ahead of the pull-up node. These
 are 3.3 V-class logic lines (unlike the display touch I²C lines, which idle at 5 V and require the
-5.5 V-class TPD4E05U06DQAR on U60) — the lower-voltage 3.3 V arrays are correct here.
+5.5 V-class TPD4E05U06DQAR on U17) — the lower-voltage 3.3 V arrays are correct here.
 
 ---
 
@@ -106,7 +106,7 @@ are 3.3 V-class logic lines (unlike the display touch I²C lines, which idle at 
 
 | Parameter | Buttons (×7) | Tamper (×1) |
 |---|---|---|
-| Input | MCP23017 U48 GPA0–6 (I²C) | STM32 PC13 / TAMP (backup domain) |
+| Input | MCP23017 U54 GPA0–6 (I²C) | STM32 PC13 / TAMP (backup domain) |
 | Idle level | High (10 kΩ → 3V3_STM) | High (10 kΩ → rail per §3.1) |
 | Actuated | Low (SPST → GND) | Low (SPST → GND) |
 | Debounce | 100 nF, 1 ms RC + FW 20–30 ms | 100 nF, 1 ms RC (see §3.1) |

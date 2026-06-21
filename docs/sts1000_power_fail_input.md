@@ -1,7 +1,7 @@
 # STS1000 — Power-Fail Input (PFI) Comparator
 
 Early-warning detector for loss of input (PoE) power. A single LMV393 half
-(U60A) monitors the upstream PD bus (`VOUT_P`) through a high-impedance divider
+(U2A) monitors the upstream PD bus (`VOUT_P`) through a high-impedance divider
 and asserts **PFI** (PE8 / EXTI8) low when the bus droops below ~37 V — well
 before the on-chip PVD or any 3.3 V-domain supervisor would react. Because
 `VOUT_P` carries the largest bulk hold-up energy in the system and collapses
@@ -18,24 +18,24 @@ from the external watchdog; see §7.
 ## 1. Signal flow
 
 ```
- VOUT_P ──R175(1.2M)──┬───────────────► +IN (U60A pin 3)
-   (PD bus, ~54 V)     │                     │
-                      R176(39.2k)          C167(1nF)──GND
-                       │                   R172(2M)──► OUT (hysteresis)
+ VOUT_P ──R2(1.2M)───┬───────────────► +IN (U2A pin 3)
+   (PD bus, ~54 V)    │                     │
+                      R3(39.2k)           C3(1nF)──GND
+                       │                   R6(2M)──► OUT (hysteresis)
                       GND
- +3.3V ──R173(174k)──┬───────────────────► −IN (U60A pin 2)
-                      R174(100k)            │
-                       │                   C168(0.1µF)──GND
+ 3V3 ──R4(174k)──────┬───────────────────► −IN (U2A pin 2)
+                      R5(100k)             │
+                       │                   C4(0.1µF)──GND
                       GND
                  Vref = 1.204 V
 
- U60A OUT (pin1, open-drain) ──R171(1k)──┬──► PFI ──► PE8 / EXTI8
-   (supplied +5V)                        R184(100k)──► +3.3V   (pull-up = logic level + boot default)
+ U2A OUT (pin1, open-drain) ──R7(1k)──┬──► PFI ──► PE8 / EXTI8
+   (supplied 5V)                      R8(100k)──► 3V3   (pull-up = logic level + boot default)
 
  high = power good   |   low = power fail   |   EXTI8 falling edge = fail
 ```
 
-`VOUT_P` good → +IN > Vref → open-drain output released → R184 holds PFI = 3.3 V
+`VOUT_P` good → +IN > Vref → open-drain output released → R8 holds PFI = 3.3 V
 (good). `VOUT_P` droops below trip → +IN < Vref → output sinks → PFI low (fail).
 
 ---
@@ -44,19 +44,19 @@ from the external watchdog; see §7.
 
 | Ref | Value / spec | Function |
 |---|---|---|
-| U60A | LMV393 (½), **V+ = +5 V** | Power-fail comparator. Open-drain output. |
-| U60B | LMV393 (½), unused | Spare half — inputs strapped to defined levels (pin 5 → +5 V, pin 6 → GND), pin 7 open. |
-| U60C | LMV393 power unit | V+ (pin 8) = +5 V, V− (pin 4) = GND. |
-| C162 | 0.1 µF | U60 supply bypass. |
-| R175 | **1.2 MΩ** 1%, 0805/1206, ≥100 V WV | Sense divider top (VOUT_P → +IN). |
-| R176 | **39.2 kΩ** 1% | Sense divider bottom (+IN → GND). |
-| C167 | 1 nF | +IN noise filter (RC ≈ 39 µs with R176). |
-| R173 | **174 kΩ** 1% | Reference divider top (+3.3 V → −IN). |
-| R174 | **100 kΩ** 1% | Reference divider bottom (−IN → GND). |
-| C168 | 0.1 µF | Reference-node bypass. |
-| R172 | **2.0 MΩ** 1% | Hysteresis, OUT → +IN. |
-| R171 | **1.0 kΩ** | Series isolation / current-limit, OUT → PE8. |
-| R184 | **100 kΩ** | Pull-up, PFI → +3.3 V. Mandatory (open-drain). Sets logic-high level and boot default. |
+| U2A | LMV393 (½), **V+ = 5 V** | Power-fail comparator. Open-drain output. |
+| U2B | LMV393 (½), unused | Spare half — inputs strapped to defined levels (pin 5 → GND, pin 6 → 5 V), pin 7 open. |
+| U2C | LMV393 power unit | V+ (pin 8) = 5 V, V− (pin 4) = GND. |
+| C5 | 0.1 µF | U2 supply bypass. |
+| R2 | **1.2 MΩ** 1%, 0805/1206, ≥100 V WV | Sense divider top (VOUT_P → +IN). |
+| R3 | **39.2 kΩ** 1% | Sense divider bottom (+IN → GND). |
+| C3 | 1 nF | +IN noise filter (RC ≈ 39 µs with R3). |
+| R4 | **174 kΩ** 1% | Reference divider top (3V3 → −IN). |
+| R5 | **100 kΩ** 1% | Reference divider bottom (−IN → GND). |
+| C4 | 0.1 µF | Reference-node bypass. |
+| R6 | **2.0 MΩ** 1% | Hysteresis, OUT → +IN. |
+| R7 | **1.0 kΩ** | Series isolation / current-limit, OUT → PE8. |
+| R8 | **100 kΩ** | Pull-up, PFI → 3V3. Mandatory (open-drain). Sets logic-high level and boot default. |
 
 ---
 
@@ -66,11 +66,11 @@ from the external watchdog; see §7.
 
 Divider ratio:
 
-  k = R176 / (R175 + R176) = 39.2k / 1.2392M = **0.031633**
+  k = R3 / (R2 + R3) = 39.2k / 1.2392M = **0.031633**
 
-Reference (from +3.3 V):
+Reference (from 3V3):
 
-  Vref = 3.3 × R174 / (R173 + R174) = 3.3 × 100 / 274 = **1.204 V**
+  Vref = 3.3 × R5 / (R4 + R5) = 3.3 × 100 / 274 = **1.204 V**
 
 Nominal trip (no hysteresis): VOUT_P = Vref / k = 1.204 / 0.031633 = **38.1 V**.
 
@@ -83,23 +83,23 @@ point):
 | 57 V (PoE max) | 1.80 V |
 | 60 V (SELV ceiling) | 1.90 V |
 
-### 3.2 Common-mode range — why +5 V supply
+### 3.2 Common-mode range — why 5 V supply
 
-The LMV393 input common-mode range is **0 to (V+ − 1.5 V)**. At +5 V that is
+The LMV393 input common-mode range is **0 to (V+ − 1.5 V)**. At 5 V that is
 0–3.5 V, which contains the +IN operating point (≤1.90 V) with margin. **At
-+3.3 V the ceiling would be 1.8 V** — exceeded by +IN at the top of the PoE
+3.3 V the ceiling would be 1.8 V** — exceeded by +IN at the top of the PoE
 range (1.80 V @57 V, 1.90 V @60 V), risking output phase-reversal and a spurious
-fail. The comparator is therefore supplied from **+5 V** even though its logic
+fail. The comparator is therefore supplied from **5 V** even though its logic
 output must reach a 3.3 V pin; the open-drain output stage makes the supply rail
-and the output-high level independent (§3.4). This matches the U12 / U38 LMV393
+and the output-high level independent (§3.4). This matches the U25 / U41 LMV393
 convention elsewhere in the design (5 V supply, output pulled to a 3.3 V rail).
 
 ### 3.3 Hysteresis
 
-R172 (2 MΩ) injects positive feedback from OUT to +IN. With the open-drain
-output swinging 0 ↔ 3.3 V (set by R184):
+R6 (2 MΩ) injects positive feedback from OUT to +IN. With the open-drain
+output swinging 0 ↔ 3.3 V (set by R8):
 
-  ΔVOUT_P ≈ R175 × (V_OH − V_OL) / R172 = 1.2M × 3.3 / 2M ≈ **2.0 V**
+  ΔVOUT_P ≈ R2 × (V_OH − V_OL) / R6 = 1.2M × 3.3 / 2M ≈ **2.0 V**
 
 Resulting thresholds (KCL at +IN, crossing at Vref):
 
@@ -114,13 +114,13 @@ prevents chatter on the slow bus decay.
 
 ### 3.4 Output stage and level translation
 
-U60A is **open-drain**. The output transistor only sinks; the high level is set
-entirely by R184's pull-up rail (+3.3 V). Pulling the drain to 3.3 V while the
+U2A is **open-drain**. The output transistor only sinks; the high level is set
+entirely by R8's pull-up rail (3V3). Pulling the drain to 3.3 V while the
 chip is supplied from 5 V is safe — there is no conduction path from the 5 V
-supply to the output node. R171 (1 kΩ) sits between the output pin and the PFI
+supply to the output node. R7 (1 kΩ) sits between the output pin and the PFI
 net for ESD/fault current-limiting at PE8; a CMOS GPIO input draws negligible
-current, so it introduces no divider error. With R171 ahead of the pull-up node,
-the asserted-low level is 3.3 V × R171/(R171+R184) ≈ 33 mV — a solid logic low.
+current, so it introduces no divider error. With R7 ahead of the pull-up node,
+the asserted-low level is 3.3 V × R7/(R7+R8) ≈ 33 mV — a solid logic low.
 
 ### 3.5 Why VOUT_P (node choice and hold-up)
 
@@ -159,7 +159,7 @@ Sense divider at 54 V: 54 / 1.2392 MΩ = 43.6 µA. Reference divider: 3.3 / 274 
 | Class 6 power | 60 W PSE / 51 W PD (board budget ~25 W) |
 | Port capacitance (PSE-limited inrush) | < 180 µF |
 
-Trip is set below 42.5 V; divider is rated to 60 V continuous (R175 single 1.2 MΩ
+Trip is set below 42.5 V; divider is rated to 60 V continuous (R2 single 1.2 MΩ
 at ≥100 V WV clears 60 V with ≥1.6× margin and survives a post-TVS transient
 toward the ~63 V clamp).
 
@@ -168,11 +168,11 @@ toward the ~63 V clamp).
 ## 5. Firmware implications
 
 **Pin / EXTI.** PFI = PE8, EXTI line 8. Configure as input, **falling-edge**
-trigger. Direct MCU pin — **not** routed through the U47/U48 I/O expanders (it
+trigger. Direct MCU pin — **not** routed through the U54/U55 I/O expanders (it
 must remain valid while the expanders and their bus may be browning out).
 
 **Boot sequence (avoid the start-up race).**
-1. As VOUT_P rises, the 5 V and 3.3 V rails come up and R184 holds PFI high
+1. As VOUT_P rises, the 5 V and 3.3 V rails come up and R8 holds PFI high
    (good) before the comparator output is valid — so the line is never floating.
 2. In init, configure PE8 as input with internal pull-up enabled.
 3. **Read the PFI level and confirm "good" (high) before arming EXTI8.** Do not
@@ -212,7 +212,7 @@ shutdown flag if the MCU never actually lost power.
 
 ## 6. Design rules captured
 
-- **Supply the comparator from +5 V**, output pulled to +3.3 V — the open-drain
+- **Supply the comparator from 5 V**, output pulled to 3V3 — the open-drain
   stage decouples supply rail from logic level and the 5 V CMR (0–3.5 V) clears
   the +IN operating point that a 3.3 V supply would not.
 - **Single 1.2 MΩ top resistor** at ≥100 V WV — splitting for derating is
@@ -236,11 +236,11 @@ shutdown flag if the MCU never actually lost power.
 - [ ] Measure actual **C_port** and recompute the hold-up window; confirm it
       exceeds the worst-case ISR shutdown time with margin. If short, add 3.3 V/5 V
       rail hold-up capacitance.
-- [ ] Confirm **U60B** pin 5 / pin 6 land on **opposite** rails (+5 V / GND) and
+- [ ] Confirm **U2B** pin 5 / pin 6 land on **opposite** rails (5 V / GND) and
       are not commoned (no rail-to-rail short through the strap).
 - [ ] Verify buck **min-Vin** (V₂ in the hold-up calc) for the 3.3 V rail.
 - [ ] Bench-confirm no false trip at the **low end of the PoE range under a load
-      transient** (long-cable + Rb warm-up step); adjust R172 if the 2 V band is
+      transient** (long-cable + Rb warm-up step); adjust R6 if the 2 V band is
       insufficient.
 - [ ] Measure **boot-to-EXTI-arm** time and confirm the read-before-arm guard
       eliminates any ramp-window false trip.

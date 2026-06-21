@@ -75,7 +75,7 @@ The board is wired to that direction fact, independent of the table's Tx/Rx text
 
 ---
 
-## 4. Transceiver — SN65C3221E (U40)
+## 4. Transceiver — SN65C3221E (U46)
 
 Single-channel RS-232 driver/receiver with charge pump and ±15 kV IEC ESD on the line
 pins. Operates from 3.3 V; accepts 3.3 V logic in and produces ±5.4 V RS-232 swing.
@@ -87,7 +87,7 @@ pins. Operates from 3.3 V; accepts 3.3 V logic in and produces ±5.4 V RS-232 sw
 | 15 | VCC | always-on 3.3 V | powered whenever the board is up |
 | 14 | GND | board GND | the single Rb↔board bond point (§6) |
 | 1 | EN̄ | **GND** | receiver permanently enabled — MCU must always be able to hear the FE |
-| 16 | FORCEOFF̄ | `RB_PWR_EN` net, 100 kΩ pulldown (R126) | active-high enable; default-off until firmware asserts |
+| 16 | FORCEOFF̄ | `RB_PWR_EN` net, 100 kΩ pulldown (R164) | active-high enable; default-off until firmware asserts |
 | 12 | FORCEON | 3.3 V | **auto-powerdown disabled** — no dependence on sensing a valid RS-232 level |
 | 10 | INVALID̄ | NC | unused (auto-powerdown off) |
 | 11 | DIN | `RB_RX` (= MCU TX, PB4 path) | data toward the Rb |
@@ -108,13 +108,13 @@ power control; FORCEOFF̄ does that.)
 
 | Designator | Value | Pin(s) | Note |
 |---|---|---|---|
-| C126 | 0.1 µF | C1+ / C1− (2,4) | flying cap |
-| C127 | 0.1 µF | C2+ / C2− (5,6) | flying cap |
-| C129 | 0.1 µF | V− (7) → GND | negative reservoir |
-| C130 | 0.1 µF | V+ (3) → VCC | positive reservoir — **V+ reaches the rail only through this cap; V+ is never shorted to VCC** |
-| C128 | **1 µF** | VCC (15) → GND | bulk/bypass — see note |
+| C139 | 0.1 µF | C1+ / C1− (2,4) | flying cap |
+| C140 | 0.1 µF | C2+ / C2− (5,6) | flying cap |
+| C144 | 0.1 µF | V− (7) → GND | negative reservoir |
+| C145 | 0.1 µF | V+ (3) → VCC | positive reservoir — **V+ reaches the rail only through this cap; V+ is never shorted to VCC** |
+| C143 | **1 µF** | VCC (15) → GND | bulk/bypass — see note |
 
-> **The 1 µF on VCC is mandatory, not optional.** U40 is the **PW (TSSOP)** package.
+> **The 1 µF on VCC is mandatory, not optional.** U46 is the **PW (TSSOP)** package.
 > The datasheet IEC-ESD spec (§7.3) requires a minimum 1 µF between VCC and GND for the
 > PW package to meet the rated ±8 kV contact / ±15 kV air discharge on the line pins.
 > Dropping below 1 µF silently forfeits the field-port ESD rating that is the entire
@@ -142,8 +142,8 @@ DOUT into an open NC contact (harmless) and still drives a dangling ROUT (harmle
 
 | Pole | COM | NC (RS-232) | NO (CMOS) | Selects |
 |---|---|---|---|---|
-| A | J1-9 (`RB_RS232_RX_P`) | DOUT (13) | `RB_RX` via R132 220 Ω | driver feeding FE input |
-| B | `RB_TX` (→ PE7) | ROUT (9) | `RB_RS232_TX_P` via R131 10 kΩ | source feeding MCU input |
+| A | J1-9 (`RB_RS232_RX_P`) | DOUT (13) | `RB_RX` via R167 220 Ω | driver feeding FE input |
+| B | `RB_TX` (→ PE7) | ROUT (9) | `RB_RS232_TX_P` via R168 10 kΩ | source feeding MCU input |
 
 **De-energized defaults to RS-232**, which matches the FE manual's documented level, so
 the link is in its safest/most-likely-correct state before firmware runs.
@@ -152,16 +152,16 @@ the link is in its safest/most-likely-correct state before firmware runs.
 
 | Designator | Value | Branch | Purpose |
 |---|---|---|---|
-| R132 | 220 Ω | Pole A:NO (MCU TX → FE input, CMOS) | edge/ringing & current limit; no MCU hazard (J1-9 is an FE input) |
-| R131 | 10 kΩ | Pole B:NO (FE output → MCU, CMOS) | **fault current limit** — see below |
+| R167 | 220 Ω | Pole A:NO (MCU TX → FE input, CMOS) | edge/ringing & current limit; no MCU hazard (J1-9 is an FE input) |
+| R168 | 10 kΩ | Pole B:NO (FE output → MCU, CMOS) | **fault current limit** — see below |
 
-R131 is the protection-critical part. In CMOS mode the FE's raw output reaches PE7
+R168 is the protection-critical part. In CMOS mode the FE's raw output reaches PE7
 through this 10 kΩ. If the unit is actually RS-232 and the relay is energized to CMOS
-by mistake, ±5.4 V appears at R131's input; the 10 kΩ limits the current the clamp
+by mistake, ±5.4 V appears at R168's input; the 10 kΩ limits the current the clamp
 (§5.3) must shunt to ≈ (5.4 − 3.6)/10 k ≈ 0.18 mA — well inside both the Schottky and
 the STM32 pin-injection limits.
 
-### 5.3 MCU-pin clamp — BAT54S (D7)
+### 5.3 MCU-pin clamp — BAT54S (D12)
 
 `RB_TX` connects **directly to the STM32 (PE7)** — no series resistor on the RB_TX net
 itself. The clamp sits right at the pin:
@@ -171,8 +171,8 @@ itself. The clamp sits right at the pin:
 - Positive excursions above 3.3 V+0.3 V → upper diode conducts → clamped to ≈ 3.6 V.
 
 The only over-rail energy that can reach `RB_TX` arrives through the Pole B:NO branch
-(R131 10 kΩ); the NC branch (ROUT) is a 0–3.3 V logic output and never a hazard. So the
-current limit lives on the relay branch (R131) and the clamp lives on the pin (D7) —
+(R168 10 kΩ); the NC branch (ROUT) is a 0–3.3 V logic output and never a hazard. So the
+current limit lives on the relay branch (R168) and the clamp lives on the pin (D12) —
 together they bound PE7 to 0–3.3 V in every mode and fault combination. No additional
 series R on `RB_TX` is wanted (it would only add delay/loading to the normal ROUT
 path).
@@ -195,13 +195,13 @@ oddball units (see §7).
 
 ### 5.5 Relay driver
 
-`RB_RS232_CMOS_SW` (MCU GPIO) → R130 470 Ω → base of Q14 (BC847W, NPN) → R129 10 kΩ
+`RB_RS232_CMOS_SW` (MCU GPIO) → R170 470 Ω → base of Q21 (BC847W, NPN) → R169 10 kΩ
 base pulldown → emitter direct to GND → collector to one coil terminal; other coil
-terminal to +3.3 V with D10 (BAT54J) flyback across the coil (cathode to +3.3 V).
+terminal to +3.3 V with D15 (BAT54J) flyback across the coil (cathode to +3.3 V).
 
 - **Emitter is directly grounded** (no degeneration) so the transistor saturates and
   the coil sees the full rail.
-- **R129 base pulldown** holds Q14 off (relay de-energized → RS-232) during reset and
+- **R169 base pulldown** holds Q21 off (relay de-energized → RS-232) during reset and
   any time the GPIO is high-Z — fail-safe to the documented default.
 - High on `RB_RS232_CMOS_SW` → energize → CMOS mode.
 
@@ -213,12 +213,12 @@ Each data line (`RB_RS232_TX`, `RB_RS232_RX`) carries, from connector inward:
 
 | Stage | Designators | Value | Role |
 |---|---|---|---|
-| Primary TVS | D5, D6 | SMAJ15CA | bidirectional surge clamp at the connector (15 V standoff, passes ±5.4 V RS-232) |
-| Connector-side shunt | C124, C125 | 47 pF C0G | EMI filter / edge shaping at the port |
-| Series | R124, R125 | 51 Ω | isolates the connector-side cap from the transceiver node; forms RC/ferrite filter |
-| Ferrite | L9, L10 | 600 Ω @ 100 MHz | HF/EMI suppression |
-| Secondary TVS | U39 | PESD15VL2BT | low-cap ESD clamp at the transceiver side |
-| Transceiver-side shunt | C122, C123 | 47 pF C0G | EMI filter at DOUT/RIN node |
+| Primary TVS | D13, D14 | SMAJ15CA | bidirectional surge clamp at the connector (15 V standoff, passes ±5.4 V RS-232) |
+| Connector-side shunt | C146, C147 | 47 pF C0G | EMI filter / edge shaping at the port |
+| Series | R165, R166 | 51 Ω | isolates the connector-side cap from the transceiver node; forms RC/ferrite filter |
+| Ferrite | L8, L9 | 600 Ω @ 100 MHz | HF/EMI suppression |
+| Secondary TVS | U47 | PESD15VL2BT | low-cap ESD clamp at the transceiver side |
+| Transceiver-side shunt | C141, C142 | 47 pF C0G | EMI filter at DOUT/RIN node |
 
 **Shunt sizing.** Shunts are 47 pF C0G (not 150 pF) to preserve edges if the link is
 ever run fast. At 3.3 V the SN65C3221E holds 1 Mbit/s only up to **CL ≤ 250 pF** at the
@@ -246,7 +246,7 @@ the *only* bond:
 
 ---
 
-## 6A. Lock-status input — opto-isolated, voltage-tolerant (U41)
+## 6A. Lock-status input — opto-isolated, voltage-tolerant (U48)
 
 The FE-5680A loop-lock indicator (J1-3) is brought in on a separate, **opto-isolated**
 path — not through the serial transceiver, and not directly to a GPIO. This serves two
@@ -271,56 +271,56 @@ tool here (unlike the 10 MHz path, which must never be opto-coupled).
 
 | Stage | Designator | Value | Role |
 |---|---|---|---|
-| Upstream series R | R133 | 4.7 kΩ, 0.25 W | limits total input current so D8 is never over-stressed across 3–24 V; ~91 mW worst-case at 24 V |
-| Input clamp | D8 | 3V3 zener → GND | clamps the unknown-high input node to ~3.3 V; sinks only the residual current R133 lets through (≤0.4 mA → ~1.3 mW) |
-| LED series R | R127 | 470 Ω | sets opto LED forward current (~4 mA) from the clamped node |
-| LED-side catch | D9 | BAT54J → GND | reverse-protection for the LED — APC-817 V_R abs max is only **6 V**, so this clamp is **required**, not optional |
-| Optocoupler | U41 | APC-817C1 (CTR 200–400%) | galvanic isolation + level translation; C1 rank min |
-| Output pullup | R128 | 22 kΩ → +3.3 V | pulls `RB_LOCK` high when the opto transistor is off; high value eases the 3 V-corner pull-down |
-| Output filter | C131 | 10 nF → GND | debounce (≈ R128·C131 ≈ 220 µs) for a slow status line |
+| Upstream series R | R171 | 4.7 kΩ, 0.25 W | limits total input current so D16 is never over-stressed across 3–24 V; ~91 mW worst-case at 24 V |
+| Input clamp | D16 | 3V3 zener → GND | clamps the unknown-high input node to ~3.3 V; sinks only the residual current R171 lets through (≤0.4 mA → ~1.3 mW) |
+| LED series R | R172 | 470 Ω | sets opto LED forward current (~4 mA) from the clamped node |
+| LED-side catch | D17 | BAT54J → GND | reverse-protection for the LED — APC-817 V_R abs max is only **6 V**, so this clamp is **required**, not optional |
+| Optocoupler | U48 | APC-817C1 (CTR 200–400%) | galvanic isolation + level translation; C1 rank min |
+| Output pullup | R173 | 22 kΩ → +3.3 V | pulls `RB_LOCK` high when the opto transistor is off; high value eases the 3 V-corner pull-down |
+| Output filter | C148 | 10 nF → GND | debounce (≈ R173·C148 ≈ 220 µs) for a slow status line |
 
-Connections: `RB_LOCK_IN` → R133 → [D8 clamp node] → R127 → LED_A (1); LED_C (2) → GND.
-Collector (4) → R128 pullup; emitter (3) → GND; collector node → C131 → `RB_LOCK`.
+Connections: `RB_LOCK_IN` → R171 → [D16 clamp node] → R172 → LED_A (1); LED_C (2) → GND.
+Collector (4) → R173 pullup; emitter (3) → GND; collector node → C148 → `RB_LOCK`.
 
 ### 6A.2 Why this tolerates an unknown high voltage (3–24 V)
 
 `RB_LOCK_IN` may be asserted at any voltage from ~3 V up to ~24 V — the FE's high level
 is not specified and varies by unit. Two elements handle this:
 
-- **R133 (4.7 kΩ upstream)** limits the *total* input current, so the FE's drive is
+- **R171 (4.7 kΩ upstream)** limits the *total* input current, so the FE's drive is
   bounded regardless of how high it swings.
-- **D8 (3V3 zener)** clamps the LED-side node to ~3.3 V, sinking only the residual
-  current that R133 lets past.
+- **D16 (3V3 zener)** clamps the LED-side node to ~3.3 V, sinking only the residual
+  current that R171 lets past.
 
 The APC-817 CTR is specified at **I_F = 5 mA**, and Fig 7 shows CTR rolling off above
 ~10 mA and below ~1 mA. The target is therefore to keep I_F in the ~1–5 mA band across
 the whole input range; the clamp is what makes that possible (without it, a single
 resistor cannot span the 14× current ratio between 3 V and 24 V — see note).
 
-**High-voltage regime (input ≥ ~3.3 V, D8 clamping).** The LED current is set by R127
+**High-voltage regime (input ≥ ~3.3 V, D16 clamping).** The LED current is set by R172
 from the *clamped* node, independent of input voltage (V_F ≈ 1.4 V max from the
 APC-817 EOC table):
 
 > I_F ≈ (3.3 − 1.4) / 470 ≈ **4.0 mA** — right at the 5 mA CTR spec point.
 
-R133 bounds the total current; D8 sinks the small remainder:
+R171 bounds the total current; D16 sinks the small remainder:
 
-| V_in | I_total = (V_in − 3.3)/4.7 kΩ | I_D8 = I_total − I_F | D8 dissipation (~3.3 V · I_D8) |
+| V_in | I_total = (V_in − 3.3)/4.7 kΩ | I_D16 = I_total − I_F | D16 dissipation (~3.3 V · I_D16) |
 |---|---|---|---|
-| 5 V | 0.36 mA | LED not yet at 4 mA; D8 idle | ~0 |
-| 12 V | 1.85 mA | LED dominates; D8 ~0 | ~0 |
-| 15 V | 2.49 mA | LED dominates; D8 ~0 | ~0 |
+| 5 V | 0.36 mA | LED not yet at 4 mA; D16 idle | ~0 |
+| 12 V | 1.85 mA | LED dominates; D16 ~0 | ~0 |
+| 15 V | 2.49 mA | LED dominates; D16 ~0 | ~0 |
 | **24 V** | **4.40 mA** | **~0.4 mA** | **~1.3 mW** |
 
-At 24 V the total (4.4 mA) barely exceeds the LED's 4.0 mA, so D8 only ever sinks
-~0.4 mA → ~1.3 mW, trivial vs. its rating. **R133 dissipation at 24 V** ≈
-(4.4 mA)² · 4.7 kΩ ≈ **91 mW** → spec R133 at **0.25 W** (0805/1206 body). LED current
+At 24 V the total (4.4 mA) barely exceeds the LED's 4.0 mA, so D16 only ever sinks
+~0.4 mA → ~1.3 mW, trivial vs. its rating. **R171 dissipation at 24 V** ≈
+(4.4 mA)² · 4.7 kΩ ≈ **91 mW** → spec R171 at **0.25 W** (0805/1206 body). LED current
 ~4 mA is far under the 60 mA / 100 mW input abs-max.
 
-**Low-voltage regime (input < ~3.3 V, D8 not clamping).** The LED current is set by
-R133 + R127 in series:
+**Low-voltage regime (input < ~3.3 V, D16 not clamping).** The LED current is set by
+R171 + R172 in series:
 
-> I_F ≈ (V_in − 1.4) / (R133 + R127) = (V_in − 1.4) / 5.17 kΩ
+> I_F ≈ (V_in − 1.4) / (R171 + R172) = (V_in − 1.4) / 5.17 kΩ
 
 | V_in | I_F |
 |---|---|
@@ -331,7 +331,7 @@ This is the weak corner. At ~0.3 mA, Fig 7 shows normalized CTR depressed to rou
 0.5–0.6× the 5 mA value; with the **C1 rank** (200% min) that still gives effective
 CTR ≈ 100–120%, so I_C ≈ 0.3–0.4 mA. The transistor only needs to sink ~3.3 V / 22 kΩ
 ≈ **0.15 mA** to pull `RB_LOCK` to V_CE(sat) (≤0.2 V), so there is ~2× margin even at
-3.0 V. This is why **R128 = 22 kΩ** (not 10 kΩ) and why the **C1 rank is the minimum** —
+3.0 V. This is why **R173 = 22 kΩ** (not 10 kΩ) and why the **C1 rank is the minimum** —
 the two together secure the 3 V corner.
 
 > **Single-resistor approach does not work over 3–24 V.** Without the clamp, I_F =
@@ -340,9 +340,9 @@ the two together secure the 3 V corner.
 > The 14× span is irreconcilable with one resistor — the zener clamp is what decouples
 > LED current from input voltage.
 
-D8 is also bidirectional: a negative input excursion forward-biases the zener to
-≈ −0.7 V, with R133 + R127 limiting current. Reverse protection of the **LED** itself is
-the job of D9 — the APC-817 LED reverse-voltage abs-max is only **6 V**, so D9 is
+D16 is also bidirectional: a negative input excursion forward-biases the zener to
+≈ −0.7 V, with R171 + R172 limiting current. Reverse protection of the **LED** itself is
+the job of D17 — the APC-817 LED reverse-voltage abs-max is only **6 V**, so D17 is
 required to catch any reverse swing before it reaches V_R.
 
 ### 6A.3 Output polarity & sense
@@ -358,15 +358,15 @@ meaning of a `RB_LOCK` level cannot be assumed.
 
 ### 6A.4 Verify (per physical unit)
 
-- **FE J1-3 source impedance / drive.** R133 (4.7 kΩ upstream) bounds the input current
-  so D8 sinks only the residual — sized to cover the full 3–24 V range. Confirm the
-  measured J1-3 high lands inside that range; D8 dissipation stays ≤~1.3 mW and R133
+- **FE J1-3 source impedance / drive.** R171 (4.7 kΩ upstream) bounds the input current
+  so D16 sinks only the residual — sized to cover the full 3–24 V range. Confirm the
+  measured J1-3 high lands inside that range; D16 dissipation stays ≤~1.3 mW and R171
   ≤~91 mW for any input up to 24 V (§6A.2). If the measured high is known and stable
-  (e.g. a clean 5 V), R127 could be nudged for a touch more I_F, but the as-built set
+  (e.g. a clean 5 V), R172 could be nudged for a touch more I_F, but the as-built set
   already works across the whole range — no change required.
 - **Opto rank / CTR at the 3 V corner.** Confirm the fitted part is **APC-817C1**
   (CTR 200–400%), not A1/B1. At the 3 V input corner I_F ≈ 0.3 mA with depressed CTR;
-  the C1 rank + R128 = 22 kΩ give ~2× pull-down margin. A lower rank may not pull low
+  the C1 rank + R173 = 22 kΩ give ~2× pull-down margin. A lower rank may not pull low
   reliably at 3 V.
 - **Lock polarity** (per 6A.3) → set the `RB_LOCK` sense config bit.
 
@@ -412,7 +412,7 @@ meaning of a `RB_LOCK` level cannot be assumed.
 ### 7.4 Enable sequencing (`RB_PWR_EN`, PB7)
 
 `RB_PWR_EN` drives **both** the Rb-rail buck EN **and** the transceiver FORCEOFF̄
-(via R126). Consequences:
+(via R164). Consequences:
 
 - The transceiver is **only powered when the Rb rail is enabled.** Do not attempt serial
   transactions while `RB_PWR_EN` is low — the transceiver is in its 1 µA shutdown and
@@ -469,7 +469,7 @@ a fault flag.
 | **Polarity** | attempt 0x2D transaction; toggle RXINV if needed | sets TX/RXINV bits |
 | **Baud/format** | try 9600 8N1 first | not stated in manual |
 | **Lock polarity** | measure J1-3 vs lock state | sets `RB_LOCK` config bit |
-| **Lock J1-3 drive range** | measure J1-3 high voltage & source impedance | confirm it lands in 3–24 V; R133/D8 dissipation in range for the whole span (§6A.2) |
+| **Lock J1-3 drive range** | measure J1-3 high voltage & source impedance | confirm it lands in 3–24 V; R171/D16 dissipation in range for the whole span (§6A.2) |
 | **Opto rank = APC-817C1** | confirm fitted part CTR 200–400% | A1/B1 may not pull low at the 3 V corner |
 | **J1-2 ↔ J1-5 continuity** | ohmmeter, power off | confirms single-domain grounding assumption |
 | **No second ground bond** | inspect SMA shield clamp, chassis, drains | preserve single-bond integrity |
@@ -482,30 +482,30 @@ a fault flag.
 
 | Ref | Part / value | Function |
 |---|---|---|
-| U40 | SN65C3221EPWR | RS-232 transceiver (TSSOP/PW package) |
-| U39 | PESD15VL2BT | secondary (transceiver-side) ESD array |
-| U41 | APC-817C1 (CTR 200–400%) | opto-isolated lock-status input |
+| U46 | SN65C3221EPWR | RS-232 transceiver (TSSOP/PW package) |
+| U47 | PESD15VL2BT | secondary (transceiver-side) ESD array |
+| U48 | APC-817C1 (CTR 200–400%) | opto-isolated lock-status input |
 | K1 | G6K-2F-Y DC3 | DPDT mode-select relay (3 V coil) |
-| Q14 | BC847W | relay coil driver (NPN) |
-| D5, D6 | SMAJ15CA | primary line TVS (connector side) |
-| D7 | BAT54S | `RB_TX` / PE7 rail clamp |
-| D8 | 3V3 zener | lock-input clamp (before LED resistor) |
-| D9 | BAT54J | lock LED reverse-V protection (APC-817 V_R max = 6 V — required) |
-| D10 | BAT54J | relay coil flyback |
-| L9, L10 | 600 Ω @ 100 MHz ferrite | line EMI suppression |
-| R124, R125 | 51 Ω | line series (filter isolation) |
-| R126 | 100 kΩ | FORCEOFF̄ pulldown (default-off) |
-| R127 | 470 Ω | lock opto LED series resistor (sets I_F ≈ 4 mA) |
-| R128 | 22 kΩ | lock opto output pullup (eases 3 V-corner pull-down) |
-| R133 | 4.7 kΩ, 0.25 W | lock-input upstream limiter (3–24 V; ~91 mW at 24 V) |
-| R129 | 10 kΩ | Q14 base pulldown (relay default-off) |
-| R130 | 470 Ω | Q14 base series |
-| R131 | 10 kΩ | CMOS-path fault current limit (Pole B:NO) |
-| R132 | 220 Ω | CMOS-path series (Pole A:NO) |
-| C122, C123 | 47 pF C0G | transceiver-side line shunts |
-| C124, C125 | 47 pF C0G | connector-side line shunts |
-| C126, C127 | 0.1 µF | charge-pump flying caps |
-| C128 | 1 µF | VCC bypass (**required for PW-package IEC ESD**) |
-| C129 | 0.1 µF | V− reservoir |
-| C130 | 0.1 µF | V+ reservoir |
-| C131 | 10 nF | lock opto output debounce (≈220 µs with R128 = 22 kΩ) |
+| Q21 | BC847W | relay coil driver (NPN) |
+| D13, D14 | SMAJ15CA | primary line TVS (connector side) |
+| D12 | BAT54S | `RB_TX` / PE7 rail clamp |
+| D16 | 3V3 zener | lock-input clamp (before LED resistor) |
+| D17 | BAT54J | lock LED reverse-V protection (APC-817 V_R max = 6 V — required) |
+| D15 | BAT54J | relay coil flyback |
+| L8, L9 | 600 Ω @ 100 MHz ferrite | line EMI suppression |
+| R165, R166 | 51 Ω | line series (filter isolation) |
+| R164 | 100 kΩ | FORCEOFF̄ pulldown (default-off) |
+| R172 | 470 Ω | lock opto LED series resistor (sets I_F ≈ 4 mA) |
+| R173 | 22 kΩ | lock opto output pullup (eases 3 V-corner pull-down) |
+| R171 | 4.7 kΩ, 0.25 W | lock-input upstream limiter (3–24 V; ~91 mW at 24 V) |
+| R169 | 10 kΩ | Q21 base pulldown (relay default-off) |
+| R170 | 470 Ω | Q21 base series |
+| R168 | 10 kΩ | CMOS-path fault current limit (Pole B:NO) |
+| R167 | 220 Ω | CMOS-path series (Pole A:NO) |
+| C141, C142 | 47 pF C0G | transceiver-side line shunts |
+| C146, C147 | 47 pF C0G | connector-side line shunts |
+| C139, C140 | 0.1 µF | charge-pump flying caps |
+| C143 | 1 µF | VCC bypass (**required for PW-package IEC ESD**) |
+| C144 | 0.1 µF | V− reservoir |
+| C145 | 0.1 µF | V+ reservoir |
+| C148 | 10 nF | lock opto output debounce (≈220 µs with R173 = 22 kΩ) |

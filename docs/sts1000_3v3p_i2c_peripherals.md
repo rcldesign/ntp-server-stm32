@@ -13,7 +13,7 @@
 | # | Decision | Was | Now | Driver |
 |---|----------|-----|-----|--------|
 | D1 | Proximity-wake sensor | VL53L1X (I²C ToF, SMD) | **Panasonic PaPIRs PIR** (EKMB 6 µA digital), panel/housing-mounted, wired back to PCB | Needs panel/through-hole part on the housing; no THT/panel-mount I²C proximity part exists |
-| D2 | Proximity-wake interface | I²C @0x29, polled 2–4 Hz | **Discrete digital input on a spare MCP23017 U47 Port B bit** (GPB2–7), interrupt via `PG_INT_N` | Leaves I²C entirely; zero MCU pins; gets a real wake interrupt |
+| D2 | Proximity-wake interface | I²C @0x29, polled 2–4 Hz | **Discrete digital input on a spare MCP23017 U55 Port B bit** (GPB2–7), interrupt via `PG_INT_N` | Leaves I²C entirely; zero MCU pins; gets a real wake interrupt |
 | D3 | E-compass | LSM303AGR (NLA) | **IIS2MDC (mag) + LIS2DH12 (accel)**, 2-chip | LSM303AGR and FXOS8700CQ both EOL; single-chip 6-axis e-compass category is dead |
 | D4 | Magnetometer grade | (consumer LIS2MDL considered) | **IIS2MDC** (industrial) | Longevity + industrial qual for a fixed-install instrument |
 | D5 | Accelerometer part | (LIS2DW12 considered) | **LIS2DH12** | Availability; also lands in the LIS2DH register family that the LSM303AGR accel already used |
@@ -80,7 +80,7 @@ The wake sensor must mount on the **housing / control panel** with flying leads 
 - **Output drive is tiny: ≤ 100 µA.** Exceeding it makes the part unstable or damages it. Pull-up sized for ≤100 µA → **R ≥ 33 kΩ; use 100 kΩ.** Optional 1–10 nF for edge cleanup. **Do not** hang an LED or low-value pull-up on the output.
 - **Pull-up rail = 3V3_STM** (so the expander input is always defined even when 3V3_P is gated; PIR off → output transistor off → line reads high = "no motion", safe default). Back-feed through a ≥100 kΩ pull-up is negligible.
 - **Confirm output structure per orderable PN** — EU lit says open-drain, NA lit describes a limited-drive voltage output. Same 100 µA ceiling either way; verify whether the pull-up is mandatory.
-- **Read via spare MCP23017 U47 Port B bit (GPB2–7).** U47 is MIRROR=1 with INTA+INTB tied → `PG_INT_N` → PA10/EXTI10. The wake input therefore raises an interrupt with **zero new MCU pins**. Set the bit's IPOL/INTCON for on-change wake.
+- **Read via spare MCP23017 U55 Port B bit (GPB2–7).** U55 is MIRROR=1 with INTA+INTB tied → `PG_INT_N` → PA10/EXTI10. The wake input therefore raises an interrupt with **zero new MCU pins**. Set the bit's IPOL/INTCON for on-change wake.
 - **Connector / wiring:** 3 conductors (V+, GND, OUT). Keep OUT high-impedance; a couple of feet of wire to the panel is fine at these currents. Add connector-pin TVS on the main PCB (as for the button array).
 
 ### Application caveats
@@ -171,7 +171,7 @@ A one-time, in-enclosure **hard/soft-iron calibration** (stored once, fixed inst
 - `IIS2MDC 0x1E (mag)` — fixed address; on 3V3_P; CS→Vdd_IO.
 - `LIS2DH12 0x19 (accel, SA0→Vdd_IO)` — or 0x18; on 3V3_P; CS→Vdd_IO.
 
-**Net:** the 0x1E slot is unchanged; 0x18/0x19 is a new accel slot (no collision with the existing map). The 3V3_P I²C UI group becomes **IIS2MDC + LIS2DH12** only; the proximity wake is a **discrete input on U47 GPB2–7**.
+**Net:** the 0x1E slot is unchanged; 0x18/0x19 is a new accel slot (no collision with the existing map). The 3V3_P I²C UI group becomes **IIS2MDC + LIS2DH12** only; the proximity wake is a **discrete input on U55 GPB2–7**.
 
 **§6 power-domain note:** add the e-compass pair (and decide the PIR's rail per §3) to the `PERIPH_EN` enumeration, or assign deliberately. If the buffered-segment topology (§2/D7) is adopted, document the far-side pull-ups on 3V3_P and the buffer part.
 
@@ -179,7 +179,7 @@ A one-time, in-enclosure **hard/soft-iron calibration** (stored once, fixed inst
 
 ## 7. Firmware notes
 
-- **Proximity wake:** read the U47 Port B bit; configure on-change interrupt (IPOL/INTCON/GPINTEN) so motion raises `PG_INT_N`. Apply a wake-hold timer. If the PIR is on 3V3_P, mask its input for ~30 s after any PERIPH_EN cycle (warm-up).
+- **Proximity wake:** read the U55 Port B bit; configure on-change interrupt (IPOL/INTCON/GPINTEN) so motion raises `PG_INT_N`. Apply a wake-hold timer. If the PIR is on 3V3_P, mask its input for ~30 s after any PERIPH_EN cycle (warm-up).
 - **E-compass:** `st,lis2dh` driver for LIS2DH12; `st,lis2mdl`-class for IIS2MDC (verify compatible string). Apply the package-to-board rotation/axis map first, then tilt-comp (MotionEC) and stored hard/soft-iron cal (MotionMC). Apply WMM/IGRF declination from the GPS fix for **true** north. Heading is for orienting the satellite plot — low rate is fine; oversample the accel to beat LIS2DH12 noise.
 - **Calibration is one-shot for the fixed install** — run in-enclosure, store, reuse. Re-run only if the unit is re-housed or nearby ferromagnetics change.
 
@@ -200,10 +200,10 @@ A one-time, in-enclosure **hard/soft-iron calibration** (stored once, fixed inst
 
 ## 9. Cross-references & change log
 
-**Cross-references:** `ntp_server_peripheral_map.md` (§4 I²C, §6 power domains, §13 open items — I²C buffer/accelerator, e-compass), `sts1000_fault_aggregation.md` (MCP23017 U47/U48 wiring, `PG_INT_N`), `sts1000_vcc_rb_supply.md` (VCC_RB dynamics relevant to mag interference).
+**Cross-references:** `ntp_server_peripheral_map.md` (§4 I²C, §6 power domains, §13 open items — I²C buffer/accelerator, e-compass), `sts1000_fault_aggregation.md` (MCP23017 U55/U54 wiring, `PG_INT_N`), `sts1000_vcc_rb_supply.md` (VCC_RB dynamics relevant to mag interference).
 
 **Change log:**
 - E-compass: LSM303AGR (NLA) → **IIS2MDC + LIS2DH12** pair; tilt-comp mandatory due to vertical mount.
-- Proximity wake: VL53L1X (I²C ToF) → **PaPIRs PIR** (panel/THT), discrete input on U47 GPB2–7; removed from I²C bus.
+- Proximity wake: VL53L1X (I²C ToF) → **PaPIRs PIR** (panel/THT), discrete input on U55 GPB2–7; removed from I²C bus.
 - Magnetometer copper: **continuous current-free pour under the part** (rejected: plane void); keep-out sized by Ampère-law field budget, balanced returns over distance.
 - Bus topology: flagged 3V3_P gating back-power; **buffer-isolated segment** recommended.

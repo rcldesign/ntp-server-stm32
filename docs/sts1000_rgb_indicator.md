@@ -1,4 +1,4 @@
-# STS1000 — RGB Status Indicator (D36)
+# STS1000 — RGB Status Indicator (D5)
 
 Single **IN-P55TATRGB** PLCC-6 RGB LED, low-side switched, driven from the always-on
 5 V rail with 3.3 V STM32 PWM. One BC847W transistor and one resistor set per color.
@@ -19,7 +19,7 @@ PWM duty produces equal brightness across colors with no firmware balancing requ
 - LED current never flows through the MCU; the GPIO sources only base current.
 
 ```
-  +5V_AON ──[R_ballast]── anode(die)            (one R per die)
+  5V_AON ──[R_ballast]── anode(die)            (one R per die)
   cathode(die) ──┬── collector
                  │
    LED_x ──[Rb]──┴── base   Q (BC847W:  B=1, C=3, E=2)
@@ -115,7 +115,7 @@ I_b = I_die / 10 ;   R_b = (3.3 − 0.8) / I_b = 2.5 / I_b
 
 BC847W min hFE is ≫ 10 at these collector currents, so all three are deeply saturated.
 **Base pulldown 10 kΩ → GND** on each holds the transistor off when the GPIO is Hi-Z
-(boot/reset), matching the Q14 relay-driver pattern.
+(boot/reset), matching the Q21 relay-driver pattern.
 
 Total base current with all three on = 2.5 + 1.67 + 0.83 ≈ **5 mA** across PD12–14.
 Unlike a MOSFET gate (~0 static), the BJT base is a real per-pin load while on — within
@@ -125,13 +125,13 @@ the STM32H5 per-pin and port budget, but accounted for.
 
 ## 6. As-built designators
 
-LED: **D36 — IN-P55TATRGB**.
+LED: **D5 — IN-P55TATRGB**.
 
 | Color | Ballast → anode | Cathode → C | Transistor | Base R → B | Pulldown | Net |
 |---|---|---|---|---|---|---|
-| Blue | R185 60.4 Ω → D36.6 | D36.1 → Q18.C | Q18 BC847W | R188 1.0 kΩ | R189 10 kΩ | LED_B |
-| Red | R186 174 Ω → D36.5 | D36.2 → Q20.C | Q20 BC847W | R192 1.5 kΩ | R193 10 kΩ | LED_R |
-| Green | R187 221 Ω → D36.4 | D36.3 → Q19.C | Q19 BC847W | R190 3.01 kΩ | R191 10 kΩ | LED_G |
+| Blue | R59 60.4 Ω → D5.6 | D5.1 → Q8.C | Q8 BC847W | R55 1.0 kΩ | R56 10 kΩ | LED_B |
+| Red | R60 174 Ω → D5.5 | D5.2 → Q9.C | Q9 BC847W | R57 1.5 kΩ | R58 10 kΩ | LED_R |
+| Green | R61 221 Ω → D5.4 | D5.3 → Q10.C | Q10 BC847W | R62 3.01 kΩ | R63 10 kΩ | LED_G |
 
 All emitters → GND. BC847W pin map B=1 / C=3 / E=2 applied on all three.
 
@@ -167,7 +167,7 @@ Mitigations, in order of preference:
 
 1. **Per-unit firmware white-balance trim at commissioning** (recommended; integrates
    with the existing brightness/gamma policy — see §9). Robust to V_F spread.
-2. Specify V_F bins on D36 (datasheet page-3 bins, e.g. F2/V2) — tightens spread but
+2. Specify V_F bins on D5 (datasheet page-3 bins, e.g. F2/V2) — tightens spread but
    constrains procurement.
 3. Bench-select ballast values against measured V_F per build.
 
@@ -200,18 +200,18 @@ problem.
   ceiling so it has full available output. Brightness follows the ambient/backlight
   policy.
 - The indicator must remain functional when the display sleeps — so its rail is
-  **always-on 5 V, not the DISP_EN-gated V_DISP_5V** (§10).
+  **always-on 5 V, not the DISP_EN-gated 5V_DISP** (§10).
 
 ---
 
 ## 10. Verify before layout
 
-- **+5V net = always-on 5 V** (MIC28516 5 V intermediate), **not** the DISP_EN-gated
-  V_DISP_5V — status/identify must survive display sleep.
-- **D36 symbol pin# ↔ footprint pad# mapping** against the PLCC-6 datasheet
+- **5V net = always-on 5 V** (MIC28516 5 V intermediate), **not** the DISP_EN-gated
+  5V_DISP — status/identify must survive display sleep.
+- **D5 symbol pin# ↔ footprint pad# mapping** against the PLCC-6 datasheet
   (1 CathB / 2 CathR / 3 CathG / 4 AnG / 5 AnR / 6 AnB). Schematic color-routing is
   correct *iff* the symbol numbering matches the footprint.
 - **LED_R/G/B land on the intended TIM4 PWM channels** (PD12–14), AF confirmed.
-- **0603 ballast footprints** (R185 37 mW, R186 48 mW).
+- **0603 ballast footprints** (R59 37 mW, R60 48 mW).
 - **Local-ambient / derating** confirmed for the blue 24.8 mA design point (§7).
 - **Ballast values re-trimmed** against measured V_F, or balance handled per §8.

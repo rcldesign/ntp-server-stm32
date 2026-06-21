@@ -55,7 +55,7 @@ out in production via H5 debug authentication (software-spec §9.1).
 
 ---
 
-## 3. Connector — J10 (USB4120-03)
+## 3. Connector — J5 (USB4120-03-C)
 
 USB 2.0 Type-C receptacle, 16 contacts, vertical SMT. The USB-2.0 variant omits the
 SuperSpeed pairs (A2/A3/A10/A11, B2/B3/B10/B11), leaving VBUS, CC, D±, SBU, GND, and
@@ -63,14 +63,14 @@ the four shell tabs.
 
 ### 3.1 Pin consolidation
 
-| Net | J10 pins | Notes |
+| Net | J5 pins | Notes |
 |---|---|---|
 | `USB_VBUS` | A4, A9, B4, B9 | all four VBUS contacts tied |
 | `GND` | A1, A12, B1, B12 | all four GND contacts → board GND |
 | `USB_DP` | A6 (D1+) **+** B6 (D2+) | both orientations paralleled |
 | `USB_DM` | A7 (D1−) **+** B7 (D2−) | both orientations paralleled |
-| CC1 | A5 | → R211 5.1 kΩ → GND |
-| CC2 | B5 | → R212 5.1 kΩ → GND |
+| CC1 | A5 | → R64 5.1 kΩ → GND |
+| CC2 | B5 | → R66 5.1 kΩ → GND |
 | SBU1 / SBU2 | A8 / B8 | NC (unused on USB 2.0) |
 | SHIELD | S1, S2, S3, S4 | → shell bond network (§7) |
 
@@ -90,8 +90,8 @@ Rd pulldown to advertise a default-USB sink (Type-C `Rp`/`Rd` model).
 
 | Designator | Value | Connection |
 |---|---|---|
-| R211 | 5.1 kΩ 1% | CC1 (A5) → GND |
-| R212 | 5.1 kΩ 1% | CC2 (B5) → GND |
+| R64 | 5.1 kΩ 1% | CC1 (A5) → GND |
+| R66 | 5.1 kΩ 1% | CC2 (B5) → GND |
 
 - **Separate Rd per CC** — CC1 and CC2 are **not** tied together (tying them defeats
   orientation detection at the source).
@@ -104,7 +104,7 @@ Rd pulldown to advertise a default-USB sink (Type-C `Rp`/`Rd` model).
 
 ## 5. Data pair — D+/D−
 
-`USB_DP` (PA12) and `USB_DM` (PA11) route from J10 through the ESD array (§6) to the MCU
+`USB_DP` (PA12) and `USB_DM` (PA11) route from J5 through the ESD array (§6) to the MCU
 as a **90 Ω differential pair**, kept short.
 
 The embedded FS PHY makes the external circuit minimal:
@@ -117,7 +117,7 @@ The embedded FS PHY makes the external circuit minimal:
 
 ---
 
-## 6. ESD — U64 (TPD4E05U06DQAR), flow-through
+## 6. ESD — U18 (TPD4E05U06DQAR), flow-through
 
 Quad-channel, ultra-low-cap (0.3 pF I/O–I/O), 5.5 V working, leadless **flow-through**
 DFN. Placed hard against the receptacle, before any branch.
@@ -137,7 +137,7 @@ DFN. Placed hard against the receptacle, before any branch.
 The datasheet labels pins 6/7/9/10 as **NC** in the package pin table, but they are the
 flow-through partners of pins 1/2/4/5 — TI's documentation and applications support
 confirm these pins are to be shorted to the corresponding line. The signal must
-physically **pass through** the part: receptacle pad → one side → through U64 → other
+physically **pass through** the part: receptacle pad → one side → through U18 → other
 side → MCU/divider. A net-list short alone (both pins on the same net) satisfies ERC but
 forfeits the protection benefit if the layout stubs the part off to the side.
 
@@ -160,8 +160,8 @@ a low-impedance return.
 
 | Designator | Value | Connection |
 |---|---|---|
-| R213 | 1 MΩ | SHIELD → GND |
-| C178 | 4.7 nF | SHIELD → GND (‖ R213) |
+| R65 | 1 MΩ | SHIELD → GND |
+| C42 | 4.7 nF | SHIELD → GND (‖ R65) |
 
 ---
 
@@ -174,9 +174,9 @@ VBUS divided to a 3.3 V-safe level for the GPIO. Target: clean logic-high at VBU
 
 | Designator | Value | Connection |
 |---|---|---|
-| R209 | 100 kΩ 1% | `USB_VBUS` → `USB_VBUS_SENSE` |
-| R210 | 121 kΩ 1% | `USB_VBUS_SENSE` → GND |
-| C179 | 100 nF | `USB_VBUS_SENSE` → GND (filter/debounce) |
+| R68 | 100 kΩ 1% | `USB_VBUS` → `USB_VBUS_SENSE` |
+| R67 | 121 kΩ 1% | `USB_VBUS_SENSE` → GND <!-- TODO verify: netlist wires R67 USB_VBUS→GND, not USB_VBUS_SENSE→GND (divider bottom leg) --> |
+| C43 | 100 nF | `USB_VBUS_SENSE` → GND (filter/debounce) |
 
 Divider ratio k = 121 / 221 = **0.547**. V(PE2) = VBUS · 0.547:
 
@@ -187,11 +187,10 @@ Divider ratio k = 121 / 221 = **0.547**. V(PE2) = VBUS · 0.547:
 | 4.40 V | 2.41 V | > VIH (~2.31 V at VDD = 3.3 V) ✓ |
 | 0 V | 0 V | absent |
 
-Load ≈ 24 µA at 5.25 V (negligible; self-powered). Filter τ = (R209‖R210)·C179 =
+Load ≈ 24 µA at 5.25 V (negligible; self-powered). Filter τ = (R68‖R67)·C43 =
 54.7 kΩ · 100 nF ≈ **5.5 ms**. The 100 kΩ top resistor also limits injection into PE2
 when VBUS is present while the MCU is unpowered (cable plugged into a depowered unit) —
-current is held within the U64 clamp's capacity. *(C179 designator assigned here —
-confirm against the schematic refdes.)*
+current is held within the U18 clamp's capacity.
 
 ### 8.2 Device supply — VDD33USB
 
@@ -255,28 +254,28 @@ independently of the debug port.
 
 | Ref | Part / value | Function |
 |---|---|---|
-| J10 | USB4120-03 (USB 2.0 Type-C, vertical SMT) | console receptacle |
-| U64 | TPD4E05U06DQAR | flow-through ESD on D+, D−, VBUS (3 of 4 ch) |
-| R211 | 5.1 kΩ 1% | CC1 Rd (sink advertise) |
-| R212 | 5.1 kΩ 1% | CC2 Rd (sink advertise) |
-| R209 | 100 kΩ 1% | VBUS-sense divider top |
-| R210 | 121 kΩ 1% | VBUS-sense divider bottom |
-| C179 | 100 nF | `USB_VBUS_SENSE` filter/debounce |
-| R213 | 1 MΩ | shell → GND DC isolation |
-| C178 | 4.7 nF | shell → GND HF bond |
+| J5 | USB4120-03-C (USB 2.0 Type-C, vertical SMT) | console receptacle |
+| U18 | TPD4E05U06DQAR | flow-through ESD on D+, D−, VBUS (3 of 4 ch) |
+| R64 | 5.1 kΩ 1% | CC1 Rd (sink advertise) |
+| R66 | 5.1 kΩ 1% | CC2 Rd (sink advertise) |
+| R68 | 100 kΩ 1% | VBUS-sense divider top |
+| R67 | 121 kΩ 1% | VBUS-sense divider bottom |
+| C43 | 100 nF | `USB_VBUS_SENSE` filter/debounce |
+| R65 | 1 MΩ | shell → GND DC isolation |
+| C42 | 4.7 nF | shell → GND HF bond |
 | — | 100 nF + 1 µF | VDD33USB decoupling (MCU power sheet) |
 
 ---
 
 ## 11. Open items / verify
 
-- [ ] Confirm **C179** refdes against the schematic (assigned here as next-free).
+- [ ] Confirm **C43** refdes against the schematic.
 - [ ] Confirm **Rd = 5.1 kΩ** sink value in BOM (not 56 kΩ).
-- [ ] Layout: route U64 as a **physical flow-through** (connector → through part → MCU),
-      not a stub; place hard against J10.
+- [ ] Layout: route U18 as a **physical flow-through** (connector → through part → MCU),
+      not a stub; place hard against J5.
 - [ ] Confirm VDD33USB decoupling (100 nF + 1 µF) is placed adjacent to the pin on the
       power sheet, tied to 3V3_STM.
 - [ ] D+/D− as a 90 Ω differential pair; no series R, no external pull-up.
 - [ ] Confirm VBUS stays ≤ 5.25 V (default-USB only; CC not routed to a PD sink) so
-      U64's 5.5 V VRWM keeps margin.
+      U18's 5.5 V VRWM keeps margin.
 - [ ] Decide whether PE2 needs ADC mapping for VBUS telemetry, or stays digital-only.
