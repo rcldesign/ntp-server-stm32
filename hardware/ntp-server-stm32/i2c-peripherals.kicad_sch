@@ -1134,6 +1134,178 @@
 			)
 			(embedded_fonts no)
 		)
+		(symbol "Sensor_Humidity:SHT4x"
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(in_pos_files yes)
+			(duplicate_pin_numbers_are_jumpers no)
+			(property "Reference" "U"
+				(at 0 8.89 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify right)
+				)
+			)
+			(property "Value" "SHT4x"
+				(at 0 6.35 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify right)
+				)
+			)
+			(property "Footprint" "Sensor_Humidity:Sensirion_DFN-4_1.5x1.5mm_P0.8mm_SHT4x_NoCentralPad"
+				(at 3.81 -6.35 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Datasheet" "https://sensirion.com/media/documents/33FD6951/624C4357/Datasheet_SHT4x.pdf"
+				(at 3.81 -8.89 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(justify left)
+				)
+			)
+			(property "Description" "Digital Humidity and Temperature Sensor, ±1%RH, ±0.1°C, I2C, 1.08-3.6V, 16bit, DFN-4"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_keywords" "Sensirion environment environmental measurement digital SHT40 SHT41 SHT45"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "ki_fp_filters" "Sensirion?DFN*1.5x1.5mm*P0.8mm*SHT4x*"
+				(at 0 0 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(symbol "SHT4x_1_1"
+				(rectangle
+					(start -5.08 5.08)
+					(end 5.08 -5.08)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type background)
+					)
+				)
+				(pin bidirectional line
+					(at -7.62 -2.54 0)
+					(length 2.54)
+					(name "SDA"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin input line
+					(at -7.62 2.54 0)
+					(length 2.54)
+					(name "SCL"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_in line
+					(at 2.54 7.62 270)
+					(length 2.54)
+					(name "VDD"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "3"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin power_in line
+					(at 2.54 -7.62 90)
+					(length 2.54)
+					(name "VSS"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "4"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
 		(symbol "Sensor_Temperature:TMP117xxDRV"
 			(exclude_from_sim no)
 			(in_bom yes)
@@ -1729,6 +1901,18 @@
 		)
 		(uuid "4a2cbfd6-ab23-43fa-ba84-48f74e6c3231")
 	)
+	(rectangle
+		(start 38.1 184.15)
+		(end 177.8 255.27)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(fill
+			(type none)
+		)
+		(uuid "91a250fc-73c8-497a-8e43-752f526798a3")
+	)
 	(text "Place on opposite side of\nPCB from OCXO and connect\nground fill between layers\nto pass temp to this device\nfrom OCXO"
 		(exclude_from_sim no)
 		(at 55.88 130.556 0)
@@ -1796,7 +1980,7 @@
 	)
 	(text "I2C Address: 0x49\n"
 		(exclude_from_sim no)
-		(at 75.184 83.566 0)
+		(at 145.034 248.666 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -1804,9 +1988,19 @@
 		)
 		(uuid "be4e0d45-3b3b-4441-b500-30b2365ac188")
 	)
-	(text "Place far away from everything"
+	(text "I2C Address: 0x44\n\n"
 		(exclude_from_sim no)
-		(at 58.166 41.91 0)
+		(at 70.612 247.65 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "d31480c2-42f6-4d7e-95a6-df3010594aec")
+	)
+	(text "Place far away from everything but next to each other"
+		(exclude_from_sim no)
+		(at 88.392 199.644 0)
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -1817,7 +2011,13 @@
 		(uuid "da6bd8f0-e3b0-4a3d-8594-9a319f0415e1")
 	)
 	(junction
-		(at 250.19 187.96)
+		(at 85.09 215.9)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "0c59ae9b-9057-4026-9044-88dc1936956b")
+	)
+	(junction
+		(at 78.74 44.45)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "152242e3-7542-4549-a37f-6a6c3f3f6dac")
@@ -1841,7 +2041,7 @@
 		(uuid "570ddb4e-1c3d-4906-ab46-9565a7bbdcc3")
 	)
 	(junction
-		(at 83.82 34.29)
+		(at 153.67 199.39)
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "7a40288c-c249-44bc-8d49-905b8d73ab61")
@@ -1893,7 +2093,7 @@
 		(uuid "e0dc7f6b-70fc-4960-9a8a-2300e19bf017")
 	)
 	(no_connect
-		(at 88.9 54.61)
+		(at 158.75 219.71)
 		(uuid "f1d28b44-04b9-4fa6-ad06-b8df5e63fbea")
 	)
 	(wire
@@ -1908,7 +2108,7 @@
 	)
 	(wire
 		(pts
-			(xy 83.82 43.18) (xy 83.82 44.45)
+			(xy 153.67 208.28) (xy 153.67 209.55)
 		)
 		(stroke
 			(width 0)
@@ -1948,7 +2148,7 @@
 	)
 	(wire
 		(pts
-			(xy 48.26 62.23) (xy 68.58 62.23)
+			(xy 118.11 227.33) (xy 138.43 227.33)
 		)
 		(stroke
 			(width 0)
@@ -1968,7 +2168,7 @@
 	)
 	(wire
 		(pts
-			(xy 243.84 219.71) (xy 243.84 220.98)
+			(xy 72.39 76.2) (xy 72.39 77.47)
 		)
 		(stroke
 			(width 0)
@@ -1998,7 +2198,7 @@
 	)
 	(wire
 		(pts
-			(xy 250.19 187.96) (xy 250.19 189.23)
+			(xy 78.74 44.45) (xy 78.74 45.72)
 		)
 		(stroke
 			(width 0)
@@ -2015,6 +2215,16 @@
 			(type default)
 		)
 		(uuid "25a9b03c-54a5-41fd-85ef-ae12aeaf0d64")
+	)
+	(wire
+		(pts
+			(xy 71.12 218.44) (xy 71.12 215.9)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "273fa747-63b4-4b28-a896-7d0834d55ca8")
 	)
 	(wire
 		(pts
@@ -2038,7 +2248,7 @@
 	)
 	(wire
 		(pts
-			(xy 255.27 209.55) (xy 251.46 209.55)
+			(xy 83.82 66.04) (xy 80.01 66.04)
 		)
 		(stroke
 			(width 0)
@@ -2048,7 +2258,7 @@
 	)
 	(wire
 		(pts
-			(xy 78.74 69.85) (xy 78.74 71.12)
+			(xy 148.59 234.95) (xy 148.59 236.22)
 		)
 		(stroke
 			(width 0)
@@ -2098,7 +2308,7 @@
 	)
 	(wire
 		(pts
-			(xy 243.84 187.96) (xy 250.19 187.96)
+			(xy 72.39 44.45) (xy 78.74 44.45)
 		)
 		(stroke
 			(width 0)
@@ -2128,7 +2338,7 @@
 	)
 	(wire
 		(pts
-			(xy 83.82 34.29) (xy 83.82 35.56)
+			(xy 153.67 199.39) (xy 153.67 200.66)
 		)
 		(stroke
 			(width 0)
@@ -2138,7 +2348,7 @@
 	)
 	(wire
 		(pts
-			(xy 78.74 49.53) (xy 78.74 34.29)
+			(xy 148.59 214.63) (xy 148.59 199.39)
 		)
 		(stroke
 			(width 0)
@@ -2218,6 +2428,16 @@
 	)
 	(wire
 		(pts
+			(xy 71.12 215.9) (xy 85.09 215.9)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "6a629d75-018b-47c6-b9ff-2aa51413bc60")
+	)
+	(wire
+		(pts
 			(xy 240.03 86.36) (xy 240.03 87.63)
 		)
 		(stroke
@@ -2248,6 +2468,16 @@
 	)
 	(wire
 		(pts
+			(xy 85.09 224.79) (xy 85.09 226.06)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "6e69a994-50b9-457f-b421-1c0076ec8aa6")
+	)
+	(wire
+		(pts
 			(xy 283.21 93.98) (xy 283.21 104.14)
 		)
 		(stroke
@@ -2268,7 +2498,7 @@
 	)
 	(wire
 		(pts
-			(xy 78.74 34.29) (xy 83.82 34.29)
+			(xy 148.59 199.39) (xy 153.67 199.39)
 		)
 		(stroke
 			(width 0)
@@ -2278,7 +2508,7 @@
 	)
 	(wire
 		(pts
-			(xy 243.84 204.47) (xy 243.84 187.96)
+			(xy 72.39 60.96) (xy 72.39 44.45)
 		)
 		(stroke
 			(width 0)
@@ -2288,7 +2518,7 @@
 	)
 	(wire
 		(pts
-			(xy 48.26 59.69) (xy 48.26 62.23)
+			(xy 118.11 224.79) (xy 118.11 227.33)
 		)
 		(stroke
 			(width 0)
@@ -2418,7 +2648,7 @@
 	)
 	(wire
 		(pts
-			(xy 64.77 57.15) (xy 68.58 57.15)
+			(xy 134.62 222.25) (xy 138.43 222.25)
 		)
 		(stroke
 			(width 0)
@@ -2438,6 +2668,16 @@
 	)
 	(wire
 		(pts
+			(xy 85.09 215.9) (xy 85.09 217.17)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "955e536d-9e6d-4bcc-b090-97f298754e24")
+	)
+	(wire
+		(pts
 			(xy 152.4 111.76) (xy 149.86 111.76)
 		)
 		(stroke
@@ -2445,6 +2685,16 @@
 			(type default)
 		)
 		(uuid "9cd38a41-d98e-4a2f-9681-0dd5b08f9dbe")
+	)
+	(wire
+		(pts
+			(xy 52.07 223.52) (xy 60.96 223.52)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "a030290d-c560-44d4-b977-bfb2403957a3")
 	)
 	(wire
 		(pts
@@ -2468,7 +2718,7 @@
 	)
 	(wire
 		(pts
-			(xy 255.27 214.63) (xy 251.46 214.63)
+			(xy 83.82 71.12) (xy 80.01 71.12)
 		)
 		(stroke
 			(width 0)
@@ -2498,13 +2748,23 @@
 	)
 	(wire
 		(pts
-			(xy 64.77 54.61) (xy 68.58 54.61)
+			(xy 134.62 219.71) (xy 138.43 219.71)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "b449c9a4-ae04-46a7-bb9f-043586e30b68")
+	)
+	(wire
+		(pts
+			(xy 71.12 233.68) (xy 71.12 236.22)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ba12ab63-16b0-401b-b0ab-0e3c7f4e3321")
 	)
 	(wire
 		(pts
@@ -2578,7 +2838,17 @@
 	)
 	(wire
 		(pts
-			(xy 250.19 196.85) (xy 250.19 198.12)
+			(xy 52.07 228.6) (xy 60.96 228.6)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f0b5803e-0d13-47c8-b520-dc9e86c1240b")
+	)
+	(wire
+		(pts
+			(xy 78.74 53.34) (xy 78.74 54.61)
 		)
 		(stroke
 			(width 0)
@@ -2598,7 +2868,7 @@
 	)
 	(global_label "I2C_SCL"
 		(shape input)
-		(at 64.77 57.15 180)
+		(at 134.62 222.25 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -2608,7 +2878,31 @@
 		)
 		(uuid "1fdd543e-996e-4ebd-be14-decd737942df")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 54.2253 57.15 0)
+			(at 124.0753 222.25 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+	)
+	(global_label "I2C_SCL"
+		(shape input)
+		(at 52.07 223.52 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "25728b6d-7ed3-4233-b517-136f69ce9c53")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 41.5253 223.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2646,7 +2940,7 @@
 	)
 	(global_label "I2C_SCL"
 		(shape input)
-		(at 255.27 214.63 0)
+		(at 83.82 71.12 0)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -2656,7 +2950,7 @@
 		)
 		(uuid "5c331a8f-8885-4ff5-aa60-41ae69776030")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 265.8147 214.63 0)
+			(at 94.3647 71.12 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2670,7 +2964,7 @@
 	)
 	(global_label "I2C_SDA"
 		(shape bidirectional)
-		(at 64.77 54.61 180)
+		(at 134.62 219.71 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -2680,7 +2974,7 @@
 		)
 		(uuid "7f59dbdc-036a-41e5-9dbd-5312c276398c")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 53.0535 54.61 0)
+			(at 122.9035 219.71 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2766,6 +3060,30 @@
 	)
 	(global_label "I2C_SDA"
 		(shape bidirectional)
+		(at 52.07 228.6 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "d3573c27-1b51-4d5d-84a3-f7f3dd17b6cb")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 40.3535 228.6 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+			)
+		)
+	)
+	(global_label "I2C_SDA"
+		(shape bidirectional)
 		(at 144.78 109.22 180)
 		(fields_autoplaced yes)
 		(effects
@@ -2790,7 +3108,7 @@
 	)
 	(global_label "I2C_SDA"
 		(shape bidirectional)
-		(at 255.27 209.55 0)
+		(at 83.82 66.04 0)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -2800,7 +3118,7 @@
 		)
 		(uuid "effc0828-d9d5-4af5-827b-9208477a1bc3")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 266.9865 209.55 0)
+			(at 95.5365 66.04 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2916,6 +3234,153 @@
 		)
 	)
 	(symbol
+		(lib_id "Device:C")
+		(at 85.09 220.98 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "0862f0b2-5ea8-4f74-b50a-1e279fe57b3f")
+		(property "Reference" "C205"
+			(at 90.17 219.7099 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "0.1uF"
+			(at 90.17 222.2499 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "0402 (1005 Metric)"
+			(at 86.0552 224.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
+			(at 85.09 220.98 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
+			(at 85.09 220.98 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
+			(at 85.09 220.98 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata"
+			(at 85.09 220.98 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
+			(at 85.09 220.98 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "f051a9c9-ceda-4d01-82e4-b26bbcd5fe02")
+		)
+		(pin "2"
+			(uuid "3fb0f558-6a17-43d5-8f3a-27a098c9b7c4")
+		)
+		(instances
+			(project "ntp-server-stm32"
+				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/cb350af7-6203-42f4-92d8-ebe7fe19eff7"
+					(reference "C205")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "power:+3.3V")
 		(at 85.09 124.46 0)
 		(unit 1)
@@ -2995,7 +3460,7 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 78.74 71.12 0)
+		(at 148.59 236.22 0)
 		(mirror y)
 		(unit 1)
 		(body_style 1)
@@ -3007,7 +3472,7 @@
 		(fields_autoplaced yes)
 		(uuid "10ac43ec-a956-4cd0-abc3-4296111782a8")
 		(property "Reference" "#PWR0449"
-			(at 78.74 77.47 0)
+			(at 148.59 242.57 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3018,7 +3483,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 78.74 76.2 0)
+			(at 148.59 241.3 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3028,7 +3493,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 78.74 71.12 0)
+			(at 148.59 236.22 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3039,7 +3504,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 78.74 71.12 0)
+			(at 148.59 236.22 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3050,7 +3515,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 78.74 71.12 0)
+			(at 148.59 236.22 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3183,7 +3648,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 227.0252 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -3194,7 +3659,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_commercial_general_en.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 226.06 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -3205,7 +3670,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 226.06 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -3216,7 +3681,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 226.06 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -3238,7 +3736,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 226.06 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -3266,7 +3764,7 @@
 	)
 	(symbol
 		(lib_id "power:+3.3V")
-		(at 250.19 187.96 0)
+		(at 78.74 44.45 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -3277,7 +3775,7 @@
 		(fields_autoplaced yes)
 		(uuid "1983406f-ce74-481a-9cbd-bcce214f93be")
 		(property "Reference" "#PWR0462"
-			(at 250.19 191.77 0)
+			(at 78.74 48.26 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3288,7 +3786,7 @@
 			)
 		)
 		(property "Value" "3V3_STM"
-			(at 250.19 182.88 0)
+			(at 78.74 39.37 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3298,7 +3796,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 250.19 187.96 0)
+			(at 78.74 44.45 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3309,7 +3807,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 250.19 187.96 0)
+			(at 78.74 44.45 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3320,7 +3818,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"+3.3V\""
-			(at 250.19 187.96 0)
+			(at 78.74 44.45 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3344,7 +3842,7 @@
 	)
 	(symbol
 		(lib_id "power:+3.3V")
-		(at 48.26 59.69 0)
+		(at 118.11 224.79 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -3355,7 +3853,7 @@
 		(fields_autoplaced yes)
 		(uuid "2104918e-7b76-4427-9acc-923fdad42e55")
 		(property "Reference" "#PWR0447"
-			(at 48.26 63.5 0)
+			(at 118.11 228.6 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3366,7 +3864,7 @@
 			)
 		)
 		(property "Value" "3V3_STM"
-			(at 48.26 54.61 0)
+			(at 118.11 219.71 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3376,7 +3874,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 48.26 59.69 0)
+			(at 118.11 224.79 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3387,7 +3885,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 48.26 59.69 0)
+			(at 118.11 224.79 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3398,7 +3896,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"+3.3V\""
-			(at 48.26 59.69 0)
+			(at 118.11 224.79 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3415,6 +3913,84 @@
 			(project "ntp-server-stm32"
 				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/cb350af7-6203-42f4-92d8-ebe7fe19eff7"
 					(reference "#PWR0447")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+3.3V")
+		(at 85.09 215.9 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "27f789b2-138d-49b9-8509-3fa509774860")
+		(property "Reference" "#PWR0554"
+			(at 85.09 219.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "3V3_STM"
+			(at 85.09 210.82 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 85.09 215.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 85.09 215.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+3.3V\""
+			(at 85.09 215.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "9069dcf2-b43b-42f6-b4dc-13b8a0136384")
+		)
+		(instances
+			(project "ntp-server-stm32"
+				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/cb350af7-6203-42f4-92d8-ebe7fe19eff7"
+					(reference "#PWR0554")
 					(unit 1)
 				)
 			)
@@ -3453,7 +4029,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 86.0552 133.35 0)
 			(hide yes)
 			(show_name no)
@@ -3464,7 +4040,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_commercial_general_en.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 85.09 129.54 0)
 			(hide yes)
 			(show_name no)
@@ -3475,7 +4051,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 85.09 129.54 0)
 			(hide yes)
 			(show_name no)
@@ -3486,7 +4062,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 85.09 129.54 0)
 			(hide yes)
 			(show_name no)
@@ -3508,7 +4117,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 85.09 129.54 0)
 			(hide yes)
 			(show_name no)
@@ -3568,7 +4177,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 275.8948 123.19 0)
 			(hide yes)
 			(show_name no)
@@ -3579,7 +4188,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_commercial_general_en.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C224KE02-01A.pdf"
 			(at 276.86 119.38 0)
 			(hide yes)
 			(show_name no)
@@ -3590,7 +4199,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 220nF 16V X7R 0402"
+		(property "Description" "CAP CER 0.22UF 16V X7R 0402"
 			(at 276.86 119.38 0)
 			(hide yes)
 			(show_name no)
@@ -3601,7 +4210,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "445-5972-1-ND"
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-GCM155R71C224KE02JCT-ND"
 			(at 276.86 119.38 0)
 			(hide yes)
 			(show_name no)
@@ -3612,7 +4254,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "TDK"
+		(property "MANUFACTURER" "Murata"
 			(at 276.86 119.38 0)
 			(hide yes)
 			(show_name no)
@@ -3623,7 +4265,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "C2012X7R1E475K125AB"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C224KE02J"
 			(at 276.86 119.38 0)
 			(hide yes)
 			(show_name no)
@@ -3682,7 +4324,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 362.9152 90.17 0)
 			(hide yes)
 			(show_name no)
@@ -3693,7 +4335,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_commercial_general_en.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 361.95 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -3704,7 +4346,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 361.95 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -3715,7 +4357,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 361.95 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -3737,7 +4412,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 361.95 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -3764,8 +4439,87 @@
 		)
 	)
 	(symbol
+		(lib_id "power:GND")
+		(at 85.09 226.06 0)
+		(mirror y)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "37590d11-b88d-410b-95a0-8fdfa43b7684")
+		(property "Reference" "#PWR0555"
+			(at 85.09 232.41 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "GND"
+			(at 85.09 231.14 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 85.09 226.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 85.09 226.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 85.09 226.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "f9ed6c88-9c07-43e0-984a-70dd090a7ae3")
+		)
+		(instances
+			(project "ntp-server-stm32"
+				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/cb350af7-6203-42f4-92d8-ebe7fe19eff7"
+					(reference "#PWR0555")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Sensor_Temperature:TMP117xxDRV")
-		(at 78.74 59.69 0)
+		(at 148.59 224.79 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -3776,7 +4530,7 @@
 		(fields_autoplaced yes)
 		(uuid "45216482-bbf2-4a0e-9f83-3ada7dc797aa")
 		(property "Reference" "U57"
-			(at 93.98 48.1898 0)
+			(at 163.83 213.2898 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3786,7 +4540,7 @@
 			)
 		)
 		(property "Value" "TMP117xxDRV"
-			(at 93.98 50.7298 0)
+			(at 163.83 215.8298 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3796,7 +4550,7 @@
 			)
 		)
 		(property "Footprint" "Package_SON:WSON-6-1EP_2x2mm_P0.65mm_EP1x1.6mm"
-			(at 80.01 68.58 0)
+			(at 149.86 233.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3808,7 +4562,7 @@
 			)
 		)
 		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/tmp117.pdf"
-			(at 80.01 71.12 0)
+			(at 149.86 236.22 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3819,8 +4573,8 @@
 				(justify left)
 			)
 		)
-		(property "Description" "Digital Temperature Sensor with I2C/SMBus Interface, 16 bits, Â±0.3Â°C, one-shot conversion, alert, nist traceable, EEPROM, WSON"
-			(at 78.74 59.69 0)
+		(property "Description" "Digital temp sensor +/-0.3C WSON-6"
+			(at 148.59 224.79 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3830,8 +4584,19 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "TMP117xxDRV"
+		(property "MANUFACTURER" "Texas Instruments"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "TMP117AIDRVR"
+			(at 69.85 165.1 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3870,7 +4635,7 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 250.19 198.12 0)
+		(at 78.74 54.61 0)
 		(mirror y)
 		(unit 1)
 		(body_style 1)
@@ -3882,7 +4647,7 @@
 		(fields_autoplaced yes)
 		(uuid "4750d5e8-ce63-4710-a137-2a78ab094c97")
 		(property "Reference" "#PWR0463"
-			(at 250.19 204.47 0)
+			(at 78.74 60.96 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3893,7 +4658,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 250.19 203.2 0)
+			(at 78.74 59.69 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3903,7 +4668,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 250.19 198.12 0)
+			(at 78.74 54.61 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3914,7 +4679,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 250.19 198.12 0)
+			(at 78.74 54.61 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3925,7 +4690,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 250.19 198.12 0)
+			(at 78.74 54.61 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3949,7 +4714,7 @@
 	)
 	(symbol
 		(lib_id "power:+3.3V")
-		(at 83.82 34.29 0)
+		(at 153.67 199.39 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -3960,7 +4725,7 @@
 		(fields_autoplaced yes)
 		(uuid "4d4884b8-593d-404f-b987-e7a0c1839fd8")
 		(property "Reference" "#PWR0451"
-			(at 83.82 38.1 0)
+			(at 153.67 203.2 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3971,7 +4736,7 @@
 			)
 		)
 		(property "Value" "3V3_STM"
-			(at 83.82 29.21 0)
+			(at 153.67 194.31 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3981,7 +4746,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 83.82 34.29 0)
+			(at 153.67 199.39 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3992,7 +4757,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 83.82 34.29 0)
+			(at 153.67 199.39 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4003,7 +4768,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"+3.3V\""
-			(at 83.82 34.29 0)
+			(at 153.67 199.39 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4136,7 +4901,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 376.8852 90.17 0)
 			(hide yes)
 			(show_name no)
@@ -4147,7 +4912,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_commercial_general_en.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 375.92 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -4158,7 +4923,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 375.92 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -4169,7 +4934,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 375.92 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -4191,7 +4989,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 375.92 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -4273,8 +5071,19 @@
 				)
 			)
 		)
-		(property "Description" "LIS2DH12TR"
+		(property "Description" "3-axis accelerometer LGA-12"
 			(at 152.4 101.6 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "STMicroelectronics"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4414,6 +5223,117 @@
 			(project "ntp-server-stm32"
 				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/cb350af7-6203-42f4-92d8-ebe7fe19eff7"
 					(reference "#PWR0454")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Sensor_Humidity:SHT4x")
+		(at 68.58 226.06 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(uuid "75d8a77b-86c1-45ec-8d23-bede4d90c644")
+		(property "Reference" "U72"
+			(at 74.93 233.172 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Value" "SHT45-AD1B-R2"
+			(at 74.93 235.204 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Footprint" "Sensor_Humidity:Sensirion_DFN-4_1.5x1.5mm_P0.8mm_SHT4x_NoCentralPad"
+			(at 72.39 232.41 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Datasheet" "https://sensirion.com/media/documents/33FD6951/624C4357/Datasheet_SHT4x.pdf"
+			(at 72.39 234.95 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+			)
+		)
+		(property "Description" "Humidity/temp sensor DFN-4"
+			(at 68.58 226.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "SHT45-AD1B-R2"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Sensirion"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "2"
+			(uuid "41f58030-0918-4543-be6c-fec53ffecae1")
+		)
+		(pin "3"
+			(uuid "bbf8a95d-9c5f-4177-af58-aa3e674fd269")
+		)
+		(pin "4"
+			(uuid "6f41b63d-d5d0-4f4d-9683-bec45ccf4614")
+		)
+		(pin "1"
+			(uuid "c031266f-bfb1-4994-b0b0-5fdb5676d072")
+		)
+		(instances
+			(project "ntp-server-stm32"
+				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/cb350af7-6203-42f4-92d8-ebe7fe19eff7"
+					(reference "U72")
 					(unit 1)
 				)
 			)
@@ -4711,8 +5631,19 @@
 				)
 			)
 		)
-		(property "Description" "IIS2MDCTR"
+		(property "Description" "3-axis magnetometer LGA-12"
 			(at 285.75 99.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "STMicroelectronics"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4780,7 +5711,7 @@
 	)
 	(symbol
 		(lib_id "Security:ATECC608B-SSHDA")
-		(at 243.84 212.09 0)
+		(at 72.39 68.58 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -4791,7 +5722,7 @@
 		(fields_autoplaced yes)
 		(uuid "90be437c-ff5c-455f-b05a-438e290a3129")
 		(property "Reference" "U60"
-			(at 237.49 210.8199 0)
+			(at 66.04 67.3099 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -4802,7 +5733,7 @@
 			)
 		)
 		(property "Value" "ATECC608B-SSHDA"
-			(at 237.49 213.3599 0)
+			(at 66.04 69.8499 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -4813,7 +5744,7 @@
 			)
 		)
 		(property "Footprint" "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
-			(at 243.84 212.09 0)
+			(at 72.39 68.58 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4824,7 +5755,7 @@
 			)
 		)
 		(property "Datasheet" "https://ww1.microchip.com/downloads/aemDocuments/documents/SCBU/ProductDocuments/DataSheets/ATECC608B-CryptoAuthentication-Device-Summary-Data-Sheet-DS40002239B.pdf"
-			(at 247.65 205.74 0)
+			(at 76.2 62.23 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4834,8 +5765,19 @@
 				)
 			)
 		)
-		(property "Description" "Cryptographic Co-Processor with Secure Hardware-based 16 Key Storage, ECDSA and ECDH support, I2C, SOIC-8"
-			(at 243.84 212.09 0)
+		(property "Description" "Secure crypto element SOIC-8"
+			(at 72.39 68.58 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Microchip"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4846,7 +5788,7 @@
 			)
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ATECC608B-SSHDA"
-			(at 0 0 0)
+			(at -171.45 -143.51 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5000,7 +5942,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 240.9952 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -5011,7 +5953,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_commercial_general_en.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 240.03 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -5022,7 +5964,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 240.03 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -5033,7 +5975,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 240.03 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -5055,7 +6030,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 240.03 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -5083,7 +6058,86 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 243.84 220.98 0)
+		(at 71.12 236.22 0)
+		(mirror y)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "9d8967e6-e978-404d-98ea-4816d56d76e0")
+		(property "Reference" "#PWR0556"
+			(at 71.12 242.57 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "GND"
+			(at 71.12 241.3 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 71.12 236.22 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 71.12 236.22 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
+			(at 71.12 236.22 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "3df799b8-8256-4422-ba38-d0ff4a7049b1")
+		)
+		(instances
+			(project "ntp-server-stm32"
+				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/cb350af7-6203-42f4-92d8-ebe7fe19eff7"
+					(reference "#PWR0556")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:GND")
+		(at 72.39 77.47 0)
 		(mirror y)
 		(unit 1)
 		(body_style 1)
@@ -5095,7 +6149,7 @@
 		(fields_autoplaced yes)
 		(uuid "ace79497-a124-479f-adc1-6ee6d7501bb9")
 		(property "Reference" "#PWR0461"
-			(at 243.84 227.33 0)
+			(at 72.39 83.82 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5106,7 +6160,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 243.84 226.06 0)
+			(at 72.39 82.55 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -5116,7 +6170,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 243.84 220.98 0)
+			(at 72.39 77.47 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5127,7 +6181,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 243.84 220.98 0)
+			(at 72.39 77.47 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5138,7 +6192,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 243.84 220.98 0)
+			(at 72.39 77.47 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5766,7 +6820,7 @@
 				(justify left)
 			)
 		)
-		(property "Description" "Digital Temperature Sensor with I2C/SMBus Interface, 16 bits, Â±0.3Â°C, one-shot conversion, alert, nist traceable, EEPROM, WSON"
+		(property "Description" "Digital temp sensor +/-0.3C WSON-6"
 			(at 80.01 149.86 0)
 			(hide yes)
 			(show_name no)
@@ -5777,7 +6831,18 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "TMP117xxDRV"
+		(property "MANUFACTURER" "Texas Instruments"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "TMP117AIDRVR"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -5817,7 +6882,7 @@
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 250.19 193.04 0)
+		(at 78.74 49.53 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -5827,7 +6892,7 @@
 		(dnp no)
 		(uuid "ea311d35-81ac-4424-9b6e-939b170da9bc")
 		(property "Reference" "C175"
-			(at 255.27 191.7699 0)
+			(at 83.82 48.2599 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -5838,7 +6903,7 @@
 			)
 		)
 		(property "Value" "0.1uF"
-			(at 255.27 194.3099 0)
+			(at 83.82 50.7999 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -5848,8 +6913,8 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
-			(at 251.1552 196.85 0)
+		(property "Footprint" "0402 (1005 Metric)"
+			(at 79.7052 53.34 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5859,8 +6924,8 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_commercial_general_en.pdf"
-			(at 250.19 193.04 0)
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
+			(at 78.74 49.53 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5870,8 +6935,8 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
-			(at 250.19 193.04 0)
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
+			(at 78.74 49.53 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5881,8 +6946,41 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
-			(at 250.19 193.04 0)
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
+			(at 78.74 49.53 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5893,7 +6991,7 @@
 			)
 		)
 		(property "MANUFACTURER" "Murata"
-			(at 250.19 193.04 0)
+			(at 78.74 49.53 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5903,8 +7001,8 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
-			(at 250.19 193.04 0)
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
+			(at 78.74 49.53 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5931,7 +7029,7 @@
 	)
 	(symbol
 		(lib_id "Device:C")
-		(at 83.82 39.37 0)
+		(at 153.67 204.47 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -5941,7 +7039,7 @@
 		(dnp no)
 		(uuid "ece2ccd6-1a32-4319-8024-de9b5f5d3d37")
 		(property "Reference" "C171"
-			(at 88.9 38.0999 0)
+			(at 158.75 203.1999 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -5952,7 +7050,7 @@
 			)
 		)
 		(property "Value" "0.1uF"
-			(at 88.9 40.6399 0)
+			(at 158.75 205.7399 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -5962,8 +7060,8 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
-			(at 84.7852 43.18 0)
+		(property "Footprint" "0402 (1005 Metric)"
+			(at 154.6352 208.28 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5973,8 +7071,8 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_commercial_general_en.pdf"
-			(at 83.82 39.37 0)
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
+			(at 153.67 204.47 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5984,8 +7082,8 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
-			(at 83.82 39.37 0)
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
+			(at 153.67 204.47 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5995,8 +7093,41 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
-			(at 83.82 39.37 0)
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
+			(at 153.67 204.47 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6007,7 +7138,7 @@
 			)
 		)
 		(property "MANUFACTURER" "Murata"
-			(at 83.82 39.37 0)
+			(at 153.67 204.47 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6017,8 +7148,8 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
-			(at 83.82 39.37 0)
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
+			(at 153.67 204.47 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6045,7 +7176,7 @@
 	)
 	(symbol
 		(lib_id "power:GND")
-		(at 83.82 44.45 0)
+		(at 153.67 209.55 0)
 		(mirror y)
 		(unit 1)
 		(body_style 1)
@@ -6057,7 +7188,7 @@
 		(fields_autoplaced yes)
 		(uuid "f2080d54-5f09-47b1-bb82-bd887b601866")
 		(property "Reference" "#PWR0452"
-			(at 83.82 50.8 0)
+			(at 153.67 215.9 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6068,7 +7199,7 @@
 			)
 		)
 		(property "Value" "GND"
-			(at 83.82 49.53 0)
+			(at 153.67 214.63 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -6078,7 +7209,7 @@
 			)
 		)
 		(property "Footprint" ""
-			(at 83.82 44.45 0)
+			(at 153.67 209.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6089,7 +7220,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 83.82 44.45 0)
+			(at 153.67 209.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6100,7 +7231,7 @@
 			)
 		)
 		(property "Description" "Power symbol creates a global label with name \"GND\" , ground"
-			(at 83.82 44.45 0)
+			(at 153.67 209.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

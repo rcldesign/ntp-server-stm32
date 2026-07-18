@@ -38,10 +38,12 @@ path. The behavior-level spec is platform-neutral.
 
 ## Board bring-up
 
-- **MCU:** STM32H563VIT6, LQFP100. **PE1 / PB11 are not bonded — never reference them in DT.**
+- **MCU:** STM32H563ZIT6, **LQFP144** (PE1/PB11 bonded but unrouted). All aggregated inputs are
+  direct GPIO on GPIOF/GPIOG — no I/O expander. **Authoritative pin contract:
+  `docs/sts1000_firmware_hardware_interface.md`.**
 - A **custom board definition** is required (`boards/.../sts1000_meridian/`): `.dts`, board
   `Kconfig`, `_defconfig`, and pinctrl. DT net names **must** match the canonical net names
-  in the peripheral map (`OSC_IN`, `MUX_SEL`, `RB_PWR_EN`, `INA_ALERT_INT_N`, …).
+  in the peripheral map (`OSC_IN`, `MUX_SEL`, `RB_PWR_EN`, `INA_ALERT_VCC_RB`, …).
 - **System clock:** PH0 is **HSE bypass** fed by the clock mux → PLL → 250 MHz SYSCLK. PLL
   config is identical for OCXO and Rb (both 10 MHz). USB-FS clock is **HSI48 + CRS** (no USB
   crystal). LSE 32.768 kHz on PC14/PC15 for the RTC.
@@ -102,18 +104,25 @@ read a lock-free, double-buffered telemetry snapshot that `discipline` publishes
 ## Power-sequencing & fault rules firmware owns
 
 - **Stagger warm-ups** to stay in the PoE budget: OCXO first → wait OCXO warm + supercaps
-  charged → assert `RB_PWR_EN` (PB7) → soft-start → INA228 #6 read-back verify in range →
-  wait `RB_LOCK` + EXTREF_MON in-band. Out-of-range → drop `RB_PWR_EN`, flag.
+  charged → write a **safe digipot code** (U43) → assert `RB_PWR_EN` (PB7) → soft-start →
+  **verify VCC_RB on INA228 U44 (0x47)** → then assert `RB_VCC_GATE` (PB1) to connect the FE →
+  wait `RB_LOCK` + `10MHz_CLK_OUT`/EXTREF (PB14) in-band. Out-of-range → drop `RB_PWR_EN`, flag.
+  (VCC_RB = 24.45 − 6.645·VCTRL, 3.0 V ref — see `sts1000_hardware_design_reference.md`.)
 - **Rb OV latch is autonomous (26 V).** Firmware only observes `RB_OV_DET` (PE3, polled) and
-  clears via `RB_OV_RESET` (PD3). Not on the I/O expander.
+  clears via `RB_OV_RESET` (PD3).
 - **Fan fail-safe to cooling:** 4-wire fan runs full speed on float/100 % PWM. Keep
   `FAN_PWM` (PE5/TIM15_CH1) resting state = max airflow so a hung MCU can't cook the box.
-- **Fault interrupts (open-drain wire-OR, active-low):** `PG_INT_N` (PA10, U55 PG+EN-fault),
-  `BTN_INT_N` (PE0, U54 buttons + touch INT), `INA_ALERT_INT_N` (PC12, U54 INA ALERTs). On
-  IRQ, read the expander port to identify the bit, then the implicated device for cause.
-- **I²C wedge recovery:** toggle `I2C_BUF_EN` (PA9, LTC4311 EN) to isolate/recover a stuck bus.
-- Front-end control reduced to one bit: **`REF_TERM_EN` (PC10)** (single LTC6752xS5 slicer;
-  `REF_SLICER_SEL`/`REF_SRC_SEL` no longer exist — see `../docs/ntp_server_rf_frontend.md`).
+- **Faults are read by a direct-GPIO scan, not expander interrupts** (no I/O expander). A ~1 kHz
+  timer scans `GPIOF` (buttons PF0-6, touch PF7, `V_ANT_EN_FAULT_N`/`V_DISP_EN_FAULT_N` PF8/9,
+  `PROX_WAKE` PF10, `ENC_BUTTON` PF11, `PANEL_LED_FAULT_N` PF12, `INA_ALERT_5V_PANEL` PF13,
+  `BKP_STM_PG`/`BKP_GPS_PG` PF14/15) and `GPIOG` (PG rails PG0-7, INA228 ALERTs PG8-15), diffs vs
+  the last sample, and on an INA alert reads that INA228 for cause. See the scan model + bit masks
+  in `sts1000_firmware_hardware_interface.md`.
+- **I²C wedge recovery:** the LTC4311 EN is strapped permanently high (there is no `I2C_BUF_EN`
+  bit — PA9 is `ENC_B`). Recover a stuck bus by controller clock-out / device-level reset,
+  not an accelerator-enable toggle.
+- Front-end control is a single bit: **`REF_TERM_EN` (PC10)** (single LTC6752xS5 slicer — see
+  `../docs/ntp_server_rf_frontend.md`).
 
 ---
 

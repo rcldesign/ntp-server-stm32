@@ -1,7 +1,7 @@
 # PoE GPS-Disciplined Stratum-1 NTP/PTP Server — Software & Firmware Specification
 
-**Target:** STM32H563VIT6 (Cortex-M33 @ 250 MHz, 2 MB flash, TrustZone + PSA crypto, ETH-MAC with IEEE-1588 hardware timestamping).
-**Companion document:** *Peripheral & Pin Map* (`ntp_server_peripheral_map.md`) — the authoritative hardware reference. Every pin/net cited here uses that document’s canonical net names. Where the two ever disagree, the pin map wins for electrical facts; this document owns software behavior.
+**Target:** STM32H563ZIT6 (Cortex-M33 @ 250 MHz, 2 MB flash, **LQFP144**, TrustZone + PSA crypto, ETH-MAC with IEEE-1588 hardware timestamping).
+**Companion documents:** *Firmware ↔ Hardware Interface Reference* (`sts1000_firmware_hardware_interface.md`) is the **authoritative pin contract** — the complete as-built 144-pin map of U12, bring-up order, the GPIO scan model, and the confirmed hardware defects that gate firmware. *Peripheral & Pin Map* (`ntp_server_peripheral_map.md`) and *Hardware Design Reference* (`sts1000_hardware_design_reference.md`) cover electrical facts. Every pin/net cited here uses the canonical net names. Where any disagree on a designator or pin, **the interface reference (as-built netlist) wins**; this document owns software behavior.
 
 This spec is prescriptive: it states the chosen design, then the rationale. Section 2 maps the software role of **every** STM32 connection. Sections 3–10 define behavior. Section 15 lists the decisions still open.
 
@@ -51,6 +51,7 @@ The timing path is isolated from the management/network load. Hardware timestamp
 |`net_mgmt`              |10                           |event                          |DHCP, mDNS, link, ND/ARP.                                                        |
 |`web` / `tls`           |12                           |socket                         |HTTPS, REST, WSS. Lowest network prio.                                           |
 |`snmp`                  |12                           |socket                         |Agent + traps.                                                                   |
+|`io_scan`               |11                           |1 kHz                          |Direct-GPIO port scan (GPIOF/GPIOG IDR snapshot + XOR-diff): buttons, EN-faults, PG rails, INA228 ALERTs. Replaces the deleted MCP23017 expanders. See interface ref §5.|
 |`housekeeping`          |14                           |1–4 Hz                         |I²C sensors (INA228/TMP117/e-compass), fan loop, supercaps.                 |
 |`ui_local`              |15                           |4–10 Hz                        |Display render, button/nav, RGB, proximity.                                      |
 |`console`               |14                           |CDC/UART RX                    |Shell, log tail, diagnostics, SMP recovery.                                      |
@@ -84,8 +85,8 @@ This is the contract between firmware and the board: for each net, what the soft
 |`RB_LOCK` (PB13)                                                     |GPIO in, EXTI13                |Rb lock-good. Second precondition for using Rb; de-assert → immediate fail-safe revert to OCXO. Debounced.                                                                                                                                                                                                                    |
 |`RB_PWR_EN` (PB7)                                                    |GPIO out → buck EN             |Enables/stages the Rb rail. Sequenced after OCXO warm + supercaps charged (PoE budget, §10.3). Drives closed-loop rail verify on INA228 #6 before the Rb is trusted.                                                                                                                                                          |
 |`RB_UART_TX/RX` (PB4/PE7)                                            |UART7                          |Rb control + telemetry: poll lock, frequency offset, EFC, temperature, health; optionally trim EFC. Device-side net naming — PB4 is the MCU’s TX into the Rb’s RX.                                                                                                                                                            |
-|`EXT_REF_IN` (front end §2.2) → mux B, `GPS_PPS_OUT` (buffered TIMEPULSE) → ext-Rb 1PPS-in|(board nets)                   |Input B is driven by the **external-reference front end** (DB9→FE-5680A Rb, or SMA→future clock), conditioned to 3.3 V CMOS. An external Rb self-disciplines to the GPS 1PPS; firmware does not steer it (§3.4). `EXTREF_MON` (above) validates the conditioned output.|
-|`REF_SRC_SEL` (PA10), `REF_TERM_EN` (PC10), `REF_SLICER_SEL` (PC0)   |GPIO out ×3                    |Direct control of the §2.2 front end (no expander, no build options — all hardware populated): source select (DB9/SMA), 50 Ω termination engage/lift, and slicer-branch route (LTC6957 low-jitter vs comparator tolerant/attenuated). **Set-once** from the stored per-source profile at boot and re-applied only on a source/clock-type change; never in the hot path. Apply → wait settle → require `EXTREF_MON` valid before the reference SM may select B.|
+|`10MHz_RF_IN` (SMA J8) → single LTC6752 slicer (U50) → mux input B, `1PPS_OUT` (J15, buffered ETH PTP)|(board nets)                   |Input B is driven by the **external-reference front end**: the FE-5680A's 10 MHz over coax to the SMA, sliced by U50 to 3.3 V CMOS (switched 50 Ω term, §2.1 `REF_TERM_EN`). The FE-5680A runs standalone; firmware does not steer it (§3.4). `EXTREF_MON` (PB14/TIM12) validates the conditioned output before the reference SM may select B.|
+|`REF_TERM_EN` (PC10)                                                 |GPIO out                       |Direct control of the §2.2 front end (no expander, no build options — all hardware populated). As-built the front end is a **single LTC6752 slicer (U50)** on the `10MHz_RF_IN` SMA with a **switched 50 Ω termination** (U49 TMUX1101, `REF_TERM_EN`=PC10, default **terminated** via R176 100k↑) — there is no runtime source-select or dual-slicer route. **Set-once** from the stored profile at boot, re-applied only on a source/clock-type change; never in the hot path. Apply → wait settle → require `EXTREF_MON` valid before the reference SM may select B.|
 
 ### 2.2 GNSS — ZED-F9T
 
@@ -98,9 +99,9 @@ This is the contract between firmware and the board: for each net, what the soft
 |`GPS_SAFEBOOT_N` (PD15)                                          |GPIO out      |Hold low + reset → F9T safeboot for firmware recovery (§8.5).                                                                                                                           |
 |`GPS_DSEL` (PD7)                                                 |GPIO out      |Hold the receiver in UART+I²C interface mode at boot.                                                                                                                                   |
 |`GPS_EXTINT` (PD6)                                               |GPIO out      |External interrupt/time-mark trigger to the F9T (e.g., aiding, time-mark requests).                                                                                                     |
-|`GPS_TXRDY` (PD5)                                                |GPIO in, EXTI5|TX-ready / geofence status; wake the parser when the receiver has data.                                                                                                                 |
+|`GPS_TXRDY` (PD5)                                                |GPIO in, EXTI5|TX-ready wake for the parser. **F9T pin-19 default function = GEOFENCE_STAT; firmware MUST re-`CFG` it to TX_READY before trusting PD5.**                                                  |
 |`GPS_ANT_OFF_MON` (PD4)                                          |GPIO in, EXTI4|Observes LNA-disable; corroborates UBX-MON-RF antenna state and the antenna-rail INA228 for the supervisor (§3.7).                                                                      |
-|GPS VCC switch (PC8), antenna bias (PC9), V_BCKP backup (PD2/PD3)|—             |See §2.6. V_BCKP **must** stay up through GPS VCC cycles for warm start.                                                                                                                |
+|GPS VCC switch (PC8), antenna bias (PC9), V_BCKP backup           |—             |See §2.6. V_BCKP is held by the autonomous TPS61094 U34 (+supercap) and **must** stay up through GPS VCC cycles for warm start; firmware monitors it via `BKP_GPS_PG` (PF15), it has no MCU enable.|
 
 ### 2.3 Ethernet & PTP timestamping
 
@@ -113,31 +114,58 @@ This is the contract between firmware and the board: for each net, what the soft
 
 ### 2.4 I²C1 sensor / secure / HMI bus (PB8 SCL / PB9 SDA)
 
-400 kHz, behind the rise-time accelerator; `I2C_BUF_EN (PA9)` lets firmware isolate/recover a wedged bus (toggle on SCL-stuck or transaction-timeout). `INA_ALERT (PC12, EXTI12)` is the shared open-drain alert.
+400 kHz, behind the **LTC4311 U56** rise-time accelerator (EN tied permanently to 3V3_STM — nothing to sequence). **15 devices, one bus, no address collisions.** All housekeeping peripherals sit on always-on **3V3_STM** (no gated peripheral rail — gating a rail whose I²C pull-ups sit on an always-on rail would back-power the parts through their SDA/SCL clamp diodes). Each INA228 ALERT is a **separate GPIO** (GPIOG/PF13, active-low, scanned — see §2.4a and interface ref §5), **not** a shared open-drain line.
 
-|Device (addr)              |Software role & cadence                                                                                                                                                    |
-|---------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-|INA228 #1 PoE in (0x40)    |Input power/PoE budget accounting; class-vs-draw sanity; brownout precursor. 4 Hz.                                                                                         |
-|INA228 #2 STM 3V3 (0x41)   |MCU rail health. 1 Hz.                                                                                                                                                     |
-|INA228 #3 GPS (0x44)       |GPS load; acquisition-vs-tracking signature. 1 Hz.                                                                                                                         |
-|INA228 #4 Antenna (0x45)   |**Antenna supervisor**: open (low I) / short (high I) / OK; cross-checks UBX-MON-RF + PD4. 4 Hz.                                                                           |
-|INA228 #5 OCXO (0x46)      |Warm-up vs steady; oven-fault detection; always reporting. 4 Hz during warm-up, 1 Hz steady.                                                                               |
-|INA228 #6 Rb (0x47)        |**Closed-loop verify** of the digipot-set Rb rail before trusting Rb; continuous Rb health. 4 Hz.                                                                          |
-|TMP117 #1 oscillator (0x48)|OCXO/Rb local temperature → aging compensation, thermal alarms. 1 Hz.                                                                                                      |
-|TMP117 #2 ambient (0x49)   |Enclosure temp → fan loop setpoint. 1 Hz.                                                                                                                                  |
-|Digipot #1/#2 (0x2C/0x2D)  |Rb-rail buck FB trim, **bounded by fixed resistors**; NV-wiper. Written only during commissioning/calibration with INA228 #6 read-back verify; never to an unbounded value.|
-|ATECC608B (0x60)           |Device identity, TLS/NTS ECC P-256 private keys (non-exportable), ECDSA sign, ECDH, SHA-256/HMAC, AES-128, hardware TRNG, two monotonic counters, attestation. §9.         |
-|FT6336U touch (0x38)       |Capacitive touchscreen; INT → MCP23017 U54 GPA7 → `BTN_INT_N`/PE0; read+dispatch on interrupt. On gated 5 V rail behind PCA9306. §6.5.                                       |
-|MCP23017 U54 (0x21)        |7-button keypad (GPA0–6) + touch INT (GPA7) on PortA; 8 INA228 ALERTs on PortB. INT → PE0 / PC12. §6.1.                                                                     |
-|IIS2MDC + LIS2DH12 (0x1E / 0x18-0x19)|E-compass: magnetometer heading + accel tilt for skyplot true-north; polled 1–5 Hz; calibrated constants applied. §6.3.                                          |
-|PIR proximity (off-bus)    |Presence/approach wake — discrete digital input on MCP23017 U55 PortB (GPB3), not on I²C. Secondary wake (touch is primary). §6.4.                                          |
+|Device (addr, ref)              |Software role & cadence                                                                                                                                                    |
+|--------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+|INA228 #1 PoE in (0x40, U10)    |Input power/PoE budget accounting; class-vs-draw sanity; brownout precursor. 4 Hz. R30 sits in the series path → voltage + current both usable.|
+|INA228 #2 STM 3V3 (0x41, U31)   |MCU rail health. 1 Hz.                                                                                                                                                     |
+|INA228 #7 5V_DISP (0x42, U32)   |Display 5 V rail. 1 Hz.                                                                                                                                                    |
+|INA228 #8 main 3V3 (0x43, U30)  |Main/general 3V3 rail; 3V3-good telemetry corroborating PG4 (AP3441 PG drives to VIN when good → ~2.98 V). 1 Hz.                                    |
+|INA228 #4 Antenna (0x45, U26)   |**Antenna supervisor**: open (low I) / short (high I) / OK; cross-checks UBX-MON-RF + PD4. 4 Hz.                                                                           |
+|INA228 #5 OCXO (0x46, U37)      |Warm-up vs steady; oven-fault detection; always reporting. 4 Hz during warm-up, 1 Hz steady.                                                                               |
+|INA228 #6 Rb (0x47, U44)        |**Closed-loop verify** of the digipot-set Rb rail before trusting Rb; continuous Rb health. 4 Hz. ALERT (PG15) pull-up R265 10k→3V3_STM.           |
+|SHT45 humidity (0x44, U72)      |Enclosure humidity/temp. **Owns 0x44** — this is why the GPS INA228 is at 0x4A. 1 Hz.                                                                                       |
+|INA228 #3 GPS (0x4A, U23)       |GPS load; acquisition-vs-tracking signature. **0x4A, not 0x44** (A0=A1=SDA strap; 0x44 is the SHT45). Do **not** re-strap. 1 Hz.                                            |
+|INA228 #9 panel 5V (0x4C, U54)  |Panel-LED string health; average over ≫ the PWM period, duty-normalize (I_true ≈ I_avg/duty). ALERT on **PF13**. 4 Hz. §6.4.                                                |
+|TMP117 #1 oscillator (0x49, U57)|OCXO/Rb local temperature → aging compensation, thermal alarms. ADD0→3V3_STM. 1 Hz.                                                                                        |
+|TMP117 #2 ambient (0x48, U58)   |Enclosure temp → fan loop setpoint. ADD0→GND. 1 Hz.                                                                                                                        |
+|ATECC608B (0x60, U60)           |Device identity, TLS/NTS ECC P-256 private keys (non-exportable), ECDSA sign, ECDH, SHA-256/HMAC, AES-128, hardware TRNG, two monotonic counters, attestation. §9.         |
+|IIS2MDC (0x1E, U61)             |Magnetometer heading for skyplot true-north; polled 1–5 Hz; calibrated constants applied. INT unconnected → poll. §6.3.                                                    |
+|LIS2DH12 (0x19, U59)            |Accel tilt for skyplot tilt-compensation. **SA0→3V3_STM ⇒ 0x19.** Poll. §6.3.                                                                                              |
+|FT6336U touch (0x38)            |Capacitive touchscreen; INT is **direct on `DISP_TOUCH_INT` (PF7)** (scanned/EXTI7) — read+dispatch. On the `DISP_EN`-gated 5 V rail behind PCA9306 U63. §6.5.              |
+
+The Rb digipot **U43 (MCP41U83)** is **not** on this bus — it is on **SPI4** (SPI mode, CS `SPI_DPOT_CS`/PD2); see §2.5/§3.4 and interface ref §9. The presence sensor is a **passive magnetic reed switch** (dry contact, no Vcc) read as a **discrete GPIO** on `PROX_WAKE`/PF10 (EXTI10, J17.18) with pull-up R254 to always-on 3V3_STM, not on I²C. §6.4.
+
+### 2.4a Direct-GPIO scan model
+
+All HMI inputs, load-switch fault flags, rail power-goods, and INA228 ALERTs are **direct GPIO**
+(no I/O expanders), serviced by the 1 kHz `io_scan` thread
+(§1.2) that snapshots **GPIOF IDR** and **GPIOG IDR**, XOR-diffs against the previous sample, and
+dispatches changed bits. The rotary encoder is **not** scanned (hardware TIM1 mode). Authoritative
+bit maps live in `sts1000_firmware_hardware_interface.md` §5; summary:
+
+- **GPIOF[0:6]** = BUTTON_1..7 (active-low); **[7]** DISP_TOUCH_INT; **[8]** `V_ANT_EN_FAULT_N`,
+  **[9]** `V_DISP_EN_FAULT_N`, **[12]** `PANEL_LED_FAULT_N` (RT9742 open-drain nFLG, active-low);
+  **[10]** PROX_WAKE (also EXTI10); **[11]** ENC_BUTTON; **[13]** `INA_ALERT_5V_PANEL` (INA228 #9
+  panel 0x4C — the one INA alert **not** on GPIOG); **[14]** BKP_STM_PG, **[15]** BKP_GPS_PG.
+- **GPIOG[0:7]** = PG rails (active-high "good"): PG0 3V3_GPS_LDO_PG, PG1 OCXO_LDO_PG, PG2
+  3V0_RF_LDO_PG *(mask until the LT3045 open-collector pull-up is fitted)*, PG3 5V_PSU_PG,
+  PG4 3V3_PSU_PG *(~2.98 V)*, PG5 OCXO_PSU_PG (÷ divider), PG6 RB_PSU_PG, PG7 POE_PG
+  *(divided to 2.93 V)*.
+- **GPIOG[8:15]** = INA228 ALERTs (active-low): PG8 V_POE, PG9 3V3_STM, PG10 5V_DISP, PG11 3V3,
+  PG12 3V3_GPS (0x4A), PG13 V_ANT, PG14 OCXO, PG15 VCC_RB *(pull-up R265 10k→3V3_STM)*.
+
+Firmware **MUST mask PG2** in the scan until the `3V0_RF_LDO_PG` pull-up is fitted. On any INA-alert
+bit asserting, read that INA228's diagnostic/flags register for the cause, then run alarm evaluation.
 
 ### 2.5 SPI4 (PE12 SCK / PE13 MISO / PE14 MOSI / PE11 NSS)
 
 |Device                                                                     |Software role                                                                                                                                                            |
 |---------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-|SPI-NOR (CS PE11, `NOR_RST_N` PE10)                                        |LittleFS backing store (web assets, logs, almanac, calibration, NTS keys, FW staging). DMA reads for asset serving. NOR_RST_N for recovery from a hung NOR.              |
-|ST7796 TFT (CS PE9, `DISP_DC` PB0, `DISP_BL` PE6/TIM15_CH2, `DISP_RST` PA8)|Local GUI on MSP4030 module. Write-only (MISO NC). Separate SPI baud/mode profile (20–40 MHz) per-CS. Partial-region updates; DMA frame pushes. Backlight PWM (onboard BSS138) for dim/blank. VCC = `5V_DISP`, gated by `DISP_EN`; touch (FT6336U) shares the rail (§2.4/§6.5). `DISP_RST` (PA8) also resets the touch controller. §6.5.|
+|SPI-NOR U62 (CS `SPI_NSS` PE11, `NOR_RST_N` PE10)                          |MX25L25645 (Macronix). LittleFS backing store (web assets, logs, almanac, calibration, NTS keys, FW staging). DMA reads for asset serving. **`NOR_RST_N` boots asserted (R205 10k↓) — drive PE10 HIGH early in bring-up** or the NOR stays held in reset.|
+|Rb digipot U43 (CS `SPI_DPOT_CS` PD2)                                      |MCP41U83, **SPI mode 0,0**. Rb-buck FB trim, **hard-bounded by fixed resistors** (§3.4). Written only during commissioning/calibration with INA228 #6 read-back verify. Code 0x000 = Terminal B = safe-low VCTRL; POR = midscale (~14.5 V, inside the 26 V OV envelope). Pre-program the NV wiper safe-low before any `RB_PWR_EN`. Wiper-write opcode/CRC per DS20007000B.|
+|ST7796 TFT (CS PE9, `DISP_DC` PB0, `DISP_BL` PE6, `DISP_RST` PA10)         |Local GUI on MSP4030 module. Write-only (MISO NC). Separate SPI baud/mode profile (20–40 MHz) per-CS; MOSI/SCK 22 Ω series-isolated (R210/R211). Partial-region updates; DMA frame pushes. Backlight PWM (onboard BSS138) for dim/blank. VCC = `5V_DISP`, gated by `DISP_EN`; touch (FT6336U) shares the rail (§2.4/§6.5). `DISP_RST` (PA10, held low at boot by R209 10k↓) also resets the touch controller. §6.5.|
 
 ### 2.6 Power, domains, backup, kill
 
@@ -145,11 +173,13 @@ This is the contract between firmware and the board: for each net, what the soft
 |---------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 |`GPS_PWR_EN` (PC8)         |GPS VCC load switch — hard power-cycle path for the receiver (warm start preserved by V_BCKP).                                                                                                                |
 |`ANT_BIAS_EN` (PC9)        |Antenna bias-T high-side enable; part of the antenna fault response (disable on persistent short).                                                                                                            |
-|`DISP_EN` (PC11)           |5 V display rail (`5V_DISP`, RT9742) + touch PCA9306 enable. **Ex-`PERIPH_EN`** — the 3V3_P housekeeping rail was removed (TMP117/ATECC608B/NOR/e-compass now on always-on 3V3_STM); this gates only display+touch. Default-off at boot (R161); cycle to cold-restart a wedged panel/touch. Mask `V_DISP_EN_FAULT` during soft-start.|
-|`RB_PWR_EN` (PB7)          |Rb-rail buck EN — see §2.1/§10.3 sequencing and INA228 #6 verify.                                                                                                                                             |
-|`BKP_GPS_EN/MODE` (PD2/PD3)|GPS V_BCKP supercap manager (TPS61094): keep enabled; firmware monitors mode/state; GPS warm-start retention.                                                                                                 |
-|`BKP_STM_EN/MODE` (PE3/PE4)|STM32 VBAT supercap manager: **auto-backup in hardware** on input collapse (must not wait for firmware). Firmware monitors only.                                                                              |
-|`POE_KILL` (PE15)          |Board cold-cycle (opens buck-input FET). Asserted by firmware for a commanded full reset; also OR-driven by WDT/thermal/latched faults in hardware. Default-RUN via pulldown. Use as the last-resort recovery.|
+|`DISP_EN` (PC11)           |5 V display rail (`5V_DISP`, RT9742 U33) + touch PCA9306 U63 enable — gates only display+touch (TMP117/ATECC608B/NOR/e-compass are on always-on 3V3_STM). Default-off at boot (R104 10k↓); cycle to cold-restart a wedged panel/touch. Mask `V_DISP_EN_FAULT_N` during soft-start. The display/touch/encoder are fed from the J17 panel-power pins (J17.16→5V_DISP, J17.28→3V3_STM); confirm both rails reach the panel before Stage-6 bring-up.|
+|`PANEL_LED_EN` (PC0), `PANEL_LED_PWM` (PE0)|Panel-LED 5 V RT9742 U55 enable (default-off, R198 10k↓) + brightness PWM. Both stages default OFF (PE0 Hi-Z = Q23 base pull-down). Health via INA228 #9 (0x4C) duty-normalized + `PANEL_LED_FAULT_N` (PF12). §6.4.|
+|`RB_PWR_EN` (PB7)          |Rb-rail buck (U40) EN — default-off (R164 100k↓); see §2.1/§3.4/§10.3 sequencing and INA228 #6 verify.                                                                                                        |
+|`RB_VCC_GATE` (PB1)        |Rb VCC disconnect gate (Q25 SI7469DP) drive — default-off (R262 pd). Connects `VCC_RB_G` to the FE-5680A **only after** `VCC_RB` (INA228 0x47) verifies in-window. Gate clamp D25 (BZX84C12) bounds \|Vgs\|.|
+|`RB_OV_DET` (PE3, polled) / `RB_OV_RESET` (PD3)|Autonomous **26 V OV latch** status/reset. `RB_OV_DET` high = tripped (latch already killed U40 in hardware); pulse `RB_OV_RESET` HIGH to clear after the cause is gone. §3.4.|
+|Supercap backup (autonomous)|TPS61094 U34 (GPS V_BCKP) / U35 (STM VBAT) are **strapped autonomous** (EN/MODE tied) — they back up in hardware on input collapse, **no firmware enable**. Firmware monitors only via `BKP_GPS_PG` (PF15) / `BKP_STM_PG` (PF14).|
+|`POE_KILL` (PE15)          |Board cold-cycle (opens buck-input FET). Asserted by firmware for a commanded full reset; also OR-driven by WDT/thermal/latched faults in hardware. Default-RUN via pulldown. Q3 (BC857W) is the high-side sustain PNP that holds the kill latched.|
 
 ### 2.7 Reliability / monitoring
 
@@ -158,17 +188,19 @@ This is the contract between firmware and the board: for each net, what the soft
 |`WDT_KICK` (PB2)                          |Refresh the external **windowed** watchdog from a supervisor task that itself checks liveness of the timing, network, and housekeeping threads (kick only if all are healthy). Windowed → both stalls and runaway loops trip it. WDT timeout → POE_KILL in hardware.|
 |`PFI` (PE8, EXTI8)                        |Power-fail early warning (ahead of on-chip PVD). ISR commits volatile critical state (last Vc, leap, calibration deltas, log cursor) to NVS and parks the DAC; the supercap/PVD covers the write window.                                                            |
 |`RTC_TAMP` (PC13)                         |Tamper/intrusion → timestamped event in the audit log, optional secure-erase policy hook, SNMP trap. Handled by RTC/TAMP peripheral.                                                                                                                                |
-|`POE_NCL/NCM/LCF` (PC7/PC2/PC3, EXTI7/2/3)|NCP1095 PD status (class/event/fault). Track PoE state, detected class vs measured draw, and fault latches; gate `RB_PWR_EN` if the granted budget can’t cover the Rb.                                                                                              |
+|`POE_NCL/NCM/LCF` (PC7/PC2/PC3, EXTI7/2/3)|NCP1095 PD status (class/event/fault). Track PoE state, detected class vs measured draw, and fault latches; gate `RB_PWR_EN` if the granted budget can’t cover the Rb. `POE_PG`/PG7 (divided to 2.93 V) and INA228 voltage/current corroborate these status lines.|
+|`HOLDOVER_ALARM_RELAY` (PA6)              |Holdover alarm relay **K2** (G6K-2F-Y, Form-C → J16). **Normally-energized fail-safe:** drive PA6 HIGH (energize) only when service quality is met; any {fault, reset, power loss, boot} de-energizes → NC closes = **ALARM**. Default de-energized (R259 10k↓ = ALARM at boot). §3.6/§8-alarms.|
 
 ### 2.8 Local UI
 
 |Net (pin)                 |Software role                                                                                                                                          |
 |--------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
-|`BTN_INT_N` (PE0, EXTI0)  |MCP23017 U54 INTA: 7-button keypad (GPA0–6) + touch INT (GPA7) → read U54, debounce buttons / service FT6336U, dispatch to the nav state machine (§6.1).             |
+|7-button keypad `BUTTON_1..7` (PF0–PF6) + `DISP_TOUCH_INT` (PF7) + `ENC_BUTTON` (PF11)|**Direct GPIO**, serviced by the 1 kHz `io_scan` (§2.4a/§1.2): debounce buttons (~20–30 ms), service FT6336U touch on PF7 (no debounce), dispatch to the nav state machine (§6.1).|
+|Rotary encoder `ENC_A/ENC_B` (PA8/PA9)|**Hardware quadrature via TIM1 encoder mode** (through U68 Schmitt buffer) — a counter, **not scanned**. Menu scroll / value edit. §6.1.|
 |RGB LED (PD12/13/14, TIM4)|At-a-glance status: green = locked stratum-1, amber = warming/holdover, red = unlocked/fault, blue pulse = activity/identify. PWM for brightness/blend.|
 |`FAN_PWM` (PE5, TIM15_CH1)|25 kHz fan drive from the thermal loop (§10.2). **Fail-safe**: undriven = full speed.                                                                  |
 |`FAN_TACH` (PA15, EXTI15) |Edge-count over 1 s → RPM; stall/again alarm.                                                                                                          |
-|Display + touch + proximity|ST7796 GUI (§2.5/§6.5), FT6336U touch wake (primary, §6.5), PIR proximity wake (secondary, §6.4).                                                     |
+|Display + touch + proximity|ST7796 GUI (§2.5/§6.5), FT6336U touch wake (primary, §6.5), magnetic-reed proximity wake (secondary, §6.4). Display/touch fed from the J17 panel-power pins (§2.6).|
 
 ### 2.9 USB & debug
 
@@ -176,7 +208,7 @@ This is the contract between firmware and the board: for each net, what the soft
 |--------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
 |`USB_DM/DP` (PA11/PA12)               |USB-FS device, **CDC-ACM** console (driverless). HSI48 + CRS clock. Carries shell, live logs, and **MCUmgr/SMP** firmware recovery (§8.4).|
 |`USB_VBUS_SENSE` (PE2)                |Gate the D+ pull-up / host-connect detect (self-powered device). Polled (not EXTI — line shared with PC2).                                |
-|`SWDIO/SWCLK` (PA13/PA14), `SWO` (PB3)|Development debug + `SWO` for high-rate trace/log during bring-up. Locked out in production via H5 debug-authentication (§9.1).           |
+|`SWDIO/SWCLK` (PA13/PA14), `SWO` (PB3)|Development debug + `SWO` for high-rate trace/log during bring-up. **SWD-only board:** PB4 (NJTRST) carries `RB_RX` (UART7_TX), so **JTAG is unavailable** — all debug is SWD; firmware MUST NOT enable the JTAG pins. Locked out in production via H5 debug-authentication (§9.1).|
 
 -----
 
@@ -205,9 +237,12 @@ The disciplined 10 MHz on `PH0` clocks the PLL → 250 MHz SYSCLK and, through t
 
 ### 3.4 Rb management
 
-- The Rb (PRS10-class) is a **self-disciplined GPSDRO**: it locks its own 10 MHz to the buffered GPS 1PPS. Firmware does **not** run a steering loop for it; it sequences power, reads health over UART7, and watches `RB_LOCK`.
-- Warm-up sequencing per §10.3 (after OCXO warm + supercaps charged) to stay within PoE budget; `RB_PWR_EN` → soft-start → INA228 #6 read-back verify → wait for `RB_LOCK` + EXTREF_MON in-band.
-- Optional fine EFC trim over UART7 only if cross-checking against GPS PPS shows a residual the Rb’s own loop isn’t removing; default is hands-off.
+- The Rb is an **FE-5680A** standalone rubidium reference. Firmware does **not** steer it; it sequences power, reads health over UART7, and watches `RB_LOCK` + `EXTREF_MON` for a valid, in-band 10 MHz before the mux may select it.
+- **Variable rail (VCC_RB).** The MIC28516 buck (U40) FB is trimmed by digipot U43 (MCP41U83) buffered through OPA320 U42, referenced to **VREF_3V0 = 3.0 V** (MCP1502-30E U45, gated by RB_PWR_EN). Transfer function (netlist-derived FB network R147/R148/R134): **`VCC_RB = 24.45 − 6.645·VCTRL`**, VCTRL = 0…3.0 V → 24.45 V (code parks VCTRL=0) down to 4.51 V (VCTRL=3.0). The 24.45 V pedestal is **fixed by the resistors**; the digipot can only pull the rail **down**, so no wiper state (POR / mid-scale / SPI-fault / open) can exceed the pedestal.
+- **Enable sequence (MUST, in order):** (1) write a **known safe-low digipot code** over SPI4 — code 0x000 parks the wiper at terminal B = safe-low VCTRL (POR = midscale ~14.5 V, inside the 26 V OV envelope); (2) `RB_PWR_EN` (PB7) → soft-start; (3) **verify `VCC_RB` on INA228 #6 (0x47)** is inside the `24.45 − 6.645·VCTRL` window **before trusting the rail**; (4) `RB_VCC_GATE` (PB1) → HIGH to connect `VCC_RB_G` to the FE-5680A; (5) wait for `RB_LOCK` + `EXTREF_MON` in-band. **Never** assert `RB_PWR_EN` before the safe code is written and read back. Warm-up gated by §10.3 PoE budget (after OCXO warm + supercaps charged).
+- **Autonomous 26 V OV latch** (U41A, firmware-independent) trips VCC_RB > 26.0 V → kills U40; `RB_OV_DET` (PE3) high = tripped; clear by pulsing `RB_OV_RESET` (PD3) HIGH once the cause is gone. This is the backstop against any FB fault above the pedestal.
+- **Rb gate path.** Gate-clamp zener **D25** (K=VCC_RB) bounds the Q25 SI7469DP gate so Q25 enhances and `VCC_RB_G` powers the FE-5680A. Two hardware caveats (not firmware blockers): rate the Rb-buck output caps C125–C128 ≥50 V (they sit on the 24.45 V VCC_RB rail), and for a 15 V-class FE set the digipot bound / OV per the unit (the 24.45 V full-scale pedestal over-volts a 15 V unit; the OV latch trips only at 26 V). Confirm FE J6-8/J6-9 Tx/Rx direction per surplus variant.
+- Optional fine EFC trim over UART7 only if a GPS-PPS cross-check shows a residual the Rb isn’t removing; default is hands-off.
 
 ### 3.5 Reference selection / mux state machine
 
@@ -215,7 +250,7 @@ States: `OCXO_ACTIVE` (boot default) ⇄ `RB_ACTIVE`, plus `EXTREF_ACTIVE` (hous
 
 - **OCXO → Rb** only when **both** `EXTREF_MON` reports a real, in-band ~10 MHz **and** `RB_LOCK` is asserted, stable past the debounce/hysteresis window.
 - **Rb → OCXO** immediately if **either** condition drops (fail-safe). Hysteresis on re-engage prevents flapping.
-- **Glitchless switch:** bridge SYSCLK to HSI, command `MUX_SEL`, allow the glitchless mux to cross over, reselect HSE, re-lock PLL, resume. Both inputs are 10 MHz so PLL config is unchanged; the disciplined PTP clock free-wheels on HSI for the few ms of changeover and is re-aligned after.
+- **Glitchless switch (firmware, not a glitch-free mux IC):** the mux is a **plain 74LVC1G157 selector (U52)** — deliberately, because a dedicated glitch-free mux completes on the *outgoing* clock's edges and hangs if that source has stopped (the exact Rb-failure case). Sequence: bridge SYSCLK to HSI, command `MUX_SEL` (PB6), let the selector switch, reselect HSE, re-lock PLL, resume; the STM32 **CSS** catches a dead source. Both inputs are 10 MHz so PLL config is unchanged; the disciplined PTP clock free-wheels on HSI for the few ms of changeover and is re-aligned after.
 - The OCXO is never powered down; on `RB_ACTIVE` its DAC holds last-good so it remains an instantly-available warm fallback.
 
 ### 3.6 Holdover engine
@@ -321,7 +356,7 @@ Every real-time element on Dashboard/Timing/GNSS reads the §3.8 quality block v
 
 ### 6.1 Buttons & navigation
 
-- Seven buttons on MCP23017 U54 Port A (GPA0–6); `BTN_INT_N (PE0/EXTI0)` fires on any Port A change → firmware reads the expander register, debounces (~20–30 ms), and emits press/long-press/repeat events. GPA7 on the same interrupt carries the FT6336U touch INT (serviced over I²C, no debounce).
+- Seven buttons `BUTTON_1..7` on **direct GPIO PF0–PF6** (active-low, each 10k↑ + 0.1 µF); the 1 kHz `io_scan` (§2.4a) diffs GPIOF, debounces (~20–30 ms), and emits press/long-press/repeat events. `DISP_TOUCH_INT` (PF7) carries the FT6336U touch INT (serviced over I²C, no debounce). A **rotary encoder** (`ENC_A/ENC_B` PA8/PA9, TIM1 hardware quadrature; push-switch `ENC_BUTTON` PF11) provides scroll/edit.
 - Logical map: **Up, Down, Left/Back, Right/Enter, Function/Menu, Power/Identify** (final assignment in §15). Nav is a screen-stack state machine: list scroll, value edit (where permitted), confirm dialogs for guarded actions.
 - Locally editable: network basics (DHCP/static, IP), display brightness/timeout, identify (blink RGB + WSS hint), reference override (guarded), reboot, factory-reset (double-confirm). Deep config stays on the web/console — the panel is for status + field service.
 
@@ -337,14 +372,14 @@ Every real-time element on Dashboard/Timing/GNSS reads the §3.8 quality block v
 
 ### 6.4 Touch / proximity wake & RGB
 
-- **Touch is the primary wake.** FT6336U INT (U54 GPA7 → `BTN_INT_N`) wakes to Home. Sleep/wake is a **`DISP_BL` PWM duty change only** — blank = duty→0, wake = duty→on — not a power or reset event: `DISP_EN`, the 5 V rail, and the rendered ST7796 frame all persist. Because touch rides the `DISP_EN`-gated rail, **DISP_EN stays asserted through the dimmed/blanked idle state**; drop it only for a deliberate display-off/recovery.
-- **PIR is the secondary/ambient wake** (U55 GPB3, discrete): approach re-asserts `DISP_EN` (if dropped) and wakes to Home. Thresholds/timeouts configurable. PIR is on always-on 3V3_STM, so it is always live regardless of DISP_EN.
+- **Touch is the primary wake.** FT6336U INT on `DISP_TOUCH_INT` (PF7, scanned/EXTI7) wakes to Home. Sleep/wake is a **`DISP_BL` PWM duty change only** — blank = duty→0, wake = duty→on — not a power or reset event: `DISP_EN`, the 5 V rail, and the rendered ST7796 frame all persist. Because touch rides the `DISP_EN`-gated rail, **DISP_EN stays asserted through the dimmed/blanked idle state**; drop it only for a deliberate display-off/recovery.
+- **A magnetic reed switch is the secondary/ambient wake** (`PROX_WAKE` PF10, EXTI10, J17.18, discrete GPIO): a magnet approach closes the dry contact and re-asserts `DISP_EN` (if dropped), waking to Home. The reed is passive (no Vcc); pull-up R254 to always-on 3V3_STM + close-to-GND is the correct conditioning → **active-low on magnet present**, always live regardless of DISP_EN. Thresholds/timeouts configurable.
 - RGB semantics per §2.8; brightness follows ambient/backlight policy; an “identify” command pulses blue to locate the unit in a rack.
 
 ### 6.5 Display driver
 
 - ST7796 over SPI4, write-only, dedicated baud/mode profile (20–40 MHz), DMA frame/region pushes, partial-region updates for changing fields to bound traffic (≈1.2 MB/s @ 4 Hz full-frame worst case). Render thread is lowest-priority and pre-emptible; never blocks timing.
-- **Power/reset sequencing:** assert `DISP_EN` (PC11) → RT9742 soft-starts `5V_DISP` and the PCA9306 enables; mask `V_DISP_EN_FAULT` (U55 GPB2) during the soft-start window; release `DISP_RST` (PA8, held low at boot by R161-class pulldown→ panel + touch reset) with the FT6336U reset-timing margin; init ST7796, then init FT6336U over the (now-translated) touch I²C. A `DISP_EN` low→high cycle fully cold-restarts a wedged panel/touch (module 74LVC245 has Ioff → no sneak path keeps it alive); drive DISP_CS/DC/BL to a defined state during the off window.
+- **Power/reset sequencing:** assert `DISP_EN` (PC11) → RT9742 soft-starts `5V_DISP` and the PCA9306 enables; mask `V_DISP_EN_FAULT_N` (PF9, RT9742 U33 nFLG) during the soft-start window; release `DISP_RST` (PA10, held low at boot by R209 10k↓ → panel + touch reset) with the FT6336U reset-timing margin; init ST7796, then init FT6336U over the (now-translated) touch I²C. A `DISP_EN` low→high cycle fully cold-restarts a wedged panel/touch (module 74LVC245 has Ioff → no sneak path keeps it alive); drive DISP_CS/DC/BL to a defined state during the off window.
 
 -----
 
@@ -401,7 +436,7 @@ F9T firmware updated over USART3 (PD8/PD9) using `GPS_SAFEBOOT_N (PD15)` + `GPS_
 
 ### 8.6 Asset / Rb / config updates
 
-Web SPA bundle and MIB/Zabbix template update with the firmware image (versioned together). Rb (PRS10) firmware is vendor-flashed over UART7 only if the module supports it (guarded, rare). Config import is a signed JSON applied via validate-then-commit (§5.5).
+Web SPA bundle and MIB/Zabbix template update with the firmware image (versioned together). Rb (FE-5680A) firmware is vendor-flashed over UART7 only if the module supports it (guarded, rare). Config import is a signed JSON applied via validate-then-commit (§5.5).
 
 -----
 
@@ -409,7 +444,7 @@ Web SPA bundle and MIB/Zabbix template update with the firmware image (versioned
 
 ### 9.1 Root of trust & key hierarchy
 
-- Hardware RoT = STiRoT (immutable) → MCUboot trust anchor → application. Debug ports closed in production via H5 **debug authentication** (re-open only with a signed challenge). Readout protection (RDP/product state) at the highest level consistent with field-update needs.
+- Hardware RoT = STiRoT (immutable) → MCUboot trust anchor → application. Debug ports closed in production via H5 **debug authentication** (re-open only with a signed challenge). Readout protection (RDP/product state) at the highest level consistent with field-update needs. The board is **SWD-only** (PB4/NJTRST reused as `RB_RX`); production debug-auth governs SWD, not JTAG.
 - **ATECC608B** holds the device identity ECC P-256 keypair and (where exportability must be denied) the TLS server key; performs ECDSA sign, ECDH, SHA-256/HMAC and AES-128, has a hardware TRNG, and provides two hardware monotonic counters plus attestation. PSA Crypto fronts both the ATECC608B (via Microchip CryptoAuthLib’s mbedTLS integration) and the on-die AES/PKA/HASH.
 
 ### 9.2 TLS
@@ -442,7 +477,7 @@ Closed debug in production; signed-only firmware + anti-rollback; least-privileg
 
 ### 10.1 Sensor acquisition
 
-`housekeeping` polls the I²C devices (§2.4) and the internal ADC (VREFINT for true VDDA, die temp, VBAT, plus supercap channels PA6/PB1, OCXO Vc PA3) on the cadences listed, applies per-sensor calibration offsets, and publishes a health block consumed by GUI/SNMP/console/display. INA228 alerts via `INA_ALERT (PC12)` trigger immediate re-read + alarm evaluation.
+`housekeeping` polls the I²C devices (§2.4) and the internal ADC (VREFINT for true VDDA, die temp, VBAT, OCXO Vc `OCXO_V` PA3) on the cadences listed, applies per-sensor calibration offsets, and publishes a health block consumed by GUI/SNMP/console/display. Supercap state is read from the backup power-good lines `BKP_STM_PG` (PF14) / `BKP_GPS_PG` (PF15), not a dedicated ADC channel (the TPS61094 managers are autonomous). INA228 ALERTs are **separate per-rail GPIOs** serviced by the 1 kHz `io_scan` (§2.4a); on any assert, immediately re-read that INA228's flags register and run alarm evaluation.
 
 ### 10.2 Thermal / fan loop
 
@@ -450,7 +485,7 @@ PI loop on enclosure temp (TMP117 #2) with oscillator temp (TMP117 #1) and die t
 
 ### 10.3 Power sequencing & faults
 
-- **Boot order:** main 3.3 V (3V3_STM — housekeeping I²C, NOR, expanders all come up here, no gating) → GPS (`GPS_PWR_EN`) + antenna bias (`ANT_BIAS_EN`) → display/touch (`DISP_EN`, when UI is needed) → OCXO warm → (when warranted) `RB_PWR_EN` with INA228 #6 read-back verify. Sequencing keeps the cold-start peak inside the granted PoE budget (§ pin map 6); if PoE class can’t cover the Rb, defer/deny `RB_PWR_EN` and flag. The display rail is deferrable/low-priority — drop `DISP_EN` first under PoE pressure.
+- **Boot order:** main 3.3 V (3V3_STM — housekeeping I²C, NOR all come up here, no gating) → release held-in-reset digital devices in order (`NOR_RST_N` PE10 → HIGH first; `LAN_RST_N` PD10 after rails+25 MHz; `DISP_RST` PA10 when UI wanted) → GPS (`GPS_PWR_EN`) + antenna bias (`ANT_BIAS_EN`) → display/touch (`DISP_EN`, when UI is needed) → OCXO warm → (when warranted) the **guarded Rb sequence** (safe digipot code → `RB_PWR_EN` → INA228 #6 0x47 verify → `RB_VCC_GATE`, §3.4). Sequencing keeps the cold-start peak inside the granted PoE budget (§ pin map 6); if PoE class can’t cover the Rb, defer/deny `RB_PWR_EN` and flag. The display rail is deferrable/low-priority — drop `DISP_EN` first under PoE pressure. Full ordered bring-up: interface ref §2.
 - **`PFI (PE8)`** ISR: persist volatile critical state, park the DAC, prepare for brownout (supercap covers the window).
 - **PoE monitor** (`POE_NCL/NCM/LCF`): track class/event/fault; gate Rb enable; trap on fault.
 - **`POE_KILL (PE15)`** for commanded cold cycle; also hardware-OR’d from WDT/thermal/latched faults. The supervisor task kicks `WDT_KICK (PB2)` only when timing/network/housekeeping liveness all pass.
@@ -503,11 +538,14 @@ Each transition emits a log event + (where defined) an SNMP trap and a GUI/RGB s
 |GNSS fix/PPS loss    |parser + PPS outlier gate      |Holdover (§3.6); alarm/trap; GUI/RGB amber.                          |
 |Antenna open/short   |INA228 #4 + MON-RF + PD4       |Flag; on persistent short drop `ANT_BIAS_EN`; trap.                  |
 |Rb unlock / bad clock|RB_LOCK / EXTREF_MON           |Fail-safe revert to OCXO; trap.                                      |
+|Rb rail over-voltage |`RB_OV_DET (PE3)`; INA228 #6 (0x47)|Autonomous 26 V OV latch already killed U40; log/trap; clear via `RB_OV_RESET (PD3)` pulse after cause gone (§3.4).|
+|Panel-LED string open/short|INA228 #9 (0x4C) duty-normalized; `PANEL_LED_FAULT_N (PF12)`|Flag LED fault; UI-only, never blocks timing.                    |
+|Rail power-good drop |PG scan (PG0/1/3/4/6/7, PF14/15) high→low|Rail-fault alarm/trap. **PG2 masked** until its LDO-PWRGD pull-up is fitted.|
 |Ext-ref front-end misconfig / no output|EXTREF_MON invalid after config|Re-apply stored profile once; if still invalid, hold on OCXO, do not select B, flag config fault + trap. Never trust an unverified front-end output.|
 |OCXO oven/DAC fault  |INA228 #5; Vc cmd≠sense (PA3)  |Mark OCXO unhealthy; prefer Rb if available; alarm.                  |
-|I²C bus wedge        |transaction timeout / SCL stuck|Toggle `I2C_BUF_EN (PA9)`, re-init; if persistent, `EXP_RST_N (PC0)` hard-reset the expanders (housekeeping is on always-on 3V3_STM — no rail-cycle path).|
+|I²C bus wedge        |transaction timeout / SCL stuck|Software bus-recovery (9 SCL clocks / STOP) + re-init; LTC4311 EN is hardwired on. Housekeeping is on always-on 3V3_STM (no rail-cycle path); no I/O-expander reset (expanders deleted — direct GPIO).|
 |NOR hang             |LittleFS error                 |`NOR_RST_N (PE10)`; degrade to RAM-only logging; alarm.              |
-|Display hang         |SPI/driver watchdog            |`DISP_RST (PA8)` re-init; UI optional, never blocks timing.          |
+|Display hang         |SPI/driver watchdog            |`DISP_RST (PA10)` re-init; UI optional, never blocks timing.          |
 |Over-temp            |TMP117/die                     |Fan max; if exceeded, shed Rb, then thermal `POE_KILL`.              |
 |Power-fail           |`PFI (PE8)`                    |Fast-save + park (§10.3).                                            |
 |Thread stall         |supervisor liveness            |Withhold `WDT_KICK` → external WDT → `POE_KILL` cold cycle.          |
@@ -515,6 +553,15 @@ Each transition emits a log event + (where defined) an SNMP trap and a GUI/RGB s
 |Tamper               |`RTC_TAMP (PC13)`              |Audit + trap; optional key zeroize.                                  |
 
 Principle: timing service degrades gracefully (holdover, reference fallback, peer NTP) before it ever serves wrong time; unrecoverable states cold-cycle rather than hang.
+
+**Firmware-relevant hardware notes** (full detail in `sts1000_firmware_hardware_interface.md`).
+**Standing firmware requirements:** SWD-only (PB4 = NJTRST → JTAG unavailable); `GPS_TXRDY` needs an
+F9T CFG-TXREADY re-map before PD5 is trusted; digipot code 0 = Terminal B safe-low (still
+pre-program the NV wiper + verify VCC_RB before `RB_PWR_EN`). **Open items:** add the
+`3V0_RF_LDO_PG`/PG2 pull-up (10k→3V3_STM) — mask PG2 until fitted; confirm the J17 panel-power pins
+(J17.16→5V_DISP, J17.28→3V3_STM) reach the panel; rate the Rb-buck output caps C125–C128 ≥50 V; grow
+VREF+ C37 to 100 nF. The power-good/telemetry signals `POE_PG`/PG7 (divided to 2.93 V), INA228 0x40
+current (R30 in series), `INA_ALERT_VCC_RB`/PG15, and PG4 (~2.98 V) are all usable as read.
 
 -----
 
@@ -537,8 +584,8 @@ Principle: timing service degrades gracefully (holdover, reference fallback, pee
 - SNMP agent: custom compact agent vs ported lwIP `apps/snmp`.
 - Web SPA framework/size budget (must fit NOR with assets + logs); pick a small framework (Preact/Svelte) and a brotli budget.
 - RADIUS/LDAP/TACACS+ and TLS-syslog: phase-2 or phase-1?
-- Rb EFC steering: hands-off (self-discipline only) vs optional firmware fine-trim — default hands-off; confirm PRS10 control surface.
-- External-ref front-end (§2.2) config policy: per-source default routing (DB9/FE-5680A = 50 Ω term + LTC6957 branch; SMA = comparator branch + term per source impedance until characterized), persisted in NVS; auto-probe (apply route → check EXTREF_MON → if invalid, try the comparator branch → flag if still invalid) vs operator-selected source only. Both slicers are always populated; selection is runtime via `REF_SLICER_SEL` — no build option.
+- Rb EFC steering: hands-off vs optional firmware fine-trim — default hands-off; confirm FE-5680A control surface (serial command set + J6-8/J6-9 Tx/Rx direction per surplus variant).
+- External-ref front-end (§2.1/§2.2) config policy: the as-built front end is a **single LTC6752 slicer (U50)** on the `10MHz_RF_IN` SMA with only a switched 50 Ω termination (`REF_TERM_EN` PC10, default terminated). Decide the stored default (terminated vs high-Z) per source impedance and the auto-probe policy (apply term → check `EXTREF_MON` → flag if invalid). No source-select or dual-slicer routing exists on this board.
 - Leap-second handling policy at the second of insertion for NTP (smear vs step) and PTP (step) — define per service.
 - Certificate lifecycle: manual/CSR only, or add ACME — phase decision.
 - Anti-rollback counter budget and field-update policy (how many versions, recovery if exhausted).

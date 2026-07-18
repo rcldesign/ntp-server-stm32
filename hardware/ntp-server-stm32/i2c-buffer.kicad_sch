@@ -1376,7 +1376,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 190.1952 100.33 0)
 			(hide yes)
 			(show_name no)
@@ -1387,7 +1387,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_commercial_general_en.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 189.23 96.52 0)
 			(hide yes)
 			(show_name no)
@@ -1398,7 +1398,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 189.23 96.52 0)
 			(hide yes)
 			(show_name no)
@@ -1409,7 +1409,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 189.23 96.52 0)
 			(hide yes)
 			(show_name no)
@@ -1431,7 +1464,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 189.23 96.52 0)
 			(hide yes)
 			(show_name no)
@@ -1491,7 +1524,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 238.252 106.68 90)
 			(hide yes)
 			(show_name no)
@@ -1502,7 +1535,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 240.03 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -1513,7 +1546,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 4.7k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 4.7K OHM 1% 1/10W 0402"
 			(at 240.03 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -1524,7 +1557,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -1537,6 +1603,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4701X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P4.70KLCT-ND"
+			(at 240.03 106.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -1753,7 +1830,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 254.762 106.68 90)
 			(hide yes)
 			(show_name no)
@@ -1764,7 +1841,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 256.54 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -1775,7 +1852,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 4.7k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 4.7K OHM 1% 1/10W 0402"
 			(at 256.54 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -1786,7 +1863,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -1799,6 +1909,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4701X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P4.70KLCT-ND"
+			(at 256.54 106.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -1879,7 +2000,7 @@
 				)
 			)
 		)
-		(property "Description" "LTC4311ISC6-TRPBF"
+		(property "Description" "I2C rise-time accelerator SC-70-6"
 			(at 186.69 115.57 0)
 			(hide yes)
 			(show_name no)
@@ -1890,7 +2011,18 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "LTC4311ISC6-TRPBF"
+		(property "MANUFACTURER" "Analog Devices"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "LTC4311ISC6#TRPBF"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)

@@ -69,8 +69,8 @@ the four shell tabs.
 | `GND` | A1, A12, B1, B12 | all four GND contacts → board GND |
 | `USB_DP` | A6 (D1+) **+** B6 (D2+) | both orientations paralleled |
 | `USB_DM` | A7 (D1−) **+** B7 (D2−) | both orientations paralleled |
-| CC1 | A5 | → R64 5.1 kΩ → GND |
-| CC2 | B5 | → R66 5.1 kΩ → GND |
+| CC1 | A5 | → R66 5.1 kΩ → GND |
+| CC2 | B5 | → R64 5.1 kΩ → GND |
 | SBU1 / SBU2 | A8 / B8 | NC (unused on USB 2.0) |
 | SHIELD | S1, S2, S3, S4 | → shell bond network (§7) |
 
@@ -90,8 +90,8 @@ Rd pulldown to advertise a default-USB sink (Type-C `Rp`/`Rd` model).
 
 | Designator | Value | Connection |
 |---|---|---|
-| R64 | 5.1 kΩ 1% | CC1 (A5) → GND |
-| R66 | 5.1 kΩ 1% | CC2 (B5) → GND |
+| R66 | 5.1 kΩ 1% | CC1 (A5) → GND |
+| R64 | 5.1 kΩ 1% | CC2 (B5) → GND |
 
 - **Separate Rd per CC** — CC1 and CC2 are **not** tied together (tying them defeats
   orientation detection at the source).
@@ -145,8 +145,9 @@ forfeits the protection benefit if the layout stubs the part off to the side.
 - **VBUS headroom is tight:** VRWM 5.5 V vs VBUS_max 5.25 V → 0.25 V margin. Valid only
   for default-USB power (5 V). If CC is ever rerouted to a PD sink that could request
   9/15/20 V, this clamp must be re-rated.
-- CC1/CC2 are unprotected (channel 4 is a single channel, cannot cover two CC pins);
-  acceptable for a console, with the 5.1 kΩ Rd limiting any event.
+- **CC1/CC2 are protected on a separate array, U65** (TPD4E0x, 4-ch): ch1 = `USB_CC1`
+  (pins 1↔10), ch2 = `USB_CC2` (pins 2↔9); its other two channels serve the encoder
+  `ENC_A_IN`/`ENC_B_IN` (J17.11/J17.27). U18 handles D+/D−/VBUS only.
 
 ---
 
@@ -174,8 +175,8 @@ VBUS divided to a 3.3 V-safe level for the GPIO. Target: clean logic-high at VBU
 
 | Designator | Value | Connection |
 |---|---|---|
-| R68 | 100 kΩ 1% | `USB_VBUS` → `USB_VBUS_SENSE` |
-| R67 | 121 kΩ 1% | `USB_VBUS_SENSE` → GND <!-- TODO verify: netlist wires R67 USB_VBUS→GND, not USB_VBUS_SENSE→GND (divider bottom leg) --> |
+| R68 | 100 kΩ 1% | `USB_VBUS` → `USB_VBUS_SENSE` (top leg) |
+| R67 | 121 kΩ 1% | `USB_VBUS_SENSE` → GND (bottom leg) |
 | C43 | 100 nF | `USB_VBUS_SENSE` → GND (filter/debounce) |
 
 Divider ratio k = 121 / 221 = **0.547**. V(PE2) = VBUS · 0.547:
@@ -194,8 +195,8 @@ current is held within the U18 clamp's capacity.
 
 ### 8.2 Device supply — VDD33USB
 
-The STM32H563**V**IT6 is LQFP100 (high pin count) and therefore has a dedicated
-**VDD33USB** pin powering the USB transceiver. Tied to **3V3_STM** (always-on) and
+The STM32H563**Z**IT6 (LQFP144) has a dedicated
+**VDD33USB** pin (U12 pin 106) powering the USB transceiver. Tied to **3V3_STM** (always-on) and
 decoupled per AN4879: **100 nF + 1 µF**. Tying to the same 3.3 V rail auto-satisfies the
 sequencing rule (VDD33USB ≤ VDD during ramp; last-on / first-off). *(Decoupling sits on
 the MCU power sheet — confirm placement adjacent to the pin.)*
@@ -256,8 +257,9 @@ independently of the debug port.
 |---|---|---|
 | J5 | USB4120-03-C (USB 2.0 Type-C, vertical SMT) | console receptacle |
 | U18 | TPD4E05U06DQAR | flow-through ESD on D+, D−, VBUS (3 of 4 ch) |
-| R64 | 5.1 kΩ 1% | CC1 Rd (sink advertise) |
-| R66 | 5.1 kΩ 1% | CC2 Rd (sink advertise) |
+| U65 | TPD4E0x (4-ch) | ESD on `USB_CC1`/`USB_CC2` (2 ch) + encoder `ENC_A_IN`/`ENC_B_IN` (2 ch, J17.11/J17.27) |
+| R64 | 5.1 kΩ 1% | CC2 Rd (sink advertise) — J5.B5 |
+| R66 | 5.1 kΩ 1% | CC1 Rd (sink advertise) — J5.A5 |
 | R68 | 100 kΩ 1% | VBUS-sense divider top |
 | R67 | 121 kΩ 1% | VBUS-sense divider bottom |
 | C43 | 100 nF | `USB_VBUS_SENSE` filter/debounce |

@@ -2581,6 +2581,16 @@
 		)
 		(uuid "89c1bcad-cdb0-45cc-a664-c3397d71f35c")
 	)
+	(text "PG pulled to VIN\nWhen power good\n"
+		(exclude_from_sim no)
+		(at 107.442 146.558 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "a13d8d18-8645-434b-b7f8-3893d36754c5")
+	)
 	(text "I2C Address: 0x42\n"
 		(exclude_from_sim no)
 		(at 356.108 208.534 0)
@@ -2762,6 +2772,12 @@
 		(uuid "69c72e1a-8a3a-4f85-8dd9-7b49e0495ef9")
 	)
 	(junction
+		(at 175.26 215.9)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "6c33d399-cbf0-4af4-89d4-e32f0f7affbb")
+	)
+	(junction
 		(at 198.12 66.04)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -2784,12 +2800,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "765c44d5-df05-4ba8-82f0-9687a8b905a5")
-	)
-	(junction
-		(at 334.01 196.85)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "77127c01-60f9-4678-9914-28231da9f2c6")
 	)
 	(junction
 		(at 234.95 101.6)
@@ -2972,6 +2982,12 @@
 		(uuid "db637b53-c2b7-4364-bf5b-4aa32caa771f")
 	)
 	(junction
+		(at 334.01 196.85)
+		(diameter 0)
+		(color 0 0 0 0)
+		(uuid "e213f707-e3be-417e-b784-c993fb477e55")
+	)
+	(junction
 		(at 152.4 176.53)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -2994,12 +3010,6 @@
 		(diameter 0)
 		(color 0 0 0 0)
 		(uuid "f0ff4719-fbba-4379-b6f6-d6d4309de92d")
-	)
-	(junction
-		(at 175.26 215.9)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "f349d121-e3fe-4378-8df5-4dd9c16be754")
 	)
 	(junction
 		(at 231.14 166.37)
@@ -3048,6 +3058,16 @@
 			(type default)
 		)
 		(uuid "01c0905c-dfe5-467b-b367-6269b0fd80e4")
+	)
+	(wire
+		(pts
+			(xy 326.39 196.85) (xy 334.01 196.85)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "02a9d5af-1aaa-4238-b077-3ec7d6f54aa2")
 	)
 	(wire
 		(pts
@@ -3148,16 +3168,6 @@
 			(type default)
 		)
 		(uuid "0c03f776-b5e1-4057-b44f-8690b8f06cae")
-	)
-	(wire
-		(pts
-			(xy 167.64 213.36) (xy 176.53 213.36)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "0c8d5ec3-3cae-4583-8f7f-66e57818a653")
 	)
 	(wire
 		(pts
@@ -3451,16 +3461,6 @@
 	)
 	(wire
 		(pts
-			(xy 326.39 199.39) (xy 335.28 199.39)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "2f545d37-afbc-4f97-8db7-4a42ba9a0a9c")
-	)
-	(wire
-		(pts
 			(xy 185.42 66.04) (xy 185.42 67.31)
 		)
 		(stroke
@@ -3568,6 +3568,16 @@
 			(type default)
 		)
 		(uuid "3a6481a4-5ce8-4591-9db5-8de6a3fe9058")
+	)
+	(wire
+		(pts
+			(xy 177.8 63.5) (xy 177.8 66.04)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "3b6b2582-248a-471d-ac6f-e4f1abbdc32b")
 	)
 	(wire
 		(pts
@@ -3708,16 +3718,6 @@
 			(type default)
 		)
 		(uuid "4618d0d9-ae14-4eb4-ad84-67930c3e60d9")
-	)
-	(wire
-		(pts
-			(xy 334.01 196.85) (xy 335.28 196.85)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "4705d2a7-5e8d-4f59-9106-16c5b9015226")
 	)
 	(wire
 		(pts
@@ -4161,16 +4161,6 @@
 	)
 	(wire
 		(pts
-			(xy 180.34 66.04) (xy 185.42 66.04)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "6edbf6b9-623f-4806-a3aa-cb0a132bf0f3")
-	)
-	(wire
-		(pts
 			(xy 374.65 100.33) (xy 375.92 100.33)
 		)
 		(stroke
@@ -4211,6 +4201,16 @@
 	)
 	(wire
 		(pts
+			(xy 334.01 196.85) (xy 335.28 196.85)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "74486e5d-a54d-44aa-b0d4-68d3d5233a35")
+	)
+	(wire
+		(pts
 			(xy 217.17 213.36) (xy 218.44 213.36)
 		)
 		(stroke
@@ -4238,6 +4238,16 @@
 			(type default)
 		)
 		(uuid "761f1398-07c7-42c6-82f9-73aee6868d94")
+	)
+	(wire
+		(pts
+			(xy 25.4 55.88) (xy 33.02 55.88)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "76ab35d2-910a-4406-a4fd-39f64bc49a5b")
 	)
 	(wire
 		(pts
@@ -4371,6 +4381,16 @@
 	)
 	(wire
 		(pts
+			(xy 325.12 100.33) (xy 334.01 100.33)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "83d73248-b9d4-4958-b67d-9e9bd361ca91")
+	)
+	(wire
+		(pts
 			(xy 54.61 85.09) (xy 81.28 85.09)
 		)
 		(stroke
@@ -4398,6 +4418,16 @@
 			(type default)
 		)
 		(uuid "84963495-78ba-417d-84c3-da359f81258b")
+	)
+	(wire
+		(pts
+			(xy 25.4 52.07) (xy 25.4 55.88)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "866adef7-9ad4-4f80-9738-ed781781cbba")
 	)
 	(wire
 		(pts
@@ -4508,16 +4538,6 @@
 			(type default)
 		)
 		(uuid "8eb04400-9379-4aa4-b15f-1213f8a27308")
-	)
-	(wire
-		(pts
-			(xy 167.64 215.9) (xy 175.26 215.9)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "90e425ec-221b-4259-8255-4ea475c484df")
 	)
 	(wire
 		(pts
@@ -4691,13 +4711,13 @@
 	)
 	(wire
 		(pts
-			(xy 325.12 102.87) (xy 334.01 102.87)
+			(xy 175.26 215.9) (xy 176.53 215.9)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
-		(uuid "9ddf4b76-f88d-427e-8bc0-926751923712")
+		(uuid "9d100ae9-f1bd-4a16-aeba-fa6b2dc25e37")
 	)
 	(wire
 		(pts
@@ -4718,16 +4738,6 @@
 			(type default)
 		)
 		(uuid "a0370e6d-3181-47a4-b7a4-0c068d0ba34c")
-	)
-	(wire
-		(pts
-			(xy 190.5 90.17) (xy 193.04 90.17)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "a199f710-ddd9-42dc-9357-ed50184b0bdc")
 	)
 	(wire
 		(pts
@@ -4851,6 +4861,16 @@
 	)
 	(wire
 		(pts
+			(xy 177.8 66.04) (xy 185.42 66.04)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ab2dae20-ab79-49b7-9808-4be439ac0d87")
+	)
+	(wire
+		(pts
 			(xy 125.73 151.13) (xy 129.54 151.13)
 		)
 		(stroke
@@ -4888,6 +4908,16 @@
 			(type default)
 		)
 		(uuid "ad405d8f-2e85-4852-b791-c5662908750d")
+	)
+	(wire
+		(pts
+			(xy 167.64 213.36) (xy 176.53 213.36)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ae4e5793-5c5a-45e7-a6ac-b4ff5d5be5d8")
 	)
 	(wire
 		(pts
@@ -5001,13 +5031,23 @@
 	)
 	(wire
 		(pts
-			(xy 175.26 215.9) (xy 176.53 215.9)
+			(xy 175.26 215.9) (xy 167.64 215.9)
 		)
 		(stroke
 			(width 0)
 			(type default)
 		)
 		(uuid "ba5030b4-07a0-4d8c-9d46-6ac8fcf4d03e")
+	)
+	(wire
+		(pts
+			(xy 177.8 88.9) (xy 177.8 90.17)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "ba8ade89-a2f8-4497-b61c-65c273d67731")
 	)
 	(wire
 		(pts
@@ -5068,6 +5108,16 @@
 			(type default)
 		)
 		(uuid "bf3a6826-e913-4ba2-9b72-519d0a838770")
+	)
+	(wire
+		(pts
+			(xy 326.39 199.39) (xy 335.28 199.39)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "bf992b19-57bd-49fb-8049-61a63731e963")
 	)
 	(wire
 		(pts
@@ -5191,16 +5241,6 @@
 	)
 	(wire
 		(pts
-			(xy 325.12 100.33) (xy 334.01 100.33)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "cd95c4da-0640-4471-a861-be5a06e92aaf")
-	)
-	(wire
-		(pts
 			(xy 133.35 88.9) (xy 123.19 88.9)
 		)
 		(stroke
@@ -5208,6 +5248,16 @@
 			(type default)
 		)
 		(uuid "cf473991-77e2-471a-a395-81213c2467d3")
+	)
+	(wire
+		(pts
+			(xy 325.12 102.87) (xy 334.01 102.87)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "d0399454-9008-4098-9610-3a6e1ea11422")
 	)
 	(wire
 		(pts
@@ -5361,6 +5411,16 @@
 	)
 	(wire
 		(pts
+			(xy 177.8 90.17) (xy 193.04 90.17)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e0267c38-ff6a-4fea-97a6-cda911d9fb0f")
+	)
+	(wire
+		(pts
 			(xy 234.95 101.6) (xy 234.95 104.14)
 		)
 		(stroke
@@ -5388,16 +5448,6 @@
 			(type default)
 		)
 		(uuid "e45182e1-7a78-4dc8-960c-1b0ab27709ad")
-	)
-	(wire
-		(pts
-			(xy 326.39 196.85) (xy 334.01 196.85)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "e480688d-c4ef-485c-a8b8-fd0783a39acc")
 	)
 	(wire
 		(pts
@@ -5551,16 +5601,6 @@
 	)
 	(wire
 		(pts
-			(xy 30.48 55.88) (xy 33.02 55.88)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "fd1dd15e-9d33-44b4-8901-ef69f191e08e")
-	)
-	(wire
-		(pts
 			(xy 109.22 46.99) (xy 120.65 46.99)
 		)
 		(stroke
@@ -5639,7 +5679,7 @@
 	)
 	(global_label "I2C_SDA"
 		(shape bidirectional)
-		(at 167.64 215.9 180)
+		(at 167.64 213.36 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -5649,7 +5689,7 @@
 		)
 		(uuid "1d7dbf2d-7b79-4948-ae01-611125fcfe4d")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 155.9235 215.9 0)
+			(at 155.9235 213.36 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5759,7 +5799,7 @@
 	)
 	(global_label "I2C_SDA"
 		(shape bidirectional)
-		(at 325.12 102.87 180)
+		(at 325.12 100.33 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -5769,7 +5809,7 @@
 		)
 		(uuid "6dfe9081-d1cd-4954-9604-008c4516b723")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 313.4035 102.87 0)
+			(at 313.4035 100.33 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5783,7 +5823,7 @@
 	)
 	(global_label "I2C_SCL"
 		(shape input)
-		(at 326.39 196.85 180)
+		(at 326.39 199.39 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -5793,7 +5833,7 @@
 		)
 		(uuid "8c6e3ae3-4317-4779-bbd7-e6a7f7247b8f")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 315.8453 196.85 0)
+			(at 315.8453 199.39 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5807,7 +5847,7 @@
 	)
 	(global_label "I2C_SCL"
 		(shape input)
-		(at 167.64 213.36 180)
+		(at 167.64 215.9 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -5817,31 +5857,7 @@
 		)
 		(uuid "976f605b-29c9-44ae-827b-5144c8ecf9dd")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 157.0953 213.36 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-	)
-	(global_label "VOUT_P"
-		(shape input)
-		(at 190.5 90.17 180)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify right)
-		)
-		(uuid "a1ad32d9-fc4d-4e6a-b462-ba40ff2cb933")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 180.56 90.17 0)
+			(at 157.0953 215.9 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5879,7 +5895,7 @@
 	)
 	(global_label "I2C_SCL"
 		(shape input)
-		(at 325.12 100.33 180)
+		(at 325.12 102.87 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -5889,31 +5905,7 @@
 		)
 		(uuid "aae3d688-8a1d-42d5-9da1-66080f66f927")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 314.5753 100.33 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-	)
-	(global_label "VOUT_P"
-		(shape input)
-		(at 30.48 55.88 180)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify right)
-		)
-		(uuid "ab740249-d558-452f-8cbd-b62296515e4f")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 20.54 55.88 0)
+			(at 314.5753 102.87 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5951,7 +5943,7 @@
 	)
 	(global_label "I2C_SDA"
 		(shape bidirectional)
-		(at 326.39 199.39 180)
+		(at 326.39 196.85 180)
 		(fields_autoplaced yes)
 		(effects
 			(font
@@ -5961,7 +5953,7 @@
 		)
 		(uuid "cc4abef3-e45f-42fb-b782-753e4c26c531")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 314.6735 199.39 0)
+			(at 314.6735 196.85 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5986,30 +5978,6 @@
 		(uuid "d1ee4338-4816-4f0d-8cc8-908c790ddc5e")
 		(property "Intersheetrefs" "${INTERSHEET_REFS}"
 			(at 309.2534 157.48 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-				(justify right)
-			)
-		)
-	)
-	(global_label "VOUT_P"
-		(shape input)
-		(at 180.34 66.04 180)
-		(fields_autoplaced yes)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify right)
-		)
-		(uuid "da74781c-2e36-4445-82a9-a32c9b656c2d")
-		(property "Intersheetrefs" "${INTERSHEET_REFS}"
-			(at 170.4 66.04 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6079,7 +6047,7 @@
 				)
 			)
 		)
-		(property "Description" "IC REG BUCK ADJ 8A 32VQFN"
+		(property "Description" "Buck regulator 8A 32-VQFN"
 			(at 237.49 45.72 0)
 			(hide yes)
 			(show_name no)
@@ -6090,7 +6058,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Microchip Technology"
+		(property "MANUFACTURER" "Microchip"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -6355,7 +6323,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0805_2012Metric"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 93.0148 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -6366,7 +6334,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM21BZ71C106KE15-01A.pdf"
+		(property "Datasheet" "https://weblib.samsungsem.com/mlcc/mlcc-ec-data-sheet.do?partNumber=CL31B106KOHVPN"
 			(at 93.98 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -6377,7 +6345,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10uF 16V X7R 0805"
+		(property "Description" "CAP CER 10UF 16V X7R 1206"
 			(at 93.98 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -6388,7 +6356,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -6399,7 +6367,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM21BZ71C106KE15LTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Samsung Electro-Mechanics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1276-6797-1-ND"
 			(at 93.98 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -6421,7 +6422,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM21BZ71C106KE15L"
+		(property "MANUFACTURER_PART_NUMBER" "CL31B106KOHVPNE"
 			(at 93.98 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -6502,7 +6503,7 @@
 				)
 			)
 		)
-		(property "Description" "70M/55M POWER SWITCH TSOT-25"
+		(property "Description" "Load switch w/ current-limit TSOT-23-5"
 			(at 336.55 162.56 0)
 			(hide yes)
 			(show_name no)
@@ -6513,7 +6514,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Richtek USA Inc."
+		(property "MANUFACTURER" "Richtek"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -6615,7 +6616,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0805_2012Metric"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 167.3352 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -6626,7 +6627,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM21BZ71C106KE15-01A.pdf"
+		(property "Datasheet" "https://weblib.samsungsem.com/mlcc/mlcc-ec-data-sheet.do?partNumber=CL31B106KOHVPN"
 			(at 166.37 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -6637,7 +6638,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10uF 16V X7R 0805"
+		(property "Description" "CAP CER 10UF 16V X7R 1206"
 			(at 166.37 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -6648,7 +6649,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -6659,7 +6660,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM21BZ71C106KE15LTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Samsung Electro-Mechanics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1276-6797-1-ND"
 			(at 166.37 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -6681,7 +6715,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM21BZ71C106KE15L"
+		(property "MANUFACTURER_PART_NUMBER" "CL31B106KOHVPNE"
 			(at 166.37 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -6818,7 +6852,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0805_2012Metric"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 221.9452 55.88 0)
 			(hide yes)
 			(show_name no)
@@ -6829,7 +6863,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM21BR71C475KE51-01A.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRT21BR71C475KE13-01.pdf"
 			(at 220.98 52.07 0)
 			(hide yes)
 			(show_name no)
@@ -6840,7 +6874,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7uF 16V X7R 0805"
+		(property "Description" "CAP CER 4.7UF 16V X7R 0805"
 			(at 220.98 52.07 0)
 			(hide yes)
 			(show_name no)
@@ -6851,7 +6885,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -6862,7 +6896,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM21BR71C475KE51KTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata Electronics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-GRT21BR71C475KE13KCT-ND"
 			(at 220.98 52.07 0)
 			(hide yes)
 			(show_name no)
@@ -6884,7 +6951,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM21BR71C475KE51K"
+		(property "MANUFACTURER_PART_NUMBER" "GRT21BR71C475KE13K"
 			(at 220.98 52.07 0)
 			(hide yes)
 			(show_name no)
@@ -7100,7 +7167,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 121.412 72.39 90)
 			(hide yes)
 			(show_name no)
@@ -7111,7 +7178,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
+		(property "Datasheet" "https://www.koaspeer.com/pdfs/RK73H.pdf"
 			(at 123.19 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -7122,7 +7189,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 15k OHM 1% 1/10W 0402"
+		(property "Description" "RES 15K OHM 1% 1/10W 0402"
 			(at 123.19 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -7133,7 +7200,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -7144,7 +7211,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P15.0KLTR-ND"
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "KOA Speer Electronics, Inc."
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "2019-RK73H1ETTP1502FCT-ND"
 			(at 123.19 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -7166,7 +7266,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1502X"
+		(property "MANUFACTURER_PART_NUMBER" "RK73H1ETTP1502F"
 			(at 123.19 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -7226,7 +7326,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 226.06 164.592 90)
 			(hide yes)
 			(show_name no)
@@ -7237,7 +7337,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDM0000/DMM0000COL9.pdf"
 			(at 226.06 166.37 0)
 			(hide yes)
 			(show_name no)
@@ -7248,7 +7348,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 75m OHM 0.5% SENSE 0805 (value TBD per rail)"
+		(property "Description" "RES 75 OHM 0.5% 1/2W 0805"
 			(at 226.06 166.37 90)
 			(hide yes)
 			(show_name no)
@@ -7259,7 +7359,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "POWER" "1/4W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Metal-strip shunt"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "0.5%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "10-ERJ-UP6D75R0VCT-ND"
 			(at 226.06 166.37 90)
 			(hide yes)
 			(show_name no)
@@ -7281,7 +7414,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "KDV08DR150ET"
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-UP6D75R0V"
 			(at 226.06 166.37 90)
 			(hide yes)
 			(show_name no)
@@ -7292,7 +7425,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Ohmite"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 226.06 166.37 90)
 			(hide yes)
 			(show_name no)
@@ -7352,7 +7485,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "C_0805_2012Metric"
+		(property "Footprint" "2220 (5750 Metric)"
 			(at 209.8548 74.93 0)
 			(hide yes)
 			(show_name no)
@@ -7363,7 +7496,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM21BD72A225ME01-01A.pdf"
+		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_automotive_midvoltage_en.pdf"
 			(at 210.82 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -7374,7 +7507,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 2.2uF 100V X7T 0805"
+		(property "Description" "CAP CER 2.2UF 250V X7T 2220"
 			(at 210.82 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -7385,7 +7518,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7T"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -7396,7 +7529,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM21BD72A225ME01KTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "100V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "TDK"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "445-7950-1-ND"
 			(at 210.82 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -7418,7 +7584,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM21BD72A225ME01K"
+		(property "MANUFACTURER_PART_NUMBER" "CGA9P3X7T2E225K250KA"
 			(at 210.82 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -7478,7 +7644,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 113.9952 85.09 0)
 			(hide yes)
 			(show_name no)
@@ -7489,7 +7655,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM155R71C104KA88-01.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 113.03 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -7500,8 +7666,41 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 113.03 81.28 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7522,7 +7721,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 113.03 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -7544,7 +7743,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 113.03 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -7758,7 +7957,7 @@
 				)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 196.85 88.392 90)
 			(hide yes)
 			(show_name no)
@@ -7780,7 +7979,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 2.2 OHM 1% 1/10W 0402"
+		(property "Description" "RES 2.2 OHM 1% 1/10W 0402"
 			(at 196.85 90.17 90)
 			(hide yes)
 			(show_name no)
@@ -7791,7 +7990,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -7824,7 +8056,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF2R20X"
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-U02F2R20X"
 			(at 196.85 90.17 90)
 			(hide yes)
 			(show_name no)
@@ -8060,7 +8292,7 @@
 				)
 			)
 		)
-		(property "Description" "IC REG BUCK ADJ 3A UDFN20208"
+		(property "Description" "Buck regulator 3A UDFN"
 			(at 113.03 166.37 0)
 			(hide yes)
 			(show_name no)
@@ -8071,7 +8303,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Diodes Incorporated"
+		(property "MANUFACTURER" "Diodes Inc"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -8185,7 +8417,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 346.202 137.16 90)
 			(hide yes)
 			(show_name no)
@@ -8196,7 +8428,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 347.98 137.16 0)
 			(hide yes)
 			(show_name no)
@@ -8207,7 +8439,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 347.98 137.16 0)
 			(hide yes)
 			(show_name no)
@@ -8218,7 +8450,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -8231,6 +8496,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
+			(at 347.98 137.16 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8309,8 +8585,30 @@
 				)
 			)
 		)
-		(property "Description" "FIXED IND 2.2UH 4.15A 16.5 MOHM"
+		(property "Description" "IND 2.2uH 4.15A"
 			(at 133.35 166.37 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "POWER" "4.15A"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Inductor"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8491,7 +8789,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0603_1608Metric"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 226.3648 85.09 0)
 			(hide yes)
 			(show_name no)
@@ -8502,7 +8800,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM188Z71C225KE43-01A.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRT21BR71C225KE01-01.pdf"
 			(at 227.33 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -8513,7 +8811,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 2.2uF 16V X7R 0603"
+		(property "Description" "CAP CER 2.2UF 16V X7R 0805"
 			(at 227.33 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -8524,7 +8822,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -8535,7 +8833,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM188Z71C225KE43DTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata Electronics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-GRT21BR71C225KE01LCT-ND"
 			(at 227.33 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -8557,7 +8888,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM188Z71C225KE43D"
+		(property "MANUFACTURER_PART_NUMBER" "GRT21BR71C225KE01L"
 			(at 227.33 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -8617,7 +8948,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 385.7752 110.49 0)
 			(hide yes)
 			(show_name no)
@@ -8628,7 +8959,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 384.81 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -8639,8 +8970,41 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 384.81 106.68 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8661,7 +9025,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -8672,7 +9036,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -8732,7 +9096,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 41.402 60.96 90)
 			(hide yes)
 			(show_name no)
@@ -8754,7 +9118,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 100k OHM 1% 1/10W 0402"
+		(property "Description" "RES 100K OHM 1% 1/10W 0402"
 			(at 43.18 60.96 0)
 			(hide yes)
 			(show_name no)
@@ -8765,7 +9129,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -8776,7 +9140,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P100KLTR-ND"
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P100KLCT-ND"
 			(at 43.18 60.96 0)
 			(hide yes)
 			(show_name no)
@@ -8858,7 +9255,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0603_1608Metric"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 205.4352 99.06 0)
 			(hide yes)
 			(show_name no)
@@ -8869,7 +9266,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM188D72A105KE01-01A.pdf"
+		(property "Datasheet" "https://datasheets.kyocera-avx.com/AutoMLCC.pdf"
 			(at 204.47 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -8880,7 +9277,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 1uF 100V X7T 0603"
+		(property "Description" "CAP CER 1UF 100V X7R 0805"
 			(at 204.47 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -8891,7 +9288,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7T"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -8902,7 +9299,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM188D72A105KE01WTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "100V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "KYOCERA AVX"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "478-KAM21KR72A105KUCT-ND"
 			(at 204.47 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -8924,7 +9354,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM188D72A105KE01W"
+		(property "MANUFACTURER_PART_NUMBER" "08051C105K4T2A"
 			(at 204.47 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -9141,7 +9571,7 @@
 				)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 88.9 149.098 90)
 			(hide yes)
 			(show_name no)
@@ -9163,7 +9593,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 6.81k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 6.81K OHM 1% 1/10W 0402"
 			(at 88.9 147.32 90)
 			(hide yes)
 			(show_name no)
@@ -9174,7 +9604,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -9312,6 +9775,84 @@
 		)
 	)
 	(symbol
+		(lib_id "power:+5V")
+		(at 177.8 88.9 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "4a963376-247b-48f4-97c2-92806bf66138")
+		(property "Reference" "#PWR0569"
+			(at 177.8 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "V_POE"
+			(at 177.8 83.82 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 177.8 88.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 177.8 88.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+5V\""
+			(at 177.8 88.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "e40fc045-93a9-4436-90ff-1925da6436df")
+		)
+		(instances
+			(project "ntp-server-stm32"
+				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/9c3718b2-090f-4287-ae75-358aea403098"
+					(reference "#PWR0569")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:FerriteBead")
 		(at 389.89 146.05 180)
 		(unit 1)
@@ -9367,8 +9908,30 @@
 				)
 			)
 		)
-		(property "Description" "FERRITE BEAD 600 OHM 1206 1LN"
+		(property "Description" "FERRITE BEAD 600ohm 1206"
 			(at 389.89 146.05 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "POWER" "3A"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Ferrite bead"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9389,7 +9952,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata Electronics"
+		(property "MANUFACTURER" "Murata"
 			(at 389.89 146.05 90)
 			(hide yes)
 			(show_name no)
@@ -9400,7 +9963,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "BLM31KN601SN1L"
+		(property "MANUFACTURER_PART_NUMBER" "BLM31PG601SN1L"
 			(at 389.89 146.05 90)
 			(hide yes)
 			(show_name no)
@@ -9538,7 +10101,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "C_0805_2012Metric"
+		(property "Footprint" "2220 (5750 Metric)"
 			(at 197.1548 74.93 0)
 			(hide yes)
 			(show_name no)
@@ -9549,7 +10112,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM21BD72A225ME01-01A.pdf"
+		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_automotive_midvoltage_en.pdf"
 			(at 198.12 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -9560,7 +10123,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 2.2uF 100V X7T 0805"
+		(property "Description" "CAP CER 2.2UF 250V X7T 2220"
 			(at 198.12 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -9571,7 +10134,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7T"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -9582,7 +10145,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM21BD72A225ME01KTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "100V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "TDK"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "445-7950-1-ND"
 			(at 198.12 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -9604,7 +10200,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM21BD72A225ME01K"
+		(property "MANUFACTURER_PART_NUMBER" "CGA9P3X7T2E225K250KA"
 			(at 198.12 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -9821,7 +10417,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0805_2012Metric"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 81.5848 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -9832,7 +10428,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM21BZ71C106KE15-01A.pdf"
+		(property "Datasheet" "https://weblib.samsungsem.com/mlcc/mlcc-ec-data-sheet.do?partNumber=CL31B106KOHVPN"
 			(at 82.55 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -9843,7 +10439,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10uF 16V X7R 0805"
+		(property "Description" "CAP CER 10UF 16V X7R 1206"
 			(at 82.55 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -9854,7 +10450,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -9865,7 +10461,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM21BZ71C106KE15LTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Samsung Electro-Mechanics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1276-6797-1-ND"
 			(at 82.55 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -9887,7 +10516,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM21BZ71C106KE15L"
+		(property "MANUFACTURER_PART_NUMBER" "CL31B106KOHVPNE"
 			(at 82.55 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -10339,7 +10968,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 84.328 151.13 90)
 			(hide yes)
 			(show_name no)
@@ -10361,7 +10990,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 82.55 151.13 0)
 			(hide yes)
 			(show_name no)
@@ -10372,7 +11001,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -10383,7 +11012,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P10.0KLTR-ND"
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
 			(at 82.55 151.13 0)
 			(hide yes)
 			(show_name no)
@@ -10465,7 +11127,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 225.552 60.96 90)
 			(hide yes)
 			(show_name no)
@@ -10487,7 +11149,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 2.2 OHM 1% 1/10W 0402"
+		(property "Description" "RES 2.2 OHM 1% 1/10W 0402"
 			(at 227.33 60.96 0)
 			(hide yes)
 			(show_name no)
@@ -10498,7 +11160,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -10531,7 +11226,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF2R20X"
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-U02F2R20X"
 			(at 227.33 60.96 0)
 			(hide yes)
 			(show_name no)
@@ -10591,7 +11286,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 107.442 40.64 90)
 			(hide yes)
 			(show_name no)
@@ -10613,7 +11308,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 109.22 40.64 0)
 			(hide yes)
 			(show_name no)
@@ -10624,7 +11319,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -10635,7 +11330,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P2.05KLTR-ND"
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
 			(at 109.22 40.64 0)
 			(hide yes)
 			(show_name no)
@@ -10717,7 +11445,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 61.9252 69.85 0)
 			(hide yes)
 			(show_name no)
@@ -10728,7 +11456,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM155R71C103KA01-01.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRT155R71C103KE01-01.pdf"
 			(at 60.96 66.04 0)
 			(hide yes)
 			(show_name no)
@@ -10739,7 +11467,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10nF 16V X7R 0402"
+		(property "Description" "CAP CER 10000PF 16V X7R 0402"
 			(at 60.96 66.04 0)
 			(hide yes)
 			(show_name no)
@@ -10750,7 +11478,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -10761,7 +11489,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-1313-2-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata Electronics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-GRT155R71C103KE01JCT-ND"
 			(at 60.96 66.04 0)
 			(hide yes)
 			(show_name no)
@@ -10783,7 +11544,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C103KA01D"
+		(property "MANUFACTURER_PART_NUMBER" "GRT155R71C103KE01J"
 			(at 60.96 66.04 0)
 			(hide yes)
 			(show_name no)
@@ -10843,7 +11604,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 134.3152 76.2 0)
 			(hide yes)
 			(show_name no)
@@ -10854,7 +11615,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM155R71C472KA01-01.pdf"
+		(property "Datasheet" "https://yageogroup.com/content/datasheet/asset/file/KEM_C1090_X7R_ESD"
 			(at 133.35 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -10865,7 +11626,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7nF 16V X7R 0402"
+		(property "Description" "CAP CER 0402 4.7NF 16V X7R 10%"
 			(at 133.35 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -10876,7 +11637,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -10887,7 +11648,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6334-2-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "KEMET"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "399-17875-1-ND"
 			(at 133.35 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -10909,7 +11703,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C472KA01D"
+		(property "MANUFACTURER_PART_NUMBER" "C0402C472K4RECAUTO"
 			(at 133.35 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -11126,7 +11920,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0805_2012Metric"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 70.1548 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -11137,7 +11931,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM21BZ71C106KE15-01A.pdf"
+		(property "Datasheet" "https://weblib.samsungsem.com/mlcc/mlcc-ec-data-sheet.do?partNumber=CL31B106KOHVPN"
 			(at 71.12 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -11148,7 +11942,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10uF 16V X7R 0805"
+		(property "Description" "CAP CER 10UF 16V X7R 1206"
 			(at 71.12 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -11159,7 +11953,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -11170,7 +11964,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM21BZ71C106KE15LTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Samsung Electro-Mechanics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1276-6797-1-ND"
 			(at 71.12 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -11192,7 +12019,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM21BZ71C106KE15L"
+		(property "MANUFACTURER_PART_NUMBER" "CL31B106KOHVPNE"
 			(at 71.12 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -11408,7 +12235,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_1210_3225Metric"
+		(property "Footprint" "1210 (3225 Metric)"
 			(at 147.0152 76.2 0)
 			(hide yes)
 			(show_name no)
@@ -11419,7 +12246,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM32EC81C476KE15-01.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRT32EC81C476KE13-01.pdf"
 			(at 146.05 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -11430,7 +12257,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 47uF 16V X6S 1210"
+		(property "Description" "CAP CER 47UF 16V X6S 1210"
 			(at 146.05 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -11441,7 +12268,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X6S"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -11452,7 +12279,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-16309-2-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata Electronics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-12494-1-ND"
 			(at 146.05 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -11474,7 +12334,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM32EC81C476KE15K"
+		(property "MANUFACTURER_PART_NUMBER" "GRT32EC81C476KE13L"
 			(at 146.05 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -11534,7 +12394,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 150.622 181.61 90)
 			(hide yes)
 			(show_name no)
@@ -11556,7 +12416,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 2.2k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 2.2K OHM 1% 1/10W 0402"
 			(at 152.4 181.61 0)
 			(hide yes)
 			(show_name no)
@@ -11567,7 +12427,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -11578,7 +12438,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P2.20KLTR-ND"
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P2.20KLCT-ND"
 			(at 152.4 181.61 0)
 			(hide yes)
 			(show_name no)
@@ -11660,7 +12553,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 141.9352 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -11671,7 +12564,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM155R71C472KA01-01.pdf"
+		(property "Datasheet" "https://yageogroup.com/content/datasheet/asset/file/KEM_C1090_X7R_ESD"
 			(at 140.97 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -11682,7 +12575,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7nF 16V X7R 0402"
+		(property "Description" "CAP CER 0402 4.7NF 16V X7R 10%"
 			(at 140.97 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -11693,7 +12586,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -11704,7 +12597,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6334-2-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "KEMET"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "399-17875-1-ND"
 			(at 140.97 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -11726,7 +12652,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C472KA01D"
+		(property "MANUFACTURER_PART_NUMBER" "C0402C472K4RECAUTO"
 			(at 140.97 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -11786,7 +12712,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 383.54 150.622 90)
 			(hide yes)
 			(show_name no)
@@ -11808,7 +12734,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 100m OHM 0.5% SENSE 0805 (value TBD per rail)"
+		(property "Description" "RES 0.1 OHM 0.5% 1/2W 1206"
 			(at 383.54 152.4 90)
 			(hide yes)
 			(show_name no)
@@ -11819,7 +12745,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "POWER" "1/4W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Metal-strip shunt"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "0.5%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "273-KDV12DR100ETCT-ND"
 			(at 383.54 152.4 90)
 			(hide yes)
 			(show_name no)
@@ -11841,7 +12800,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "KDV08DR150ET"
+		(property "MANUFACTURER_PART_NUMBER" "KDV12DR100ET"
 			(at 383.54 152.4 90)
 			(hide yes)
 			(show_name no)
@@ -12090,8 +13049,19 @@
 				)
 			)
 		)
-		(property "Description" "INA228AQDGSRQ1"
+		(property "Description" "Current/power monitor 20-bit I2C"
 			(at 176.53 205.74 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Texas Instruments"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12185,7 +13155,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 121.412 93.98 90)
 			(hide yes)
 			(show_name no)
@@ -12207,7 +13177,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 2.05k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 2.05K OHM 1% 1/10W 0402"
 			(at 123.19 93.98 0)
 			(hide yes)
 			(show_name no)
@@ -12218,7 +13188,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -12311,7 +13314,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 111.252 72.39 90)
 			(hide yes)
 			(show_name no)
@@ -12333,7 +13336,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 24.9k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 24.9K OHM 1% 1/10W 0402"
 			(at 113.03 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -12344,7 +13347,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -12355,7 +13358,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P24.9KLTR-ND"
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P24.9KLCT-ND"
 			(at 113.03 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -12670,7 +13706,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0805_2012Metric"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 191.4652 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -12681,7 +13717,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM21BZ71C106KE15-01A.pdf"
+		(property "Datasheet" "https://weblib.samsungsem.com/mlcc/mlcc-ec-data-sheet.do?partNumber=CL31B106KOHVPN"
 			(at 190.5 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -12692,7 +13728,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10uF 16V X7R 0805"
+		(property "Description" "CAP CER 10UF 16V X7R 1206"
 			(at 190.5 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -12703,7 +13739,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -12714,7 +13750,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM21BZ71C106KE15LTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Samsung Electro-Mechanics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1276-6797-1-ND"
 			(at 190.5 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -12736,7 +13805,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM21BZ71C106KE15L"
+		(property "MANUFACTURER_PART_NUMBER" "CL31B106KOHVPNE"
 			(at 190.5 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -12796,7 +13865,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 387.0452 207.01 0)
 			(hide yes)
 			(show_name no)
@@ -12807,7 +13876,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 386.08 203.2 0)
 			(hide yes)
 			(show_name no)
@@ -12818,8 +13887,41 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 386.08 203.2 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12840,7 +13942,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -12851,7 +13953,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -12989,7 +14091,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "C_0805_2012Metric"
+		(property "Footprint" "2220 (5750 Metric)"
 			(at 184.4548 74.93 0)
 			(hide yes)
 			(show_name no)
@@ -13000,7 +14102,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM21BD72A225ME01-01A.pdf"
+		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_automotive_midvoltage_en.pdf"
 			(at 185.42 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -13011,7 +14113,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 2.2uF 100V X7T 0805"
+		(property "Description" "CAP CER 2.2UF 250V X7T 2220"
 			(at 185.42 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -13022,7 +14124,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7T"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -13033,7 +14135,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM21BD72A225ME01KTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "100V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "TDK"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "445-7950-1-ND"
 			(at 185.42 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -13055,7 +14190,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM21BD72A225ME01K"
+		(property "MANUFACTURER_PART_NUMBER" "CGA9P3X7T2E225K250KA"
 			(at 185.42 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -13113,7 +14248,7 @@
 				)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 36.83 57.658 90)
 			(hide yes)
 			(show_name no)
@@ -13135,7 +14270,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 200k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 200K OHM 1% 1/10W 0402"
 			(at 36.83 55.88 90)
 			(hide yes)
 			(show_name no)
@@ -13146,7 +14281,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -13157,7 +14292,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P200KLTR-ND"
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P200KLCT-ND"
 			(at 36.83 55.88 90)
 			(hide yes)
 			(show_name no)
@@ -13200,6 +14368,84 @@
 			(project "ntp-server-stm32"
 				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/9c3718b2-090f-4287-ae75-358aea403098"
 					(reference "R90")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "power:+5V")
+		(at 177.8 63.5 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "a31a387e-1f9c-4e2a-907a-f9e1c2ee040c")
+		(property "Reference" "#PWR0568"
+			(at 177.8 67.31 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "V_POE"
+			(at 177.8 58.42 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 177.8 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 177.8 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+5V\""
+			(at 177.8 63.5 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "8e1fd801-7b43-4d16-88b8-e64490e15230")
+		)
+		(instances
+			(project "ntp-server-stm32"
+				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/9c3718b2-090f-4287-ae75-358aea403098"
+					(reference "#PWR0568")
 					(unit 1)
 				)
 			)
@@ -13362,6 +14608,84 @@
 		)
 	)
 	(symbol
+		(lib_id "power:+5V")
+		(at 25.4 52.07 0)
+		(unit 1)
+		(body_style 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "af63e085-dd9c-4c64-a227-dc79ecb46d0e")
+		(property "Reference" "#PWR0566"
+			(at 25.4 55.88 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "V_POE"
+			(at 25.4 46.99 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 25.4 52.07 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 25.4 52.07 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Power symbol creates a global label with name \"+5V\""
+			(at 25.4 52.07 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(pin "1"
+			(uuid "294f52ed-cdad-4e41-8cd0-96674c1d51c0")
+		)
+		(instances
+			(project "ntp-server-stm32"
+				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/9c3718b2-090f-4287-ae75-358aea403098"
+					(reference "#PWR0566")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
 		(lib_id "Device:C")
 		(at 116.84 54.61 0)
 		(unit 1)
@@ -13395,7 +14719,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 117.8052 58.42 0)
 			(hide yes)
 			(show_name no)
@@ -13406,7 +14730,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM155R71C104KA88-01.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 116.84 54.61 0)
 			(hide yes)
 			(show_name no)
@@ -13417,8 +14741,41 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 116.84 54.61 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13439,7 +14796,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 116.84 54.61 0)
 			(hide yes)
 			(show_name no)
@@ -13461,7 +14818,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 116.84 54.61 0)
 			(hide yes)
 			(show_name no)
@@ -13510,7 +14867,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "500m"
+		(property "Value" "15m"
 			(at 384.556 58.42 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13521,7 +14878,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 382.27 54.102 90)
 			(hide yes)
 			(show_name no)
@@ -13532,7 +14889,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://www.ohmite.com/assets/images/res-mcs.pdf"
 			(at 382.27 55.88 0)
 			(hide yes)
 			(show_name no)
@@ -13543,7 +14900,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 500m OHM 0.5% SENSE 0805 (value TBD per rail)"
+		(property "Description" "1W 0.015 OHM METAL ALLOY CS 1% C"
 			(at 382.27 55.88 90)
 			(hide yes)
 			(show_name no)
@@ -13554,7 +14911,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "POWER" "1/4W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Metal-strip shunt"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "0.5%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "273-MCS1632R015DERCT-ND"
 			(at 382.27 55.88 90)
 			(hide yes)
 			(show_name no)
@@ -13576,7 +14966,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "KDV08DR150ET"
+		(property "MANUFACTURER_PART_NUMBER" "MCS1632R015DER"
 			(at 382.27 55.88 90)
 			(hide yes)
 			(show_name no)
@@ -13725,7 +15115,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 150.622 171.45 90)
 			(hide yes)
 			(show_name no)
@@ -13747,7 +15137,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 152.4 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -13758,7 +15148,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -13769,7 +15159,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P10.0KLTR-ND"
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
 			(at 152.4 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -13873,8 +15296,19 @@
 				)
 			)
 		)
-		(property "Description" "INA228AQDGSRQ1"
+		(property "Description" "Current/power monitor 20-bit I2C"
 			(at 335.28 189.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Texas Instruments"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -14125,7 +15559,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0805_2012Metric"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 178.7652 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -14136,7 +15570,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM21BZ71C106KE15-01A.pdf"
+		(property "Datasheet" "https://weblib.samsungsem.com/mlcc/mlcc-ec-data-sheet.do?partNumber=CL31B106KOHVPN"
 			(at 177.8 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -14147,7 +15581,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10uF 16V X7R 0805"
+		(property "Description" "CAP CER 10UF 16V X7R 1206"
 			(at 177.8 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -14158,7 +15592,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -14169,7 +15603,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM21BZ71C106KE15LTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Samsung Electro-Mechanics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1276-6797-1-ND"
 			(at 177.8 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -14191,7 +15658,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM21BZ71C106KE15L"
+		(property "MANUFACTURER_PART_NUMBER" "CL31B106KOHVPNE"
 			(at 177.8 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -14429,8 +15896,19 @@
 				)
 			)
 		)
-		(property "Description" "INA228AQDGSRQ1"
+		(property "Description" "Current/power monitor 20-bit I2C"
 			(at 334.01 92.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Texas Instruments"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -14524,7 +16002,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 228.2952 223.52 0)
 			(hide yes)
 			(show_name no)
@@ -14535,7 +16013,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 227.33 219.71 0)
 			(hide yes)
 			(show_name no)
@@ -14546,8 +16024,41 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 227.33 219.71 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -14568,7 +16079,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -14579,7 +16090,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -14717,7 +16228,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0603_1608Metric"
+		(property "Footprint" "0603 (1608 Metric)"
 			(at 317.8048 147.32 0)
 			(hide yes)
 			(show_name no)
@@ -14728,7 +16239,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://yageogroup.com/content/datasheet/asset/file/KEM_C1023_X7R_AUTO_SMD"
 			(at 318.77 143.51 0)
 			(hide yes)
 			(show_name no)
@@ -14739,7 +16250,73 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 1uF 16V X7R 0603"
+		(property "Description" "CAP CER 1UF 16V X7R 0603"
+			(at 318.77 143.51 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "C0603C105K4RACAUTO"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "KEMET"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "399-17704-1-ND"
 			(at 318.77 143.51 0)
 			(hide yes)
 			(show_name no)
@@ -15134,7 +16711,7 @@
 				)
 			)
 		)
-		(property "Description" "IC REG BUCK ADJ 8A 32VQFN"
+		(property "Description" "Buck regulator 8A 32-VQFN"
 			(at 64.77 50.8 0)
 			(hide yes)
 			(show_name no)
@@ -15145,7 +16722,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Microchip Technology"
+		(property "MANUFACTURER" "Microchip"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -15567,7 +17144,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0805_2012Metric"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 202.8952 175.26 0)
 			(hide yes)
 			(show_name no)
@@ -15578,7 +17155,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM21BZ71C106KE15-01A.pdf"
+		(property "Datasheet" "https://weblib.samsungsem.com/mlcc/mlcc-ec-data-sheet.do?partNumber=CL31B106KOHVPN"
 			(at 201.93 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -15589,7 +17166,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 10uF 16V X7R 0805"
+		(property "Description" "CAP CER 10UF 16V X7R 1206"
 			(at 201.93 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -15600,7 +17177,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X7R"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -15611,7 +17188,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-GRM21BZ71C106KE15LTR-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Samsung Electro-Mechanics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1276-6797-1-ND"
 			(at 201.93 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -15633,7 +17243,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM21BZ71C106KE15L"
+		(property "MANUFACTURER_PART_NUMBER" "CL31B106KOHVPNE"
 			(at 201.93 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -15791,8 +17401,30 @@
 				)
 			)
 		)
-		(property "Description" "FIXED IND 6.8UH 11.5A 11.5 MOHM"
+		(property "Description" "IND 6.8uH 11.5A"
 			(at 118.11 67.31 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "POWER" "11.5A"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Inductor"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15971,7 +17603,7 @@
 				)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 85.09 86.868 90)
 			(hide yes)
 			(show_name no)
@@ -15993,7 +17625,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 2.21k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 2.21K OHM 1% 1/10W 0402"
 			(at 85.09 85.09 90)
 			(hide yes)
 			(show_name no)
@@ -16004,7 +17636,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -16015,7 +17647,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P2.21KLTR-ND"
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P2.21KLCT-ND"
 			(at 85.09 85.09 90)
 			(hide yes)
 			(show_name no)
@@ -16098,7 +17763,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 328.168 162.56 90)
 			(hide yes)
 			(show_name no)
@@ -16120,7 +17785,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 326.39 162.56 0)
 			(hide yes)
 			(show_name no)
@@ -16131,7 +17796,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -16142,7 +17807,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P10.0KLTR-ND"
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
 			(at 326.39 162.56 0)
 			(hide yes)
 			(show_name no)
@@ -16224,7 +17922,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_1210_3225Metric"
+		(property "Footprint" "1210 (3225 Metric)"
 			(at 160.9852 76.2 0)
 			(hide yes)
 			(show_name no)
@@ -16235,7 +17933,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM32EC81C476KE15-01.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRT32EC81C476KE13-01.pdf"
 			(at 160.02 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -16246,7 +17944,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 47uF 16V X6S 1210"
+		(property "Description" "CAP CER 47UF 16V X6S 1210"
 			(at 160.02 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -16257,7 +17955,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "DIELECTRIC" "X6S"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -16268,7 +17966,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-16309-2-ND"
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Murata Electronics"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-12494-1-ND"
 			(at 160.02 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -16290,7 +18021,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM32EC81C476KE15K"
+		(property "MANUFACTURER_PART_NUMBER" "GRT32EC81C476KE13L"
 			(at 160.02 72.39 0)
 			(hide yes)
 			(show_name no)
@@ -16506,7 +18237,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0603_1608Metric"
+		(property "Footprint" "0603 (1608 Metric)"
 			(at 366.0648 161.29 0)
 			(hide yes)
 			(show_name no)
@@ -16517,7 +18248,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://yageogroup.com/content/datasheet/asset/file/KEM_C1023_X7R_AUTO_SMD"
 			(at 367.03 157.48 0)
 			(hide yes)
 			(show_name no)
@@ -16528,7 +18259,73 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 1uF 16V X7R 0603"
+		(property "Description" "CAP CER 1UF 16V X7R 0603"
+			(at 367.03 157.48 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "C0603C105K4RACAUTO"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "KEMET"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "399-17704-1-ND"
 			(at 367.03 157.48 0)
 			(hide yes)
 			(show_name no)

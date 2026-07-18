@@ -304,7 +304,7 @@
       "method": 0,
       "sort_order": 0
     },
-    "bom_export_filename": "${PROJECTNAME}.csv",
+    "bom_export_filename": "sts1000_bom.csv",
     "bom_fmt_presets": [],
     "bom_fmt_settings": {
       "field_delimiter": ",",
@@ -738,10 +738,34 @@
           "label": "SNAPEDA_PN",
           "name": "SNAPEDA_PN",
           "show": false
+        },
+        {
+          "group_by": false,
+          "label": "VOLTAGE",
+          "name": "VOLTAGE",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "POWER",
+          "name": "POWER",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "DIELECTRIC",
+          "name": "DIELECTRIC",
+          "show": false
+        },
+        {
+          "group_by": false,
+          "label": "TOLERANCE",
+          "name": "TOLERANCE",
+          "show": false
         }
       ],
       "filter_string": "",
-      "group_symbols": false,
+      "group_symbols": true,
       "include_excluded_from_bom": true,
       "name": "",
       "sort_asc": true,
@@ -788,7 +812,7 @@
         "uuid": "4c8fa883-5b85-4079-9006-ac22e5786016"
       }
     ],
-    "used_designators": "FB1-11,L1-9,D1-21,D36,#PWR1-491,K1,C1-181,H1-14,J1-11,J26,Q1-24,R1-214,TP1,U1-64,Y1-3",
+    "used_designators": "C204",
     "variants": []
   },
   "sheets": [
@@ -858,7 +882,7 @@
     ],
     [
       "8516a03c-2dcf-4211-a0e4-f385f3438f2a",
-      "I2C GPIO"
+      "GPIO (page 17)"
     ],
     [
       "fdd681a7-78b0-4780-a402-46d96d17d671",
@@ -875,6 +899,10 @@
     [
       "3c84e598-3dad-4afe-bf84-971a3936fe83",
       "WDT"
+    ],
+    [
+      "1dd95190-8248-4aa1-9194-8073fa083bff",
+      "Optical Encoder"
     ]
   ],
   "text_variables": {},

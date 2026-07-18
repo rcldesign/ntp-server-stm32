@@ -1,9 +1,9 @@
 # STS1000 "Meridian" — External Window Watchdog & Board Cold-Cycle Arming
 
 External windowed watchdog that backstops firmware liveness and, on a window
-violation, arms the board cold-cycle (`POE_KILL`). Also captures the corrected
-role of the I²C bus accelerator (`LTC4311`) and the consequent I²C-wedge recovery
-procedure. Datasheet-verified against TI SBVS366A (TPS3430) and ADI 4311fa (LTC4311).
+violation, arms the board cold-cycle (`POE_KILL`). Also documents the role of the
+I²C bus accelerator (`LTC4311`) and the I²C-wedge recovery procedure. Datasheet-verified
+against TI SBVS366A (TPS3430) and ADI 4311fa (LTC4311).
 
 ---
 
@@ -23,12 +23,11 @@ supervisor task is confirmed live (§5); the IWDG covers the pre-arm window.
 
 ## 2. Part selection
 
-| Desig.¹ | Part (orderable) | Pkg | Notes |
+| Desig. | Part (orderable) | Pkg | Notes |
 |---|---|---|---|
-| **U64** | TPS3430WDRCR (std) / TPS3430-Q1² | VSON-10 DRC, 3×3 mm | Standalone **window** watchdog; VDD 1.6–6.5 V; IDD ~10 µA; open-drain `WDO`. Active/Production (marking 430AA). |
+| **U64** | TPS3430WDRCR (std) / TPS3430-Q1¹ | VSON-10 DRC, 3×3 mm | Standalone **window** watchdog; VDD 1.6–6.5 V; IDD ~10 µA; open-drain `WDO`. Active/Production (marking 430AA). |
 
-¹ Designator reconciled against the re-annotated KiCad schematic (WDT sheet).
-² Automotive AEC-Q100 grade qualified version exists ("TPS3430-Q1"); confirm exact orderable suffix on ti.com if used.
+¹ Automotive AEC-Q100 grade qualified version exists ("TPS3430-Q1"); confirm exact orderable suffix on ti.com if used.
 
 Why a dedicated window WDT (not a supervisor + simple WDT): the window catches a
 **runaway/babbling** firmware (kicks too fast) as well as a stall (kicks too slow).
@@ -45,8 +44,8 @@ Both are real failure modes for the timing/network supervisor.
 | 3 | SET0 | **3V3_STM** | hard-tied high |
 | 4 | CRST | **NC (float)** | selects tRST = 200 ms preset; no fill |
 | 5 | GND | GND | |
-| 6 | SET1 | **WDT_EN (PA9)** | enable/ratio control (§5); **R213 = 100 kΩ pulldown** so it boots disabled |
-| 7 | WDI | **WDT_KICK (PB2)** | falling-edge triggered; **R169 = 100 kΩ pulldown** for a defined level <!-- TODO verify designator: R169 (no pulldown on WDT_KICK in current netlist) --> |
+| 6 | SET1 | **WDT_EN (PC12)** | enable/ratio control (§5); **R213 = 100 kΩ pulldown** so it boots disabled |
+| 7 | WDI | **WDT_KICK (PB2)** | falling-edge triggered; **no pulldown** (net is a 2-node PB2↔WDI link; PB2 push-pull holds a defined level) |
 | 8 | WDO | **WDO_N** | open-drain active-low; pull-up **R23 = 10 kΩ** (§6) |
 | 9 | NC | float | must not connect |
 | 10 | VDD2 | 3V3_STM | **must** tie to VDD1 — part is non-functional otherwise |
@@ -89,18 +88,18 @@ Reserve for a future cadence change; the no-cap preset is the baseline.
 
 ---
 
-## 5. Enable / disable control — `WDT_EN` (PA9)
+## 5. Enable / disable control — `WDT_EN` (PC12)
 
 The TPS3430 is enabled/disabled by the SET pins. SET0 is tied high; **SET1 is driven
-directly by the MCU on PA9 (`WDT_EN`, GPIO push-pull).**
+directly by the MCU on PC12 (`WDT_EN`, GPIO push-pull).**
 
-| SET0 | SET1 (PA9) | Mode |
+| SET0 | SET1 (PC12) | Mode |
 |---|---|---|
 | 1 | 0 | **Disabled** — WDO held high, all WDI activity ignored |
 | 1 | 1 | **Enabled**, 1:2 ratio, window per §4 |
 
-- **Boot-disabled by default.** At MCU reset PA9 is Hi-Z; **R213 (100 kΩ pulldown)**
-  holds SET1 low → disabled. Firmware drives PA9 high to arm, after the supervisor
+- **Boot-disabled by default.** At MCU reset PC12 is Hi-Z; **R213 (100 kΩ pulldown)**
+  holds SET1 low → disabled. Firmware drives PC12 high to arm, after the supervisor
   task is confirmed running.
 - **Enable transition** takes effect immediately, with a 150 µs (tWD-setup) blanking
   before the device responds to WDI; the first WDI falling edge after arming must
@@ -108,13 +107,16 @@ directly by the MCU on PA9 (`WDT_EN`, GPIO push-pull).**
 - **Single-pin change.** Only SET1 moves (SET0 fixed high); the disable↔enable
   transition is immediate and does not require the 500 µs (tSET) inter-pin spacing
   that applies only when both SET pins are changed.
-- **Disabled-state hygiene.** Per datasheet, WDI must not float when disabled; PB2
-  (push-pull) plus R169 keeps it at a defined level at all times, including the
-  pre-GPIO-config boot instant. <!-- TODO verify designator: R169 (no WDT_KICK pulldown in current netlist) -->
+- **Disabled-state hygiene.** Per datasheet, WDI must not float when disabled. `WDT_KICK`
+  is a direct 2-node link (PB2 ↔ U64 WDI) with **no pulldown**; R169 is not on this net (it
+  is the Q21 relay-driver base pulldown in the Rb-IO block). PB2 is push-pull and holds a
+  defined level once GPIO is configured; at the pre-GPIO-config boot instant WDI is
+  briefly Hi-Z, harmless because the WDT is held disabled by R213 until firmware arms it.
 
-Direct-GPIO control (vs an I/O-expander bit) is deliberate: the board watchdog's
+Direct-GPIO control (rather than an I/O-expander bit) is deliberate: the board watchdog's
 arm/disarm line must not depend on the I²C bus it helps protect, and it must remain
-controllable when that bus is wedged or the expanders are being reset.
+controllable when that bus is wedged. No I/O expander sits in this path — every such signal
+is direct GPIO.
 
 ---
 
@@ -123,35 +125,37 @@ controllable when that bus is wedged or the expanders are being reset.
 `WDO` is **open-drain active-low** (asserts low on a window violation for tRST). This
 is the correct polarity to join the board's active-low fault collection directly.
 
-### Primary: native wire-OR onto `WDO_N`
+### Primary: `WDO_N` → POE_KILL WDT input stage
 
-The thermal cutoff and the Rb OV-latch annunciation are also open-collector
-active-low, so all three wire-OR onto a single **`WDO_N`** node with one pull-up
-(R23, 10 kΩ to 3V3). `WDO_N` low drives the single inversion inside the
-`POE_KILL` kill-driver, which pulls `POE_KILL` high and arms the upstream-rail gate
-RC that opens the buck-input pass-FET. Firmware (`POE_KILL`, PE15) ORs in on the
-high side.
+**`WDO_N` is WDO-only** — not a three-way wire-OR. The net has exactly three
+nodes: `U64` pin 8 (`WDO`, open-drain), the pull-up **R23 (10 kΩ → 3V3)**, and **R24**
+(series into the `POE_KILL` WDT input stage, Q4 base). There are no thermal-cutoff or Rb-OV
+taps on this node: the Rb OV event reaches the MCU on its own `RB_OV_DET` path (Rb-supply
+doc §4), and there is no separate thermal open-collector here. `WDO_N` low drives the double inversion
+(Q4→Q5) inside the `POE_KILL` kill-driver, which pulls `POE_KILL` high and arms the kill
+RC that opens the pass switch. Firmware (`POE_KILL`, PE15) ORs in on the high side.
 
 ```
-WDO ──┬───────────────► WDO_N (active-low wire-OR) ──► kill-driver ──► POE_KILL(H) ──► gate RC ──► pass-FET open
-      R23 10k                   ▲              ▲
-      (to 3V3)             thermal O-C     OV-latch O-C
+WDO(U64.8) ──┬── WDO_N ── R24 ──► POE_KILL WDT input stage (Q4→Q5) ──► KILL_N low ──► AUX assert ──► NCP1095 offline
+             R23 10k
+             (to 3V3)
 ```
 
 Trip sequence: supervisor stops kicking → window violated → `WDO` pulls `WDO_N`
-low → kill-driver opens the buck-input FET → 3V3_STM decays over the buck output
-caps (ms-class), during which U64 stays powered and `WDO` holds the assert → the
-upstream-rail RC latches the off-time and auto-restores with soft-start → board
+low → kill-driver forces the NCP1095 offline (POE_KILL doc) → 3V3_STM decays over the
+buck output caps (ms-class), during which U64 stays powered and `WDO` holds the assert →
+the on-board kill RC latches the off-time; the PSE then re-detects → board
 reboots, U64 re-arms.
 
 ### Fallback: active-high collection
 
-Only if the kill-driver collection node accepts **active-high** asserts (one push per
-source): add an inverter <!-- TODO verify designator: U62 (fallback 74LVC1G04GW-Q100H, not in current netlist; U62 is now MX25L25645 SPI-NOR) --> = 74LVC1G04GW-Q100H on 3V3_STM (matches the project's
-74LVC1G157 / 74LVC1G34 family), with `WDO` → inverter → a Schottky <!-- TODO verify designator: D17 (fallback BAT54/RB521S-30, not in current netlist; D17 is now BAT54J in Rb IO) -->
-(BAT54 / RB521S-30, anode at inverter output) → `POE_KILL`; `WDO` then pulls up to
-3V3 via R23. `POE_KILL` high ≈ VOH − Vf ≈ 3.0 V — verify the kill-driver input
-registers that as a logic high. Add a 0.1 µF bypass <!-- TODO verify designator: C145 (fallback, not in current netlist) --> at the inverter.
+Not used in this design (the POE_KILL WDT input stage takes `WDO_N` active-low
+directly). Documented only in case the kill-driver collection node is ever changed to
+accept **active-high** asserts: add a 74LVC1G04GW-Q100H inverter on 3V3_STM (matches the
+project's 74LVC1G157 / 74LVC1G34 family), `WDO` → inverter → a Schottky (BAT54 /
+RB521S-30, anode at inverter output) → `POE_KILL`, with `WDO` pulled up to 3V3 via R23,
+plus a 0.1 µF inverter bypass. **None of these parts are populated and none carry a
+refdes.**
 
 ---
 
@@ -163,11 +167,11 @@ registers that as a logic high. Add a 0.1 µF bypass <!-- TODO verify designator
   report healthy. A windowed WDT means kicking unconditionally on a timer defeats
   the purpose; the kick must be gated on liveness.
 
-### 7.2 Arm sequence (`WDT_EN`, PA9)
-1. Boot with PA9 left to its reset Hi-Z (R213 holds the WDT disabled).
+### 7.2 Arm sequence (`WDT_EN`, PC12)
+1. Boot with PC12 left to its reset Hi-Z (R213 holds the WDT disabled).
 2. Start IWDG (hardware-start, §7.3) so the MCU is covered from instruction zero.
 3. Bring up the supervisor; confirm all monitored threads report in.
-4. **If no debugger attached** (§7.4): drive PA9 high to arm, then begin the 1.10 s kick loop.
+4. **If no debugger attached** (§7.4): drive PC12 high to arm, then begin the 1.10 s kick loop.
 
 ### 7.3 Internal watchdog
 - **IWDG hardware-start** via the flash option byte (IWDG software/hardware select —
@@ -183,9 +187,9 @@ for a debug session rather than frozen:
 
 - **Connect-under-reset** is the standard flow: the probe attaches with `C_DEBUGEN`
   set before release of reset. Firmware reads `CoreDebug->DHCSR & C_DEBUGEN` early
-  and, if a debugger is present, **skips arming** the external WDT (leaves PA9 low →
+  and, if a debugger is present, **skips arming** the external WDT (leaves PC12 low →
   WDT disabled). No mid-boot race.
-- **Live toggle:** a console command (e.g. `dev wd ext off|on`) drives PA9 directly.
+- **Live toggle:** a console command (e.g. `dev wd ext off|on`) drives PC12 directly.
   Because it is a direct GPIO, this works even with the I²C bus wedged. Gate the
   command behind **debug-auth** (`sec` group) so a fielded unit cannot have its board
   watchdog switched off without authorization.
@@ -197,16 +201,15 @@ for a debug session rather than frozen:
 |---|---|---|
 | Boot, pre-supervisor | disabled (R213) | running (HW-start) |
 | Operational, no debugger | armed, kicked at 1.10 s | running, kicked |
-| Debugger attached | disabled (PA9 low) | frozen-on-halt (DBGMCU) |
+| Debugger attached | disabled (PC12 low) | frozen-on-halt (DBGMCU) |
 | Thread stall / runaway | trips → `POE_KILL` cold-cycle | (may also trip MCU reset) |
-| After `EXP_RST_N` | unaffected (PA9 is direct GPIO) | unaffected |
 
 ---
 
 ## 8. I²C bus accelerator (`LTC4311`) & wedge-recovery procedure
 
 ### 8.1 The accelerator is not a buffer
-`LTC4311ISC6` (SC70-6) is a **dual I²C active pull-up / rise-time accelerator**, not a
+`U56` **LTC4311** (SC70-6) is a **dual I²C active pull-up / rise-time accelerator**, not a
 segmenting buffer. It taps onto the bus lines (BUS1/BUS2) and boosts positive
 transitions; it has **no IN/OUT isolation**. Its ENABLE pin only gates the
 accelerator (≈1 V threshold; >1.5 V = on; <0.4 V = <5 µA shutdown with BUS pins
@@ -217,13 +220,13 @@ it cannot isolate or recover a wedged bus.
 |---|---|---|
 | VCC | 3V3_STM | bus supply rail; 0.1 µF bypass |
 | GND | GND | ground plane |
-| BUS1 | SCL (PB8) | active pull-up tap |
-| BUS2 | SDA (PB9) | active pull-up tap |
+| BUS1 | I2C_SCL (PB8) | active pull-up tap |
+| BUS2 | I2C_SDA (PB9) | active pull-up tap |
 | ENABLE | **3V3_STM** | **tied on, always enabled** (auto-standby handles idle current) |
 
-`I2C_BUF_EN` is **deleted** — it was never a recovery lever, and PA9 is repurposed to
-`WDT_EN` (§5). The static bus pull-ups remain as before; the LTC4311 provides no
-internal pull-ups.
+There is no `I2C_BUF_EN` control: the LTC4311 ENABLE is tied on and is not a recovery
+lever. `WDT_EN` is on **PC12** (§5); PA8/PA9 carry the encoder. The static bus pull-ups
+are independent of the LTC4311, which provides no internal pull-ups.
 
 ### 8.2 Bus-wedge recovery ladder
 None of these involve the LTC4311.
@@ -231,9 +234,9 @@ None of these involve the LTC4311.
 1. **Controller recovery:** reconfigure SCL (PB8) as GPIO output, clock out ≥ 9
    pulses to release a slave stuck mid-byte, generate a STOP, re-init I2C1. Clears a
    slave holding SDA low.
-2. **`EXP_RST_N` (PC0):** hard-reset the MCP23017 expanders if they are the stuck party.
-   (Housekeeping is on always-on 3V3_STM — there is no rail-cycle recovery path.)
-3. **`POE_KILL`** full cold-cycle as last resort.
+2. **`POE_KILL`** full cold-cycle as last resort. (There is no I/O-expander reset lever —
+   no MCP23017 expanders exist, so there is no `EXP_RST_N`; and housekeeping is on
+   always-on 3V3_STM, so there is no rail-cycle recovery path either.)
 
 ---
 
@@ -254,13 +257,12 @@ None of these involve the LTC4311.
 | C180 | 0.1 µF X7R | 0402 | U64 VDD1 bypass |
 | C181 | 0.1 µF X7R | 0402 | U64 VDD2 bypass |
 | R23 | 10 kΩ (E96) | 0402 | WDO pull-up → WDO_N |
-| R213 | 100 kΩ (E96) | 0402 | SET1/`WDT_EN` pulldown (boot-disabled default) |
-| R169 | 100 kΩ (E96) | 0402 | WDI defined-level pulldown <!-- TODO verify designator: R169 (no WDT_KICK pulldown in current netlist) --> |
-| *inverter* | *74LVC1G04GW-Q100H* | *SC-70* | *fallback only (active-high collection)* <!-- TODO verify designator: U62 (fallback, not in netlist; U62 = MX25L25645) --> |
-| *C145* | *0.1 µF X7R* | *0402* | *inverter bypass — fallback only* <!-- TODO verify designator: C145 (fallback, not in netlist) --> |
-| *Schottky* | *BAT54 / RB521S-30 Schottky* | *SOD-323* | *OR-diode — fallback only* <!-- TODO verify designator: D17 (fallback, not in netlist; D17 = BAT54J in Rb IO) --> |
-| *C144b* | *39 nF C0G* | *0402* | *CWD window-stretch — optional, not in baseline* <!-- TODO verify designator: C144b (optional, not in netlist) --> |
-| — | LTC4311 ENABLE → 3V3_STM | — | strap-on (no new part) |
+| R213 | 100 kΩ (E96) | 0402 | SET1/`WDT_EN` (PC12) pulldown (boot-disabled default) |
+| *inverter* | *74LVC1G04GW-Q100H* | *SC-70* | *fallback only (active-high collection) — no refdes; not populated* |
+| *bypass* | *0.1 µF X7R* | *0402* | *inverter bypass — fallback only; not populated* |
+| *Schottky* | *BAT54 / RB521S-30* | *SOD-323* | *OR-diode — fallback only; not populated* |
+| *CWD cap* | *39 nF C0G* | *0402* | *window-stretch — optional, not in baseline* |
+| — | U56 LTC4311 ENABLE → 3V3_STM | — | strap-on (no new part) |
 
 Italic rows are conditional and not populated in the baseline.
 
@@ -276,14 +278,11 @@ Italic rows are conditional and not populated in the baseline.
       freeze register fields in RM0481.
 - [ ] Bench-confirm a window violation (stall and runaway) drives `WDO_N` low and
       cold-cycles the board; confirm `WDO` tRST assert overlaps the rail collapse.
-- [ ] Reconcile designators U64 / C180 / C181 / R23 / R213 against KiCad; the WDI
-      pulldown (R169) and the fallback parts (inverter / C145 / OR-diode) have no
-      current netlist refdes — assign or drop.
 
 ---
 
-## 12. Cross-doc updates required
-- **Pin map / software spec:** delete `I2C_BUF_EN (PA9)`; add `WDT_EN (PA9) → TPS3430 SET1`. Note PA9 spent; U54 GPB4 returns to spare.
-- **Reliability/monitoring:** `WDT_KICK (PB2)` role unchanged; add the arm line and boot-disabled behavior.
-- **§11 checklist:** change "LTC4311ISC6 (EN = I2C_BUF_EN PA9)" → "LTC4311ISC6 (ENABLE tied to 3V3_STM, always on)"; add U64 line under §1/§9.
-- **Recovery matrix:** replace the I²C-wedge action — remove "Toggle `I2C_BUF_EN`"; use the §8.2 ladder.
+## 12. Cross-references
+- **Pin map / software spec:** `WDT_EN (PC12) → TPS3430 (U64) SET1`; there is no `I2C_BUF_EN`. PA8/PA9 are the encoder (`ENC_A`/`ENC_B`).
+- **Reliability/monitoring:** `WDT_KICK (PB2)` is the kick line; PC12 is the arm line (boot-disabled). `WDO_N` is WDO-only (no thermal/Rb-OV wire-OR).
+- **Checklist:** LTC4311 (U56) ENABLE tied to 3V3_STM (always on); U64 per §1/§9.
+- **Recovery matrix:** the I²C-wedge ladder has no expander-reset step (no MCP23017 expanders, no `EXP_RST_N`); use the §8.2 ladder.

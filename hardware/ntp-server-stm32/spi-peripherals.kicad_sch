@@ -598,8 +598,8 @@
 			(on_board yes)
 			(in_pos_files yes)
 			(duplicate_pin_numbers_are_jumpers no)
-			(property "Reference" "U"
-				(at -16.51 16.002 0)
+			(property "Reference" "U62"
+				(at -8.255 19.05 0)
 				(show_name no)
 				(do_not_autoplace no)
 				(effects
@@ -609,7 +609,7 @@
 				)
 			)
 			(property "Value" "MX25L25645GM2I-08G"
-				(at -8.128 -1.016 0)
+				(at -8.255 16.51 0)
 				(show_name no)
 				(do_not_autoplace no)
 				(effects
@@ -640,7 +640,7 @@
 					)
 				)
 			)
-			(property "Description" ""
+			(property "Description" "MX25L25645GM2I-08G"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -651,25 +651,18 @@
 					)
 				)
 			)
-			(symbol "MX25L25645GM2I-08G_0_0"
-				(pin unspecified line
-					(at 3.81 12.7 180)
-					(length 2.54)
-					(name "VCC"
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
-					)
-					(number ""
-						(effects
-							(font
-								(size 1.27 1.27)
-							)
-						)
+			(property "MANUFACTURER_PART_NUMBER" "MX25L25645GM2I-08G"
+				(at -129.54 86.36 0)
+				(show_name no)
+				(do_not_autoplace no)
+				(hide yes)
+				(effects
+					(font
+						(size 1.27 1.27)
 					)
 				)
+			)
+			(symbol "MX25L25645GM2I-08G_0_0"
 				(pin unspecified line
 					(at 3.81 8.89 180)
 					(length 2.54)
@@ -789,6 +782,24 @@
 						)
 					)
 					(number "7"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin unspecified line
+					(at 3.81 12.7 180)
+					(length 2.54)
+					(name "VCC"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "8"
 						(effects
 							(font
 								(size 1.27 1.27)
@@ -1079,7 +1090,7 @@
 		)
 		(uuid "dcb70a40-18d5-450e-a958-cfa02dfd71d8")
 	)
-	(text "Place resistors where traces branch away\nfrom U55 and U35 towards the connector"
+	(text "Place resistors where traces branch away\nfrom U62 and U63 towards the connector"
 		(exclude_from_sim no)
 		(at 150.622 121.412 0)
 		(effects
@@ -2083,7 +2094,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 152.4 109.982 90)
 			(hide yes)
 			(show_name no)
@@ -2094,7 +2105,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 152.4 111.76 0)
 			(hide yes)
 			(show_name no)
@@ -2116,7 +2127,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P22.0LCT-ND"
 			(at 152.4 111.76 90)
 			(hide yes)
 			(show_name no)
@@ -2149,7 +2193,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 152.4 111.76 90)
 			(hide yes)
 			(show_name no)
@@ -2208,7 +2252,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 152.4 116.078 90)
 			(hide yes)
 			(show_name no)
@@ -2219,7 +2263,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 152.4 114.3 0)
 			(hide yes)
 			(show_name no)
@@ -2241,7 +2285,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P22.0LCT-ND"
 			(at 152.4 114.3 90)
 			(hide yes)
 			(show_name no)
@@ -2274,7 +2351,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 152.4 114.3 90)
 			(hide yes)
 			(show_name no)
@@ -2412,7 +2489,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 107.442 226.06 90)
 			(hide yes)
 			(show_name no)
@@ -2423,7 +2500,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 109.22 226.06 0)
 			(hide yes)
 			(show_name no)
@@ -2434,7 +2511,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 109.22 226.06 0)
 			(hide yes)
 			(show_name no)
@@ -2445,7 +2522,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -2458,6 +2568,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
+			(at 109.22 226.06 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2674,7 +2795,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 98.552 66.04 90)
 			(hide yes)
 			(show_name no)
@@ -2685,7 +2806,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 100.33 66.04 0)
 			(hide yes)
 			(show_name no)
@@ -2696,7 +2817,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 100.33 66.04 0)
 			(hide yes)
 			(show_name no)
@@ -2707,7 +2828,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -2720,6 +2874,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
+			(at 100.33 66.04 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2857,7 +3022,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 97.282 201.93 90)
 			(hide yes)
 			(show_name no)
@@ -2868,7 +3033,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 99.06 201.93 0)
 			(hide yes)
 			(show_name no)
@@ -2879,7 +3044,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 99.06 201.93 0)
 			(hide yes)
 			(show_name no)
@@ -2890,7 +3055,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -2903,6 +3101,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
+			(at 99.06 201.93 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -2961,7 +3170,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 90.932 90.17 90)
 			(hide yes)
 			(show_name no)
@@ -2972,7 +3181,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 92.71 90.17 0)
 			(hide yes)
 			(show_name no)
@@ -2983,7 +3192,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 92.71 90.17 0)
 			(hide yes)
 			(show_name no)
@@ -2994,7 +3203,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -3007,6 +3249,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
+			(at 92.71 90.17 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3065,7 +3318,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 107.442 201.93 90)
 			(hide yes)
 			(show_name no)
@@ -3076,7 +3329,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 109.22 201.93 0)
 			(hide yes)
 			(show_name no)
@@ -3087,7 +3340,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 109.22 201.93 0)
 			(hide yes)
 			(show_name no)
@@ -3098,7 +3351,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -3111,6 +3397,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
+			(at 109.22 201.93 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3482,7 +3779,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 87.122 201.93 90)
 			(hide yes)
 			(show_name no)
@@ -3493,7 +3790,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 88.9 201.93 0)
 			(hide yes)
 			(show_name no)
@@ -3504,7 +3801,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 88.9 201.93 0)
 			(hide yes)
 			(show_name no)
@@ -3515,7 +3812,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -3528,6 +3858,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
+			(at 88.9 201.93 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3684,8 +4025,19 @@
 				)
 			)
 		)
-		(property "Description" "MX25L25645GM2I-08G"
+		(property "Description" "256Mb SPI-NOR flash (TW-origin, policy OK)"
 			(at 129.54 86.36 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Macronix"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3706,7 +4058,7 @@
 				)
 			)
 		)
-		(pin ""
+		(pin "8"
 			(uuid "5a7e536b-8db5-4d09-8863-3223ec7170a7")
 		)
 		(pin "6"
@@ -3929,7 +4281,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 147.0152 62.23 0)
 			(hide yes)
 			(show_name no)
@@ -3940,7 +4292,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_commercial_general_en.pdf"
+		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GCM155R71C104KA55-01.pdf"
 			(at 146.05 58.42 0)
 			(hide yes)
 			(show_name no)
@@ -3951,7 +4303,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.1uF 16V X7R 0402"
+		(property "Description" "CAP CER 0.1UF 16V X7R 0402"
 			(at 146.05 58.42 0)
 			(hide yes)
 			(show_name no)
@@ -3962,7 +4314,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6328-2-ND"
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "16V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "490-4759-1-ND"
 			(at 146.05 58.42 0)
 			(hide yes)
 			(show_name no)
@@ -3984,7 +4369,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C104KA88J"
+		(property "MANUFACTURER_PART_NUMBER" "GCM155R71C104KA55D"
 			(at 146.05 58.42 0)
 			(hide yes)
 			(show_name no)
@@ -4066,8 +4451,19 @@
 				)
 			)
 		)
-		(property "Description" "PCA9306DCTT"
+		(property "Description" "I2C/SMBus level translator SC-70-8"
 			(at 154.94 207.01 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Texas Instruments"
+			(at 0 0 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4155,7 +4551,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 159.512 58.42 90)
 			(hide yes)
 			(show_name no)
@@ -4166,7 +4562,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 161.29 58.42 0)
 			(hide yes)
 			(show_name no)
@@ -4177,7 +4573,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 10k OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 10K OHM 1% 1/10W 0402"
 			(at 161.29 58.42 0)
 			(hide yes)
 			(show_name no)
@@ -4188,7 +4584,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -4201,6 +4630,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P10.0KLCT-ND"
+			(at 161.29 58.42 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

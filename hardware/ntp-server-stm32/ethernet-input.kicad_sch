@@ -3298,7 +3298,7 @@
 				)
 			)
 		)
-		(property "Description" "CONN JACK 1PORT 1000 BASE-T PCB"
+		(property "Description" "RJ45 magjack 1000BASE-T"
 			(at 138.43 116.84 0)
 			(hide yes)
 			(show_name no)
@@ -3345,7 +3345,7 @@
 				(justify bottom)
 			)
 		)
-		(property "MANUFACTURER" "Bel Fuse"
+		(property "MANUFACTURER" "Bel/Stewart"
 			(at 138.43 116.84 0)
 			(hide yes)
 			(show_name no)
@@ -3499,7 +3499,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 97.028 160.02 90)
 			(hide yes)
 			(show_name no)
@@ -3510,7 +3510,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 95.25 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -3532,7 +3532,40 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "POWER" "1/10W"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIELECTRIC" "Thick-film"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "1%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -3545,6 +3578,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1004X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P1.00MLCT-ND"
+			(at 95.25 160.02 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3748,7 +3792,7 @@
 			)
 		)
 		(property "Value" "4.7nF"
-			(at 107.95 161.2899 0)
+			(at 104.648 162.56 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3758,7 +3802,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "1812 (4532 Metric)"
 			(at 103.8352 163.83 0)
 			(hide yes)
 			(show_name no)
@@ -3769,7 +3813,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://product.tdk.com/system/files/dam/doc/product/capacitor/ceramic/mlcc/catalog/mlcc_commercial_general_en.pdf"
+		(property "Datasheet" "https://yageogroup.com/content/datasheet/asset/file/KEM_C1076_X7R_HV_AUTO_SMD"
 			(at 102.87 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -3780,7 +3824,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 4.7nF 16V X7R 0402"
+		(property "Description" "CAP CER 1812 4.7NF 2000V X7R 10%"
 			(at 102.87 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -3791,7 +3835,40 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-6334-2-ND"
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "2kV"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "399-16791-1-ND"
 			(at 102.87 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -3802,7 +3879,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Murata"
+		(property "MANUFACTURER" "KEMET"
 			(at 102.87 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -3813,7 +3890,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM155R71C472KA01D"
+		(property "MANUFACTURER_PART_NUMBER" "C1812C472KGRACAUTO"
 			(at 102.87 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -3873,7 +3950,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "C_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 120.3452 163.83 0)
 			(hide yes)
 			(show_name no)
@@ -3884,7 +3961,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://search.murata.co.jp/Ceramy/image/img/A01X/G101/ENG/GRM31CR72E104KW03-01.pdf"
+		(property "Datasheet" "https://yageogroup.com/content/datasheet/asset/file/KEM_C1023_X7R_AUTO_SMD"
 			(at 119.38 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -3895,7 +3972,7 @@
 				)
 			)
 		)
-		(property "Description" "CAP CER 0.022uF 50V X7R 0402"
+		(property "Description" "CAP CER 0.022UF 50V X7R 0402"
 			(at 119.38 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -3906,7 +3983,51 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "490-3542-2-ND"
+		(property "DIELECTRIC" "X7R"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "TOLERANCE" "10%"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "VOLTAGE" "50V"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "KEMET"
+			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "399-C0402C223J5RACAUTOCT-ND"
 			(at 119.38 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -3928,7 +4049,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "GRM31CR72E104KW03L"
+		(property "MANUFACTURER_PART_NUMBER" "C0402C223J5RACAUTO"
 			(at 119.38 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -4166,7 +4287,7 @@
 				)
 			)
 		)
-		(property "Description" "TVS DIODE 5.5VWM 8VC 10USON"
+		(property "Description" "USB ESD array"
 			(at 78.74 43.18 0)
 			(hide yes)
 			(show_name no)

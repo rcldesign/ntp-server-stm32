@@ -1,188 +1,131 @@
-# STS1000 — Fault Aggregation & Local-UI Expanders (MCP23017 ×2)
+# STS1000 — Fault Aggregation (direct-GPIO scan)
 
-**As-built** per schematic (U55 @0x20, U54 @0x21). Complete fault/UI coverage on two
-MCP23017s, every signal individually readable on I²C, on **three active-low interrupts**:
+All fault/status and human-interface signals land on **STM32 U12 (STM32H563ZIT6,
+LQFP144) GPIO directly** — no port expander, no I²C round-trip, **no open-drain wire-OR
+interrupt tree**. Fault state is gathered by a firmware **port-scan** (read whole GPIO
+input registers at a fixed rate), not by EXTI aggregation. The LQFP144 package provides
+the I/O headroom to land every rail, ALERT, and HMI line on its own pin.
 
-| Net (`_N`, open-drain) | STM32 | Source | Carries |
-|------------------------|-------|--------|---------|
-| `BTN_INT_N`      | PE0/EXTI0  | U54 INTA | 8 buttons |
-| `INA_ALERT_INT_N`| PC12/EXTI12| U54 INTB | 8 INA228 ALERTs |
-| `PG_INT_N`       | PA10/EXTI10| U55 INTA+INTB | 8 PG + 2 EN-fault |
-
-VDD = **3V3_STM** on both (matches the I²C master + INT pull-up rail). Cross-refs: peripheral
-map §4/§6/§8/§9/§11/§12/§13; `sts1000_vcc_rb_supply.md`.
+Canonical firmware/register behavior lives in **`sts1000_firmware_hardware_interface.md`**;
+electrical pin facts in `ntp_server_peripheral_map.md` §8/§9/§12/§13. This doc is the
+map of *what* is aggregated and *where*.
 
 ---
 
-## 1. As-built wiring
+## 1. Aggregation model
 
-### U55 @0x20 — PG + EN-fault → one interrupt (`PG_INT_N`, MIRROR=1)
+- **All PG (power-good) rails → `GPIOG[0:7]`** (one pin per rail, read as a byte).
+- **All 9 INA228 ALERT lines → `GPIOG[8:15]` (8) + `PF13` (panel INA228, the 9th).**
+- **HMI + RT9742 EN-fault + backup-PG inputs → `GPIOF`** (buttons, touch INT, encoder
+  button, proximity wake, the three load-switch fault flags, backup-rail PGs).
+- **No expander, no MIRROR/INTCON config, no shared interrupt nets.** Firmware reads
+  `GPIOF`/`GPIOG` input data registers on a **~1 kHz port scan** and diffs against the
+  previous snapshot.
 
-| Bit | Net | | Bit | Net |
-|-----|-----|-|-----|-----|
-| GPA0 | `3V3_GPS_LDO_PG` | | GPB0 | `V_ANT_EN_FAULT` |
-| GPA1 | `OCXO_LDO_PG`    | | GPB1 | `V_DISP_EN_FAULT` |
-| GPA2 | `3V0_RF_LDO_PG`  | | GPB2–7 | NC (6 spare) |
-| GPA3 | `5V_PSU_PG`      | | | |
-| GPA4 | `3V3_PSU_PG`     | | | |
-| GPA5 | `OCXO_PSU_PG`    | | | |
-| GPA6 | `RB_PSU_PG`      | | | |
-| GPA7 | `POE_PG`         | | | |
-
-INTA+INTB tied → `PG_INT_N` (R200 10k → 3V3_STM). A0/A1/A2→GND. RESET←`EXP_RST_N` (R198 10k pull-down). VDD 3V3_STM (C168 0.1µF).
-
-### U54 @0x21 — buttons + INA → two interrupts (MIRROR=0)
-
-| Bit | Net | | Bit | Net |
-|-----|-----|-|-----|-----|
-| GPA0 | `BUTTON_1` | | GPB0 | `INA_ALERT_V_POE` |
-| GPA1 | `BUTTON_2` | | GPB1 | `INA_ALERT_3V3` |
-| GPA2 | `BUTTON_3` | | GPB2 | `INA_ALERT_3V3_STM` |
-| GPA3 | `BUTTON_4` | | GPB3 | `INA_ALERT_5V_DISP` |
-| GPA4 | `BUTTON_5` | | GPB4 | `INA_ALERT_3V3_GPS` |
-| GPA5 | `BUTTON_6` | | GPB5 | `INA_ALERT_V_ANT` |
-| GPA6 | `BUTTON_7` | | GPB6 | `INA_ALERT_OCXO` |
-| GPA7 | `DISP_TOUCH_INT` | | GPB7 | `INA_ALERT_VCC_RB` |
-
-INTA→`BTN_INT_N` (R201 10k), INTB→`INA_ALERT_INT_N` (R199 10k), both →3V3_STM. A0→3V3_STM (A1/A2→GND ⇒ 0x21). RESET←`EXP_RST_N`. VDD 3V3_STM (C169 0.1µF). 16/16 bits used.
-
-> **Not on either expander:** `RB_OV` (PE3/PD3, autonomous latch), `PFI` (PE8), NCP1095
-> `POE_NCL/NCM/LCF` (PC7/PC2/PC3), `RB_LOCK` (PB13). Direct MCU pins.
+Each INA228 ALERT remains individually meaningful (the scan identifies which rail), and
+each ALERT is an open-drain output pulled to 3V3_STM at the MCU pin — but they land on
+**separate GPIO pins**, so there is no shared wire-OR line and no missed-edge race.
 
 ---
 
-## 2. Interrupt topology
-
-```
-   U55 @0x20 (MIRROR=1, INT open-drain)
-     PortA 8×PG ─┐
-     PortB 2×EN_FAULT ─┘── INTA+INTB (tied) → PG_INT_N → R200 → PA10/EXTI10
-
-   U54 @0x21 (MIRROR=0, INT open-drain)
-     PortA 8×button ── INTA → BTN_INT_N        → R201 → PE0/EXTI0
-     PortB 8×INA ──── INTB → INA_ALERT_INT_N   → R199 → PC12/EXTI12
-```
-
-All `_N` active-low, idle-high, asserted-low. One pull-up per net on the expander sheet
-(R201/R200/R199). **PC12: remove the legacy R44** if still placed (R199 is now the pull-up).
-Scale a domain past its port by wire-ORing another open-drain INT onto the same `_N` line.
-
----
-
-## 3. STM32 pin map (verify the three nets land here on the MCU sheet)
+## 2. Power-good rails — `GPIOG[0:7]`
 
 | Pin (#) | Net | Source |
 |---------|-----|--------|
-| PE0 (97)  | `BTN_INT_N`       | U54 INTA |
-| PC12 (80) | `INA_ALERT_INT_N` | U54 INTB (drop R44; keep R199) |
-| PA10 (69) | `PG_INT_N`        | U55 INTA+INTB (R200 = the PA10 pull-up — earlier "add 10k" item is satisfied) |
-| PC0 (15)  | `EXP_RST_N`       | shared to both RESET pins (R198 pull-down → default-asserted) |
+| PG0 (56) | `3V3_GPS_LDO_PG` | U22 LT3045 PG (R215 pull-up) |
+| PG1 (57) | `OCXO_LDO_PG`    | U39 LDO PG (R131) |
+| PG2 (87) | `3V0_RF_LDO_PG`  | U51 LDO PG |
+| PG3 (88) | `5V_PSU_PG`      | 5 V buck PG (U13/U28/U29 chain) |
+| PG4 (89) | `3V3_PSU_PG`     | 3V3 buck PG (R92/R94) |
+| PG5 (90) | `OCXO_PSU_PG`    | via R232/R233 divider off `OCXO_PSU_PG` (U39 EN node) — sense, **not** spare |
+| PG6 (91) | `RB_PSU_PG`      | U40 MIC28516 PG |
+| PG7 (92) | `POE_PG`         | U9 NCP1095 PGO (also gates U28 EN) |
 
-Board is GPIO-full (PA10 and PC0 both now used). All three INT lines + reset are on existing pins.
-
----
-
-## 4. Register configuration (IOCON.BANK=0)
-
-| Reg | U55 @0x20 (PG+EN) | U54 @0x21 (btn+INA) | Meaning |
-|-----|-------------------|---------------------|---------|
-| IODIR | 0xFF/0xFF | 0xFF/0xFF | inputs |
-| IPOL | per-bit | PortA 0x00; PortB per-bit | invert active-low so asserted=1 (PG/INA active-low; confirm POE_PG, EN-fault) |
-| GPINTEN | 0xFF/**0x03** | 0xFF/0xFF | U55: 8 PG + 2 EN (GPB0/1); U54: 8 btn + 8 INA |
-| DEFVAL | 0x00/0x00 | —/0x00 | idle reads 0 after IPOL |
-| INTCON | 0xFF/0xFF | **0x00**/0xFF | U55 both level; U54 PortA on-change, PortB level |
-| IOCON | **0x44** (MIRROR=1) | **0x04** (MIRROR=0) | ODR=1 (open-drain) both |
-| GPPU | per source | per source | internal 100k OK for clean ALERT/PG; external where noisy |
-
-U55 MIRROR=1 OR's both ports onto INTA/INTB (the external tie then parallels them — harmless).
-U54 MIRROR=0 keeps buttons (INTA) and INA (INTB) on separate pins.
-
-**Init (arm last):** IOCON → IODIR → IPOL → GPPU → DEFVAL → INTCON → dummy read GPIOA+GPIOB →
-GPINTEN → enable MCU EXTI. Drive `EXP_RST_N` (PC0) high first.
+> PG5 divides `OCXO_PSU_PG` (≈0.89×) into PG5 — confirm the source stays ≤3.3 V (PG5 is
+> not 5 V-tolerant). Two additional backup-rail PGs land on GPIOF, not GPIOG: `BKP_STM_PG`
+> (PF14) and `BKP_GPS_PG` (PF15), from the U67 comparator pair.
 
 ---
 
-## 5. Read-acknowledge race — mitigation
+## 3. INA228 ALERT lines — `GPIOG[8:15]` + `PF13`
 
-1. Read INTF first; if zero, exit.
-2. Faults are level (compare-to-DEFVAL) → persistent fault keeps its INT asserted; missed edge self-heals; transient captured in INTCAP.
-3. Poll backstop (§7) reads GPIO regardless.
-4. Storm guard: stuck fault → mask its GPINTEN bit, hand to poll, re-arm on clear. Buttons (on-change) can't storm.
+| Pin (#) | Net | INA228 | Addr | Rail |
+|---------|-----|--------|------|------|
+| PG8 (93)  | `INA_ALERT_V_POE`   | U10 | 0x40 | PoE input |
+| PG9 (124) | `INA_ALERT_3V3_STM` | U31 | 0x41 | STM 3V3 |
+| PG10 (125)| `INA_ALERT_5V_DISP` | U32 | 0x42 | 5V_DISP |
+| PG11 (126)| `INA_ALERT_3V3`     | U30 | 0x43 | main/general 3V3 |
+| PG12 (127)| `INA_ALERT_3V3_GPS` | U23 | **0x4A** | GPS VCC (0x44 = SHT45 U72) |
+| PG13 (128)| `INA_ALERT_V_ANT`   | U26 | 0x45 | antenna bias |
+| PG14 (129)| `INA_ALERT_OCXO`    | U37 | 0x46 | OCXO |
+| PG15 (132)| `INA_ALERT_VCC_RB`  | U44 | 0x47 | Rb (VCC_RB) |
+| PF13 (53) | `INA_ALERT_5V_PANEL`| U54 | 0x4C | panel-LED 5 V |
 
-On U54, read each port's INTCAP to clear only that port's INT (INTA vs INTB independent). On U55
-(MIRROR=1) reading either port's INTCAP/GPIO clears the shared INT — read both GPIOA (PG) and
-GPIOB (EN) each entry.
+Each of the nine ALERTs pulls up 10 kΩ → 3V3_STM (INA228 ALERT is open-drain): R220–R226
+on PG8–PG14, **R265 on `INA_ALERT_VCC_RB` (PG15)**, and R227 on the panel ALERT (PF13).
 
 ---
 
-## 6. Firmware — three workers
+## 4. HMI / EN-fault / backup-PG inputs — `GPIOF`
+
+| Pin (#) | Net | Source | Conditioning |
+|---------|-----|--------|--------------|
+| PF0–PF6 (10–18) | `BUTTON_1`…`BUTTON_7` | J17 keypad | R190–R196 10 kΩ→3V3_STM + C161–C167 0.1 µF; TVS U19/U20 |
+| PF7 (19) | `DISP_TOUCH_INT` | FT-series touch INT (J17.33) | R208 10 kΩ→3V3_STM, no cap; TVS U17 |
+| PF8 (20) | `V_ANT_EN_FAULT_N` | U27 RT9742 nFLG (antenna) | R200 10 kΩ→3V3_STM |
+| PF9 (21) | `V_DISP_EN_FAULT_N` | U33 RT9742 nFLG (display 5 V) | R105 10 kΩ→3V3_STM |
+| PF10 (22) | `PROX_WAKE` | magnetic reed switch (J17.18) | R254 10 kΩ→3V3_STM + C202; TVS U16; passive dry contact, active-low on magnet |
+| PF11 (49) | `ENC_BUTTON` | encoder switch (J17.9) | R236 10 kΩ→3V3_STM + C187; TVS U69 |
+| PF12 (50) | `PANEL_LED_FAULT_N` | U55 RT9742 nFLG (panel LED) | R201 10 kΩ→3V3_STM |
+| PF13 (53) | `INA_ALERT_5V_PANEL` | U54 INA228 @0x4C | R227 pull-up (see §3) |
+| PF14 (54) | `BKP_STM_PG` | U67 backup-PG comparator | R246 |
+| PF15 (55) | `BKP_GPS_PG` | U67 backup-PG comparator | R241 |
+
+All 16 GPIOF pins are used. Buttons/encoder are active-low (idle-high); the RT9742 nFLG
+flags are open-drain active-low (`_N`); INA ALERT is open-drain active-low.
+
+> **Not aggregated here (direct dedicated pins elsewhere):** `RB_OV_DET` (PE3, autonomous
+> Rb OV latch), `PFI` power-fail (PE8), NCP1095 `POE_NCL/POE_NCM/POE_LCF` (PC7/PC2/PC3),
+> `RB_LOCK` (PB13), `WDT_EN` (PC12). These are safety/latency paths that must not wait on a
+> port scan.
+
+---
+
+## 5. Firmware — port-scan (see `sts1000_firmware_hardware_interface.md`)
 
 ```
-EXTI(PE0,  BTN_INT_N):        button_worker
-EXTI(PC12, INA_ALERT_INT_N):  ina_worker
-EXTI(PA10, PG_INT_N):         pg_worker
-
-button_worker:                 # U54 Port A
-  do: fa=rd(0x21,INTFA); if fa==0: break
-      ca=rd(0x21,INTCAPA); debounce_confirm(~ca & 0xFF)   # 8 buttons
-  while pe0_low()
-
-ina_worker:                    # U54 Port B
-  do: fb=rd(0x21,INTFB); if fb==0: break
-      cb=rd(0x21,INTCAPB)
-      for bit in fb: read that INA228 diag/flags for V/I/P cause, clear its latch
-      stuck=rd(0x21,GPIOB) & 0xFF; if stuck: mask GPINTENB bits, poll owns them
-  while pc12_low()
-
-pg_worker:                     # U55 Port A (PG) + Port B (EN-fault)
-  do: fa=rd(0x20,INTFA); fb=rd(0x20,INTFB); if fa==0 and fb==0: break
-      ca=rd(0x20,INTCAPA); cb=rd(0x20,INTCAPB)
-      dispatch_pg(fa,ca)            # RB/5V first, then 3.3V rails, OCXO, RF, PoE
-      dispatch_enfault(fb & 0x03,cb)  # V_ANT_EN_FAULT, V_DISP_EN_FAULT
-      stuck=(rd(0x20,GPIOA)&0xFF) | ((rd(0x20,GPIOB)&0x03)<<8)
-      if stuck: mask those GPINTEN bits
-  while pa10_low()
+scan_task (~1 kHz):
+  g = read GPIOG->IDR                 # PG[0:7] rails, PG[8:15] INA ALERTs
+  f = read GPIOF->IDR                 # buttons/touch/encoder/EN-fault/backup-PG
+  pg_bad   = ~g[0:7]                  # PG low = rail not good (per-rail polarity: confirm)
+  ina_alrt = ~g[8:15]; if f.PF13 low: ina_alrt |= panel
+  dispatch each changed bit vs. previous snapshot
+  for each asserted INA ALERT: read that INA228 diag/flags (V/I/P cause) over I²C1, clear latch
+  buttons: debounce ~20–30 ms in firmware on top of the 1 ms RC
 ```
 
-EN-fault is now interrupt-driven (shares `PG_INT_N`), no longer polled. Antenna faults
-cross-check `GPS_ANT_OFF_MON` (PD4) and the ZED-F9T antenna status.
+- **No read-acknowledge race:** ALERTs/PGs are levels on dedicated pins; a persistent fault
+  simply keeps its bit asserted until cleared. A missed transition self-heals on the next
+  ~1 ms scan.
+- **Storm guard:** a stuck ALERT is handled by reading/clearing its INA228 over I²C; the
+  bit clears when the underlying condition clears. No masking of a shared interrupt is
+  needed (there is no shared interrupt).
+- **Wake:** buttons/touch/encoder can additionally be armed as EXTI on their GPIOF pins for
+  low-latency panel wake if desired; the fault scan itself does not depend on EXTI.
 
 ---
 
-## 7. Periodic poll backstop
+## 6. Reserved / absent nets & designators (do not introduce)
 
-```
-poll_task (500 ms): for chip,ports in {0x20:(A,B), 0x21:(A,B)}:
-  read GPIOA/GPIOB & fault masks; update state; re-arm cleared masked bits
-  if i2c_error or implausible: recover(chip)
-```
+There is no shared-interrupt or expander topology in this design: nets `EXP_RST_N`,
+`BTN_INT_N`, `INA_ALERT_INT_N`, `PG_INT_N`, `INA_ALERT_N` do not exist. **U54 = panel
+INA228 (0x4C)** and **U55 = panel-LED RT9742 load switch** — neither is an I/O expander.
 
 ---
 
-## 8. Power, /RESET, recovery
+## 7. Open items
 
-- **VDD = 3V3_STM** (both): MCU's own always-on rail → expanders share the I²C-master/INT-line domain and the fault monitor is alive whenever the MCU can read it. I²C bus pull-ups and R201/R200/R199 are on 3V3_STM. **Not** 3V3_P (gated; and a rail U54 monitors → circular).
-- **/RESET = `EXP_RST_N` (PC0)**, shared; R198 10k pull-down holds both chips in reset until firmware drives PC0 high.
-- **Recovery:** I2C_BUF_EN (PA9) bus clear → assert `EXP_RST_N` (PC0) for a POR-equivalent hard reset. No I²C soft-reset; no rail power-cycle (3V3_STM not gated).
-
-> OV (Rb latch + PE3), WDT→POE_KILL, fan fail-safe act in hardware; PFI (PE8) covers fast brownout. Expander latency isn't a safety path.
-
----
-
-## 9. Address & bus (peripheral map §4)
-
-- U55 @0x20, U54 @0x21 (A0→VS); on the buffered segment (`I2C_SCL_BUF`/`I2C_SDA_BUF`).
-- INA228 ×8 at 0x40–0x47; TMP117 0x48–0x4B; VL53L1X 0x29; ATECC608B 0x60 — all clear.
-- ~16 nodes behind the LTC4311/PCA9517 — re-confirm 400 kHz Cb.
-
----
-
-## 10. Open items
-
-1. **Drop R44 at PC12** (or R199) — one pull-up per `INA_ALERT_INT_N` net; both = 5k.
-2. **Net label** — Image 1 reads `PG_IN_N`; intended `PG_INT_N`. Fix in KiCad so it isn't a one-pin net.
-3. **STM32-side connections** — confirm `BTN_INT_N`→PE0, `INA_ALERT_INT_N`→PC12, `PG_INT_N`→PA10, `EXP_RST_N`→PC0 on the MCU sheet.
-4. **Polarity** — confirm `POE_PG`, `V_ANT_EN_FAULT`, `V_DISP_EN_FAULT` (and PGs good=high/fault=low); set per-bit IPOL so asserted=1.
-5. **INA228 latched ALERT** on all eight.
-6. **U55 MIRROR=1** in firmware (matches the external INTA/INTB tie); U54 MIRROR=0.
-7. **Masks** — U55 fault mask 0x03FF (PG 0x00FF + EN 0x0300); U54 button 0x00FF, INA 0xFF00.
+1. **PG polarity per rail** — confirm each PG is good=high/fault=low; set scan mask accordingly.
+2. **PG5 source voltage** — confirm `OCXO_PSU_PG` (÷ R232/R233) stays ≤3.3 V at PG5.
+3. **INA228 latched ALERT** enabled on all nine; scan clears via I²C diag read.
+4. **Optional EXTI wake** on the GPIOF button/touch/encoder subset (latency vs. scan).

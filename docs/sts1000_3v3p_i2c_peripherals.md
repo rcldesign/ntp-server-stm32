@@ -1,8 +1,17 @@
-# STS1000 "Meridian" — 3V3_P I²C Peripherals & UI Sensors
+# STS1000 "Meridian" — I²C1 Peripherals & UI Sensors
 
-**Subsystem design record.** Covers the I²C peripheral group on the gated peripheral rail (3V3_P), the bus-topology consequences of gating that rail, and the two UI sensors that were re-specified in this design cycle: the **proximity-wake sensor** and the **e-compass**.
+**Subsystem design record.** Covers the I²C1 peripheral group, its display level-shifter, and the
+two UI sensors: the **proximity-wake sensor** and the **e-compass**.
 
-**Canonical bus/pin map:** `ntp_server_peripheral_map.md` §4 (I²C1) and §6 (power domains) remain authoritative for the global address table and rail assignments. This document records the *decisions and rationale* behind the changes; propagate the deltas in §6 below into §4/§6 of the peripheral map.
+> **Rail topology:** *all* I²C1 peripherals sit on the **always-on `3V3_STM`** rail as one flat
+> segment; there is no gated peripheral rail. All aggregated digital inputs are **direct STM32
+> GPIO** (no I/O expanders). This is deliberate: gating a peripheral rail while the I²C master and
+> pull-ups sit on an always-on rail back-powers the "off" parts through their SDA/SCL ESD clamps
+> (§2), so the clean topology is a single always-on segment.
+
+**Canonical bus/pin map:** `ntp_server_peripheral_map.md` §4 (I²C1) and §6 (power domains) are
+authoritative for the global address table and rail assignments. This document records the
+*decisions and rationale*.
 
 **Mounting context (drives the e-compass choice):** the main PCB / control panel is mounted **vertically** in the enclosure. Any heading function must therefore be tilt-compensated at an arbitrary orientation — see §4.
 
@@ -10,88 +19,115 @@
 
 ## 0. Summary of decisions (conclusions first)
 
-| # | Decision | Was | Now | Driver |
-|---|----------|-----|-----|--------|
-| D1 | Proximity-wake sensor | VL53L1X (I²C ToF, SMD) | **Panasonic PaPIRs PIR** (EKMB 6 µA digital), panel/housing-mounted, wired back to PCB | Needs panel/through-hole part on the housing; no THT/panel-mount I²C proximity part exists |
-| D2 | Proximity-wake interface | I²C @0x29, polled 2–4 Hz | **Discrete digital input on a spare MCP23017 U55 Port B bit** (GPB2–7), interrupt via `PG_INT_N` | Leaves I²C entirely; zero MCU pins; gets a real wake interrupt |
-| D3 | E-compass | LSM303AGR (NLA) | **IIS2MDC (mag) + LIS2DH12 (accel)**, 2-chip | LSM303AGR and FXOS8700CQ both EOL; single-chip 6-axis e-compass category is dead |
-| D4 | Magnetometer grade | (consumer LIS2MDL considered) | **IIS2MDC** (industrial) | Longevity + industrial qual for a fixed-install instrument |
-| D5 | Accelerometer part | (LIS2DW12 considered) | **LIS2DH12** | Availability; also lands in the LIS2DH register family that the LSM303AGR accel already used |
-| D6 | Magnetometer copper treatment | (proposed: void plane under part, 5 mm trace keep-out) | **Keep a continuous, current-free ground pour under the part**; control *current*, not copper | Copper is magnetically silent; only currents and ferromagnets produce field; a void breaks the return path and can route current under the sensor |
-| D7 | 3V3_P I²C bus topology | flat segment, pull-ups on 3V3_STM | **Buffer-isolate the gated devices** (PCA9517/TCA4311) with far-side pull-ups on 3V3_P **or** treat PERIPH_EN as effectively always-on | Gating 3V3_P while the bus stays live back-powers the dead devices through their SDA/SCL ESD clamps |
+| # | Decision | Rationale |
+|---|----------|-----------|
+| D1 | Proximity-wake sensor = **passive magnetic reed switch** (dry SPST contact), panel/housing-mounted, wired back to the PCB | A magnet on the access door/panel actuates it; no I²C proximity part is panel-mount/THT, and a dry contact needs no Vcc |
+| D2 | Proximity-wake interface = **discrete digital input on STM32 `PROX_WAKE` = PF10** (J17.18) | Off the I²C bus entirely; direct GPIO, read on the ~1 kHz GPIOF scan (+ optional EXTI wake) |
+| D3 | E-compass = **IIS2MDC (mag) + LIS2DH12 (accel)**, 2-chip | The single-chip 6-axis e-compass category is dead (LSM303AGR and FXOS8700CQ both EOL); a mag+accel pair covers the tilt-comp need |
+| D4 | Magnetometer = **IIS2MDC** (industrial grade) | Longevity + industrial qual for a fixed-install instrument |
+| D5 | Accelerometer = **LIS2DH12** | Availability; lands in the LIS2DH/LIS3DH register family, keeping the accel firmware path simple |
+| D6 | **Continuous, current-free ground pour under the magnetometer**; control *current*, not copper | Copper is magnetically silent; only currents and ferromagnets produce field, and a plane void can route return current under the sensor |
+| D7 | **One flat I²C1 segment, every device on always-on 3V3_STM** (no gated peripheral rail) | Gating a rail while the bus stays live back-powers the "off" devices through their SDA/SCL ESD clamps; a single always-on segment needs no isolating buffer |
 
 ---
 
-## 1. 3V3_P I²C device inventory
+## 1. I²C1 device inventory (15 devices, one flat segment on 3V3_STM)
 
-Devices powered from the **gated peripheral/housekeeping rail** (`PERIPH_EN` = PC11), excluding the two GPIO expanders and the eight INA228s (those are on always-on **3V3_STM**, by design).
+Master = STM32 U12 on **PB8 (SCL) / PB9 (SDA)**. Pull-ups **R202 (SCL) / R203 (SDA) = 4.7 kΩ →
+3V3_STM** (the only pull-ups on the bus). Rise-time accelerator **LTC4311 U56** with **ENABLE (pin 3)
+strapped to 3V3_STM** (permanently on). Every device below is powered from **always-on 3V3_STM** —
+there is no gated segment.
 
-| Device | Addr (7-bit) | Rail status | Strap / mode | Analog beyond bypass |
-|--------|--------------|-------------|--------------|----------------------|
-| TMP117 #1 (osc temp) | 0x48 | **Confirmed** on PERIPH_EN | ADD0 → GND | none |
-| TMP117 #2 (ambient) | 0x49 | **Confirmed** on PERIPH_EN | ADD0 → V+ | none |
-| ATECC608B (secure element) | 0x60 | **Confirmed** on PERIPH_EN | I²C variant; addr in config zone | none |
-| IIS2MDC (e-compass mag) | 0x1E (fixed) | UI peripheral — **confirm rail in §6** | CS → Vdd_IO for I²C | mag is sensitive analog; keep-out (§5) |
-| LIS2DH12 (e-compass accel) | 0x18 or 0x19 (SA0) | UI peripheral — **confirm rail in §6** | CS → Vdd_IO; SA0 strap | none |
+| Addr (7-bit) | Device | Ref | Strap / note |
+|---|---|---|---|
+| 0x19 | LIS2DH12 (e-compass accel) | U59 | SA0 → 3V3_STM (**committed 0x19**); CS → Vdd_IO for I²C |
+| 0x1E | IIS2MDC (e-compass mag) | U61 | fixed address; CS → Vdd_IO for I²C |
+| 0x40 | INA228 — PoE input | U10 | A1/A0 = GND |
+| 0x41 | INA228 — STM 3V3 | U31 | |
+| 0x42 | INA228 — 5V_DISP | U32 | |
+| 0x43 | INA228 — main/general 3V3 | U30 | |
+| **0x44** | **SHT45 (humidity)** | **U72** | fixed (SHT45-AD1B); **owns 0x44** |
+| 0x45 | INA228 — antenna bias (V_ANT) | U26 | |
+| 0x46 | INA228 — OCXO | U37 | |
+| 0x47 | INA228 — Rb (VCC_RB) | U44 | |
+| 0x48 | TMP117 (osc temp) | U58 | ADD0 → GND |
+| 0x49 | TMP117 (ambient) | U57 | ADD0 → 3V3_STM |
+| **0x4A** | INA228 — GPS VCC | U23 | A1 = A0 = SDA → 0x4A (SHT45 U72 owns 0x44) |
+| 0x4C | INA228 — panel-LED 5 V | U54 | |
+| 0x60 | ATECC608B (secure element) | U60 | address in config zone |
 
-> **Open assumption:** `ntp_server_peripheral_map.md` §6 currently lists `PERIPH_EN` as feeding only **TMP117 / ATECC608B / NOR**. The e-compass parts (and previously the VL53L1X) are treated as 3V3_P UI peripherals throughout this work but are **not explicitly enumerated on that rail in §6**. Confirm and add them, or assign them deliberately to a different rail. NOR flash and the ST7796 TFT are also on PERIPH_EN but are SPI, hence out of scope here.
+**No collisions.** 9× INA228 + 2× TMP117 + SHT45 + LIS2DH12 + IIS2MDC + ATECC608B = 15 devices.
+The proximity-wake sensor is off the bus entirely (D1/D2 → PF10).
 
-The proximity-wake sensor (formerly VL53L1X @0x29) **leaves the I²C bus entirely** under D1/D2.
+> **Address notes:** GPS INA228 **U23 = 0x4A** because **SHT45 U72 owns 0x44** on this bus (do not
+> re-strap U23 to 0x44 — head-on collision). TMP117 **U58 = 0x48 / U57 = 0x49**; LIS2DH12
+> **U59 = 0x19** (SA0 strapped high).
 
 ---
 
-## 2. Bus topology — 3V3_P gating & back-powering (D7)
+## 2. Bus topology — one flat always-on segment (D7)
 
-`PERIPH_EN` (PC11) gates 3V3_P, while the I²C **master, pull-ups, and both MCP23017 expanders sit on always-on 3V3_STM**. When PERIPH_EN drops:
+Every I²C1 device is on always-on **3V3_STM**, one flat segment, no gating — so nothing is ever
+back-powered. The hazard this avoids: gating a peripheral rail while the I²C **master and pull-ups
+sit on always-on 3V3_STM** back-powers the "off" parts — their SDA/SCL pins stay held at 3.3 V by
+the 3V3_STM pull-ups, so current flows into those pins through the devices' bus-pin ESD clamp diodes,
+back-powering the dead devices and loading the live bus. A single always-on segment removes the
+hazard with no isolating buffer.
 
-- The 3V3_P I²C devices lose VDD, but their SDA/SCL pins are still held at 3.3 V by the 3V3_STM pull-ups.
-- Current flows into those pins through the devices' bus-pin ESD clamp diodes → **back-powers the "off" parts and loads the live bus**.
+> An **LTC4311 only accelerates edges — it does NOT isolate.** **U56 (LTC4311)** is present purely
+> as a rise-time accelerator with **ENABLE strapped to 3V3_STM** (always on); it is not solving
+> back-powering (there is none to solve).
 
-### Resolution options
+### 2.1 Display-side I²C level-shift (PCA9306 U63)
 
-1. **Buffer-isolated segment (preferred).** Put the 3V3_P devices behind a **PCA9517 / TCA4311** segmenting buffer, with the **far-side pull-ups on 3V3_P**. Gating PERIPH_EN then drops the whole segment cleanly and isolates it from the master side. (`I2C_BUF_EN` = PA9 already exists as an open item in peripheral-map §13.)
-2. **Flat segment + treat PERIPH_EN as always-on.** Keep one flat bus, add series protection on SDA/SCL, and never actually gate 3V3_P in normal operation.
+The display/touch module runs I²C at **5 V**; the MCU I²C1 domain is 3.3 V. **PCA9306 U63** bridges
+them: VREF1 (pin 2) = **3V3_STM** + main `I2C_SCL/I2C_SDA` (SCL1/SDA1); VREF2 (pin 7) = **5V_DISP** +
+the display-side `I2C_DISP_SCL/I2C_DISP_SDA` (SCL2/SDA2); **EN (pin 8) = `DISP_EN` (PC11)** so the
+display segment level-shifter is enabled with the display rail. The 3.3 V main side is pulled up by
+R202/R203 (§1).
 
-> An **LTC4311 only accelerates edges — it does NOT isolate**, so it does not solve back-powering. If segmenting is required for back-powering, the part must be a real buffer (PCA9517/TCA4311), not the LTC4311 accelerator. Resolve the LTC4311-vs-buffer choice (peripheral-map §13) with this constraint in mind.
+> **5 V-side pull-ups:** the PCA9306 is a passive pass-gate and provides no pull-ups, so the
+> **display module supplies its own 5 V I²C pull-ups** on `I2C_DISP_SCL/SDA` (J17.32/J17.15). The
+> display module is powered from **J17.16 = 5V_DISP** (so INA228 U54/U32 also see the display load)
+> and the panel logic from **J17.28 = 5 V**.
 
 ---
 
-## 3. Proximity-wake sensor — VL53L1X → PaPIRs PIR (D1, D2)
+## 3. Proximity-wake sensor — passive magnetic reed switch (D1, D2)
 
-### Why the change
+### Why a reed switch
 
-The wake sensor must mount on the **housing / control panel** with flying leads back to the PCB. **No catalog I²C proximity sensor is through-hole or panel-mount** — every I²C proximity part (VL53xx, VCNL40xx, APDS-9960) is a tiny optical SMD module meant to sit behind a window on the main PCB. Requiring panel/THT mount therefore drops I²C and moves to a discrete-output sensor.
-
-### Technology trade (panel/THT, single sensor, "wake on approach")
-
-| Tech | Representative part | Mount | Supply | Output | Range | Verdict |
-|------|--------------------|-------|--------|--------|-------|---------|
-| **Pyroelectric PIR** | Panasonic PaPIRs **EKMB** (6 µA) / EKMC | TO-5 leaded can; lens at panel aperture | ~1.8–6 V | digital open-drain on/off | meters | **Selected** |
-| Capacitive proximity (industrial barrel) | M12/M18 threaded | true panel-mount + lead | usually 10–30 V | NPN/PNP OC | mm–few cm | range too short; wrong supply |
-| Diffuse photoelectric | bracket/panel sensor | bracket | 10–30 V | OC discrete | OK | false-triggers in enclosure; wrong supply |
-| Analog IR distance | Sharp GP2Y0A | module + leads | 5 V | analog (needs ADC) | OK | no spare ADC; obsolescence |
+The wake sensor must mount on the **housing / control panel** with flying leads back to the PCB. **No catalog I²C proximity sensor is through-hole or panel-mount** — every I²C proximity part (VL53xx, VCNL40xx, APDS-9960) is a tiny optical SMD module meant to sit behind a window on the main PCB. A panel/THT mount rules out I²C; the part is a **passive magnetic reed switch** — a dry SPST contact actuated by a magnet on the access door/panel. It needs no supply, no window, and no warm-up, and conditions exactly like the panel buttons.
 
 ### Selected part
 
-**Panasonic PaPIRs, digital type — recommend EKMB 6 µA high-noise-immunity grade.** TO-5 metal-can leaded (through-hole), integrated amp/comparator/ASIC, fixed preset threshold, open-drain on/off output, temp/offset compensation, high EMI immunity (6 µA grade has a differential design with noise resistance into the GHz range — relevant near GNSS/RF). Standard or wide lens. Runs directly off 3V3_P. Choose the final lens/finish for the aperture geometry.
+**Passive magnetic reed switch (dry SPST contact).** Two-terminal, unpowered: a magnet brought near the contact closes it. Panel/housing-mountable with flying leads; immune to optical/thermal false triggers and to the EMI environment near the GNSS/RF section. Actuation = door/panel magnet present.
 
-### Interface (the parts that bite)
+### Interface — `PROX_WAKE` = PF10, J17.18
 
-- **Output drive is tiny: ≤ 100 µA.** Exceeding it makes the part unstable or damages it. Pull-up sized for ≤100 µA → **R ≥ 33 kΩ; use 100 kΩ.** Optional 1–10 nF for edge cleanup. **Do not** hang an LED or low-value pull-up on the output.
-- **Pull-up rail = 3V3_STM** (so the expander input is always defined even when 3V3_P is gated; PIR off → output transistor off → line reads high = "no motion", safe default). Back-feed through a ≥100 kΩ pull-up is negligible.
-- **Confirm output structure per orderable PN** — EU lit says open-drain, NA lit describes a limited-drive voltage output. Same 100 µA ceiling either way; verify whether the pull-up is mandatory.
-- **Read via spare MCP23017 U55 Port B bit (GPB2–7).** U55 is MIRROR=1 with INTA+INTB tied → `PG_INT_N` → PA10/EXTI10. The wake input therefore raises an interrupt with **zero new MCU pins**. Set the bit's IPOL/INTCON for on-change wake.
-- **Connector / wiring:** 3 conductors (V+, GND, OUT). Keep OUT high-impedance; a couple of feet of wire to the panel is fine at these currents. Add connector-pin TVS on the main PCB (as for the button array).
+- **Read on STM32 `PROX_WAKE` = PF10** (direct GPIO, TVS U16), gathered by the ~1 kHz GPIOF scan and
+  optionally armed as EXTI for wake. Conditioning: **R254 10 kΩ → 3V3_STM + C202 0.1 µF** — the same
+  active-low chain as the panel buttons.
+- **Dry contact, active-low.** Idle (contact open) the 10 kΩ holds PF10 high; magnet present closes
+  the reed to GND → low. A passive contact draws no current. The topology is **fail-safe**: an
+  unplugged or cut lead reads idle-high (no false wake); a closed reed reads low (wake).
+- **No Vcc pin needed.** The reed is passive — `PROX_WAKE` + GND on **J17.18** (plus a J17 GND) is the
+  complete connection.
+- **Debounce:** R254·C202 = 10 kΩ × 0.1 µF ≈ 1 ms RC + firmware debounce, as for the buttons. Reed
+  contacts bounce on close; the RC + FW debounce covers it.
+- **Connector / wiring:** a couple of feet of wire to the panel is fine. TVS at the connector (U16) as
+  for the button array.
 
-### Application caveats
+### Application note
 
-- **Motion ≠ presence.** PIR fires on movement; "approach" wakes it, but it won't hold while a person stands still. Handle in firmware with a wake-hold timer (stay lit N s after last edge) — standard PIR display-wake pattern.
-- **Warm-up vs. rail gating.** PIR needs ~30 s to stabilize after power-up; output is unreliable until then. If 3V3_P is gated by PERIPH_EN, each cycle restarts that settle. **Option:** put just this sensor on 3V3_STM (a few µA) so wake is instantly reliable; otherwise firmware must mask the sensor ~30 s after any PERIPH_EN cycle.
-- **Optical path.** Lens must see out an aperture — will not work behind glass or most plastics (IR-opaque). Provide a clear/IR-transmissive window or open slot. **Aim it out the front, away from the fan exhaust, OCXO oven, and Rb package** — moving warm air is the classic PIR false-trigger source in an instrument enclosure.
+- **Magnet-actuated, not motion/approach.** Wake fires when the door/panel magnet is presented (lid
+  opened, or a keeper magnet moved), not on a warm body. Firmware treats a close edge as a wake event;
+  apply a wake-hold timer to keep the panel lit N s after the last edge. **No warm-up mask is
+  required** — a passive contact is valid immediately at boot.
 
 ---
 
-## 4. E-compass — LSM303AGR → IIS2MDC + LIS2DH12 (D3, D4, D5)
+## 4. E-compass — IIS2MDC + LIS2DH12 (D3, D4, D5)
 
 ### Why a pair, and why these parts
 
@@ -101,14 +137,14 @@ The wake sensor must mount on the **housing / control panel** with flying leads 
 
 ### Parts
 
-| Function | Part | Addr (7-bit) | Key facts |
-|----------|------|--------------|-----------|
-| Magnetometer | **IIS2MDC** (TR) | **0x1E, fixed** (no select pin) | Industrial-grade sibling of LIS2MDL, **register-compatible**; ±50 G; I²C to 3.4 MHz + SPI; LGA; −40/+85 °C. Same register family as the LSM303AGR mag. |
-| Accelerometer | **LIS2DH12** (TR) | **0x18 (SA0=0) / 0x19 (SA0=1)** | ±2/±4/±8/±16 g; 12-bit HR; **LIS2DH/LIS3DH register family** (NOT the LIS2DW12 "femto" map); `WHO_AM_I` = **0x33**; −40/+85 °C. |
+| Function | Part | Ref | Addr (7-bit) | Key facts |
+|----------|------|-----|--------------|-----------|
+| Magnetometer | **IIS2MDC** (TR) | **U61** | **0x1E, fixed** (no select pin) | Industrial-grade sibling of LIS2MDL, **register-compatible**; ±50 G; I²C to 3.4 MHz + SPI; LGA; −40/+85 °C. Same register family as the LSM303AGR mag. |
+| Accelerometer | **LIS2DH12** (TR) | **U59** | **0x19 (SA0 → 3V3_STM)** | ±2/±4/±8/±16 g; 12-bit HR; **LIS2DH/LIS3DH register family** (NOT the LIS2DW12 "femto" map); `WHO_AM_I` = **0x33**; −40/+85 °C. |
 
-- **0x1E is fixed** for the IIS2MDC — confirms that the **0x18/0x19 strap belongs to the accelerometer, not the magnetometer.** (Recorded because it was a point of confusion.)
-- Pick the accel address: **0x19 (SA0 → Vdd_IO)** reuses the LSM303AGR accel's old slot, or 0x18 (SA0 → GND). Both free on the bus. **Strap SA0 — never float it.**
-- **Firmware bonus:** the LSM303AGR's accelerometer was register-compatible with the LIS2DH family, so LIS2DH12 keeps the accel firmware path close to the original design. On Zephyr, the `st,lis2dh` driver covers LIS2DH12; the magnetometer uses the `st,lis2mdl`-class driver given IIS2MDC register identity (confirm the devicetree `compatible`/alias).
+- **0x1E is fixed** for the IIS2MDC (no select pin); the **0x18/0x19 strap belongs to the accelerometer, not the magnetometer.**
+- **Accel address = 0x19** — LIS2DH12 U59 SA0 strapped to 3V3_STM; free on the bus.
+- **Firmware:** LIS2DH12 sits in the LIS2DH register family, keeping the accel firmware path simple. On Zephyr, the `st,lis2dh` driver covers LIS2DH12; the magnetometer uses the `st,lis2mdl`-class driver given IIS2MDC register identity (confirm the devicetree `compatible`/alias).
 
 ### Configuration & assembly notes
 
@@ -160,26 +196,28 @@ A one-time, in-enclosure **hard/soft-iron calibration** (stored once, fixed inst
 
 ---
 
-## 6. I²C address map — delta to propagate into peripheral-map §4/§6
+## 6. I²C address map — canonical assignments for peripheral-map §4/§6
 
-**Remove:**
-- `VL53L1X 0x29` (proximity moves off I²C — D1/D2).
-- `LSM303AGR 0x1E / 0x19` (e-compass replaced — D3).
-- The `BNO055 0x28` alt note (unless retained as a fusion-IMU fallback).
+The full I²C1 map is the table in **§1**. The canonical assignments peripheral-map §4/§6 must carry:
 
-**Add:**
-- `IIS2MDC 0x1E (mag)` — fixed address; on 3V3_P; CS→Vdd_IO.
-- `LIS2DH12 0x19 (accel, SA0→Vdd_IO)` — or 0x18; on 3V3_P; CS→Vdd_IO.
-
-**Net:** the 0x1E slot is unchanged; 0x18/0x19 is a new accel slot (no collision with the existing map). The 3V3_P I²C UI group becomes **IIS2MDC + LIS2DH12** only; the proximity wake is a **discrete input on U55 GPB2–7**.
-
-**§6 power-domain note:** add the e-compass pair (and decide the PIR's rail per §3) to the `PERIPH_EN` enumeration, or assign deliberately. If the buffered-segment topology (§2/D7) is adopted, document the far-side pull-ups on 3V3_P and the buffer part.
+- **E-compass:** `IIS2MDC 0x1E` mag (U61); `LIS2DH12 0x19` accel (U59, SA0→3V3_STM); CS→Vdd_IO for I²C.
+- **Humidity:** `SHT45 0x44` (U72).
+- **Current monitors:** GPS INA228 = **0x4A** (U23); TMP117 **U58 = 0x48 / U57 = 0x49**; panel INA228
+  `U54 = 0x4C`.
+- **Proximity wake** is a discrete GPIO on PF10 (D1/D2), not an I²C address.
+- **Power domain:** every I²C1 device (the §1 table), plus the SPI-NOR (U62) and display/touch, is on
+  **always-on 3V3_STM**. No gated peripheral rail, no segmenting buffer; U56 (LTC4311) is an
+  always-on accelerator only. Fusion-IMU alternatives (BNO055 0x28 etc.) apply only if the e-compass
+  pair is ever replaced.
 
 ---
 
 ## 7. Firmware notes
 
-- **Proximity wake:** read the U55 Port B bit; configure on-change interrupt (IPOL/INTCON/GPINTEN) so motion raises `PG_INT_N`. Apply a wake-hold timer. If the PIR is on 3V3_P, mask its input for ~30 s after any PERIPH_EN cycle (warm-up).
+- **Proximity wake:** read `PROX_WAKE` (PF10) on the GPIOF scan; optionally arm EXTI on PF10 for
+  on-change wake. Apply a wake-hold timer on the close edge. The sensor is a **passive magnetic reed
+  switch** (active-low, R254 pull-up → 3V3_STM), so **no warm-up mask is needed** and the level is
+  valid immediately (§3).
 - **E-compass:** `st,lis2dh` driver for LIS2DH12; `st,lis2mdl`-class for IIS2MDC (verify compatible string). Apply the package-to-board rotation/axis map first, then tilt-comp (MotionEC) and stored hard/soft-iron cal (MotionMC). Apply WMM/IGRF declination from the GPS fix for **true** north. Heading is for orienting the satellite plot — low rate is fine; oversample the accel to beat LIS2DH12 noise.
 - **Calibration is one-shot for the fixed install** — run in-enclosure, store, reuse. Re-run only if the unit is re-housed or nearby ferromagnetics change.
 
@@ -187,23 +225,20 @@ A one-time, in-enclosure **hard/soft-iron calibration** (stored once, fixed inst
 
 ## 8. Open items / to verify
 
-- [ ] **PIR orderable PN**: confirm digital output structure (open-drain vs limited-drive push-pull) and the ≤100 µA ceiling; finalize lens/finish for the panel aperture.
-- [ ] **PIR rail**: 3V3_P (gated, needs warm-up mask) vs 3V3_STM (always ready). Decide and document.
-- [ ] **3V3_P bus topology (D7)**: choose buffer-isolated segment (PCA9517/TCA4311, far-side pull-ups on 3V3_P) vs flat-bus-with-PERIPH_EN-always-on; reconcile with the LTC4311-vs-buffer open item (peripheral-map §13). LTC4311 does not isolate.
-- [ ] **§6 rail enumeration**: explicitly assign IIS2MDC, LIS2DH12 (and PIR) to a rail; §6 currently lists only TMP117/ATECC608B/NOR on PERIPH_EN.
-- [ ] **Accel address**: commit 0x18 vs 0x19 and strap SA0 accordingly.
-- [ ] **Zephyr bindings**: confirm `st,lis2dh` (LIS2DH12) and the IIS2MDC magnetometer `compatible`/alias.
+- [ ] **Display 5V-side I²C pull-ups (U63)**: the PCA9306 provides none — confirm the display module
+      carries its own 2× ~4.7 kΩ → 5V_DISP on `I2C_DISP_SCL/SDA` (§2.1).
+- [ ] **Zephyr bindings**: confirm `st,lis2dh` (LIS2DH12 U59 @0x19) and the IIS2MDC (U61 @0x1E)
+      magnetometer `compatible`/alias; firmware I²C map must adopt GPS INA=0x4A, SHT45=0x44,
+      TMP117 U58=0x48 / U57=0x49.
 - [ ] **Local temperature** at the e-compass location vs LIS2DH12 −40/+85 °C (consumer grade).
-- [ ] **Magnetometer keep-out** captured as layout rules: current-loop exclusion vs trace current, balanced power returns, non-ferromagnetic finish/parts zone, distances to relay/bucks/magnetics/Rb/OCXO/fan.
+- [ ] **Magnetometer keep-out** captured as layout rules: current-loop exclusion vs trace current,
+      balanced power returns, non-ferromagnetic finish/parts zone, distances to relay/bucks/magnetics/Rb/OCXO/fan.
 
 ---
 
-## 9. Cross-references & change log
+## 9. Cross-references
 
-**Cross-references:** `ntp_server_peripheral_map.md` (§4 I²C, §6 power domains, §13 open items — I²C buffer/accelerator, e-compass), `sts1000_fault_aggregation.md` (MCP23017 U55/U54 wiring, `PG_INT_N`), `sts1000_vcc_rb_supply.md` (VCC_RB dynamics relevant to mag interference).
-
-**Change log:**
-- E-compass: LSM303AGR (NLA) → **IIS2MDC + LIS2DH12** pair; tilt-comp mandatory due to vertical mount.
-- Proximity wake: VL53L1X (I²C ToF) → **PaPIRs PIR** (panel/THT), discrete input on U55 GPB2–7; removed from I²C bus.
-- Magnetometer copper: **continuous current-free pour under the part** (rejected: plane void); keep-out sized by Ampère-law field budget, balanced returns over distance.
-- Bus topology: flagged 3V3_P gating back-power; **buffer-isolated segment** recommended.
+`ntp_server_peripheral_map.md` (§4 I²C, §6 power domains), `ina228_decode` map,
+`sts1000_fault_aggregation.md` (direct-GPIO fault/HMI scan), `sts1000_firmware_hardware_interface.md`,
+`sts1000_vcc_rb_supply.md` (VCC_RB dynamics relevant to mag interference),
+`sts1000_schematic_design_review.md` (netlist-driven consistency review).

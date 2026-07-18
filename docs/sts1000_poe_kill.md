@@ -23,7 +23,7 @@ Consequence: the on-board hold cap (C9) does **not** need to span the MPS window
 
 ## Connections
 
-Net aliases: `VOUT_P` = VPP (bridge +, buck Vin+); `VOUT_N` = VPN (bridge −, **kill-driver reference**); `GND` = RTN (buck return, logic ground — **rises to VPP when the pass switch is off**); `V_KBIAS` = VOUT_N + 12 V (local); `VAUX` = NCP1095 AUX (pin 4) drive net.
+Net aliases: `VOUT_P` = VPP (bridge +, PD front-end + kill bias; **upstream** of the U10 PoE shunt R30); `V_POE` = VOUT_P after the R30 150 mΩ shunt — feeds the bucks. All PoE loads draw from `V_POE`, so R30 (150 mΩ) sits in the series feed and the PoE INA228 (U10 @0x40) reads real load current. `VOUT_N` = VPN (bridge −, **kill-driver reference**); `GND` = RTN (buck return, logic ground — **rises to VPP when the pass switch is off**); `V_KBIAS` = VOUT_N + 12 V (local); `VAUX` = NCP1095 AUX (pin 4) drive net.
 
 ### Bias rail + KILL_N (VOUT_N-referenced; alive whenever PoE present)
 
@@ -58,7 +58,7 @@ Net aliases: `VOUT_P` = VPP (bridge +, buck Vin+); `VOUT_N` = VPN (bridge −, *
 | Ref | Value | Connection | Note |
 |---|---|---|---|
 | R22 | 10 kΩ | KILL_N → Q3.B | base series |
-| Q3 | BC857W (PNP) | E = V_KBIAS; B; C = HOLD | KILL_N low → HOLD → V_KBIAS |
+| Q3 | BC857W (PNP) | E = V_KBIAS, C = HOLD | High-side sustain PNP: `Q3.2 (E)` = V_KBIAS (Net-(D4-K), +12 V), `Q3.3 (C)` = HOLD (C9/R25/R27). KILL_N low → Q3 on → HOLD pulled to V_KBIAS. |
 | C9 | 1 µF | HOLD → VOUT_N | off-time / survives MCU death |
 | R25 | 180 kΩ | HOLD → VOUT_N | bleed; default-RUN |
 | R27 | 10 kΩ | HOLD → VAUX | divider top |
@@ -69,13 +69,13 @@ Net aliases: `VOUT_P` = VPP (bridge +, buck Vin+); `VOUT_N` = VPN (bridge −, *
 
 | Ref | Value / Part | Key connections |
 |---|---|---|
-| U9 | NCP1095DBR2 | AUX(4) ← VAUX; PGATE(10) → Q2.G; PSNS(9) → Q2.S / R16 top; RTN(12) → GND; VPP(1) → VOUT_P; VPN(8) → VOUT_N; ACS(6) → VPN; GBR(11) → FDMQ8205A GDC; PGO(14) open-drain → buck EN (pull-up to VPP) |
+| U9 | NCP1095DBR2 | AUX(4) ← VAUX; PGATE(10) → Q2.G; PSNS(9) → Q2.S / R16 top; RTN(12) → GND; VPP(1) → VOUT_P; VPN(8) → VOUT_N; ACS(6) → VPN; GBR(11) → FDMQ8205A GDC; PGO(14) open-drain `POE_PG` net → U28 EN + R20 (10 k pull-up to VOUT_P). STM32 `PG7` (U12.92) telemetry is taken through the R264 174 k / R263 10 k divider (POE_PG → PG7 = 2.93 V), keeping the MCU input off the raw ~54 V node — see §Power-good telemetry divider. |
 | Q2 | FDMC8622 (100 V / 40 mΩ) | D = RTN(GND), S = R16 top / PSNS, G = PGATE |
 | R16 | 25 mΩ | Q2.S → VOUT_N (RSNS) |
 | R13 / R14 | 232 Ω / 909 Ω | CLA(2)→VPN / CLB(3)→VPN — Class 6 |
-| CPD | 10 µF / 80 V | VPP → RTN (PD bulk) |
+| C10 (CPD) | 10 µF / 80 V | VPP → RTN/GND (PD bulk) |
 | C8 | 100 nF / 100 V | VPP → VPN |
-| D1 | SMBJ58A | VPP → VPN (TVS) |
+| CR1 | SMCJ58A | VPP → VPN (TVS); as-built `CR1.1 = VOUT_P`, `CR1.2 = VOUT_N` |
 
 ## Reference domains
 
@@ -122,7 +122,7 @@ All input-stage transistors are emitter-to-GND with base pulldowns to GND. This 
 | Off-state: RTN = VPP | p.7 |
 | PGATE abs-max | 11 V vs VPN — p.5 |
 | Class 6 = RCLASSA 232 Ω / RCLASSB 909 Ω, assigned 51 W | Table 1, p.9 |
-| Pass FET FDMC8622 = 100 V / 40 mΩ; RSNS 25 mΩ; CPD 10 µF/80 V; C1 100 nF/100 V; D1 SMBJ58A | BOM p.8 |
+| Pass FET FDMC8622 = 100 V / 40 mΩ; RSNS 25 mΩ; CPD (C10) 10 µF/80 V; C8 100 nF/100 V; TVS **CR1 SMCJ58A** | BOM p.8 |
 | PGO open-drain MUST gate buck EN; pull-up referenced to RTN | p.10, Fig 5 |
 | ACS to VPN disables Autoclass (single-signature) | p.3, p.12 |
 
@@ -134,6 +134,32 @@ All input-stage transistors are emitter-to-GND with base pulldowns to GND. This 
 4. **WDT pull-up taps WDO_N, not the Q4 base node** — open-drain nWDO must be cleanly pulled to 3V3; a pull-up after the series resistor leaves Q4 half-on during a fault and blocks the kill.
 5. Recovery is PSE-driven (MPS dropout → re-detect). On-board RC only triggers + survives MCU death.
 6. Reuse standard BJTs: BC847W (NPN), BC857W (PNP). 10 kΩ base series, 100 kΩ base pulldown.
+
+## Power-good telemetry divider
+
+`POE_PG` is the NCP1095 PGO net (= `R20.2`, `U28.24 EN`, `U9.14 PGO`, `R20.1 → VOUT_P`).
+Its release level is the ~54 V VPP rail (open-drain PGO pulled up to VOUT_P by R20), so the
+MCU telemetry tap uses a divider rather than sitting on the raw rail: `U12.92 (PG7)` is fed by
+**R264 174 kΩ** (POE_PG → `Net-(U12B-PG7)`) + **R263 10 kΩ** (node → GND). Ratio 10/184 =
+0.0543 → PG7 = 54 V × 0.0543 = **2.93 V** (3.10 V @57 V) — below the 3.6 V abs-max and a valid
+logic HIGH. Polarity is direct: PGO releases when power-good → R20 pulls POE_PG to VOUT_P → PG7
+high; PGO sinks on fault → POE_PG ≈ 0 → PG7 low. R20 pull-up and U28 EN sit on the undivided
+POE_PG node.
+
+> **BOM note:** R264 must be the 174 kΩ part (`ERJ-2RKF1743X`). A 1.21 kΩ value here would make
+> PG7 = 48 V — board-lethal — so verify the 174 kΩ MPN before ordering.
+
+## Decision Log
+
+- **PG7 telemetry divider (R264 174 k / R263 10 k).** NCP1095 PGO is an open-drain that releases
+  to the ~54 V VPP rail when power-good; the divider brings the power-good level into the MCU input
+  range (2.93 V @54 V) so a single GPIO can read PoE power-good without exposure to the PD rail.
+- **U10 shunt in the series feed (V_POE).** The PoE input INA228 (U10 @0x40) shunt R30 must carry
+  the full load current to measure PoE input power, so every buck draws from `V_POE` (downstream of
+  R30) rather than directly from `VOUT_P`.
+- **Q3 PNP high-side orientation.** The sustain device is a PNP with its emitter on the high rail
+  (V_KBIAS) and collector driving the load node (HOLD), so that KILL_N low turns Q3 on and pulls HOLD
+  up to V_KBIAS to self-sustain the assert.
 
 ## Open bench items
 

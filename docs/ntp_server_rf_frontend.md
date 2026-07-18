@@ -3,20 +3,6 @@
 **Comprehensive design, control, and firmware reference.**
 This block conditions any common 10 MHz external reference into a clean 3.0 V CMOS square and drives **input B** of the system clock-source mux (peripheral map §2.1). It is the authoritative source for this subsystem's schematic, BOM, control interface, and firmware contract.
 
-<!--
-TODO verify designators (2026-06 re-annotation): the following old refs map onto a same-value
-pair on the "Refrence Clock Input" sheet and could NOT be resolved one-to-one from value/role
-alone — they are left at their OLD numbers below and must be confirmed against the schematic:
-  C133 → C150/C153 (0.1µF pair)        C134/C137 → C154/C156 (10µF Cin/Cout pair)
-  C135/C136 → C151/C155 (10nF pair)    R134/R135 → R174/R175 (47k bias pair)
-  R140/R141 → R179/R180 (10k VMID pair) R142/R147 → R176/R182 (100k pair)
-  R143/R144 → R183/R184 (33Ω pair)     D12/D15 → D18/D19 (BAT54S pair)
-  D13/D14 → D20/D21 (3V3 zener pair)
-  D11 (SMA ESD, SZESD7410) lives on the Connectors sheet — D8/D9 are SZESD7410; confirm new ref.
-Resolved confidently: U42→U49, U43→U50, U44→U51, FB8→FB9, C132→C149, R136→R177, R137→R178,
-R138→R181, R145→R185, R146→R186.
--->
-
 -----
 
 ## 0. TL;DR for the firmware engineer
@@ -62,16 +48,16 @@ Out of scope: connecting a DC power supply directly to the SMA centre. C149 bloc
 ```
                                                   3V0_RF (island)
                                                        |
- SMA ─D11─||─C149─┬─N1─R178─┬─N2─||─C136─R181─┬─(+IN) ┌────────┐
-(RF_IN) (ESD)(DCblk)│       │ (clamp │  (Rin) │   U50 │LTC6752 │ Q ─R144─► 10MHz_CLK_OUT
-                   │        │  D12)  │        │ (−IN) │  xS5   │           ├─► mux input B
-              R134/R135   D13(isl  REF_VMID──┴───────└────────┘           └─► EXTREF_MON
-              47k/47k     clamp)   (1.5V, R140/R141)                            (PB14/TIM12)
-              →N1=1.5V       │       R142 100k +IN bias
-                   │     term leg:  VCC: 3V0_RF─R143(33Ω)─┬─VCC(5)
-        3V3─R147─┤     N1─R177─C133─U49(SEL)   33Ω        D14(3V3)──┤
+ SMA ─D8─||─C149─┬─N1─R178─┬─N2─||─C151─R181─┬─(+IN) ┌────────┐
+(RF_IN) (ESD)(DCblk)│       │ (clamp │  (Rin) │   U50 │LTC6752 │ Q ─R184─► 10MHz_CLK_OUT
+                   │        │  D19)  │        │ (−IN) │  xS5   │           ├─► mux input B
+              R174/R175   D20(isl  REF_VMID──┴───────└────────┘           └─► EXTREF_MON
+              47k/47k     clamp)   (1.5V, R179/R180)                            (PB14/TIM12)
+              →N1=1.5V       │       R182 100k +IN bias
+                   │     term leg:  VCC: 3V0_RF─R183(33Ω)─┬─VCC(5)
+        3V3─R176─┤     N1─R177─C150─U49(SEL)   33Ω        D21(3V3)──┤
          (100k     │        49.9 0.1µF (TMUX1101            0.1µF+1µF──┤
-         pull-up)  │  D15(BAT54S)──┘  VDD=3V0_RF,                    └─GND
+         pull-up)  │  D18(BAT54S)──┘  VDD=3V0_RF,                    └─GND
                    │   pin-2 clamp    → GND)
               N1───┘
 
@@ -82,7 +68,7 @@ Out of scope: connecting a DC power supply directly to the SMA centre. C149 bloc
 
 - **Single LTC6752xS5 squarer.** One comparator covers the full input envelope — its rail-to-rail-beyond input plus the N2 clamp handle +6…+15 dBm sine, TTL square, and high-Z logic. CMOS output drives mux input B directly.
 - **3.0 V island.** Set by the LT3045; matches the OCXO's 3.0 V Voh so both references present identical logic levels to the mux, and respects the base LTC6752's **3.6 V supply abs-max** with headroom.
-- **VCC abs-max guard.** Base LTC6752 supply abs-max is 3.6 V (the 5.25 V figure applies only to the separate-supply −2/−3 variants, not offered in S5). R143 + D14 hold the comparator VCC ≤ ~3.5 V even if the island lifts in a fault.
+- **VCC abs-max guard.** Base LTC6752 supply abs-max is 3.6 V (the 5.25 V figure applies only to the separate-supply −2/−3 variants, not offered in S5). R183 + D21 hold the comparator VCC ≤ ~3.5 V even if the island lifts in a fault.
 - **Continuous ground plane** under the whole path (no split, no star tie, no bridge component) — isolation lives on the supply rail (LT3045 + FB9), not in the return. See §7.
 - **All hardware always populated**; the MCU adapts the path at runtime via the single `REF_TERM_EN` bit.
 
@@ -92,11 +78,11 @@ Out of scope: connecting a DC power supply directly to the SMA centre. C149 bloc
 
 The governing failure mode: a Schottky clamp to the 3 V rail **fails when the board is off**, because a dead rail is at 0 V and positive excursions then dump current into it, back-powering logic in an undefined state. Defeated by cooperating elements, none of which assume a live rail:
 
-1. **ESD array (D11, SZESD7410)** at the connector — kills the kV transient first.
+1. **ESD array (D8, SZESD7410)** at the connector — kills the kV transient first.
 2. **DC block (C149)** — isolates every active part from input DC; a DC fault cannot reach the switch, clamp, or comparator.
-3. **Rail clamp (D12 at N2)**, current-limited by **R178** — holds the comparator-input node within (−0.3 V … island+0.3 V) in every fault/setting case.
-4. **Island shunt clamp (D13)** — sinks back-fed current the LT3045 cannot (an LDO can't sink), *defining* the island rather than letting it float; the comparator VCC is independently guarded by **R143 + D14**, so the comparator's survival does not depend on D13's exact clamp voltage.
-5. **Termination-switch clamp (D15 at U49 pin 2)** — holds the switch's signal pin to the rails when the termination is lifted, so the open-switch state is safe for any source.
+3. **Rail clamp (D19 at N2)**, current-limited by **R178** — holds the comparator-input node within (−0.3 V … island+0.3 V) in every fault/setting case.
+4. **Island shunt clamp (D20)** — sinks back-fed current the LT3045 cannot (an LDO can't sink), *defining* the island rather than letting it float; the comparator VCC is independently guarded by **R183 + D21**, so the comparator's survival does not depend on D20's exact clamp voltage.
+5. **Termination-switch clamp (D18 at U49 pin 2)** — holds the switch's signal pin to the rails when the termination is lifted, so the open-switch state is safe for any source.
 
 **N1 carries no voltage-sensitive load** (divider, C149, R177, R178 — all rated for the full ±6.3 V / ±14 V transient swing), so it needs no clamp; leaving the 50 Ω node clamp-free also removes shunt capacitance and preserves the match.
 
@@ -104,40 +90,40 @@ The governing failure mode: a Schottky clamp to the 3 V rail **fails when the bo
 
 ## 4. Stage-by-stage design
 
-### 4.1 Connector & ESD — SMA, `D11`
+### 4.1 Connector & ESD — SMA, `D8`
 | Item | Value / PN | Notes |
 |---|---|---|
 | SMA | edge-mount, 50 Ω | reference input `10MHz_RF_IN` |
-| `D11` | SZESD7410MXWT5G | bidirectional, 0.7 pF, V_BR 10 V; IEC 61000-4-2. Low C preserves the 50 Ω node. At the connector pads, before C149. |
+| `D8` | SZESD7410MXWT5G | bidirectional, 0.7 pF, V_BR 10 V; IEC 61000-4-2. Low C preserves the 50 Ω node. At the connector pads, before C149. |
 
 ### 4.2 DC block — `C149`
 | Item | Value | Notes |
 |---|---|---|
 | `C149` | 100 nF C0G/X7R, 50 V, 0402 | 0.16 Ω at 10 MHz; HPF into 50 Ω ≈ 32 kHz. 50 V rating survives a +24 V-class miswire on the centre pin without conducting it downstream. |
 
-### 4.3 Bias node N1 — `R134`, `R135`
+### 4.3 Bias node N1 — `R174`, `R175`
 | Item | Value | Notes |
 |---|---|---|
-| `R134`,`R135` | 47 kΩ 1% each: R134 = 3V0_RF→N1, R135 = N1→GND | Midpoint = N1 = **1.5 V** (half the island). 23.5 kΩ Thevenin ≫ 50 Ω → does not load the signal or detune the match. **No bypass on N1** (would short the signal). DC bias of N1 is always defined regardless of termination state. |
+| `R174`,`R175` | 47 kΩ 1% each: R174 = 3V0_RF→N1, R175 = N1→GND | Midpoint = N1 = **1.5 V** (half the island). 23.5 kΩ Thevenin ≫ 50 Ω → does not load the signal or detune the match. **No bypass on N1** (would short the signal). DC bias of N1 is always defined regardless of termination state. |
 
-### 4.4 Switched termination — `R177`, `C133`, `U49`, `D15`, `R147`
-Leg: **N1 → R177 → C133 → U49 → GND.**
+### 4.4 Switched termination — `R177`, `C150`, `U49`, `D18`, `R176`
+Leg: **N1 → R177 → C150 → U49 → GND.**
 | Item | Value / PN | Notes |
 |---|---|---|
-| `R177` | 49.9 Ω 0.1% thin-film | 50 Ω line termination (with C133 + U49 Ron ≈ 50.5 Ω → RL > 30 dB). |
-| `C133` | 0.1 µF C0G/X7R | DC-blocks the leg so N1's 1.5 V draws no standing current; 0.16 Ω at 10 MHz → transparent. |
+| `R177` | 49.9 Ω 0.1% thin-film | 50 Ω line termination (with C150 + U49 Ron ≈ 50.5 Ω → RL > 30 dB). |
+| `C150` | 0.1 µF C0G/X7R | DC-blocks the leg so N1's 1.5 V draws no standing current; 0.16 Ω at 10 MHz → transparent. |
 | `U49` | TI **TMUX1101DCK** SPST, SC70-6, VDD = 3V0_RF | `REF_TERM_EN` (PC10) on SEL: **1 = ON → terminated**, 0 = OFF → lifted. Grounded-end placement. 0.1 µF VDD decoupling. |
-| `D15` | **BAT54S** at U49 pin 2 → 3V0_RF/GND | Clamps the switch's signal pin to the rails. With the switch open (term lifted), pin 2 sees the N1 swing through R177; D15 holds it to the rails so the lifted state is safe for any source — sine, logic, or a hot 50 Ω source. |
-| `R147` | 100 kΩ → 3V3 (always-on) | Pull-up on `REF_TERM_EN`/SEL → defaults **terminated** (safe) before the island or MCU come up. SEL is fail-safe (may be driven above VDD and before VDD), so the 3.3 V idle level into a 3.0 V-powered part is valid. |
+| `D18` | **BAT54S** at U49 pin 2 → 3V0_RF/GND | Clamps the switch's signal pin to the rails. With the switch open (term lifted), pin 2 sees the N1 swing through R177; D18 holds it to the rails so the lifted state is safe for any source — sine, logic, or a hot 50 Ω source. |
+| `R176` | 100 kΩ → 3V3 (always-on) | Pull-up on `REF_TERM_EN`/SEL → defaults **terminated** (safe) before the island or MCU come up. SEL is fail-safe (may be driven above VDD and before VDD), so the 3.3 V idle level into a 3.0 V-powered part is valid. |
 
 **Why U49 is on the 3.0 V island, not the 3.3 V logic rail:** SEL is 1.8 V-logic-compatible and fail-safe, so a 3.3 V control HIGH into a 3.0 V-powered part is valid with no level concern. Keeping VDD + GND + the termination return all in the island/analog-ground domain keeps the 10 MHz return local. The line is static (µA), so it does not dirty the low-noise rail.
 
-### 4.5 Clamp & current limit — `R178`, `D12`, `D13`
+### 4.5 Clamp & current limit — `R178`, `D19`, `D20`
 | Item | Value / PN | Notes |
 |---|---|---|
 | `R178` | 100 Ω 1%, N1 → N2 | Sole current limiter into the N2 clamp; ≈ 100 MHz RC with the comparator input C → passes 10 MHz flat. |
-| `D12` | **BAT54S**: A(1)→GND, COM(3)→N2, K(2)→3V0_RF | Clamps N2 to (−0.3 V … island+0.3 V), current-limited by R178. Legit swing never reaches it → no distortion/leakage. |
-| `D13` | 3.3 V clamp on 3V0_RF (TVS preferred ≥ 1 W; 3V3 zener acceptable) | Island shunt clamp — sinks D12's back-fed current (~27 mA at +20 dBm), defining the island. V_RWM ≥ 3.0 V (no conduction at setpoint). Clamp voltage non-critical (≤ ~4.5 V fine) because R143+D14 guard the comparator. A TVS gives more +27 dBm surge margin. |
+| `D19` | **BAT54S**: A(1)→GND, COM(3)→N2, K(2)→3V0_RF | Clamps N2 to (−0.3 V … island+0.3 V), current-limited by R178. Legit swing never reaches it → no distortion/leakage. |
+| `D20` | 3.3 V clamp on 3V0_RF (TVS preferred ≥ 1 W; 3V3 zener acceptable) | Island shunt clamp — sinks D19's back-fed current (~27 mA at +20 dBm), defining the island. V_RWM ≥ 3.0 V (no conduction at setpoint). Clamp voltage non-critical (≤ ~4.5 V fine) because R183+D21 guard the comparator. A TVS gives more +27 dBm surge margin. |
 
 ### 4.6 Squarer — `U50` (LTC6752xS5)
 S5 = 5-lead TSOT-23. Pinout: **1 = Q, 2 = VEE, 3 = +IN, 4 = −IN, 5 = VCC.**
@@ -145,15 +131,15 @@ Specs: 2.9 ns prop delay, 280 MHz, 4.5 ps RMS jitter (100 mVpp/100 MHz), rail-to
 
 | Net | Pin | Connection |
 |---|---|---|
-| +IN | 3 | N2 → **C136 10 nF** (AC-couple) → **R181 1 kΩ** (Rin) → +IN; plus **R142 100 kΩ** +IN → REF_VMID (self-bias). R181 limits +IN ESD-clamp current in a fault (≈ 1 mA), so almost no fault current reaches VCC. |
+| +IN | 3 | N2 → **C151 10 nF** (AC-couple) → **R181 1 kΩ** (Rin) → +IN; plus **R182 100 kΩ** +IN → REF_VMID (self-bias). R181 limits +IN ESD-clamp current in a fault (≈ 1 mA), so almost no fault current reaches VCC. |
 | −IN | 4 | REF_VMID. |
-| Q | 1 | → **R144 33 Ω** → `10MHz_CLK_OUT` (= mux input B; also tapped to EXTREF_MON). |
+| Q | 1 | → **R184 33 Ω** → `10MHz_CLK_OUT` (= mux input B; also tapped to EXTREF_MON). |
 | VEE | 2 | GND. |
-| VCC | 5 | 3V0_RF → **R143 33 Ω** → VCC; **D14 (3V3)** VCC→GND at the pin; **0.1 µF + 1 µF** at the pin. |
+| VCC | 5 | 3V0_RF → **R183 33 Ω** → VCC; **D21 (3V3)** VCC→GND at the pin; **0.1 µF + 1 µF** at the pin. |
 
-`REF_VMID` = R140/R141 (10 kΩ/10 kΩ off 3V0_RF) = **1.5 V**, 0.1 µF bypass; feeds both the +IN bias (R142) and −IN.
+`REF_VMID` = R179/R180 (10 kΩ/10 kΩ off 3V0_RF) = **1.5 V**, 0.1 µF bypass; feeds both the +IN bias (R182) and −IN.
 
-**VCC guard (R143 + D14).** R143 in series from 3V0_RF to pin 5; D14 on the **pin-5 side** of R143. Under an off-state fault the island can lift to ~4 V; R143 drops the difference and D14 pins VCC ≤ ~3.4 V < 3.6 V abs-max. Normal Iq (4.5 mA) drops ~0.15 V → VCC ≈ 2.85 V (> 2.45 V min); the 0.1 µF + 1 µF supplies switching transients through the 33 Ω.
+**VCC guard (R183 + D21).** R183 in series from 3V0_RF to pin 5; D21 on the **pin-5 side** of R183. Under an off-state fault the island can lift to ~4 V; R183 drops the difference and D21 pins VCC ≤ ~3.4 V < 3.6 V abs-max. Normal Iq (4.5 mA) drops ~0.15 V → VCC ≈ 2.85 V (> 2.45 V min); the 0.1 µF + 1 µF supplies switching transients through the 33 Ω.
 
 **Hysteresis:** fixed internal (S5). Adequate for the high-slew 10 MHz sine. For more immunity on marginal sources, add positive feedback Q→+IN (~1 MΩ) — no package change.
 
@@ -162,16 +148,26 @@ Specs: 2.9 ns prop delay, 280 MHz, 4.5 ps RMS jitter (100 mVpp/100 MHz), rail-to
 |---|---|---|
 | `U51` | LT3045xDD | ultralow-noise LDO (0.8 µVRMS, 1 nV/√Hz). Dedicated island for U49 + U50; keeps SMPS spurs off the comparator and the bench fanout. |
 | VOUT | **3.0 V** via `R186` = 30.1 kΩ 0.1% on SET (100 µA × 30.1k = 3.01 V) | matches OCXO Voh; respects LTC6752 3.6 V abs-max. |
-| `C135` | 10 nF on SET | low-noise mode (bypasses SET-resistor + reference noise); increases start-up time. |
+| `C155` | 10 nF on SET | low-noise mode (bypasses SET-resistor + reference noise); increases start-up time. |
 | `R185` | 1.5 kΩ ILIM→GND | current limit = 150 mA·kΩ / 1.5 kΩ = **100 mA** (≫ ~5 mA load). |
-| `C134`,`C137` | 10 µF X7R (Cin / Cout) | — |
+| `C154`,`C156` | 10 µF X7R (Cin / Cout) | — |
 | `FB9` | ferrite ≈ 600 Ω @ 100 MHz | island input filter; ~260 mV dropout from +5 V → ample headroom. |
 | EN/UV | ← `5V_PSU_PG` (defined logic level) | island enabled when +5 V is good. |
 | OUTS (9) | tied to OUT (10) at the output node | regulation sense point. |
-| PGFB (6) | connected to set the PG threshold | defined (not floating); configures the PG comparator and fast-start. |
-| PG (4) | float | unused. |
+| PGFB (6) | R218/R219 divider | sets the PG threshold; configures the PG comparator and fast-start. |
+| PG (4) | `3V0_RF_LDO_PG` → **PG2** (U12.87), **R266 10 kΩ → 3V3_STM** | open-collector power-good routed to the MCU; the pull-up presents a valid HIGH when the LDO is in regulation (§4.8). |
 
 Island current: U50 ≈ 4.5 mA + U49 negligible ≪ 100 mA limit.
+
+### 4.8 Power-good pull-up — `R266`
+
+The LT3045 (U51) `PG` pin is **open-collector**: it pulls low when the LDO is out of
+regulation and goes high-impedance (de-asserts) when power is good, so it requires an
+external pull-up to present a valid HIGH. Net `3V0_RF_LDO_PG` carries **R266 (10 kΩ →
+3V3_STM)** alongside `U51.4 (PG)` and `U12.87 (PG2)`; PG2 therefore reads power-good HIGH
+in regulation and low on fault. This matches the sibling GPS LDO (U22, same LT3045), whose
+`3V3_GPS_LDO_PG` net uses R215 10 kΩ → 3V3_STM. PG is monitor-only (not an enable), so the
+island runs independently of this line.
 
 -----
 
@@ -181,19 +177,19 @@ Island current: U50 ≈ 4.5 mA + U49 negligible ≪ 100 mA limit.
 
 | Signal | Pin | Peripheral / mode | Role |
 |---|---|---|---|
-| `REF_TERM_EN` | PC10 | GPIO output, push-pull, low speed | 1 = terminate (50 Ω/sine), 0 = lift (high-Z logic). Drives U49 SEL. R147 pull-up to +3.3 V → defaults terminated. |
+| `REF_TERM_EN` | PC10 | GPIO output, push-pull, low speed | 1 = terminate (50 Ω/sine), 0 = lift (high-Z logic). Drives U49 SEL. R176 pull-up to +3.3 V → defaults terminated. |
 | `EXTREF_MON` | PB14 | TIM12_CH1 (AF input capture / counter) | Validates `10MHz_CLK_OUT`: edges advancing AND f ∈ 10 MHz ± band. |
 | `MUX_SEL` | PB6 | GPIO output | System mux select: 0 = OCXO (A, boot default), 1 = external ref (B). Owned by the reference state machine (peripheral map §2.1/§3.5). |
 | `RB_LOCK` | PB13 | GPIO in, EXTI13 | FE-5680A lock-good (when the external source is the Rb); second precondition before selecting B. |
 
 Reference-source power (FE-5680A) is gated by `RB_PWR_EN` (PB7) on the Rb buck — a separate subsystem, cross-referenced only.
 
-**Boot/reset state:** PC10 resets to Hi-Z; R147 (100 kΩ to +3.3 V) then holds SEL high → **terminated** (the safe default — presents 50 Ω, and the lifted state is safe anyway via D15). Firmware drives PC10 explicitly early in init.
+**Boot/reset state:** PC10 resets to Hi-Z; R176 (100 kΩ to +3.3 V) then holds SEL high → **terminated** (the safe default — presents 50 Ω, and the lifted state is safe anyway via D18). Firmware drives PC10 explicitly early in init.
 
 ### 5.2 Power & enable sequencing
 
 1. **+5 V good → `5V_PSU_PG` asserts → LT3045 enables → 3V0_RF live.** The comparator and front end power up independently of MCU boot; no MCU action required. The front end is passive-safe in all states.
-2. **MCU boot:** set `MUX_SEL` = 0 (OCXO), drive `REF_TERM_EN` to the stored per-source default (or leave the R147 default = terminated).
+2. **MCU boot:** set `MUX_SEL` = 0 (OCXO), drive `REF_TERM_EN` to the stored per-source default (or leave the R176 default = terminated).
 3. **External source power** (if FE-5680A): `RB_PWR_EN` = 1 → Rb buck up → warm-up (cross-ref Rb buck). The conditioned square appears at `10MHz_CLK_OUT` once the source outputs 10 MHz.
 
 ### 5.3 Configuration, validation, and selection
@@ -239,9 +235,9 @@ Set BAND from the application (±100 ppm typical; widen for autorange acquisitio
 
 | Element | Time constant | Note |
 |---|---|---|
-| LT3045 start-up | ms-class | increased by Cset (C135); only at power-on |
+| LT3045 start-up | ms-class | increased by Cset (C155); only at power-on |
 | REF_VMID divider | 5 kΩ × 0.1 µF = 0.5 ms | threshold settle |
-| AC-couple HPF | ~159 Hz (C136 with R181+R142) | edge-coupling; ms-class envelope settle |
+| AC-couple HPF | ~159 Hz (C151 with R181+R182) | edge-coupling; ms-class envelope settle |
 | VCC RC | 33 Ω × 1 µF = 33 µs | negligible |
 | Comparator prop delay | 2.9 ns | instantaneous vs. the above |
 
@@ -262,23 +258,23 @@ A source rated "+P dBm into 50 Ω" has open-circuit EMF = 2× its into-50 Ω vol
 
 ### 6.2 Clamp currents (device OFF, +20 dBm, term lifted)
 - N1 swings to ~6.32 Vpk, loading only the 47 kΩ divider (134 µA), C149, the term leg, and R178.
-- R178 (100 Ω) → N2; D12 clamps to the island: I ≈ (6.32 − ~3.6)/100 ≈ **27 mA** (half-wave) into the island.
-- D13 sinks it, defining the island at ≤ ~4 V; dissipation ≈ 27 mA × 4 V ≈ 0.1 W → trivial for a ≥ 1 W TVS.
-- **Comparator VCC is independently guarded:** even with the island at ~4 V, R143 + D14 hold VCC ≤ ~3.4 V < 3.6 V abs-max; D14 sinks ≈ (4 − 3.4)/33 ≈ 18 mA ≈ 0.06 W.
+- R178 (100 Ω) → N2; D19 clamps to the island: I ≈ (6.32 − ~3.6)/100 ≈ **27 mA** (half-wave) into the island.
+- D20 sinks it, defining the island at ≤ ~4 V; dissipation ≈ 27 mA × 4 V ≈ 0.1 W → trivial for a ≥ 1 W TVS.
+- **Comparator VCC is independently guarded:** even with the island at ~4 V, R183 + D21 hold VCC ≤ ~3.4 V < 3.6 V abs-max; D21 sinks ≈ (4 − 3.4)/33 ≈ 18 mA ≈ 0.06 W.
 - Comparator +IN guarded by R181 (1 kΩ): internal input clamp draws ≈ 1 mA, harmless.
-- **Termination leg:** with the switch lifted, U49 pin 2 sees the N1 swing through R177; D15 clamps it to the rails → safe.
+- **Termination leg:** with the switch lifted, U49 pin 2 sees the N1 swing through R177; D18 clamps it to the rails → safe.
 
-Transient +27 dBm: island-path I ≈ (14.1 − 3.6)/100 ≈ 105 mA brief → D13 ≈ 0.4 W within TVS surge; BAT54S IFSM ok; VCC still pinned ≤ ~3.5 V by D14.
+Transient +27 dBm: island-path I ≈ (14.1 − 3.6)/100 ≈ 105 mA brief → D20 ≈ 0.4 W within TVS surge; BAT54S IFSM ok; VCC still pinned ≤ ~3.5 V by D21.
 
 ### 6.3 Setting-combination safety
 | TERM | Source | Outcome |
 |---|---|---|
 | 1 | 50 Ω sine/square | normal |
 | 1 | high-Z logic | source sags into 50 Ω (its problem); our parts unstressed |
-| 0 | high-Z logic | intended use; U49 pin 2 clamped by D15 → safe |
-| 0 | hot 50 Ω source | N1 ±6.3 V; R178 limits the N2/island path; U49 pin 2 clamped by D15 → safe (a wrong setting only fails validation) |
-| any | +15 dBm / 5 V into comparator | N2 rail-clamped via D12; R181 protects +IN → no damage; slices the crossings |
-| any | OFF + input ≤ +20 dBm | D11/C149/R178/D12/D13/D15 + R143/D14 cooperate; no rail back-powered above abs-max |
+| 0 | high-Z logic | intended use; U49 pin 2 clamped by D18 → safe |
+| 0 | hot 50 Ω source | N1 ±6.3 V; R178 limits the N2/island path; U49 pin 2 clamped by D18 → safe (a wrong setting only fails validation) |
+| any | +15 dBm / 5 V into comparator | N2 rail-clamped via D19; R181 protects +IN → no damage; slices the crossings |
+| any | OFF + input ≤ +20 dBm | D8/C149/R178/D19/D20/D18 + R183/D21 cooperate; no rail back-powered above abs-max |
 
 Conclusion: every power state × either termination setting × ≤ +20 dBm continuous (≤ +27 dBm transient) is non-destructive, with no residual stress point.
 
@@ -295,9 +291,9 @@ Conclusion: every power state × either termination setting × ≤ +20 dBm conti
 **Placement, not cuts, provides separation:**
 - Keep the RF front end in its own physical region; steer SMPS, Ethernet PHY, and STM32 digital returns elsewhere so they never share copper under the RF traces.
 - Continuous plane under SMA → comparator → mux; stitch with ground vias along the 50 Ω trace and around U50.
-- Short, controlled-impedance 50 Ω trace SMA → N1; R177 close to N1; D11 at the connector pads; C149 immediately after.
-- D12 returns to the plane with minimal loop; D13 adjacent to U51 output; D15 at U49 pin 2.
-- R143 + D14 + the VCC bypass tight to U50 pin 5; R181 + C136 tight to +IN; REF_VMID bypass close to U50.
+- Short, controlled-impedance 50 Ω trace SMA → N1; R177 close to N1; D8 at the connector pads; C149 immediately after.
+- D19 returns to the plane with minimal loop; D20 adjacent to U51 output; D18 at U49 pin 2.
+- R183 + D21 + the VCC bypass tight to U50 pin 5; R181 + C151 tight to +IN; REF_VMID bypass close to U50.
 - `REF_TERM_EN`, `10MHz_CLK_OUT`, and the EXTREF_MON tap cross as ordinary signals referenced to the same plane; route them away from the RF node.
 
 **Test points:** N1, N2, REF_VMID, 3V0_RF, U50 VCC (pin 5), 10MHz_CLK_OUT.
@@ -309,33 +305,33 @@ Conclusion: every power state × either termination setting × ≤ +20 dBm conti
 | Ref | Part / value | Pkg | Purpose |
 |---|---|---|---|
 | SMA | edge-mount 50 Ω | — | reference input |
-| D11 | SZESD7410MXWT5G | X2-DFN | ESD (IEC 61000-4-2) |
+| D8 | SZESD7410MXWT5G | X2-DFN | ESD (IEC 61000-4-2) |
 | C149 | 100 nF C0G/X7R 50 V | 0402 | DC / fault block |
-| R134,R135 | 47 kΩ 1% | 0402 | N1 bias → 1.5 V |
+| R174,R175 | 47 kΩ 1% | 0402 | N1 bias → 1.5 V |
 | R178 | 100 Ω 1% | 0402 | N2 clamp current limit |
-| D12 | BAT54S | SOT-23 | N2 clamp (A→GND, COM→N2, K→3V0_RF) |
-| D13 | 3.0–3.3 V TVS, V_RWM ≥ 3.0 V, ≥ 1 W (or 3V3 zener) | SOD | island shunt clamp *(user-selected)* |
+| D19 | BAT54S | SOT-23 | N2 clamp (A→GND, COM→N2, K→3V0_RF) |
+| D20 | 3.0–3.3 V TVS, V_RWM ≥ 3.0 V, ≥ 1 W (or 3V3 zener) | SOD | island shunt clamp *(user-selected)* |
 | R177 | 49.9 Ω 0.1% thin-film | 0402 | 50 Ω termination |
-| C133 | 100 nF C0G/X7R | 0402 | term-leg DC block |
+| C150 | 100 nF C0G/X7R | 0402 | term-leg DC block |
 | U49 | TI TMUX1101DCK | SC70-6 | termination switch (SEL = PC10), grounded-end |
 | — | 0.1 µF | 0402 | U49 VDD decoupling |
-| D15 | BAT54S | SOT-23 | U49 pin-2 clamp → 3V0_RF/GND |
-| R147 | 100 kΩ 1% | 0402 | REF_TERM_EN pull-up → +3.3 V (default terminated) |
-| C136 | 10 nF C0G | 0402 | comparator input AC-couple |
+| D18 | BAT54S | SOT-23 | U49 pin-2 clamp → 3V0_RF/GND |
+| R176 | 100 kΩ 1% | 0402 | REF_TERM_EN pull-up → +3.3 V (default terminated) |
+| C151 | 10 nF C0G | 0402 | comparator input AC-couple |
 | R181 | 1 kΩ 1% | 0402 | +IN clamp-current limiter (Rin) |
-| R140,R141 | 10 kΩ 1% | 0402 | REF_VMID divider (1.5 V) |
+| R179,R180 | 10 kΩ 1% | 0402 | REF_VMID divider (1.5 V) |
 | — | 0.1 µF | 0402 | REF_VMID bypass |
-| R142 | 100 kΩ 1% | 0402 | +IN self-bias to REF_VMID |
+| R182 | 100 kΩ 1% | 0402 | +IN self-bias to REF_VMID |
 | U50 | **LTC6752xS5** (base, S5) | TSOT-23-5 | squarer → mux input B |
-| R143 | 33 Ω 1% | 0402 | VCC isolation (abs-max guard) |
-| D14 | 3.3 V TVS/Zener, ≥ 0.5 W | SOD | VCC local clamp (pin-5 side of R143) |
+| R183 | 33 Ω 1% | 0402 | VCC isolation (abs-max guard) |
+| D21 | 3.3 V TVS/Zener, ≥ 0.5 W | SOD | VCC local clamp (pin-5 side of R183) |
 | — | 0.1 µF + 1 µF | 0402 | U50 VCC decoupling (at pin 5) |
-| R144 | 33 Ω 1% | 0402 | mux-B / EXTREF_MON edge damping |
+| R184 | 33 Ω 1% | 0402 | mux-B / EXTREF_MON edge damping |
 | U51 | LT3045xDD | DFN | island LDO 3.0 V |
 | R186 | 30.1 kΩ 0.1% | 0402 | LT3045 SET (3.0 V) |
-| C135 | 10 nF | 0402 | LT3045 Cset (low-noise) |
+| C155 | 10 nF | 0402 | LT3045 Cset (low-noise) |
 | R185 | 1.5 kΩ 1% | 0402 | LT3045 ILIM (~100 mA) |
-| C134,C137 | 10 µF X7R | 0603 | LT3045 Cin / Cout |
+| C154,C156 | 10 µF X7R | 0603 | LT3045 Cin / Cout |
 | FB9 | ferrite ≈ 600 Ω @ 100 MHz | 0603 | island input filter |
 
 -----
@@ -344,26 +340,27 @@ Conclusion: every power state × either termination setting × ≤ +20 dBm conti
 
 | Net | Nodes | Notes |
 |---|---|---|
-| `10MHz_RF_IN` | SMA center, D11, C149 | 50 Ω, controlled-Z |
-| `N1` | C149, R134/R135 mid, R177, R178 | bias = 1.5 V; no clamp, no bypass |
-| `N2` | R178, D12 COM, C136 | clamped to (−0.3 … island+0.3) V |
-| `REF_VMID` | R140/R141 mid, R142, U50 −IN, 0.1 µF | 1.5 V threshold |
-| `3V0_RF` | U51 OUT, D13, D12 K, D15, R134, R140, R143, U49 VDD, bypass | 3.0 V island |
-| `10MHz_CLK_OUT` | U50 Q via R144 → mux input B **and** EXTREF_MON (PB14) | 3.0 V CMOS square |
-| `REF_TERM_EN` | PC10 → U49 SEL, R147 pull-up to +3.3 V | static control, default terminated |
+| `10MHz_RF_IN` | SMA center, D8, C149 | 50 Ω, controlled-Z |
+| `N1` | C149, R174/R175 mid, R177, R178 | bias = 1.5 V; no clamp, no bypass |
+| `N2` | R178, D19 COM, C151 | clamped to (−0.3 … island+0.3) V |
+| `REF_VMID` | R179/R180 mid, R182, U50 −IN, 0.1 µF | 1.5 V threshold |
+| `3V0_RF` | U51 OUT, D20, D19 K, D18, R174, R179, R183, U49 VDD, bypass | 3.0 V island |
+| `10MHz_CLK_OUT` | U50 Q via R184 → mux input B **and** EXTREF_MON (PB14) | 3.0 V CMOS square |
+| `REF_TERM_EN` | PC10 → U49 SEL, R176 pull-up to +3.3 V | static control, default terminated |
 | `5V_PSU_PG` | → U51 EN/UV | island enable |
+| `3V0_RF_LDO_PG` | U51 PG (4) → PG2 (U12.87), R266 10 kΩ → 3V3_STM | island power-good (open-collector), pulled up to present a valid HIGH — §4.8 |
 | `5V` | FB9 → U51 IN | island input |
-| `3V3` | R147 | always-on rail (pull-up only) |
+| `3V3` | R176 | always-on rail (pull-up only) |
 
 -----
 
 ## 10. Bring-up & test procedure
 
-1. **Island:** apply +5 V, assert `5V_PSU_PG`. Verify 3V0_RF = 3.00 ± 0.03 V; REF_VMID = 1.50 V; U50 VCC ≈ 2.85 V (pin 5, after R143).
-2. **Bias/clamp (no signal):** N1 = 1.5 V, N2 = 1.5 V. With PC10 undriven, confirm R147 holds SEL high → terminated.
-3. **Signal:** inject +7 dBm 10 MHz sine, term engaged (PC10=1): clean swing at N1, D12 not conducting, `10MHz_CLK_OUT` is a 3.0 V 10 MHz square.
+1. **Island:** apply +5 V, assert `5V_PSU_PG`. Verify 3V0_RF = 3.00 ± 0.03 V; REF_VMID = 1.50 V; U50 VCC ≈ 2.85 V (pin 5, after R183).
+2. **Bias/clamp (no signal):** N1 = 1.5 V, N2 = 1.5 V. With PC10 undriven, confirm R176 holds SEL high → terminated.
+3. **Signal:** inject +7 dBm 10 MHz sine, term engaged (PC10=1): clean swing at N1, D19 not conducting, `10MHz_CLK_OUT` is a 3.0 V 10 MHz square.
 4. **EXTREF_MON:** confirm TIM12 counts ~100 000 edges / 10 ms gate; verify in-band pass and out-of-band/absent fail.
-5. **Termination logic:** toggle PC10 → confirm U49 switches (50 Ω present when 1, lifted when 0) via return-loss or N1 amplitude; confirm D15 clamps U49 pin 2 in the lifted state under a hot input.
+5. **Termination logic:** toggle PC10 → confirm U49 switches (50 Ω present when 1, lifted when 0) via return-loss or N1 amplitude; confirm D18 clamps U49 pin 2 in the lifted state under a hot input.
 6. **Hot-input / off-state:** with the board **off**, apply +20 dBm 10 MHz; confirm no rail exceeds abs-max (probe 3V0_RF and U50 VCC ≤ 3.5 V). Repeat powered.
 7. **End-to-end:** run `configure_external_ref()`, confirm `EXTREF_MON` validates, then glitchless `MUX_SEL`=1; verify PH0 tracks and the bench fanout follows.
 
@@ -374,18 +371,18 @@ Conclusion: every power state × either termination setting × ≤ +20 dBm conti
 | Symptom | Likely cause | Check |
 |---|---|---|
 | EXTREF_MON never validates, signal present | term setting wrong for source type; source level too low; AC-couple/bias fault | scope N2 and 10MHz_CLK_OUT; try the other REF_TERM_EN state |
-| Comparator output stuck high/low | REF_VMID wrong (R140/R141), +IN bias open (R142), no input | meter REF_VMID = 1.5 V; check C136/R181 continuity |
+| Comparator output stuck high/low | REF_VMID wrong (R179/R180), +IN bias open (R182), no input | meter REF_VMID = 1.5 V; check C151/R181 continuity |
 | Island > 3.0 V or noisy | LT3045 OUTS open, FB9 open, Cout fault | verify OUTS=OUT, 3V0_RF ripple |
-| VCC > 3.5 V in fault | D14 not at the pin-5 node of R143 | confirm D14 cathode at the R143–pin5 node |
-| Termination never engages | R147/PC10 drive conflict; U49 SEL open | confirm SEL toggles 0/1 at U49 |
+| VCC > 3.5 V in fault | D21 not at the pin-5 node of R183 | confirm D21 cathode at the R183–pin5 node |
+| Termination never engages | R176/PC10 drive conflict; U49 SEL open | confirm SEL toggles 0/1 at U49 |
 | Reference flaps OCXO↔ext | BAND too tight, no re-engage hysteresis | widen/hysteresis in EXTREF_MON gate (§5.3) |
 
 -----
 
 ## 12. Open items
-1. `D13` (user-selecting): TVS V_RWM ≥ 3.0 V, ≥ 1 W; clamp ≤ ~4.5 V acceptable (R143+D14 guard the IC).
+1. `D20` (user-selecting): TVS V_RWM ≥ 3.0 V, ≥ 1 W; clamp ≤ ~4.5 V acceptable (R183+D21 guard the IC).
 2. LTC6752 S5 internal hysteresis value (LE/HYST not bonded) — confirm adequate for the 10 MHz sine; decide on optional Q→+IN positive feedback.
-3. Confirm U50 VCC ≈ 2.85 V stays > 2.45 V min over temp/Iq spread; trim R143 if marginal.
+3. Confirm U50 VCC ≈ 2.85 V stays > 2.45 V min over temp/Iq spread; trim R183 if marginal.
 4. Confirm the `10MHz_CLK_OUT` → EXTREF_MON (PB14) tap is damped/routed cleanly alongside the mux-B route.
 5. FE-5680A Loop-Lock polarity (base: >3 V unlocked / <1 V locked; Opt 26 inverts) → RB_LOCK sense (DB9 side; cross-reference).
 

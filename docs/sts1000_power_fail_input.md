@@ -167,9 +167,9 @@ toward the ~63 V clamp).
 
 ## 5. Firmware implications
 
-**Pin / EXTI.** PFI = PE8, EXTI line 8. Configure as input, **falling-edge**
-trigger. Direct MCU pin — **not** routed through the U54/U55 I/O expanders (it
-must remain valid while the expanders and their bus may be browning out).
+**Pin / EXTI.** PFI = PE8 (U12.59), EXTI line 8. Configure as input, **falling-edge**
+trigger. Direct MCU pin — no I/O-expander in the path (every aggregated signal is direct
+GPIO), so annunciation stays valid while the I²C housekeeping bus may be browning out.
 
 **Boot sequence (avoid the start-up race).**
 1. As VOUT_P rises, the 5 V and 3.3 V rails come up and R8 holds PFI high
@@ -224,8 +224,8 @@ shutdown flag if the MCU never actually lost power.
 - **High = good, low = fail, driven asserting edge** — the comparator actively
   sinks the fail edge rather than relying on the (also-sagging) pull-up rail; the
   pull-up only defines the benign default.
-- **Direct MCU pin, not the expanders** — the annunciation path must survive a
-  browning-out bus.
+- **Direct MCU pin (PE8), no I/O-expander in the path** — the annunciation path must
+  survive a browning-out I²C bus.
 
 ---
 

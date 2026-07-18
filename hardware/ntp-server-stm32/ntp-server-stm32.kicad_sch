@@ -4401,6 +4401,52 @@
 		)
 	)
 	(sheet
+		(at 257.81 140.97)
+		(size 12.7 12.7)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(stroke
+			(width 0.1524)
+			(type solid)
+		)
+		(fill
+			(color 0 0 0 0)
+		)
+		(uuid "1dd95190-8248-4aa1-9194-8073fa083bff")
+		(property "Sheetname" "Optical Encoder"
+			(at 257.81 140.2584 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left bottom)
+			)
+		)
+		(property "Sheetfile" "optical-encoder.kicad_sch"
+			(at 257.81 154.2546 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left top)
+			)
+		)
+		(instances
+			(project "ntp-server-stm32"
+				(path "/4c8fa883-5b85-4079-9006-ac22e5786016"
+					(page "22")
+				)
+			)
+		)
+	)
+	(sheet
 		(at 322.58 43.18)
 		(size 12.7 15.24)
 		(exclude_from_sim no)
@@ -4692,7 +4738,7 @@
 			(color 0 0 0 0)
 		)
 		(uuid "8516a03c-2dcf-4211-a0e4-f385f3438f2a")
-		(property "Sheetname" "I2C GPIO"
+		(property "Sheetname" "GPIO (page 17)"
 			(at 375.92 19.6084 0)
 			(show_name no)
 			(do_not_autoplace no)

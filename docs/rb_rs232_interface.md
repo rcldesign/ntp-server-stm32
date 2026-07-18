@@ -111,7 +111,7 @@ power control; FORCEOFF̄ does that.)
 | C139 | 0.1 µF | C1+ / C1− (2,4) | flying cap |
 | C140 | 0.1 µF | C2+ / C2− (5,6) | flying cap |
 | C144 | 0.1 µF | V− (7) → GND | negative reservoir |
-| C145 | 0.1 µF | V+ (3) → VCC | positive reservoir — **V+ reaches the rail only through this cap; V+ is never shorted to VCC** |
+| C145 | 0.1 µF | **V+ (3) → GND** | positive-doubler reservoir — the standard SN65C3221E doubler reservoir (V+→GND). |
 | C143 | **1 µF** | VCC (15) → GND | bulk/bypass — see note |
 
 > **The 1 µF on VCC is mandatory, not optional.** U46 is the **PW (TSSOP)** package.
@@ -382,7 +382,8 @@ meaning of a `RB_LOCK` level cannot be assumed.
   during reset. The relay default (RS-232) routes PB4 into DIN through the transceiver,
   harmless in either reset state.
 - **Verify the AF pairing:** confirm PB4 and PE7 both map to the same **UART7** TX/RX
-  alternate function on the LQFP100 package before layout.
+  alternate function on the LQFP144 (ZIT6) package before layout. Note **PB4 = NJTRST**, so
+  the board must be **SWD-only** (no JTAG).
 - **Baud/format:** the FE manual does not state it. FE-5680A Option 2 units are commonly
   **9600 8N1** — **confirm on the actual unit.** Make baud a configurable parameter.
 
@@ -506,6 +507,6 @@ a fault flag.
 | C146, C147 | 47 pF C0G | connector-side line shunts |
 | C139, C140 | 0.1 µF | charge-pump flying caps |
 | C143 | 1 µF | VCC bypass (**required for PW-package IEC ESD**) |
-| C144 | 0.1 µF | V− reservoir |
-| C145 | 0.1 µF | V+ reservoir |
+| C144 | 0.1 µF | V− reservoir (→ GND) |
+| C145 | 0.1 µF | V+ doubler reservoir (**V+ → GND**) |
 | C148 | 10 nF | lock opto output debounce (≈220 µs with R173 = 22 kΩ) |

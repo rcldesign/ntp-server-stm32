@@ -22,8 +22,8 @@ This block selects between the onboard OCXO (`OCXO_CLK_OUT`, mux input **A**) an
 | Parameter | Value | Source |
 |---|---|---|
 | Inputs | two 10 MHz CMOS squares, A = OCXO, B = external/Rb front end | §2 OCXO, ext-ref front-end doc |
-| Input A level | ~3.0 V Voh CMOS, 0 V Vol, **R98<!-- TODO verify designator: R98 (OCXO source term, other sheet) --> = 22 Ω source term at the OCXO**, 50 Ω DC-coupled trace | OCXO buffer |
-| Input B level | 3.0 V CMOS (3.0 V island), **R144<!-- TODO verify designator: R144 → R183/R184 (rf-frontend Q damper, ambiguous 33Ω pair) --> = 33 Ω source term at the LTC6752 Q** | LTC6752xS5 Q |
+| Input A level | ~3.0 V Voh CMOS, 0 V Vol, **R123 = 22 Ω source term at the OCXO (Y3)**, 50 Ω DC-coupled trace | OCXO buffer |
+| Input B level | 3.0 V CMOS (3.0 V island), **R184 = 33 Ω source term at the LTC6752 (U50) Q** | LTC6752xS5 Q |
 | Output to PH0 (`CLK_OUT`) | full-swing **3.3 V** CMOS square, ≤ VDD, ~50 % duty, 10 MHz | HSE bypass spec |
 | PH0 HSE-bypass thresholds | VIH > 0.7·VDD = 2.31 V; VIL < 0.3·VDD = 0.99 V; **must not exceed VDD or go below VSS**; 1–32 MHz, ~40–60 % duty | STM32H5 datasheet (digital bypass) |
 | Bench fanout (`10MHz_RF_OUT`) | isolated buffered copy, source-matched to 50 Ω, AC-coupled, ESD-protected | follows the active reference |
@@ -36,28 +36,26 @@ This block selects between the onboard OCXO (`OCXO_CLK_OUT`, mux input **A**) an
 ## 2. Architecture (as-built)
 
 ```
- OCXO_CLK_OUT ─(R98 22Ω @OCXO, 50Ω trace)──────► I0(3) ┐
+ OCXO_CLK_OUT ─(R123 22Ω @OCXO, 50Ω trace)──────► I0(3) ┐
  (A: 3.0V CMOS, 10 MHz; src-terminated upstream)        │  U52            Y(4)
                                                         │ 74LVC1G157 ──┬─ R187 22Ω ─► CLK_OUT ─► PH0 (OSC_IN, HSE bypass; PH1/OSC_OUT = NC)
- 10MHz_CLK_OUT ─(R144 33Ω @LTC6752)────────────► I1(1) ┘  GW-Q100H     │
+ 10MHz_CLK_OUT ─(R184 33Ω @LTC6752)────────────► I1(1) ┘  GW-Q100H     │
  (B: 3.0V CMOS, 10 MHz; src-terminated upstream)   S(6)                └─► A(2) U53 ─Y(4)─ R189 22Ω ─ C160 100nF ─► 10MHz_RF_OUT ─► SMA
                                                     │                       74LVC1G34GW                                  │
- MUX_SEL (PB6) ─────────────────────────────────────┤                                                                  D16 SZESD7410
+ MUX_SEL (PB6) ─────────────────────────────────────┤                                                                  D9 SZESD7410
    R188 100kΩ ↓ GND  (default S=L → I0 = OCXO at boot)                                                         (low-C, at connector, off-page)
 
  Rail:  3V3 ─ FB10 (≈600Ω@100MHz) ─► 3V3_CLK  (VDD domain; ≤ VDD so PH0 is never over-driven)
         decoupling: C157 1 µF bulk + C158 0.1 µF (U52 VCC, pin 5) + C159 0.1 µF (U53 VCC, pin 5), tight to each pin
 ```
-<!-- TODO verify designator: R187/R189 (Clock MUX sheet has two 22Ω, R187 & R189 — confirm which is the Y→PH0 damp vs the fanout source-match) -->
-<!-- TODO verify designator: C158/C159 (Clock MUX sheet has two 0.1µF, C158 & C159 — confirm which decouples U52 VCC vs U53 VCC) -->
-<!-- TODO verify designator: D16 SZESD7410 (fanout SMA ESD lives on Connectors sheet — D8/D9 are SZESD7410; confirm new ref) -->
+<!-- Designator roles: R187 = Y→CLK_OUT/PH0 damp (net CLK_OUT); R189 = fanout source-match (→C160→10MHz_RF_OUT). C158/C159 both decouple 3V3_CLK at U52/U53 VCC (interchangeable). Fanout SMA ESD = D9 (10MHz_RF_OUT); RF-input ESD (10MHz_RF_IN) = D8. -->
 
 **Decisions of record:**
 
 - **Logic 2:1 selector (74LVC1G157GW-Q100H), not a glitch-free clock-mux IC.** (a) The dedicated parts (IDT/Renesas ICS580/581) are EOL. (b) A glitch-free mux completes its handoff on the outgoing clock's edges and can hang if that clock has stopped — the worst case is exactly "Rb stopped, return to OCXO." A selector forwards combinationally and cannot stall. (c) At 10 MHz LVCMOS, a logic mux's additive jitter is sub-ps and swamped by the source oscillators and the STM32 PLL.
 - **Glitchlessness lives in firmware (HSI bridge) + CSS.** §2.1 already mandates the HSI bridge for the live-HSE swap; with SYSCLK on HSI during the flip, any select-edge runt at the mux is irrelevant to the core. CSS gives automatic, hardware-timed failover on reference loss.
 - **One gate on the PH0 path.** The mux output (Y, pin 4) drives PH0 through a single 22 Ω series damper (R187). The bench fanout is taken from the **Y node before R187** through a *separate* buffer (U53) so its 50 Ω load and the SMA port never disturb the PH0 node.
-- **No series R at the mux inputs.** Source termination lives at each driver (R98 at the OCXO, R144 at the LTC6752); a receiver-end series R into the high-Z, Schmitt CMOS input (CI = 2.5 pF) does nothing for the match and would be asymmetric between A and B. (The earlier receiver-end series R on I0 was removed for this reason.)
+- **No series R at the mux inputs.** Source termination lives at each driver (R123 at the OCXO, R184 at the LTC6752); a receiver-end series R into the high-Z, Schmitt CMOS input (CI = 2.5 pF) does nothing for the match and would be asymmetric between A and B.
 - **VDD-domain supply.** 3V3_CLK is the MCU 3.3 V rail behind FB10, so the mux Voh tracks VDD and never exceeds the PH0 abs-max. The 3.327 V OCXO LDO is deliberately not used here.
 - **All hardware always populated;** runtime selection only, via the single `MUX_SEL` bit (consistent with the program-wide no-DNP/no-jumper rule).
 
@@ -70,9 +68,9 @@ TSSOP6 / SOT363-2, AEC-Q100 Grade 1, −40/+125 °C. VCC 1.65–5.5 V, 2:1 non-i
 
 | Pin | Symbol | Net | Connection |
 |---|---|---|---|
-| 1 | I1 | `10MHz_CLK_OUT` | input B; R144 (33 Ω) source-terminated at the LTC6752 Q. Short stub. |
+| 1 | I1 | `10MHz_CLK_OUT` | input B; R184 (33 Ω) source-terminated at the LTC6752 Q. Short stub. |
 | 2 | GND | GND | continuous plane. |
-| 3 | I0 | `OCXO_CLK_OUT` | input A; R98 (22 Ω) source-terminated at the OCXO over its 50 Ω trace. Direct to I0 (no receiver-end R). |
+| 3 | I0 | `OCXO_CLK_OUT` | input A; R123 (22 Ω) source-terminated at the OCXO over its 50 Ω trace. Direct to I0 (no receiver-end R). |
 | 4 | Y | (mux-out node) | → R187 → `CLK_OUT`, and → U53 A (pin 2). |
 | 5 | VCC | `3V3_CLK` | C158 0.1 µF at the pin. |
 | 6 | S | `MUX_SEL` (PB6) | S=0 → I0 (OCXO); S=1 → I1 (ext/Rb). R188 100 kΩ pull-down → default OCXO. |
@@ -85,7 +83,7 @@ Function table (Nexperia DS): S=L → Y=I0; S=H → Y=I1. Non-inverting.
 | `R187` | 22 Ω 1% 0402 | Series source-damp on the short `(Y node) → CLK_OUT → PH0` trace. PH0 (OSC_IN, bypass) is a high-Z digital input; 22 Ω + U52 Zo (~25–35 Ω) damps the line without a parallel terminator. **Keep `CLK_OUT` short and over continuous ground to the STM32.** |
 | PH1 (OSC_OUT) | NC | left high-Z in bypass (peripheral map §2). |
 
-### 3.3 Bench fanout — `U53`, `R189`, `C160`, `D16`
+### 3.3 Bench fanout — `U53`, `R189`, `C160`, `D9`
 Isolated so the SMA/cable load and any hot-plug event never reach PH0.
 
 | Item | Value / PN | Notes |
@@ -93,7 +91,7 @@ Isolated so the SMA/cable load and any hot-plug event never reach PH0.
 | `U53` | 74LVC1G34GW-Q100, TSSOP5 / SOT353-1 | single non-inverting buffer. High-Z input (pin 2) taps the **Y node (before R187)** — negligible load; re-drives the fanout. Place close to U52. Q100 grade matches U52. |
 | `R189` | 22 Ω 1% (trim 22–33) | Source-match: U53 Zo (~30 Ω) + R189 ≈ 50 Ω. Delivers ~1.5–1.65 Vpp into a 50 Ω bench load (≈ +8 dBm-class square). |
 | `C160` | 100 nF C0G/X7R, 50 V | DC-block to bench gear; HPF corner = 1/(2π·50·100 n) ≈ 32 kHz → transparent at 10 MHz. |
-| `D16` | **SZESD7410MXWT5G** (≤ 0.7 pF, bidir, IEC 61000-4-2) | output-port ESD at the SMA pads (off-page, at the connector). Low C preserves the 10 MHz edges. Same family as the RF-input ESD (D11). |
+| `D9` | **SZESD7410MXWT5G** (≤ 0.7 pF, bidir, IEC 61000-4-2) | output-port ESD at `10MHz_RF_OUT` SMA pads (J9, off-page, at the connector). Low C preserves the 10 MHz edges. Same family as the RF-input ESD (D8). |
 
 > If a higher-drive or lower-additive-jitter fanout is wanted later (sine-shaped, +13 dBm, or distribution to several ports), U53 → a dedicated clock-fanout/driver block; the mux interface here is unchanged.
 
@@ -156,7 +154,7 @@ Revert B → A: trigger on EITHER RB_LOCK de-assert OR EXTREF_MON fail OR CSS/NM
 | C160 | 100 nF C0G/X7R 50 V | 0402 | fanout AC-couple / DC block |
 | C157 | 1 µF X7R | 0402 | 3V3_CLK bulk (at FB10) |
 | C159 | 0.1 µF | 0402 | U53 VCC decoupling (pin 5) |
-| D16 | SZESD7410MXWT5G (≤ 0.7 pF) | X2-DFN | SMA fanout ESD (at connector, off-page) |
+| D9 | SZESD7410MXWT5G (≤ 0.7 pF) | X2-DFN | SMA fanout ESD (at connector, off-page) |
 | FB10 | ferrite ≈ 600 Ω @ 100 MHz | 0603 | 3V3 → 3V3_CLK |
 
 -----
@@ -165,11 +163,11 @@ Revert B → A: trigger on EITHER RB_LOCK de-assert OR EXTREF_MON fail OR CSS/NM
 
 | Net | Nodes | Notes |
 |---|---|---|
-| `OCXO_CLK_OUT` | OCXO buffer (R98) → U52 I0 (pin 3) | input A, 3.0 V CMOS, source-terminated upstream (R98) |
-| `10MHz_CLK_OUT` | LTC6752 Q (R144) → U52 I1 (pin 1) | input B, 3.0 V CMOS, source-terminated upstream (R144); also → EXTREF_MON (PB14) at the front end |
+| `OCXO_CLK_OUT` | OCXO buffer (R123) → U52 I0 (pin 3) | input A, 3.0 V CMOS, source-terminated upstream (R123) |
+| `10MHz_CLK_OUT` | LTC6752 Q (R184) → U52 I1 (pin 1) | input B, 3.0 V CMOS, source-terminated upstream (R184); also → EXTREF_MON (PB14) at the front end |
 | (mux-out / Y node) | U52 Y (pin 4) → R187, U53 A (pin 2) | selected reference; fanout tap is here, **before** R187 |
 | `CLK_OUT` | R187 → PH0 (OSC_IN) | HSE bypass, full-swing 3.3 V CMOS; keep short to STM32 |
-| `10MHz_RF_OUT` | U53 Y (pin 4) → R189 → C160 → SMA, D16 | bench 10 MHz fanout, follows the active reference |
+| `10MHz_RF_OUT` | U53 Y (pin 4) → R189 → C160 → SMA, D9 | bench 10 MHz fanout, follows the active reference |
 | `MUX_SEL` (PB6) | U52 S (pin 6), R188 → GND | static select, default A |
 | `3V3_CLK` | FB10 → U52/U53 VCC, C157/C158/C159 | VDD-domain clock rail (≤ VDD) |
 
@@ -178,9 +176,9 @@ Revert B → A: trigger on EITHER RB_LOCK de-assert OR EXTREF_MON fail OR CSS/NM
 ## 7. Grounding & layout
 - Continuous ground plane under `OCXO_CLK_OUT`, `10MHz_CLK_OUT`, the Y node, and the `CLK_OUT` trace — consistent with the RF-front-end grounding philosophy (isolation on the rail via FB10, not the return).
 - U52 GND is **pin 2 only**; route it to the plane. (Confirmed the GND drop does not tie to the I0/`OCXO_CLK_OUT` net.)
-- Place **U52 adjacent to PH0**; keep `(Y node) → R187 → CLK_OUT → PH0` short and direct. Keep both input stubs (I0, I1) short; the real source termination is already at each source (R98, R144).
+- Place **U52 adjacent to PH0**; keep `(Y node) → R187 → CLK_OUT → PH0` short and direct. Keep both input stubs (I0, I1) short; the real source termination is already at each source (R123, R184).
 - Place **U53 next to U52** so the Y-node tap to the buffer is a short stub.
-- Steer the bench-fanout 50 Ω trace and SMA away from PH0; keep its return on the same plane. D16 at the SMA pads.
+- Steer the bench-fanout 50 Ω trace and SMA away from PH0; keep its return on the same plane. D9 at the SMA pads.
 - FB10 + C157 at the rail entry; C158/C159 hard against each VCC pin.
 - **Test points:** Y node, `CLK_OUT` (PH0), `10MHz_RF_OUT`, `3V3_CLK`.
 
@@ -221,13 +219,13 @@ Revert B → A: trigger on EITHER RB_LOCK de-assert OR EXTREF_MON fail OR CSS/NM
 - **U52 74LVC1G157-Q100 (Nexperia, Rev. 6, 2025-09-09):** pinning 1=I1, 2=GND, 3=I0, 4=Y, 5=VCC, 6=S — matches schematic exactly. Function table S=L→I0 / S=H→I1 (non-inverting) — confirms R188 pull-down boots to OCXO. Schmitt inputs, IOFF, ±24 mA @ 3.0 V noted.
 - **U53 74LVC1G34 (Nexperia, SOT353-1):** pinning 1=n.c., 2=A, 3=GND, 4=Y, 5=VCC — matches schematic exactly. Non-inverting buffer (A→Y), fanout in-phase with the reference.
 - **STM32H5 HSE bypass:** OSC_IN is a digital input requiring >0.7·VDD / <0.3·VDD, ≤ VDD; 1–32 MHz, ~40–60 % duty; OSC_OUT NC. The 3.3 V re-buffered square satisfies this with ~1 V margin.
-- **Removed:** the redundant receiver-end series R on I0 (OCXO source term is R98). **Ruled out:** OCXO-to-GND short at the I0 node (U52 GND is pin 2 only).
+- **I0 node:** no receiver-end series R (OCXO source term is R123); U52 GND is pin 2 only, so I0/`OCXO_CLK_OUT` carries no path to GND.
 - **EOL note:** dedicated glitch-free clock-mux ICs (IDT/Renesas ICS580-01, ICS581-0x) are obsolete; not used.
 
 -----
 
 ## 11. System interface & cross-references
-- **Inputs:** A = OCXO `OCXO_CLK_OUT` (peripheral map §2); B = `10MHz_CLK_OUT` from the external-reference front end (RF-front-end doc; supersedes the older multi-slicer §2.2 — single LTC6752xS5 now).
+- **Inputs:** A = OCXO `OCXO_CLK_OUT` (peripheral map §2); B = `10MHz_CLK_OUT` from the external-reference front end (RF-front-end doc; single LTC6752xS5 squarer).
 - **Output:** `CLK_OUT` → PH0 HSE bypass + `10MHz_RF_OUT` bench fanout (peripheral map §2.1).
 - **Control:** `MUX_SEL` (PB6); validation via `EXTREF_MON` (PB14/TIM12) and `RB_LOCK` (PB13); failover via HSE CSS.
 - **Doc note:** peripheral-map §2 wording "OCXO … → PH0 directly" should be updated to "→ PH0 **via the §2.1 clock mux** (`CLK_OUT`)."

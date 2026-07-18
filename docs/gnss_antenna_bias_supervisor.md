@@ -6,7 +6,7 @@
 |---|---|
 | **Subsystem** | Active GNSS antenna feed (bias-T), current-limited supply, and antenna-fault supervisor |
 | **Host receiver** | u-blox ZED-F9T-00B (multi-band timing receiver) |
-| **Host MCU** | STM32H563VIT6 |
+| **Host MCU** | STM32H563ZIT6 (LQFP144, U12) |
 | **Antenna rail** | 5 V, 150 mA maximum |
 | **Logic domain** | 3V3_GPS (F9T VCC_IO); comparators powered from 5V_LDO |
 
@@ -33,7 +33,7 @@ The supervisor uses **two independent fault paths** for defense in depth: the an
                           GPS_RF_IN  ──►  ZED-F9T RF_IN
                               ▲
                               │  (RF received signal)
-                             L1  56 nH  ← bias-T choke (DC pass / RF block)
+                             L1  47 nH  ← bias-T choke (DC pass / RF block); 47 nH intentional
                               │
    V_ANT ──FB4──┬──[ Q11 ]────┴───────────────►  node A  ──► antenna (RF + 5 V DC)
    (5 V)        │   PNP pass        (antenna DC feed point / Q11 collector)
@@ -52,24 +52,42 @@ The supervisor uses **two independent fault paths** for defense in depth: the an
 
 Two physical domains coexist on the line: a **DC path** (V_ANT → current limiter → L1 → antenna) and an **RF path** (antenna → L1 node → GPS_RF_IN). L1 and C52 separate them.
 
+**RF-input ESD:** `GPS_RF_IN` at the SMA (J7) is protected by **L10 = PGB1010603MR** (PulseGuard polymer suppressor, Cj ≈ 0.05 pF, standoff ~20–24 V) to GND — the correct low-Cj / high-standoff class for a line carrying both 1.5 GHz RF (Cj ≤ ~0.3 pF) and 5 V DC bias (V_RWM ≥ ~6.5 V). Outdoor cable runs still need an external inline coaxial gas-discharge arrestor.
+
 ---
 
 ## 3. RF/DC Combining (Bias-T)
 
 | Ref | Value | Function |
 |-----|-------|----------|
-| L1 | 56 nH (250 mA, 820 mΩ DCR) | Bias-T choke. Passes DC bias to the antenna; presents high impedance to GNSS RF so the signal stays on the line to the receiver. |
+| L1 | **47 nH (intentional)** | Bias-T choke. Passes DC bias to the antenna; presents high impedance to GNSS RF so the signal stays on the line to the receiver. |
 | C52 | 1 µF | DC-feed-node bypass; provides an AC return so RF does not enter the bias network. |
 | FB4 | 120 Ω @ 100 MHz | Conditions the incoming V_ANT rail (suppresses conducted noise). |
 | C61 | 0.1 µF | V_ANT local decoupling. |
 
-The choke is the only series element between the antenna DC feed (node A) and the receiver RF input. At the GPS L1 band (1.575 GHz) the 56 nH choke presents:
+The choke is the only series element between the antenna DC feed (node A) and the receiver RF input. At the GPS L1 band (1.575 GHz) the choke presents:
 
 ```
-Z = 2πfL ≈ 2π × 1.575e9 × 56e-9 ≈ 554 Ω
+Z(47 nH) = 2πfL ≈ 2π × 1.575e9 × 47e-9 ≈ 465 Ω   (as-built, intentional)
 ```
 
-This clears u-blox's ">500 Ω at GNSS frequencies" guideline with margin across the multi-band range. The choke's 250 mA saturation rating comfortably exceeds the ~180 mA current limit, and its 820 mΩ DCR adds only ~0.15 V of drop at the limit current (this drop is downstream of node A, so it affects the voltage delivered to the antenna but not the supervisor thresholds).
+> **L1 = 47 nH.** At 465 Ω the choke passes the ≤182 mA foldback bias current (part rated
+> ≥ 300 mA > 182 mA, with saturation margin) while the board relies on the active foldback
+> limiter (§4) rather than a fixed series resistor for isolation. The 465 Ω isolation is an
+> accepted deviation from the u-blox ">500 Ω" bias-T guideline for this design.
+
+The choke's saturation rating must exceed the ~180 mA current limit, and its DCR adds only a fraction of a volt of drop at the limit current (this drop is downstream of node A, so it affects the voltage delivered to the antenna but not the supervisor thresholds).
+
+> **Open item — 5 V bias on RF_IN.** The ~5 V antenna bias is injected by L1 onto
+> `GPS_RF_IN`, the same node as the ZED-F9T `RF_IN` (U21.2), with no series DC-block cap
+> between them. The u-blox reference active-antenna bias circuits (ZED-F9T Integration
+> Manual UBX-21040375, §4.4.1, Figs 36–38) inject bias directly on RF_IN and rely on the
+> receiver's **internal DC block**, but u-blox notes that internal block "may not have a
+> working voltage higher than VCC" (3.3 V), and the bias here is ~5 V. **Action:** add a
+> ~47 pF C0G series DC-block (u-blox reference value; 33–100 pF acceptable) between the
+> bias-T node and U21.2 so only the antenna sees the 5 V bias, **or** confirm the ZED-F9T
+> internal block tolerates continuous 5 V. Supervisor/current-sense (U24/U26) are on the
+> V_ANT side and are unaffected either way.
 
 ---
 
@@ -180,6 +198,12 @@ The F9T's ANT_OFF pin (5) is an **output that goes high to command the antenna o
 |-----|------|------------|------------|
 | Q14 | BC847W (NPN) | Level shift / invert | E→GND; B← ANT_OFF via R79; C→ Q13 base via R75. |
 | Q13 | BC857W (PNP) | High-side disable switch | E→V_ANT; C→ Q11 base node (where R73 lands); B← R75 and R74. |
+
+> **Q13 orientation** (BC857W, SOT-323: 1=B, 2=E, 3=C): `Q13.2(E) → V_ANT`,
+> `Q13.3(C) → Net-(Q11-B)`. On `ANT_OFF` high, Q14 pulls Q13's base low via R75 → the PNP
+> (E = V_ANT) turns on → its collector sources into Q11's base, raising it to ~V_ANT → pass
+> PNP Q11 turns off → antenna bias removed. Bench-verify: on assert of ANT_OFF, scope node A
+> and confirm it collapses to ~0 V.
 | R79 | 10 kΩ | ANT_OFF → Q14 base. |
 | R75 | 4.7 kΩ | Q14 collector → Q13 base (drive limit). |
 | R74 | 10 kΩ | Q13 base → V_ANT (holds Q13 off when Q14 is off). |
@@ -219,7 +243,7 @@ Because the only connection to the F9T pin is Q14's base through R79, the 5 V ra
 | DETECT (antenna-present) threshold | ~5 mA | R85/R86 → 0.327 V, ÷ 66 V/A |
 | SHORT threshold | node A < ~1.5 V | R80/R81 ÷2 vs. R82/R83 → 0.762 V |
 | Current-sense linear ceiling | ~45 mA | INA181A1 gain 20 on 3.3 V (present/absent only) |
-| Bias-T choke impedance @ 1.575 GHz | ~554 Ω | L1 = 56 nH (250 mA, 820 mΩ DCR) |
+| Bias-T choke impedance @ 1.575 GHz | ~465 Ω | L1 = 47 nH (intentional) |
 | Supervisor logic level | 3.3 V | 3V3_GPS pull-ups |
 | Comparator supply | 5 V | 5V_LDO |
 
@@ -240,10 +264,15 @@ Tolerance: the dividers are 1 % resistors feeding an LMV393 (few-mV offset) and 
 | STM32 pin | Net | Role |
 |-----------|-----|------|
 | PD4 (EXTI4) | GPS_ANT_OFF_MON | Observes LNA-disable / commanded-off state. Input-only. |
-| PC9 | ANT_BIAS_EN | Antenna-bias enable; dropped on persistent short. |
-| PC8 | GPS VCC switch | Gates F9T VCC. |
-| PD2 / PD3 | V_BCKP backup | Must stay powered through GPS VCC cycles (warm start). |
-| I²C1 (PB8/PB9) | — | Antenna-rail INA228 #4 (precision V/I/P). |
+| PC9 | ANT_BIAS_EN | Antenna-bias enable (→ U27 RT9742 EN); dropped on persistent short. |
+| PC8 | GPS_PWR_EN | Gates F9T VCC (→ U22 LT3045 EN). |
+| PF15 | BKP_GPS_PG | Power-good of the GPS backup rail `GPS_VBAT` (U34 TPS61094 + supercap, feeds F9T V_BCKP). |
+| I²C1 (PB8/PB9) | — | Antenna-rail INA228 **U26 @0x45** (precision V/I/P across R89 0.1 Ω). |
+
+> **INA228 addresses:** the *antenna-bias* rail is monitored by **U26 @0x45** (precise
+> antenna current, R89 0.1 Ω shunt). The *GPS VCC* rail (3V3_GPS) is a **separate** INA228,
+> **U23 @0x4A** (shunt across R72 0.5 Ω). U23 is strapped 0x4A because **0x44 is owned by the
+> SHT45 humidity sensor (U72)** on the same I²C1 bus; 0x4A avoids that collision.
 
 ### 9.2 Antenna-state fusion
 
@@ -251,7 +280,7 @@ Firmware determines antenna state by fusing three independent sources:
 
 1. **UBX-MON-RF** from the F9T (driven by the analog supervisor in this document).
 2. **GPS_ANT_OFF_MON (PD4)** — whether the antenna is currently commanded off.
-3. **Antenna-rail INA228 #4** over I²C — precise current → OK / open / short.
+3. **Antenna-rail INA228 U26 (0x45)** over I²C — precise current (R89 0.1 Ω) → OK / open / short.
 
 On a **persistent** short, firmware drops `ANT_BIAS_EN (PC9)` and raises an alarm (SNMP trap, log entry, GUI indication). The redundancy ensures a single-source transient does not by itself trigger a shutdown, and gives the operator a precise current reading for diagnostics.
 
@@ -281,6 +310,9 @@ V_BCKP (F9T pin 36) stays powered across GPS VCC power-cycles for warm start. V_
 
 **Why dual-path supervision (analog + INA228).** Defense in depth — no single glitch trips a shutdown — plus a precise digital current value for telemetry and diagnostics.
 
+**Why the GPS-VCC INA228 (U23) is at 0x4A, not 0x44.** The SHT45 humidity sensor (U72)
+occupies 0x44 on the same I²C1 bus; 0x4A keeps the GPS-VCC monitor collision-free.
+
 ### Engineering constraints to honor at layout/BOM
 
 - **R77** dissipates ~130 mW at the ~180 mA limit; specify 0805, 1 %, ≥0.25 W.
@@ -296,10 +328,11 @@ V_BCKP (F9T pin 36) stays powered across GPS VCC power-cycles for warm start. V_
 
 | Ref | Part | Value |
 |-----|------|-------|
-| L1 | RF choke | 56 nH, 250 mA, 820 mΩ DCR |
+| L1 | RF choke | **47 nH (intentional — see §3); rated ≥ 300 mA > 182 mA foldback** |
 | C52 | capacitor | 1 µF |
 | FB4 | ferrite bead | 120 Ω @ 100 MHz |
 | C61 | capacitor | 0.1 µF |
+| L10 | PGB1010603MR | PulseGuard polymer ESD suppressor on `GPS_RF_IN` at J7 (low-Cj, high-standoff) |
 
 **Antenna supply & current limit**
 
@@ -324,12 +357,20 @@ V_BCKP (F9T pin 36) stays powered across GPS VCC power-cycles for warm start. V_
 | R87 | resistor | 10 k (DETECT pull-up → 3V3_GPS) |
 | C28–C31 | capacitors | 0.1 µF (decoupling) <!-- TODO verify designator: C28-C31 — bank is C54/C55/C56 on 3V3_GPS + C57/C58 on 5V (U25C V+); exact role-to-ref mapping not resolvable from flat netlist --> |
 
+**Precision current monitoring (I²C)**
+
+| Ref | Part | Value / note |
+|-----|------|-------|
+| U26 | INA228 | Antenna-bias current/voltage monitor, **I²C1 @0x45**; shunt = R89. |
+| R89 | resistor | 0.1 Ω antenna-current shunt (U26 IN+/IN−; 1.638 A FS). |
+| U23 | INA228 | GPS-VCC (3V3_GPS) monitor, **I²C1 @0x4A** (not 0x44 — SHT45 U72 owns 0x44); shunt = R72 0.5 Ω. |
+
 **ANT_OFF disable stage**
 
 | Ref | Part | Value |
 |-----|------|-------|
 | Q14 | BC847W | NPN |
-| Q13 | BC857W | PNP |
+| Q13 | BC857W | PNP high-side disable (E=V_ANT, C=Q11 base node; see §7) |
 | R79 | resistor | 10 k (ANT_OFF → Q14 base) |
 | R75 | resistor | 4.7 k (Q14 collector → Q13 base) |
 | R74 | resistor | 10 k (Q13 base → V_ANT) |

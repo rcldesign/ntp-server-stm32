@@ -107,7 +107,7 @@ BC847W as a saturated switch, forced β ≈ 10 for low, stable V_ce(sat). V_be(s
 I_b = I_die / 10 ;   R_b = (3.3 − 0.8) / I_b = 2.5 / I_b
 ```
 
-| Color | I_b (β_f≈10) | R_b calc | **R_b (E96)** | β_f as-built |
+| Color | I_b (β_f≈10) | R_b calc | **R_b (E96)** | β_f actual |
 |---|---|---|---|---|
 | Blue | 2.48 mA | 2.5/0.00248 = 1008 Ω | **1.0 kΩ** | 24.8/2.5 = 9.9 |
 | Red | 1.67 mA | 2.5/0.00167 = 1497 Ω | **1.5 kΩ** | 16.7/1.67 = 10.0 |
@@ -123,7 +123,7 @@ the STM32H5 per-pin and port budget, but accounted for.
 
 ---
 
-## 6. As-built designators
+## 6. Designators
 
 LED: **D5 — IN-P55TATRGB**.
 
@@ -183,7 +183,7 @@ problem.
 ## 9. Firmware implications
 
 - **3 PWM channels on LED_R / LED_G / LED_B → PD12 / PD13 / PD14.** Expected TIM4
-  CH1/CH2/CH3 on the LQFP100 — **verify the AF pairing** before layout. Use one timer so
+  CH1/CH2/CH3 on the LQFP144 (STM32H563ZIT6, U12) — **verify the AF pairing** before layout. Use one timer so
   all three share frequency/phase.
 - **Polarity active-high.** Duty 0 % = off, 100 % = full (~750 mcd/color). Initialize the
   three pins **low** (or leave Hi-Z; the 10 kΩ pulldowns hold the transistors off) and
