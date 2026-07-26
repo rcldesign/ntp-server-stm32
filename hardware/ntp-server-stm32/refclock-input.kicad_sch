@@ -3556,7 +3556,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 74.422 109.22 90)
 			(hide yes)
 			(show_name no)
@@ -3567,7 +3567,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 76.2 109.22 0)
 			(hide yes)
 			(show_name no)
@@ -3578,7 +3578,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 47k 1% 1/10W 0402"
+		(property "Description" "RES SMD 47K OHM 1% 1/10W 0402"
 			(at 76.2 109.22 0)
 			(hide yes)
 			(show_name no)
@@ -3622,7 +3622,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -3635,6 +3635,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4702X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P47.0KLCT-ND"
+			(at 76.2 109.22 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4162,7 +4173,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 74.422 119.38 90)
 			(hide yes)
 			(show_name no)
@@ -4173,7 +4184,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 76.2 119.38 0)
 			(hide yes)
 			(show_name no)
@@ -4184,7 +4195,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 47k 1% 1/10W 0402"
+		(property "Description" "RES SMD 47K OHM 1% 1/10W 0402"
 			(at 76.2 119.38 0)
 			(hide yes)
 			(show_name no)
@@ -4228,7 +4239,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -4241,6 +4252,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4702X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P47.0KLCT-ND"
+			(at 76.2 119.38 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

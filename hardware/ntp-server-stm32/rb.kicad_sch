@@ -11672,7 +11672,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 106.172 59.69 90)
 			(hide yes)
 			(show_name no)
@@ -11694,7 +11694,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 10.7k 1% 1/10W 0402"
+		(property "Description" "RES SMD 10.7K OHM 1% 1/10W 0402"
 			(at 107.95 59.69 0)
 			(hide yes)
 			(show_name no)
@@ -11738,7 +11738,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -11749,7 +11749,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P24.9KLTR-ND"
+		(property "DIGIKEY_PART_NUMBER" "P10.7KLCT-ND"
 			(at 107.95 59.69 0)
 			(hide yes)
 			(show_name no)
@@ -22971,7 +22971,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 92.202 199.39 90)
 			(hide yes)
 			(show_name no)
@@ -22982,7 +22982,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 93.98 199.39 0)
 			(hide yes)
 			(show_name no)
@@ -22993,7 +22993,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 47k 1% 1/10W 0402"
+		(property "Description" "RES SMD 47K OHM 1% 1/10W 0402"
 			(at 93.98 199.39 0)
 			(hide yes)
 			(show_name no)
@@ -23037,7 +23037,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -23050,6 +23050,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4702X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P47.0KLCT-ND"
+			(at 93.98 199.39 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
