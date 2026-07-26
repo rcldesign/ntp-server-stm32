@@ -7315,7 +7315,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "75m"
+		(property "Value" "50m"
 			(at 228.346 168.91 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7326,7 +7326,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 226.06 164.592 90)
 			(hide yes)
 			(show_name no)
@@ -7337,7 +7337,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDM0000/DMM0000COL9.pdf"
+		(property "Datasheet" "https://www.vishay.com/docs/30100/wsl.pdf"
 			(at 226.06 166.37 0)
 			(hide yes)
 			(show_name no)
@@ -7348,7 +7348,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 75 OHM 0.5% 1/2W 0805"
+		(property "Description" "RES 0.05 OHM 1% 1/4W 1206"
 			(at 226.06 166.37 90)
 			(hide yes)
 			(show_name no)
@@ -7392,7 +7392,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "10-ERJ-UP6D75R0VCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "WSLC-.05CT-ND"
 			(at 226.06 166.37 90)
 			(hide yes)
 			(show_name no)
@@ -7414,7 +7414,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "ERJ-UP6D75R0V"
+		(property "MANUFACTURER_PART_NUMBER" "WSL1206R0500FEA"
 			(at 226.06 166.37 90)
 			(hide yes)
 			(show_name no)
@@ -7425,7 +7425,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic Industry"
+		(property "MANUFACTURER" "Vishay Dale"
 			(at 226.06 166.37 90)
 			(hide yes)
 			(show_name no)
@@ -9886,7 +9886,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1206"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 391.668 146.05 90)
 			(hide yes)
 			(show_name no)
@@ -12723,7 +12723,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://www.vishay.com/docs/30100/wsl.pdf"
 			(at 383.54 152.4 0)
 			(hide yes)
 			(show_name no)
@@ -12734,7 +12734,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 0.1 OHM 0.5% 1/2W 1206"
+		(property "Description" "RES 0.1 OHM 1% 1/4W 1206"
 			(at 383.54 152.4 90)
 			(hide yes)
 			(show_name no)
@@ -12778,7 +12778,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV12DR100ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "WSLC-.10CT-ND"
 			(at 383.54 152.4 90)
 			(hide yes)
 			(show_name no)
@@ -12800,7 +12800,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "KDV12DR100ET"
+		(property "MANUFACTURER_PART_NUMBER" "WSL1206R1000FEA"
 			(at 383.54 152.4 90)
 			(hide yes)
 			(show_name no)
@@ -12811,7 +12811,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Ohmite"
+		(property "MANUFACTURER" "Vishay Dale"
 			(at 383.54 152.4 90)
 			(hide yes)
 			(show_name no)
@@ -13037,7 +13037,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ti.com/lit/gpn/ina228-q1"
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/ina228-q1.pdf"
 			(at 176.53 205.74 0)
 			(hide yes)
 			(show_name no)
@@ -13049,7 +13049,7 @@
 				)
 			)
 		)
-		(property "Description" "Current/power monitor 20-bit I2C"
+		(property "Description" "IC PWR MONITOR 10VSSOP"
 			(at 176.53 205.74 0)
 			(hide yes)
 			(show_name no)
@@ -13073,6 +13073,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "INA228AQDGSRQ1"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-INA228AQDGSRQ1CT-ND"
+			(at 176.53 205.74 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -14867,7 +14878,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "15m"
+		(property "Value" "100m"
 			(at 384.556 58.42 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -14889,7 +14900,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-mcs.pdf"
+		(property "Datasheet" "https://www.vishay.com/docs/30100/wsl.pdf"
 			(at 382.27 55.88 0)
 			(hide yes)
 			(show_name no)
@@ -14900,7 +14911,7 @@
 				)
 			)
 		)
-		(property "Description" "1W 0.015 OHM METAL ALLOY CS 1% C"
+		(property "Description" "RES 0.1 OHM 1% 1/4W 1206"
 			(at 382.27 55.88 90)
 			(hide yes)
 			(show_name no)
@@ -14944,7 +14955,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-MCS1632R015DERCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "WSLC-.10CT-ND"
 			(at 382.27 55.88 90)
 			(hide yes)
 			(show_name no)
@@ -14966,7 +14977,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "MCS1632R015DER"
+		(property "MANUFACTURER_PART_NUMBER" "WSL1206R1000FEA"
 			(at 382.27 55.88 90)
 			(hide yes)
 			(show_name no)
@@ -14977,7 +14988,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Ohmite"
+		(property "MANUFACTURER" "Vishay Dale"
 			(at 382.27 55.88 90)
 			(hide yes)
 			(show_name no)
@@ -15284,7 +15295,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ti.com/lit/gpn/ina228-q1"
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/ina228-q1.pdf"
 			(at 335.28 189.23 0)
 			(hide yes)
 			(show_name no)
@@ -15296,7 +15307,7 @@
 				)
 			)
 		)
-		(property "Description" "Current/power monitor 20-bit I2C"
+		(property "Description" "IC PWR MONITOR 10VSSOP"
 			(at 335.28 189.23 0)
 			(hide yes)
 			(show_name no)
@@ -15320,6 +15331,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "INA228AQDGSRQ1"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-INA228AQDGSRQ1CT-ND"
+			(at 335.28 189.23 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15884,7 +15906,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ti.com/lit/gpn/ina228-q1"
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/ina228-q1.pdf"
 			(at 334.01 92.71 0)
 			(hide yes)
 			(show_name no)
@@ -15896,7 +15918,7 @@
 				)
 			)
 		)
-		(property "Description" "Current/power monitor 20-bit I2C"
+		(property "Description" "IC PWR MONITOR 10VSSOP"
 			(at 334.01 92.71 0)
 			(hide yes)
 			(show_name no)
@@ -15920,6 +15942,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "INA228AQDGSRQ1"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-INA228AQDGSRQ1CT-ND"
+			(at 334.01 92.71 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

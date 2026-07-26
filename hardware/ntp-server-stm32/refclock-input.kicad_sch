@@ -4616,7 +4616,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 183.388 80.01 90)
 			(hide yes)
 			(show_name no)
@@ -4627,7 +4627,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 181.61 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -4638,7 +4638,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 33 1% 1/10W 0402"
+		(property "Description" "RES SMD 33 OHM 1% 1/10W 0402"
 			(at 181.61 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -4682,7 +4682,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -4695,6 +4695,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF33R0X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P33.0LCT-ND"
+			(at 181.61 80.01 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4900,7 +4911,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 296.418 92.71 90)
 			(hide yes)
 			(show_name no)
@@ -4911,7 +4922,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 294.64 92.71 0)
 			(hide yes)
 			(show_name no)
@@ -4922,7 +4933,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 30.1k 1% 1/10W 0402"
+		(property "Description" "RES SMD 30.1K OHM 1% 1/10W 0402"
 			(at 294.64 92.71 0)
 			(hide yes)
 			(show_name no)
@@ -4966,7 +4977,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -4979,6 +4990,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF3012X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P30.1KLCT-ND"
+			(at 294.64 92.71 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5488,7 +5510,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1206"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 264.668 71.12 90)
 			(hide yes)
 			(show_name no)
@@ -5625,7 +5647,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 345.948 92.71 90)
 			(hide yes)
 			(show_name no)
@@ -5636,7 +5658,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 344.17 92.71 0)
 			(hide yes)
 			(show_name no)
@@ -5647,7 +5669,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 49.9k 1% 1/10W 0402"
+		(property "Description" "RES SMD 49.9K OHM 1% 1/10W 0402"
 			(at 344.17 92.71 0)
 			(hide yes)
 			(show_name no)
@@ -5691,7 +5713,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 49.53 0 0)
 			(hide yes)
 			(show_name no)
@@ -5704,6 +5726,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4992X"
 			(at 49.53 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P49.9KLCT-ND"
+			(at 344.17 92.71 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6626,6 +6659,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "LTC6752IS5#TRMPBF"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "505-LTC6752IS5#TRMPBFCT-ND"
+			(at 184.15 116.84 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8093,7 +8137,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 345.948 82.55 90)
 			(hide yes)
 			(show_name no)
@@ -8104,7 +8148,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 344.17 82.55 0)
 			(hide yes)
 			(show_name no)
@@ -8115,7 +8159,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 402k 1% 1/10W 0402"
+		(property "Description" "RES SMD 402K OHM 1% 1/10W 0402"
 			(at 344.17 82.55 0)
 			(hide yes)
 			(show_name no)
@@ -8159,7 +8203,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 49.53 -10.16 0)
 			(hide yes)
 			(show_name no)
@@ -8172,6 +8216,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4023X"
 			(at 49.53 -10.16 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P402KLCT-ND"
+			(at 344.17 82.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8430,6 +8485,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "TMUX1101DCK"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-TMUX1101DCKRCT-ND"
+			(at 125.73 231.14 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9313,7 +9379,7 @@
 				)
 			)
 		)
-		(property "Description" "LDO 500mA ultralow-noise DFN-10"
+		(property "Description" "IC REG LIN POS ADJ 500MA 10DFN"
 			(at 316.23 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -9337,6 +9403,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "LT3045EDD#TRPBF"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "505-LT3045EDD#TRPBFCT-ND"
+			(at 316.23 80.01 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9776,7 +9853,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 200.66 118.618 90)
 			(hide yes)
 			(show_name no)
@@ -9787,7 +9864,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 200.66 116.84 0)
 			(hide yes)
 			(show_name no)
@@ -9798,7 +9875,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 33 1% 1/10W 0402"
+		(property "Description" "RES SMD 33 OHM 1% 1/10W 0402"
 			(at 200.66 116.84 0)
 			(hide yes)
 			(show_name no)
@@ -9842,7 +9919,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -9855,6 +9932,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF33R0X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P33.0LCT-ND"
+			(at 200.66 116.84 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

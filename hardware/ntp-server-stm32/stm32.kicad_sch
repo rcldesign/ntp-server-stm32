@@ -11095,7 +11095,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1206"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 323.088 34.29 90)
 			(hide yes)
 			(show_name no)
@@ -11457,7 +11457,7 @@
 				)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 321.31 144.018 90)
 			(hide yes)
 			(show_name no)
@@ -11468,7 +11468,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 321.31 142.24 0)
 			(hide yes)
 			(show_name no)
@@ -11479,7 +11479,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 1.21k 1% 1/10W 0402"
+		(property "Description" "RES SMD 1.21K OHM 1% 1/10W 0402"
 			(at 321.31 142.24 0)
 			(hide yes)
 			(show_name no)
@@ -11523,7 +11523,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 419.1 370.84 0)
 			(hide yes)
 			(show_name no)
@@ -11536,6 +11536,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1211X"
 			(at 419.1 370.84 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P1.21KLCT-ND"
+			(at 321.31 142.24 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12197,7 +12208,7 @@
 				(justify bottom)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.st.com/resource/en/datasheet/stm32h562ag.pdf"
 			(at 207.01 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -12208,7 +12219,7 @@
 				)
 			)
 		)
-		(property "Description" "MCU Cortex-M33 2MB LQFP144"
+		(property "Description" "IC MCU 32BIT 2MB FLASH 144LQFP"
 			(at 207.01 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -12300,6 +12311,17 @@
 					(size 1.27 1.27)
 				)
 				(justify bottom)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "497-STM32H563ZIT6-ND"
+			(at 207.01 106.68 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
 			)
 		)
 		(pin "2"
@@ -15729,7 +15751,7 @@
 				)
 			)
 		)
-		(property "Description" "Voltage ref 3.3V SOT-23-6"
+		(property "Description" "IC VREF SERIES 3.3V SOT23-6"
 			(at 281.94 214.63 0)
 			(hide yes)
 			(show_name no)
@@ -15753,6 +15775,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "MCP1502T-33E/CHY"
 			(at 633.73 19.05 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "150-MCP1502T-33E/CHYCT-ND"
+			(at 281.94 214.63 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -16609,7 +16642,7 @@
 				)
 			)
 		)
-		(property "Description" "LDO 500mA ultralow-noise DFN-10"
+		(property "Description" "IC REG LIN POS ADJ 500MA 10DFN"
 			(at 374.65 43.18 0)
 			(hide yes)
 			(show_name no)
@@ -16633,6 +16666,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "LT3045EDD#TRPBF"
 			(at 195.58 -134.62 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "505-LT3045EDD#TRPBFCT-ND"
+			(at 374.65 43.18 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -18249,7 +18293,7 @@
 				(justify bottom)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.st.com/resource/en/datasheet/stm32h562ag.pdf"
 			(at 68.58 74.93 0)
 			(hide yes)
 			(show_name no)
@@ -18260,7 +18304,7 @@
 				)
 			)
 		)
-		(property "Description" "MCU Cortex-M33 2MB LQFP144"
+		(property "Description" "IC MCU 32BIT 2MB FLASH 144LQFP"
 			(at 68.58 74.93 0)
 			(hide yes)
 			(show_name no)
@@ -18352,6 +18396,17 @@
 					(size 1.27 1.27)
 				)
 				(justify bottom)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "497-STM32H563ZIT6-ND"
+			(at 68.58 74.93 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
 			)
 		)
 		(pin "2"

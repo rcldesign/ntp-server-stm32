@@ -5126,7 +5126,7 @@
 				(justify bottom)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Fopa320"
 			(at 101.6 135.89 0)
 			(hide yes)
 			(show_name no)
@@ -5161,6 +5161,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "OPA320AIDBVT"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-29510-1-ND"
+			(at 101.6 135.89 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8084,7 +8095,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ti.com/lit/gpn/tps7a52-q1"
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Ftps7a52-q1"
 			(at 299.72 125.73 0)
 			(hide yes)
 			(show_name no)
@@ -8120,6 +8131,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "TPS7A5201QRGRRQ1"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-50505-1-ND"
+			(at 299.72 125.73 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10572,7 +10594,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ti.com/lit/gpn/ina228-q1"
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/ina228-q1.pdf"
 			(at 198.12 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -10584,7 +10606,7 @@
 				)
 			)
 		)
-		(property "Description" "Current/power monitor 20-bit I2C"
+		(property "Description" "IC PWR MONITOR 10VSSOP"
 			(at 198.12 160.02 0)
 			(hide yes)
 			(show_name no)
@@ -10608,6 +10630,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "INA228AQDGSRQ1"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-INA228AQDGSRQ1CT-ND"
+			(at 198.12 160.02 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -11085,7 +11118,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805Wide 3015 (7638 Metric), 1530"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 247.65 120.142 90)
 			(hide yes)
 			(show_name no)
@@ -11096,7 +11129,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-fcsl.pdf"
+		(property "Datasheet" "https://www.vishay.com/docs/30100/wsl.pdf"
 			(at 247.65 121.92 0)
 			(hide yes)
 			(show_name no)
@@ -11107,7 +11140,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 0.025 OHM 0.5% 3W 3015"
+		(property "Description" "RES 0.025 OHM 1% 1/4W 1206"
 			(at 247.65 121.92 90)
 			(hide yes)
 			(show_name no)
@@ -11151,7 +11184,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-FCSL76R025DERCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "WSLC-.025CT-ND"
 			(at 247.65 121.92 90)
 			(hide yes)
 			(show_name no)
@@ -11173,7 +11206,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "FCSL76R025DER"
+		(property "MANUFACTURER_PART_NUMBER" "WSL1206R0250FEA"
 			(at 247.65 121.92 90)
 			(hide yes)
 			(show_name no)
@@ -11184,7 +11217,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Ohmite"
+		(property "MANUFACTURER" "Vishay Dale"
 			(at 247.65 121.92 90)
 			(hide yes)
 			(show_name no)

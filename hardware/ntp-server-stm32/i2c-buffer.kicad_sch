@@ -2033,6 +2033,17 @@
 				)
 			)
 		)
+		(property "DIGIKEY_PART_NUMBER" "LTC4311ISC6#TRPBFCT-ND"
+			(at 186.69 115.57 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "5"
 			(uuid "6ec936c8-28cb-4a29-8244-0b89514e60d9")
 		)

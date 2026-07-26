@@ -4631,7 +4631,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ti.com/lit/gpn/ina228-q1"
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/ina228-q1.pdf"
 			(at 295.91 190.5 0)
 			(hide yes)
 			(show_name no)
@@ -4643,7 +4643,7 @@
 				)
 			)
 		)
-		(property "Description" "Current/power monitor 20-bit I2C"
+		(property "Description" "IC PWR MONITOR 10VSSOP"
 			(at 295.91 190.5 0)
 			(hide yes)
 			(show_name no)
@@ -4667,6 +4667,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "INA228AQDGSRQ1"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-INA228AQDGSRQ1CT-ND"
+			(at 295.91 190.5 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4747,7 +4758,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "8-VSSOP"
 			(at 137.16 88.9 0)
 			(hide yes)
 			(show_name no)
@@ -4758,7 +4769,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/lmv331.pdf"
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Flmv393"
 			(at 137.16 88.9 0)
 			(hide yes)
 			(show_name no)
@@ -4769,7 +4780,7 @@
 				)
 			)
 		)
-		(property "Description" "Dual comparator low-voltage"
+		(property "Description" "IC COMPARATOR 2CH 8-VSSOP"
 			(at 137.16 88.9 0)
 			(hide yes)
 			(show_name no)
@@ -4793,6 +4804,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "LMV393IDGKR"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-13993-1-ND"
+			(at 137.16 88.9 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5825,7 +5847,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "100m"
+		(property "Value" "150m"
 			(at 347.726 156.21 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5847,7 +5869,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://www.vishay.com/docs/30100/wsl.pdf"
 			(at 345.44 153.67 0)
 			(hide yes)
 			(show_name no)
@@ -5858,7 +5880,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 0.1 OHM 0.5% 1/2W 1206"
+		(property "Description" "RES 0.15 OHM 1% 1/4W 1206"
 			(at 345.44 153.67 90)
 			(hide yes)
 			(show_name no)
@@ -5902,7 +5924,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV12DR100ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "WSLC-.15CT-ND"
 			(at 345.44 153.67 90)
 			(hide yes)
 			(show_name no)
@@ -5924,7 +5946,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "KDV12DR100ET"
+		(property "MANUFACTURER_PART_NUMBER" "WSL1206R1500FEA"
 			(at 345.44 153.67 90)
 			(hide yes)
 			(show_name no)
@@ -5935,7 +5957,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Ohmite"
+		(property "MANUFACTURER" "Vishay Dale"
 			(at 345.44 153.67 90)
 			(hide yes)
 			(show_name no)
@@ -7636,7 +7658,7 @@
 				)
 			)
 		)
-		(property "Footprint" "DBV0006A_N"
+		(property "Footprint" "SOT-23-6"
 			(at 120.65 148.59 0)
 			(hide yes)
 			(show_name no)
@@ -7660,7 +7682,7 @@
 				)
 			)
 		)
-		(property "Description" "Current-sense amp gain-20 SOT-23-6"
+		(property "Description" "Current Sense Amplifier 1 Circuit Rail-to-Rail SOT-23-6"
 			(at 120.65 148.59 0)
 			(hide yes)
 			(show_name no)
@@ -7684,6 +7706,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "INA181A1IDBVR"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-47656-1-ND"
+			(at 120.65 148.59 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8365,7 +8398,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1206"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 221.488 85.09 90)
 			(hide yes)
 			(show_name no)
@@ -8794,7 +8827,7 @@
 				)
 			)
 		)
-		(property "Footprint" "1206"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 356.87 151.892 90)
 			(hide yes)
 			(show_name no)
@@ -9390,7 +9423,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 84.328 109.22 90)
 			(hide yes)
 			(show_name no)
@@ -10144,7 +10177,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "8-VSSOP"
 			(at 228.6 100.33 0)
 			(hide yes)
 			(show_name no)
@@ -10155,7 +10188,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/lmv331.pdf"
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Flmv393"
 			(at 228.6 100.33 0)
 			(hide yes)
 			(show_name no)
@@ -10166,7 +10199,7 @@
 				)
 			)
 		)
-		(property "Description" "Dual comparator low-voltage"
+		(property "Description" "IC COMPARATOR 2CH 8-VSSOP"
 			(at 228.6 100.33 0)
 			(hide yes)
 			(show_name no)
@@ -10190,6 +10223,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "LMV393IDGKR"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-13993-1-ND"
+			(at 228.6 100.33 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12834,7 +12878,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "8-VSSOP"
 			(at 170.18 143.51 0)
 			(hide yes)
 			(show_name no)
@@ -12845,7 +12889,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/lmv331.pdf"
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Flmv393"
 			(at 170.18 143.51 0)
 			(hide yes)
 			(show_name no)
@@ -12856,7 +12900,7 @@
 				)
 			)
 		)
-		(property "Description" "Dual comparator low-voltage"
+		(property "Description" "IC COMPARATOR 2CH 8-VSSOP"
 			(at 170.18 143.51 0)
 			(hide yes)
 			(show_name no)
@@ -12880,6 +12924,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "LMV393IDGKR"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-13993-1-ND"
+			(at 170.18 143.51 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

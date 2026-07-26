@@ -1237,7 +1237,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "6-TSSOP"
 			(at 146.05 123.19 0)
 			(hide yes)
 			(show_name no)
@@ -1248,7 +1248,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/sg/scyt129e/scyt129e.pdf"
+		(property "Datasheet" "https://assets.nexperia.com/documents/data-sheet/74LVC2G17.pdf"
 			(at 146.05 123.19 0)
 			(hide yes)
 			(show_name no)
@@ -1283,6 +1283,17 @@
 		)
 		(property "MANUFACTURER" "Nexperia"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1727-4218-1-ND"
+			(at 146.05 123.19 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -1430,7 +1441,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "6-TSSOP"
 			(at 158.75 82.55 0)
 			(hide yes)
 			(show_name no)
@@ -1441,7 +1452,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/sg/scyt129e/scyt129e.pdf"
+		(property "Datasheet" "https://assets.nexperia.com/documents/data-sheet/74LVC2G17.pdf"
 			(at 158.75 82.55 0)
 			(hide yes)
 			(show_name no)
@@ -1476,6 +1487,17 @@
 		)
 		(property "MANUFACTURER" "Nexperia"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1727-4218-1-ND"
+			(at 158.75 82.55 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -1544,7 +1566,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "6-TSSOP"
 			(at 158.75 62.23 0)
 			(hide yes)
 			(show_name no)
@@ -1555,7 +1577,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/sg/scyt129e/scyt129e.pdf"
+		(property "Datasheet" "https://assets.nexperia.com/documents/data-sheet/74LVC2G17.pdf"
 			(at 158.75 62.23 0)
 			(hide yes)
 			(show_name no)
@@ -1590,6 +1612,17 @@
 		)
 		(property "MANUFACTURER" "Nexperia"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1727-4218-1-ND"
+			(at 158.75 62.23 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

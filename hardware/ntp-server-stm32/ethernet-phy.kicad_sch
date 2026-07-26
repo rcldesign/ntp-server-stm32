@@ -6183,7 +6183,7 @@
 				(justify bottom)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://ww1.microchip.com/downloads/en/DeviceDoc/DS_LAN8742_00001989A.pdf"
 			(at 227.33 88.9 0)
 			(hide yes)
 			(show_name no)
@@ -6194,7 +6194,7 @@
 				)
 			)
 		)
-		(property "Description" "10/100 Ethernet PHY RMII QFN-24"
+		(property "Description" "IC TRANSCEIVER FULL 1/1 24SQFN"
 			(at 227.33 88.9 0)
 			(hide yes)
 			(show_name no)
@@ -6262,6 +6262,17 @@
 					(size 1.27 1.27)
 				)
 				(justify bottom)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "LAN8742AI-CZ-CT-ND"
+			(at 227.33 88.9 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
 			)
 		)
 		(pin "22"
@@ -8610,7 +8621,7 @@
 				)
 			)
 		)
-		(property "Footprint" "1206"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 33.02 244.602 90)
 			(hide yes)
 			(show_name no)

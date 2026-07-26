@@ -5822,7 +5822,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 132.08 238.252 90)
 			(hide yes)
 			(show_name no)
@@ -5833,7 +5833,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 132.08 240.03 0)
 			(hide yes)
 			(show_name no)
@@ -5844,7 +5844,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 91 1% 1/8W 0805"
+		(property "Description" "RES SMD 91 OHM 1% 1/8W 0805"
 			(at 132.08 240.03 90)
 			(hide yes)
 			(show_name no)
@@ -5888,7 +5888,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "P91.0CCT-ND"
 			(at 132.08 240.03 90)
 			(hide yes)
 			(show_name no)
@@ -5921,7 +5921,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 132.08 240.03 90)
 			(hide yes)
 			(show_name no)
@@ -6060,7 +6060,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 132.08 233.172 90)
 			(hide yes)
 			(show_name no)
@@ -6071,7 +6071,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 132.08 234.95 0)
 			(hide yes)
 			(show_name no)
@@ -6082,7 +6082,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 91 1% 1/8W 0805"
+		(property "Description" "RES SMD 91 OHM 1% 1/8W 0805"
 			(at 132.08 234.95 90)
 			(hide yes)
 			(show_name no)
@@ -6126,7 +6126,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "P91.0CCT-ND"
 			(at 132.08 234.95 90)
 			(hide yes)
 			(show_name no)
@@ -6159,7 +6159,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 132.08 234.95 90)
 			(hide yes)
 			(show_name no)
@@ -6826,7 +6826,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 99.06 169.672 90)
 			(hide yes)
 			(show_name no)
@@ -6837,7 +6837,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 99.06 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -6848,7 +6848,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 4.7k 1% 1/8W 0805"
+		(property "Description" "RES SMD 4.7K OHM 1% 1/8W 0805"
 			(at 99.06 171.45 90)
 			(hide yes)
 			(show_name no)
@@ -6892,7 +6892,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "P4.70KCCT-ND"
 			(at 99.06 171.45 90)
 			(hide yes)
 			(show_name no)
@@ -6925,7 +6925,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 99.06 171.45 90)
 			(hide yes)
 			(show_name no)
@@ -7063,7 +7063,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 132.08 243.332 90)
 			(hide yes)
 			(show_name no)
@@ -7074,7 +7074,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 132.08 245.11 0)
 			(hide yes)
 			(show_name no)
@@ -7085,7 +7085,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 150 1% 1/8W 0805"
+		(property "Description" "RES SMD 150 OHM 1% 1/8W 0805"
 			(at 132.08 245.11 90)
 			(hide yes)
 			(show_name no)
@@ -7129,7 +7129,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "P150CCT-ND"
 			(at 132.08 245.11 90)
 			(hide yes)
 			(show_name no)
@@ -7162,7 +7162,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 132.08 245.11 90)
 			(hide yes)
 			(show_name no)
@@ -7526,7 +7526,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 132.08 223.012 90)
 			(hide yes)
 			(show_name no)
@@ -7537,7 +7537,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 132.08 224.79 0)
 			(hide yes)
 			(show_name no)
@@ -7548,7 +7548,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 91 1% 1/8W 0805"
+		(property "Description" "RES SMD 91 OHM 1% 1/8W 0805"
 			(at 132.08 224.79 90)
 			(hide yes)
 			(show_name no)
@@ -7592,7 +7592,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "P91.0CCT-ND"
 			(at 132.08 224.79 90)
 			(hide yes)
 			(show_name no)
@@ -7625,7 +7625,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 132.08 224.79 90)
 			(hide yes)
 			(show_name no)
@@ -8695,7 +8695,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ti.com/lit/gpn/ina228-q1"
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/ina228-q1.pdf"
 			(at 60.96 93.98 0)
 			(hide yes)
 			(show_name no)
@@ -8707,7 +8707,7 @@
 				)
 			)
 		)
-		(property "Description" "Current/power monitor 20-bit I2C"
+		(property "Description" "IC PWR MONITOR 10VSSOP"
 			(at 60.96 93.98 0)
 			(hide yes)
 			(show_name no)
@@ -8731,6 +8731,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "INA228AQDGSRQ1"
 			(at -234.95 -96.52 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-INA228AQDGSRQ1CT-ND"
+			(at 60.96 93.98 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9045,7 +9056,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 133.35 160.782 90)
 			(hide yes)
 			(show_name no)
@@ -9056,7 +9067,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 133.35 162.56 0)
 			(hide yes)
 			(show_name no)
@@ -9067,7 +9078,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 820 1% 1/8W 0805"
+		(property "Description" "RES SMD 820 OHM 1% 1/8W 0805"
 			(at 133.35 162.56 90)
 			(hide yes)
 			(show_name no)
@@ -9111,7 +9122,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "P820CCT-ND"
 			(at 133.35 162.56 90)
 			(hide yes)
 			(show_name no)
@@ -9144,7 +9155,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 133.35 162.56 90)
 			(hide yes)
 			(show_name no)
@@ -9810,7 +9821,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 132.08 212.852 90)
 			(hide yes)
 			(show_name no)
@@ -9821,7 +9832,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 132.08 214.63 0)
 			(hide yes)
 			(show_name no)
@@ -9832,7 +9843,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 91 1% 1/8W 0805"
+		(property "Description" "RES SMD 91 OHM 1% 1/8W 0805"
 			(at 132.08 214.63 90)
 			(hide yes)
 			(show_name no)
@@ -9876,7 +9887,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "P91.0CCT-ND"
 			(at 132.08 214.63 90)
 			(hide yes)
 			(show_name no)
@@ -9909,7 +9920,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 132.08 214.63 90)
 			(hide yes)
 			(show_name no)
@@ -10274,7 +10285,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 132.08 228.092 90)
 			(hide yes)
 			(show_name no)
@@ -10285,7 +10296,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 132.08 229.87 0)
 			(hide yes)
 			(show_name no)
@@ -10296,7 +10307,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 91 1% 1/8W 0805"
+		(property "Description" "RES SMD 91 OHM 1% 1/8W 0805"
 			(at 132.08 229.87 90)
 			(hide yes)
 			(show_name no)
@@ -10340,7 +10351,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "P91.0CCT-ND"
 			(at 132.08 229.87 90)
 			(hide yes)
 			(show_name no)
@@ -10373,7 +10384,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 132.08 229.87 90)
 			(hide yes)
 			(show_name no)
@@ -10737,7 +10748,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "0805 (2012 Metric)"
 			(at 132.08 217.932 90)
 			(hide yes)
 			(show_name no)
@@ -10748,7 +10759,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 132.08 219.71 0)
 			(hide yes)
 			(show_name no)
@@ -10759,7 +10770,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 91 1% 1/8W 0805"
+		(property "Description" "RES SMD 91 OHM 1% 1/8W 0805"
 			(at 132.08 219.71 90)
 			(hide yes)
 			(show_name no)
@@ -10803,7 +10814,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "P91.0CCT-ND"
 			(at 132.08 219.71 90)
 			(hide yes)
 			(show_name no)
@@ -10836,7 +10847,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 132.08 219.71 90)
 			(hide yes)
 			(show_name no)
@@ -11033,7 +11044,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "220m"
+		(property "Value" "150m"
 			(at 112.776 59.69 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -11044,7 +11055,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 110.49 55.372 90)
 			(hide yes)
 			(show_name no)
@@ -11055,7 +11066,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://www.vishay.com/docs/30100/wsl.pdf"
 			(at 110.49 57.15 0)
 			(hide yes)
 			(show_name no)
@@ -11066,7 +11077,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 220m SENSE 0.5% 0805"
+		(property "Description" "RES 0.15 OHM 1% 1/4W 1206"
 			(at 110.49 57.15 90)
 			(hide yes)
 			(show_name no)
@@ -11110,7 +11121,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "WSLC-.15CT-ND"
 			(at 110.49 57.15 90)
 			(hide yes)
 			(show_name no)
@@ -11132,7 +11143,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "KDV08DR150ET"
+		(property "MANUFACTURER_PART_NUMBER" "WSL1206R1500FEA"
 			(at 110.49 57.15 90)
 			(hide yes)
 			(show_name no)
@@ -11143,7 +11154,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Ohmite"
+		(property "MANUFACTURER" "Vishay Dale"
 			(at 110.49 57.15 90)
 			(hide yes)
 			(show_name no)
@@ -11201,7 +11212,7 @@
 				)
 			)
 		)
-		(property "Footprint" "1206"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 121.92 55.372 90)
 			(hide yes)
 			(show_name no)

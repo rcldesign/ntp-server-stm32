@@ -5917,7 +5917,7 @@
 				)
 			)
 		)
-		(property "Description" "LDO 500mA ultralow-noise DFN-10"
+		(property "Description" "IC REG LIN POS ADJ 500MA 10DFN"
 			(at 287.02 67.31 0)
 			(hide yes)
 			(show_name no)
@@ -5941,6 +5941,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "LT3045EDD#TRPBF"
 			(at 0 -3.81 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "505-LT3045EDD#TRPBFCT-ND"
+			(at 287.02 67.31 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6104,7 +6115,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1206"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 222.758 58.42 90)
 			(hide yes)
 			(show_name no)
@@ -6378,7 +6389,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "100m"
+		(property "Value" "75m"
 			(at 343.916 67.31 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6400,7 +6411,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://www.vishay.com/docs/30100/wsl.pdf"
 			(at 341.63 64.77 0)
 			(hide yes)
 			(show_name no)
@@ -6411,7 +6422,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 0.1 OHM 0.5% 1/2W 1206"
+		(property "Description" "RES 0.075 OHM 1% 1/4W 1206"
 			(at 341.63 64.77 90)
 			(hide yes)
 			(show_name no)
@@ -6455,7 +6466,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV12DR100ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "541-10064-1-ND"
 			(at 341.63 64.77 90)
 			(hide yes)
 			(show_name no)
@@ -6477,7 +6488,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "KDV12DR100ET"
+		(property "MANUFACTURER_PART_NUMBER" "WSL1206R0750FEA"
 			(at 341.63 64.77 90)
 			(hide yes)
 			(show_name no)
@@ -6488,7 +6499,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Ohmite"
+		(property "MANUFACTURER" "Vishay Dale"
 			(at 341.63 64.77 90)
 			(hide yes)
 			(show_name no)
@@ -6931,7 +6942,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 318.008 69.85 90)
 			(hide yes)
 			(show_name no)
@@ -6942,7 +6953,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 316.23 69.85 0)
 			(hide yes)
 			(show_name no)
@@ -6953,7 +6964,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 453k 1% 1/10W 0402"
+		(property "Description" "RES SMD 453K OHM 1% 1/10W 0402"
 			(at 316.23 69.85 0)
 			(hide yes)
 			(show_name no)
@@ -6997,7 +7008,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 50.8 -13.97 0)
 			(hide yes)
 			(show_name no)
@@ -7010,6 +7021,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4533X"
 			(at 50.8 -13.97 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P453KLCT-ND"
+			(at 316.23 69.85 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -7156,7 +7178,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ti.com/lit/gpn/ina228-q1"
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/ina228-q1.pdf"
 			(at 292.1 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -7168,7 +7190,7 @@
 				)
 			)
 		)
-		(property "Description" "Current/power monitor 20-bit I2C"
+		(property "Description" "IC PWR MONITOR 10VSSOP"
 			(at 292.1 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -7192,6 +7214,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "INA228AQDGSRQ1"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-INA228AQDGSRQ1CT-ND"
+			(at 292.1 106.68 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8204,7 +8237,7 @@
 				(justify bottom)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.u-blox.com/en/docs/UBX-18053713"
 			(at 116.84 207.01 0)
 			(hide yes)
 			(show_name no)
@@ -8215,7 +8248,7 @@
 				)
 			)
 		)
-		(property "Description" "GNSS timing receiver module"
+		(property "Description" "RF RECEIVER GNSS/GPS 54LGA"
 			(at 116.84 207.01 0)
 			(hide yes)
 			(show_name no)
@@ -8307,6 +8340,17 @@
 					(size 1.27 1.27)
 				)
 				(justify bottom)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "672-1197-1-ND"
+			(at 116.84 207.01 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
 			)
 		)
 		(pin "19"
@@ -9865,7 +9909,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 318.008 80.01 90)
 			(hide yes)
 			(show_name no)
@@ -9876,7 +9920,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 316.23 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -9887,7 +9931,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 49.9k 1% 1/10W 0402"
+		(property "Description" "RES SMD 49.9K OHM 1% 1/10W 0402"
 			(at 316.23 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -9931,7 +9975,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 50.8 -3.81 0)
 			(hide yes)
 			(show_name no)
@@ -9944,6 +9988,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4992X"
 			(at 50.8 -3.81 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P49.9KLCT-ND"
+			(at 316.23 80.01 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

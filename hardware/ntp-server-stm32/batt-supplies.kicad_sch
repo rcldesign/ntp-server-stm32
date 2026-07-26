@@ -5012,7 +5012,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 69.85 126.492 90)
 			(hide yes)
 			(show_name no)
@@ -5023,7 +5023,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 69.85 128.27 0)
 			(hide yes)
 			(show_name no)
@@ -5034,7 +5034,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 110k 1% 1/10W 0402"
+		(property "Description" "RES SMD 110K OHM 1% 1/10W 0402"
 			(at 69.85 128.27 0)
 			(hide yes)
 			(show_name no)
@@ -5078,7 +5078,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 11.43 256.54 0)
 			(hide yes)
 			(show_name no)
@@ -5091,6 +5091,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1103X"
 			(at 11.43 256.54 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P110KLCT-ND"
+			(at 69.85 128.27 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -5237,7 +5248,7 @@
 				(justify bottom)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=http%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Ftps61094"
 			(at 92.71 67.31 0)
 			(hide yes)
 			(show_name no)
@@ -5774,6 +5785,17 @@
 				(justify bottom)
 			)
 		)
+		(property "DIGIKEY_PART_NUMBER" "296-TPS61094DSSRCT-ND"
+			(at 92.71 67.31 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "13"
 			(uuid "11b6ca17-44bc-446e-93c0-f8192607ad19")
 		)
@@ -6012,7 +6034,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 260.858 134.62 90)
 			(hide yes)
 			(show_name no)
@@ -6023,7 +6045,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 259.08 134.62 0)
 			(hide yes)
 			(show_name no)
@@ -6034,7 +6056,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 150k 1% 1/10W 0402"
+		(property "Description" "RES SMD 150K OHM 1% 1/10W 0402"
 			(at 259.08 134.62 0)
 			(hide yes)
 			(show_name no)
@@ -6078,7 +6100,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 130.81 76.2 0)
 			(hide yes)
 			(show_name no)
@@ -6091,6 +6113,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1503X"
 			(at 130.81 76.2 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P150KLCT-ND"
+			(at 259.08 134.62 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6455,7 +6488,7 @@
 				(justify bottom)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=http%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Ftps61094"
 			(at 276.86 66.04 0)
 			(hide yes)
 			(show_name no)
@@ -6990,6 +7023,17 @@
 					(size 1.27 1.27)
 				)
 				(justify bottom)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-TPS61094DSSRCT-ND"
+			(at 276.86 66.04 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
 			)
 		)
 		(pin "13"
@@ -8055,7 +8099,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 252.73 126.492 90)
 			(hide yes)
 			(show_name no)
@@ -8066,7 +8110,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 252.73 128.27 0)
 			(hide yes)
 			(show_name no)
@@ -8077,7 +8121,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 110k 1% 1/10W 0402"
+		(property "Description" "RES SMD 110K OHM 1% 1/10W 0402"
 			(at 252.73 128.27 0)
 			(hide yes)
 			(show_name no)
@@ -8121,7 +8165,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 194.31 256.54 0)
 			(hide yes)
 			(show_name no)
@@ -8134,6 +8178,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1103X"
 			(at 194.31 256.54 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P110KLCT-ND"
+			(at 252.73 128.27 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8349,7 +8404,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.eaton.com/content/dam/eaton/products/electronic-components/resources/data-sheet/eaton-dr-high-power-density-high-efficiency-shielded-drum-core-power-inductors-data-sheet.pdf"
 			(at 58.42 57.15 0)
 			(hide yes)
 			(show_name no)
@@ -8360,7 +8415,7 @@
 				)
 			)
 		)
-		(property "Description" "IND 2.2uH"
+		(property "Description" "IND 2.2uH 4.15A"
 			(at 58.42 57.15 0)
 			(hide yes)
 			(show_name no)
@@ -8373,6 +8428,39 @@
 		)
 		(property "DIELECTRIC" "Inductor"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "283-DR73-2R2-RTR-ND"
+			(at 58.42 57.15 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Eaton - Electronics Division"
+			(at 58.42 57.15 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "DR73-2R2-R"
+			(at 58.42 57.15 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -8733,7 +8821,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "8-VSSOP"
 			(at 95.25 125.73 0)
 			(hide yes)
 			(show_name no)
@@ -8744,7 +8832,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/lmv331.pdf"
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Flmv393"
 			(at 95.25 125.73 0)
 			(hide yes)
 			(show_name no)
@@ -8755,7 +8843,7 @@
 				)
 			)
 		)
-		(property "Description" "Dual comparator low-voltage"
+		(property "Description" "IC COMPARATOR 2CH 8-VSSOP"
 			(at 95.25 125.73 0)
 			(hide yes)
 			(show_name no)
@@ -8779,6 +8867,17 @@
 		)
 		(property "MANUFACTURER" "Texas Instruments"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-13993-1-ND"
+			(at 95.25 125.73 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9453,7 +9552,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "8-VSSOP"
 			(at 278.13 125.73 0)
 			(hide yes)
 			(show_name no)
@@ -9464,7 +9563,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/lmv331.pdf"
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Flmv393"
 			(at 278.13 125.73 0)
 			(hide yes)
 			(show_name no)
@@ -9475,7 +9574,7 @@
 				)
 			)
 		)
-		(property "Description" "Dual comparator low-voltage"
+		(property "Description" "IC COMPARATOR 2CH 8-VSSOP"
 			(at 278.13 125.73 0)
 			(hide yes)
 			(show_name no)
@@ -9499,6 +9598,17 @@
 		)
 		(property "MANUFACTURER" "Texas Instruments"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-13993-1-ND"
+			(at 278.13 125.73 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10097,7 +10207,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "8-VSSOP"
 			(at 62.23 217.17 0)
 			(hide yes)
 			(show_name no)
@@ -10108,7 +10218,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/lmv331.pdf"
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Flmv393"
 			(at 62.23 217.17 0)
 			(hide yes)
 			(show_name no)
@@ -10119,7 +10229,7 @@
 				)
 			)
 		)
-		(property "Description" "Dual comparator low-voltage"
+		(property "Description" "IC COMPARATOR 2CH 8-VSSOP"
 			(at 62.23 217.17 0)
 			(hide yes)
 			(show_name no)
@@ -10143,6 +10253,17 @@
 		)
 		(property "MANUFACTURER" "Texas Instruments"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-13993-1-ND"
+			(at 62.23 217.17 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10688,7 +10809,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.eaton.com/content/dam/eaton/products/electronic-components/resources/data-sheet/eaton-dr-high-power-density-high-efficiency-shielded-drum-core-power-inductors-data-sheet.pdf"
 			(at 242.57 55.88 0)
 			(hide yes)
 			(show_name no)
@@ -10699,7 +10820,7 @@
 				)
 			)
 		)
-		(property "Description" "IND 2.2uH"
+		(property "Description" "IND 2.2uH 4.15A"
 			(at 242.57 55.88 0)
 			(hide yes)
 			(show_name no)
@@ -10712,6 +10833,39 @@
 		)
 		(property "DIELECTRIC" "Inductor"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "283-DR73-2R2-RTR-ND"
+			(at 242.57 55.88 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER" "Eaton - Electronics Division"
+			(at 242.57 55.88 90)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "MANUFACTURER_PART_NUMBER" "DR73-2R2-R"
+			(at 242.57 55.88 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -11968,7 +12122,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 77.978 134.62 90)
 			(hide yes)
 			(show_name no)
@@ -11979,7 +12133,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 76.2 134.62 0)
 			(hide yes)
 			(show_name no)
@@ -11990,7 +12144,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 150k 1% 1/10W 0402"
+		(property "Description" "RES SMD 150K OHM 1% 1/10W 0402"
 			(at 76.2 134.62 0)
 			(hide yes)
 			(show_name no)
@@ -12034,7 +12188,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at -52.07 76.2 0)
 			(hide yes)
 			(show_name no)
@@ -12047,6 +12201,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1503X"
 			(at -52.07 76.2 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P150KLCT-ND"
+			(at 76.2 134.62 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12923,7 +13088,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1206"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 79.248 201.93 90)
 			(hide yes)
 			(show_name no)

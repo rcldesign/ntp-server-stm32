@@ -2755,6 +2755,17 @@
 				)
 			)
 		)
+		(property "DIGIKEY_PART_NUMBER" "296-51907-1-ND"
+			(at 163.83 106.68 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "9"
 			(uuid "07f1e2e4-2994-40e6-97dd-dd8356f922e8")
 		)
@@ -4085,7 +4096,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 338.328 95.25 90)
 			(hide yes)
 			(show_name no)
@@ -4096,7 +4107,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 336.55 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -4107,7 +4118,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 470 1% 1/10W 0402"
+		(property "Description" "RES SMD 470 OHM 1% 1/10W 0402"
 			(at 336.55 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -4151,7 +4162,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 101.6 -3.81 0)
 			(hide yes)
 			(show_name no)
@@ -4164,6 +4175,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4700X"
 			(at 101.6 -3.81 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P470LCT-ND"
+			(at 336.55 95.25 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

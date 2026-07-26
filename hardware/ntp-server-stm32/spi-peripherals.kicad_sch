@@ -4003,7 +4003,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "8-SOIC"
 			(at 129.54 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -4014,7 +4014,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.mxic.com.tw/Lists/Datasheet/Attachments/8906/MX25L25645G,%203V,%20256Mb,%20v2.0.pdf"
 			(at 129.54 86.36 0)
 			(hide yes)
 			(show_name no)
@@ -4049,6 +4049,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "MX25L25645GM2I-08G"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1092-1234-ND"
+			(at 129.54 86.36 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4475,6 +4486,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "PCA9306DCTT"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-32200-1-ND"
+			(at 154.94 207.01 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

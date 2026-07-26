@@ -6139,7 +6139,7 @@
 				(justify bottom)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/sn65c3221e.pdf"
 			(at 127 144.78 0)
 			(hide yes)
 			(show_name no)
@@ -6174,6 +6174,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "SN65C3221EPWR"
 			(at 36.83 29.21 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-20992-1-ND"
+			(at 127 144.78 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -6556,7 +6567,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "1727-3813-2-ND"
+		(property "DIGIKEY_PART_NUMBER" "1727-3813-1-ND"
 			(at 124.46 40.64 90)
 			(hide yes)
 			(show_name no)
@@ -8425,7 +8436,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 363.728 38.1 90)
 			(hide yes)
 			(show_name no)
@@ -8436,7 +8447,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 361.95 38.1 0)
 			(hide yes)
 			(show_name no)
@@ -8447,7 +8458,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 22k 1% 1/10W 0402"
+		(property "Description" "RES SMD 22K OHM 1% 1/10W 0402"
 			(at 361.95 38.1 0)
 			(hide yes)
 			(show_name no)
@@ -8491,7 +8502,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -8504,6 +8515,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF2202X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P22.0KLCT-ND"
+			(at 361.95 38.1 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -9335,7 +9357,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 321.31 47.498 90)
 			(hide yes)
 			(show_name no)
@@ -9346,7 +9368,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 321.31 45.72 0)
 			(hide yes)
 			(show_name no)
@@ -9357,7 +9379,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 470 1% 1/10W 0402"
+		(property "Description" "RES SMD 470 OHM 1% 1/10W 0402"
 			(at 321.31 45.72 0)
 			(hide yes)
 			(show_name no)
@@ -9401,7 +9423,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -9414,6 +9436,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4700X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P470LCT-ND"
+			(at 321.31 45.72 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10027,7 +10060,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 331.978 140.97 90)
 			(hide yes)
 			(show_name no)
@@ -10038,7 +10071,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 330.2 140.97 0)
 			(hide yes)
 			(show_name no)
@@ -10049,7 +10082,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 470 1% 1/10W 0402"
+		(property "Description" "RES SMD 470 OHM 1% 1/10W 0402"
 			(at 330.2 140.97 0)
 			(hide yes)
 			(show_name no)
@@ -10093,7 +10126,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 95.25 41.91 0)
 			(hide yes)
 			(show_name no)
@@ -10106,6 +10139,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF4700X"
 			(at 95.25 41.91 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P470LCT-ND"
+			(at 330.2 140.97 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10386,7 +10430,7 @@
 				)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 142.24 28.702 90)
 			(hide yes)
 			(show_name no)
@@ -10408,7 +10452,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 51 1% 1/10W 0402"
+		(property "Description" "RES SMD 51 OHM 1% 1/10W 0402"
 			(at 142.24 30.48 90)
 			(hide yes)
 			(show_name no)
@@ -10452,7 +10496,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -10463,7 +10507,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P51.0LTR-ND"
+		(property "DIGIKEY_PART_NUMBER" "P51.0LCT-ND"
 			(at 142.24 30.48 90)
 			(hide yes)
 			(show_name no)
@@ -11710,7 +11754,7 @@
 				)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 142.24 27.178 90)
 			(hide yes)
 			(show_name no)
@@ -11732,7 +11776,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 51 1% 1/10W 0402"
+		(property "Description" "RES SMD 51 OHM 1% 1/10W 0402"
 			(at 142.24 25.4 90)
 			(hide yes)
 			(show_name no)
@@ -11776,7 +11820,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -11787,7 +11831,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P51.0LTR-ND"
+		(property "DIGIKEY_PART_NUMBER" "P51.0LCT-ND"
 			(at 142.24 25.4 90)
 			(hide yes)
 			(show_name no)

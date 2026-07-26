@@ -8835,7 +8835,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 166.878 223.52 90)
 			(hide yes)
 			(show_name no)
@@ -8846,7 +8846,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 165.1 223.52 0)
 			(hide yes)
 			(show_name no)
@@ -8857,7 +8857,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 18k 1% 1/10W 0402"
+		(property "Description" "RES SMD 18K OHM 1% 1/10W 0402"
 			(at 165.1 223.52 0)
 			(hide yes)
 			(show_name no)
@@ -8901,7 +8901,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -8914,6 +8914,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1802X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P18.0KLCT-ND"
+			(at 165.1 223.52 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13363,6 +13374,17 @@
 				)
 			)
 		)
+		(property "DIGIKEY_PART_NUMBER" "150-MCP1502T-30E/CHYCT-ND"
+			(at 157.48 147.32 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "6"
 			(uuid "e62743e9-f16b-44bb-b17b-73a008b37465")
 		)
@@ -13973,7 +13995,7 @@
 				(justify bottom)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Fopa320"
 			(at 95.25 113.03 0)
 			(hide yes)
 			(show_name no)
@@ -14008,6 +14030,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "OPA320AIDBVT"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-29510-1-ND"
+			(at 95.25 113.03 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15495,7 +15528,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ti.com/lit/gpn/ina228-q1"
+		(property "Datasheet" "https://www.ti.com/lit/ds/symlink/ina228-q1.pdf"
 			(at 151.13 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -15507,7 +15540,7 @@
 				)
 			)
 		)
-		(property "Description" "Current/power monitor 20-bit I2C"
+		(property "Description" "IC PWR MONITOR 10VSSOP"
 			(at 151.13 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -15531,6 +15564,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "INA228AQDGSRQ1"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-INA228AQDGSRQ1CT-ND"
+			(at 151.13 91.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -15772,7 +15816,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 116.332 59.69 90)
 			(hide yes)
 			(show_name no)
@@ -15783,7 +15827,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDQ0000/ast-ind-151033.pdf"
 			(at 118.11 59.69 0)
 			(hide yes)
 			(show_name no)
@@ -15794,7 +15838,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 20k 1% 1/10W 0402"
+		(property "Description" "RES 20K OHM 0.5% 1/10W 0402"
 			(at 118.11 59.69 0)
 			(hide yes)
 			(show_name no)
@@ -15838,7 +15882,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -15849,7 +15893,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P15.0KLTR-ND"
+		(property "DIGIKEY_PART_NUMBER" "10-ERJ-H2RD2002XCT-ND"
 			(at 118.11 59.69 0)
 			(hide yes)
 			(show_name no)
@@ -15871,7 +15915,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF2002X"
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-H2RD2002X"
 			(at 118.11 59.69 0)
 			(hide yes)
 			(show_name no)
@@ -16897,7 +16941,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1206"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 213.868 224.79 90)
 			(hide yes)
 			(show_name no)
@@ -18711,7 +18755,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 163.322 240.03 90)
 			(hide yes)
 			(show_name no)
@@ -18722,7 +18766,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 165.1 240.03 0)
 			(hide yes)
 			(show_name no)
@@ -18733,7 +18777,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 33k 1% 1/10W 0402"
+		(property "Description" "RES SMD 33K OHM 1% 1/10W 0402"
 			(at 165.1 240.03 0)
 			(hide yes)
 			(show_name no)
@@ -18777,7 +18821,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -18790,6 +18834,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF3302X"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P33.0KLCT-ND"
+			(at 165.1 240.03 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -19469,7 +19524,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 116.332 81.28 90)
 			(hide yes)
 			(show_name no)
@@ -19491,7 +19546,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 604 1% 1/10W 0402"
+		(property "Description" "RES SMD 604 OHM 1% 1/10W 0402"
 			(at 118.11 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -19535,7 +19590,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -19546,7 +19601,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P2.05KLTR-ND"
+		(property "DIGIKEY_PART_NUMBER" "P604LCT-ND"
 			(at 118.11 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -20020,7 +20075,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://ww1.microchip.com/downloads/aemDocuments/documents/APID/ProductDocuments/DataSheets/MCP41U83-Data-Sheet-DS20007000.pdf"
+		(property "Datasheet" "https://ww1.microchip.com/downloads/aemDocuments/documents/MSLD/ProductDocuments/MCP41U83-Data-Sheet-DS20007000.pdf"
 			(at 106.68 173.99 0)
 			(hide yes)
 			(show_name no)
@@ -20055,6 +20110,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "MCP41U83T-503E/ST"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "150-MCP41U83T-503E/STCT-ND"
+			(at 106.68 156.21 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -20974,7 +21040,7 @@
 				(justify left)
 			)
 		)
-		(property "Value" "20m"
+		(property "Value" "7m"
 			(at 202.946 57.15 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -20985,7 +21051,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805"
+		(property "Footprint" "2515 (6332 Metric)"
 			(at 200.66 52.832 90)
 			(hide yes)
 			(show_name no)
@@ -20996,7 +21062,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.ohmite.com/assets/images/res-kdv.pdf"
+		(property "Datasheet" "https://www.vishay.com/docs/30100/wsl.pdf"
 			(at 200.66 54.61 0)
 			(hide yes)
 			(show_name no)
@@ -21007,7 +21073,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 20m SENSE 0.5% 0805"
+		(property "Description" "RES 0.007 OHM 1% 1W 2512"
 			(at 200.66 54.61 90)
 			(hide yes)
 			(show_name no)
@@ -21051,7 +21117,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "273-KDV08DR150ETCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "WSLG-.007CT-ND"
 			(at 200.66 54.61 90)
 			(hide yes)
 			(show_name no)
@@ -21073,7 +21139,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "KDV08DR150ET"
+		(property "MANUFACTURER_PART_NUMBER" "WSL25127L000FEA"
 			(at 200.66 54.61 90)
 			(hide yes)
 			(show_name no)
@@ -21084,7 +21150,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Ohmite"
+		(property "MANUFACTURER" "Vishay Dale"
 			(at 200.66 54.61 90)
 			(hide yes)
 			(show_name no)
@@ -21685,7 +21751,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "8-VSSOP"
 			(at 246.38 224.79 0)
 			(hide yes)
 			(show_name no)
@@ -21696,7 +21762,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/lmv331.pdf"
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Flmv393"
 			(at 246.38 224.79 0)
 			(hide yes)
 			(show_name no)
@@ -21707,7 +21773,7 @@
 				)
 			)
 		)
-		(property "Description" "Dual comparator low-voltage"
+		(property "Description" "IC COMPARATOR 2CH 8-VSSOP"
 			(at 246.38 224.79 0)
 			(hide yes)
 			(show_name no)
@@ -21731,6 +21797,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "LMV393IDGKR"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-13993-1-ND"
+			(at 246.38 224.79 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -23428,7 +23505,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "8-VSSOP"
 			(at 220.98 240.03 0)
 			(hide yes)
 			(show_name no)
@@ -23439,7 +23516,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/lmv331.pdf"
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Flmv393"
 			(at 220.98 240.03 0)
 			(hide yes)
 			(show_name no)
@@ -23450,7 +23527,7 @@
 				)
 			)
 		)
-		(property "Description" "Dual comparator low-voltage"
+		(property "Description" "IC COMPARATOR 2CH 8-VSSOP"
 			(at 220.98 240.03 0)
 			(hide yes)
 			(show_name no)
@@ -23474,6 +23551,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "LMV393IDGKR"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-13993-1-ND"
+			(at 220.98 240.03 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -25129,7 +25217,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "8-VSSOP"
 			(at 85.09 219.71 0)
 			(hide yes)
 			(show_name no)
@@ -25140,7 +25228,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "http://www.ti.com/lit/ds/symlink/lmv331.pdf"
+		(property "Datasheet" "https://www.ti.com/general/docs/suppproductinfo.tsp?distId=10&gotoUrl=https%3A%2F%2Fwww.ti.com%2Flit%2Fgpn%2Flmv393"
 			(at 85.09 219.71 0)
 			(hide yes)
 			(show_name no)
@@ -25151,7 +25239,7 @@
 				)
 			)
 		)
-		(property "Description" "Dual comparator low-voltage"
+		(property "Description" "IC COMPARATOR 2CH 8-VSSOP"
 			(at 85.09 219.71 0)
 			(hide yes)
 			(show_name no)
@@ -25175,6 +25263,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "LMV393IDGKR"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "296-13993-1-ND"
+			(at 85.09 219.71 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)

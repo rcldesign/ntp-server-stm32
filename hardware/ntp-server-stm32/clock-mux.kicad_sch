@@ -2388,6 +2388,17 @@
 				)
 			)
 		)
+		(property "DIGIKEY_PART_NUMBER" "1727-6074-1-ND"
+			(at 219.71 224.79 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "4"
 			(uuid "40402050-5ee9-43d5-b15b-7fd9e7916337")
 		)
@@ -2796,6 +2807,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "74LVC1G157GW-Q100H"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1727-74LVC1G157GW-Q100HCT-ND"
+			(at 147.32 113.03 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3473,7 +3495,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 196.85 226.568 90)
 			(hide yes)
 			(show_name no)
@@ -3484,7 +3506,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 196.85 224.79 0)
 			(hide yes)
 			(show_name no)
@@ -3495,7 +3517,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 33 1% 1/10W 0402"
+		(property "Description" "RES SMD 33 OHM 1% 1/10W 0402"
 			(at 196.85 224.79 0)
 			(hide yes)
 			(show_name no)
@@ -3539,7 +3561,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at -2.54 106.68 0)
 			(hide yes)
 			(show_name no)
@@ -3552,6 +3574,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF33R0X"
 			(at -2.54 106.68 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P33.0LCT-ND"
+			(at 196.85 224.79 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3689,7 +3722,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1206"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 133.858 78.74 90)
 			(hide yes)
 			(show_name no)
@@ -3973,7 +4006,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "R_0402_1005Metric"
+		(property "Footprint" "0402 (1005 Metric)"
 			(at 242.57 226.568 90)
 			(hide yes)
 			(show_name no)
@@ -3984,7 +4017,7 @@
 				)
 			)
 		)
-		(property "Datasheet" ""
+		(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
 			(at 242.57 224.79 0)
 			(hide yes)
 			(show_name no)
@@ -3995,7 +4028,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 33 1% 1/10W 0402"
+		(property "Description" "RES SMD 33 OHM 1% 1/10W 0402"
 			(at 242.57 224.79 0)
 			(hide yes)
 			(show_name no)
@@ -4039,7 +4072,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "Panasonic"
+		(property "MANUFACTURER" "Panasonic Industry"
 			(at 0 62.23 0)
 			(hide yes)
 			(show_name no)
@@ -4052,6 +4085,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF33R0X"
 			(at 0 62.23 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "P33.0LCT-ND"
+			(at 242.57 224.79 90)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -4154,6 +4198,17 @@
 		)
 		(property "MANUFACTURER_PART_NUMBER" "74LVC1G34GW,125"
 			(at 0 0 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "DIGIKEY_PART_NUMBER" "1727-6074-1-ND"
+			(at 219.71 162.56 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
