@@ -190,8 +190,17 @@ Genuinely open (§15.2), all needing hardware or a human decision rather than mo
   driver exposes it, and whether PA0's PPS reaches the aux trigger internally needs a board.
   The TIM2↔PTP **software correlation is the shipped path** — the aux snapshot is an accuracy
   optimisation, not a prerequisite.
-- **Leap smear opt-in.** Step is decided and implemented for both services. The NTP-only
-  smear opt-in — cfg key, ramp, PTP refusal, annunciation — is **not built**.
+- ~~**Leap smear opt-in.**~~ **Built.** Step remains the default for both services;
+  `ntp.leap.smear` enables a **linear ramp over a leading window ending at the leap
+  instant** (`ntp.leap.smear.s`, default 86400 s, bounds 14400–86400). Linear because every
+  deployed smearing service is, so client servos are tuned for it, and because
+  `elapsed_ns / window_s` is provably monotone in integer arithmetic and terminates at
+  exactly 1e9. Leading rather than centred because a centred window spends half its length
+  after the event, when `leap_pending` is already 0. While active the NTP projection drops
+  to stratum 2 with refid `SMER` — **not** 16, which means "unsynchronised" and would have
+  RFC 5905 clients discard the server outright, making a smear nobody accepts into a step
+  with extra steps. The forfeiture lives in the NTP projection, not the shared §3.8 block,
+  so PTP — which is still serving correct time — is not degraded with it.
 - **FE-5680A J6.8/J6.9 direction** for the specific surplus variant.
 - **Anti-rollback epoch policy**: when a release warrants bumping the security counter. The
   mechanism is in place; the release process is a human call.

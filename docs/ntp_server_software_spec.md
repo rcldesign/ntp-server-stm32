@@ -594,6 +594,7 @@ than trusted.
 | Web SPA framework + size budget | **No framework** — vanilla JS, no build step. 42.2 KiB gzipped against the 256 KiB NOR budget (16.5 %), so Preact/Svelte were unnecessary. | `firmware/web/`, `pack_assets.py` |
 | RADIUS / LDAP / TACACS+ : phase 1 or 2 | **Phase 1, built.** The AAA chain with its lockout policy is shared by the web, console and MP planes through one entry point. | `core/auth/`, `zephyr/net/sts_aaa.c` |
 | Rb EFC steering | **Hands-off**, as proposed. Firmware sequences power and reads health; it never steers the FE-5680A. | `zephyr/platform/rb_serial.c` |
+| Leap-second handling at the second of insertion | **Step for both services, by default.** Smear is an NTP-only opt-in (`ntp.leap.smear`, off): a **linear ramp over a leading window ending at the leap instant** (`ntp.leap.smear.s`, default 86400 s, bounds 14400–86400). Linear because every deployed smearing service is, so client servos are tuned for that input, and because `elapsed_ns / window_s` is provably monotone in integer arithmetic and lands on exactly 1e9. Leading rather than centred because a centred window spends half its length *after* the event, when `leap_pending` is already 0 and `leap_at_tai_s` is meaningless. PTP is structurally excluded — 1588 has no smear concept — and a tree-scanning test enforces which files may reference it. While smearing, the NTP projection drops to **stratum 2, refid `SMER`**, with root dispersion grown by the live deviation; deliberately *not* stratum 16, which means "unsynchronised" and would have RFC 5905 clients discard the server, turning a smear into a step with extra steps. The forfeiture is applied in the NTP projection, not the shared §3.8 block, so PTP is not degraded alongside it. One documented artefact: at 1 ns granularity an *insert* smear stalls served time for exactly one nanosecond per window tick — unavoidable in integer nanoseconds, and never a reversal. | `core/quality`, `core/ntp`, `zephyr/net/sts_ntp.c` |
 | External-ref front-end default | **Boots terminated**, set in hardware by the R176 100 k pull-up on `REF_TERM_EN` (PC10) rather than by firmware, so the default holds before firmware runs. Firmware may switch it at runtime. | `boards/rcldesign/sts1000_meridian/sts1000_meridian.dts:200` |
 | Certificate lifecycle | **Manual / CSR.** ACME is deliberately deferred — it needs an HTTPS client, base64url + JWS-ES256 and a trustworthy clock at first boot; the gaps are enumerated at the point of deferral. | `zephyr/net/sts_cert.c` |
 
@@ -605,13 +606,6 @@ than trusted.
   of it, and whether PA0's PPS can reach the aux trigger internally is a routing question
   that needs a board to answer. The TIM2↔PTP **software correlation is the shipped path**;
   the aux snapshot remains an accuracy optimisation, not a prerequisite.
-- **Leap-second handling at the second of insertion.** Decided in principle and *not yet
-  fully implemented*: **step** is correct for both services and is what the firmware does —
-  a stratum-1 reference that smears is misreporting UTC for the whole smear window, and the
-  same box serves PTP, where smear is not permitted at all. Smear therefore exists only as
-  an explicit NTP-only opt-in, must be refused for the PTP grandmaster, must be loudly
-  annunciated while active, and arguably forfeits the stratum-1 claim for its duration.
-  **None of that opt-in path is built** — there is no cfg key and no ramp.
 - **FE-5680A J6.8/J6.9 Tx/Rx direction and the full connector pinout** for the specific
   surplus variant. Needs the physical unit; no amount of firmware settles it.
 - **Anti-rollback counter budget and exhaustion recovery.** The mechanism is being put in
