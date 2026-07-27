@@ -16,6 +16,11 @@
 #include "util/cobs.h"
 #include "util/crc.h"
 
+_Static_assert(MCP_CFG_EXPORT_CHUNK >= CFG_EXPORT_MIN_CHUNK,
+	       "export chunk must hold at least one record");
+_Static_assert(MCP_CFG_EXPORT_CHUNK <= (MCP_MAX_PAYLOAD - 6U),
+	       "export chunk must fit the response payload after its 6-byte head");
+
 /* ------------------------------------------------------------------------- */
 /* Wire codec                                                                */
 /* ------------------------------------------------------------------------- */
@@ -798,8 +803,7 @@ static int h_cfg_export(mcp_ctx_t *c, const mcp_frame_t *f)
 	c->exp_prev_valid = true;
 
 	start = c->exp.offset;
-	rc = cfg_export_read(c->w.cfg, &c->exp, &p[6], MCP_MAX_PAYLOAD - 6U,
-			     &n);
+	rc = cfg_export_read(c->w.cfg, &c->exp, &p[6], MCP_CFG_EXPORT_CHUNK, &n);
 	if (rc < 0) {
 		c->exp_active = false;
 		return mcp__reply_status(c, f->cmd, f->seq, cfg_err(rc));

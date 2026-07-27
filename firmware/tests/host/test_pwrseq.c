@@ -52,10 +52,11 @@ typedef struct {
 	 * directly.
 	 */
 	bool rb_glue;
-	uint16_t rb_cmd;   /* last digipot code the glue saw written */
-	bool rb_powered;   /* RB_PWR_EN asserted per the action stream */
-	bool bad_readback; /* inject: readback never valid (SPI dead) */
-	bool hold_no_lock; /* inject: RB_LOCK never asserts */
+	uint16_t rb_cmd;     /* last digipot code the glue saw written */
+	bool rb_powered;     /* RB_PWR_EN asserted per the action stream */
+	bool bad_readback;   /* inject: readback never valid (SPI dead) */
+	bool wrong_readback; /* inject: readback matches no commanded code */
+	bool hold_no_lock;   /* inject: RB_LOCK never asserts */
 	bool hold_no_extref; /* inject: EXTREF_MON never in band */
 	int32_t force_op_rail_mv; /* inject: rail while operating code active (0=auto) */
 } model_t;
@@ -146,6 +147,10 @@ static void glue_apply(model_t *m, size_t from)
 
 	if (m->bad_readback) {
 		m->in.digipot_readback_valid = false;
+	} else if (m->wrong_readback) {
+		/* A value that matches neither the safe nor the operating code. */
+		m->in.digipot_readback = (uint16_t)(m->rb_cmd + 1U);
+		m->in.digipot_readback_valid = true;
 	} else {
 		m->in.digipot_readback = m->rb_cmd;
 		m->in.digipot_readback_valid = true;
@@ -413,10 +418,21 @@ static void test_digipot_transfer_matches_the_documented_table(void)
 		}
 	}
 
-	/* Out-of-range codes saturate at the top code rather than producing a
-	 * negative VCTRL, which would read back as an impossible rail. */
-	TEST_ASSERT_EQUAL_UINT32(pwrseq_digipot_vctrl_mv(&x, 1023U),
+	/*
+	 * BLOCKER-1: an out-of-range code must clamp to the SAFE-LOW end, never
+	 * toward steps-1. Since VOUT rises with the code, clamping to steps-1
+	 * would turn any garbage code into ~24.4 V — maximum output onto a
+	 * 15 V-class FE. A code at or above `steps` therefore returns the
+	 * code-0 VCTRL (= vref, minimum VOUT), not the code-1023 VCTRL.
+	 */
+	TEST_ASSERT_EQUAL_UINT32(pwrseq_digipot_vctrl_mv(&x, 0U),
 				 pwrseq_digipot_vctrl_mv(&x, 5000U));
+	TEST_ASSERT_EQUAL_UINT32(3000U, pwrseq_digipot_vctrl_mv(&x, 5000U));
+	TEST_ASSERT_EQUAL_INT32(4515, pwrseq_rb_expected_mv(&x, 5000U));
+	TEST_ASSERT_EQUAL_INT32(4515, pwrseq_rb_expected_mv(&x, 1024U));
+	/* Emphatically NOT the maximum-output end. */
+	TEST_ASSERT_TRUE(pwrseq_rb_expected_mv(&x, 5000U) <
+			 pwrseq_rb_expected_mv(&x, 1023U));
 
 	TEST_ASSERT_EQUAL_UINT32(0U, pwrseq_digipot_vctrl_mv(NULL, 0U));
 	TEST_ASSERT_EQUAL_INT32(0, pwrseq_rb_expected_mv(NULL, 0U));
@@ -640,31 +656,47 @@ static void test_action_arguments_come_from_config(void)
 	int i;
 
 	/*
-	 * Drive the whole chain from a non-zero safe code — 25 is the 5 V point
-	 * in the vcc_rb_supply §5 table — so the digipot argument, the expected
-	 * rail voltage and the window all have to agree end to end. A hard-coded
-	 * zero anywhere in that path fails here and nowhere else.
+	 * The two digipot writes must carry their own codes: the safe/precharge
+	 * write its safe code, the operating write the operating code. Drive
+	 * both from non-default values — safe 0 (4.5 V), operating 25 (5 V per
+	 * the vcc_rb_supply §5 table) — plus a non-default panel duty, so a
+	 * hard-coded or swapped argument anywhere in the path fails here.
 	 */
 	pwrseq_cfg_default(&cfg);
-	cfg.digipot_safe_code = 25U;
+	cfg.digipot_safe_code = 0U;
+	cfg.digipot_operating_code = 25U; /* 5 V, well under the 15 V ceiling */
 	cfg.panel_led_duty_pct = 40U;
 
 	model_init(&m, &cfg);
-	m.in.digipot_readback = 25U;
-	m.in.ina_vbus_mv[INA228_RAIL_VCC_RB] = 5000;
 	run_out(&m, 100U, 100U);
 
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_TRUE(m.ctx.rb_gated);
 
-	for (i = 0; i < (int)m.log_len; i++) {
-		if (m.log[i].action == PWRSEQ_ACT_DIGIPOT_WRITE) {
-			TEST_ASSERT_EQUAL_UINT16(25U, m.log[i].arg);
-		} else if (m.log[i].action == PWRSEQ_ACT_PANEL_LED_PWM) {
-			TEST_ASSERT_EQUAL_UINT16(40U, m.log[i].arg);
-		} else {
-			TEST_ASSERT_EQUAL_UINT16(0U, m.log[i].arg);
+	/* The first digipot write is the safe code, the second the operating
+	 * code — order matters, so track which write we are looking at. */
+	{
+		int writes = 0;
+
+		for (i = 0; i < (int)m.log_len; i++) {
+			switch (m.log[i].action) {
+			case PWRSEQ_ACT_DIGIPOT_WRITE:
+				TEST_ASSERT_EQUAL_UINT16(0U, m.log[i].arg);
+				writes++;
+				break;
+			case PWRSEQ_ACT_DIGIPOT_WRITE_OP:
+				TEST_ASSERT_EQUAL_UINT16(25U, m.log[i].arg);
+				writes++;
+				break;
+			case PWRSEQ_ACT_PANEL_LED_PWM:
+				TEST_ASSERT_EQUAL_UINT16(40U, m.log[i].arg);
+				break;
+			default:
+				TEST_ASSERT_EQUAL_UINT16(0U, m.log[i].arg);
+				break;
+			}
 		}
+		TEST_ASSERT_EQUAL_INT(2, writes);
 	}
 }
 
@@ -741,13 +773,18 @@ static void test_a_digipot_that_will_not_read_back_stops_the_sequence(void)
 	model_t m;
 
 	model_init(&m, NULL);
-	m.in.digipot_readback_valid = false;
+	m.bad_readback = true; /* SPI dead: readback never valid */
 	run_out(&m, 100U, 200U);
 
-	/* The write is attempted, the verify retried, and then the whole stage
-	 * is abandoned — the rail is never energised on an unproven wiper. */
+	/*
+	 * The safe-code write is attempted, its verify retried three times, and
+	 * then the whole stage abandoned — RB_PWR_EN is never even reached,
+	 * because the readback verify sits before it. Nothing energises on an
+	 * unproven wiper.
+	 */
 	TEST_ASSERT_EQUAL_UINT(1U, count_of(&m, PWRSEQ_ACT_DIGIPOT_WRITE));
 	TEST_ASSERT_EQUAL_UINT(3U, count_of(&m, PWRSEQ_ACT_DIGIPOT_VERIFY));
+	expect_absent(&m, PWRSEQ_ACT_DIGIPOT_WRITE_OP);
 	expect_absent(&m, PWRSEQ_ACT_RB_PWR_EN);
 	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 
@@ -770,14 +807,19 @@ static void test_a_digipot_that_reads_back_the_wrong_code_is_rejected(void)
 {
 	model_t m;
 
+	/*
+	 * An SPI glitch leaves the wiper register reading a value that matches
+	 * neither commanded code. The safe-code readback verify catches it
+	 * before RB_PWR_EN.
+	 */
 	model_init(&m, NULL);
-	/* POR mid-scale is about 14.5 V — inside the OV envelope, and lethal to
-	 * a 15 V-class FE if it were trusted as the safe-low code. */
-	m.in.digipot_readback = 512U;
+	m.wrong_readback = true;
 	run_out(&m, 100U, 200U);
 
 	expect_absent(&m, PWRSEQ_ACT_RB_PWR_EN);
 	TEST_ASSERT_TRUE(pwrseq_rb_fault(&m.ctx));
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_DIGIPOT)) != 0U);
 }
 
 static void test_rb_never_gates_before_the_rail_window_is_proven(void)
@@ -785,8 +827,10 @@ static void test_rb_never_gates_before_the_rail_window_is_proven(void)
 	model_t m;
 
 	model_init(&m, NULL);
-	/* Rail comes up at 12 V when 4.515 V +-5 % was commanded. */
-	m.in.ina_vbus_mv[INA228_RAIL_VCC_RB] = 12000;
+	/* Once the operating code is commanded (~14.25 V), the buck instead
+	 * regulates to 12 V — out of window. The precharge safe-low rail is
+	 * fine, so the sequence powers up and reaches the operating check. */
+	m.force_op_rail_mv = 12000;
 	run_out(&m, 100U, 200U);
 
 	/* Powered, because that is how the rail is measured at all... */
@@ -815,28 +859,79 @@ static void test_a_rail_just_outside_the_window_is_still_rejected(void)
 {
 	model_t m;
 
-	/* 4515 + 5 % is 4741; one millivolt past it must fail. */
+	/*
+	 * Operating expected is 14 249 mV (code 500); the ±5 % window is
+	 * [13537, 14961]. The measured<=vmax gate (15 000) does not bite inside
+	 * this band, so these boundaries isolate the window check itself.
+	 */
 	model_init(&m, NULL);
-	m.in.ina_vbus_mv[INA228_RAIL_VCC_RB] = 4742;
+	m.force_op_rail_mv = 14962; /* one past the top edge */
 	run_out(&m, 100U, 200U);
 	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 
-	/* And exactly on the boundary must pass. */
 	model_init(&m, NULL);
-	m.in.ina_vbus_mv[INA228_RAIL_VCC_RB] = 4741;
+	m.force_op_rail_mv = 14961; /* exactly the top edge */
 	run_out(&m, 100U, 200U);
 	expect_present(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
 
 	model_init(&m, NULL);
-	m.in.ina_vbus_mv[INA228_RAIL_VCC_RB] = 4289;
+	m.force_op_rail_mv = 13537; /* exactly the bottom edge */
 	run_out(&m, 100U, 200U);
 	expect_present(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 
 	model_init(&m, NULL);
-	m.in.ina_vbus_mv[INA228_RAIL_VCC_RB] = 4288;
+	m.force_op_rail_mv = 13536; /* one below */
 	run_out(&m, 100U, 200U);
 	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
+}
+
+static void test_rb_measured_over_vmax_is_refused_even_inside_the_window(void)
+{
+	pwrseq_cfg_t cfg;
+	model_t m;
+
+	/*
+	 * BLOCKER-1's defence in depth: a rail that sits INSIDE the code's own
+	 * tolerance window but ABOVE the FE ceiling must still be refused. This
+	 * is the case the self-referential check missed — if the window were the
+	 * only gate, a rail matching its (bounded but high) setpoint would pass
+	 * and connect an over-voltage to the FE.
+	 *
+	 * Operating code 520 -> ~14 638 mV expected; ±5 % window is roughly
+	 * [13906, 15370]. A measured 15 100 mV is inside that window yet above
+	 * the 15 000 mV ceiling, so only the independent measured<=vmax gate can
+	 * catch it.
+	 */
+	pwrseq_cfg_default(&cfg);
+	cfg.digipot_operating_code = 520U;
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_init(&m.ctx, &cfg)); /* expected(520) < vmax */
+
+	/* Sanity: 15 100 really is inside the code's own tolerance window, so
+	 * the window check alone would have let it through. */
+	{
+		int32_t lo = 0;
+		int32_t hi = 0;
+
+		TEST_ASSERT_EQUAL_INT(0,
+				      pwrseq_rb_window(&cfg.rb_xfer, 520U,
+						       cfg.rb_vbus_tol_pct, &lo,
+						       &hi));
+		TEST_ASSERT_TRUE((15100 >= lo) && (15100 <= hi));
+		TEST_ASSERT_TRUE(15100 > (int32_t)cfg.rb_vmax_mv);
+	}
+
+	model_init(&m, &cfg);
+	m.force_op_rail_mv = 15100; /* in window, over vmax */
+	run_out(&m, 100U, 200U);
+
+	expect_present(&m, PWRSEQ_ACT_RB_PWR_EN);
+	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
+	expect_present(&m, PWRSEQ_ACT_RB_PWR_DIS);
+	TEST_ASSERT_TRUE(pwrseq_rb_fault(&m.ctx));
+	TEST_ASSERT_FALSE(m.ctx.rb_gated);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
+	TEST_ASSERT_TRUE(m.ctx.relay_eligible);
 }
 
 static void test_a_stale_vcc_rb_reading_is_not_a_pass(void)

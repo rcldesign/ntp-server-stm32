@@ -136,6 +136,16 @@ extern "C" {
 #define MCP_LOG_EVT_RECS 8U
 #endif
 
+/**
+ * Bytes of TLV payload CFG_EXPORT emits per chunk. Kept well below the frame
+ * limit so the export streams in small, individually-acknowledged pieces over
+ * a slow serial link (and so the resumable/retry path is the normal case, not
+ * a corner one). Must be at least CFG_EXPORT_MIN_CHUNK.
+ */
+#ifndef MCP_CFG_EXPORT_CHUNK
+#define MCP_CFG_EXPORT_CHUNK 256U
+#endif
+
 /** Stored admin credential size: salt[16] || HMAC-SHA-256[32]. */
 #define MCP_PW_SALT_LEN 16U
 #define MCP_PW_MAC_LEN  32U

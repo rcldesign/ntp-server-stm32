@@ -313,6 +313,19 @@ static void test_init_rejects_bad_config(void)
 	(void)disc_cfg_defaults(&cfg);
 	cfg.recover_ramp_max_ppb = 0.0f;
 	TEST_ASSERT_EQUAL_INT(-EINVAL, disc_init(&ctx, &cfg));
+
+	/* L13: +Inf passes a bare `> 0` check but would later be cast to int64
+	 * for the quality block (UB). An infinite holdover coefficient or
+	 * dispersion floor must be rejected outright. */
+	(void)disc_cfg_defaults(&cfg);
+	cfg.holdover.drift_ns_per_s = INFINITY;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, disc_init(&ctx, &cfg));
+	(void)disc_cfg_defaults(&cfg);
+	cfg.base_disp_ns = INFINITY;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, disc_init(&ctx, &cfg));
+	(void)disc_cfg_defaults(&cfg);
+	cfg.tempco_ppb_per_c = INFINITY;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, disc_init(&ctx, &cfg));
 }
 
 static void test_api_rejects_null_and_uninitialised(void)
