@@ -9,14 +9,16 @@
  * Scope — deliberate, and narrower than IEEE 1588 as a whole
  * ---------------------------------------------------------------------------
  *
- * 1. **Default profile only** (IEEE 1588-2019 Annex I.3, "Default PTP profile,
- *    E2E"). ptp_cfg_t carries the knobs the Telecom (G.8275.1/.2) and Power
- *    (C37.238) profiles need — domain, priority1/2, log intervals, transport —
- *    but none of their profile-specific *behaviours* (alternate BMCA,
- *    localPriority, forced port states, profile TLVs) are implemented.
- *    Selecting one raises PTP_ALARM_PROFILE_UNSUPPORTED at init and the engine
- *    keeps Default-profile behaviour. ARCHITECTURE.md §5 lists these as
- *    deferred.
+ * 1. **Four profiles: Default, G.8275.1, G.8275.2 and C37.238.** The parameters,
+ *    permitted ranges, transport restrictions, clockClass ladders, alternate-BMCA
+ *    localPriority tiebreak and mandatory Announce TLVs all live in
+ *    ptp_profile.h; the engine reads a descriptor rather than branching on the
+ *    profile enum. Two profile features are *not* implemented and are reported
+ *    rather than hidden: C37.238's peer-delay mechanism (this engine is E2E
+ *    only, note 4 below) and G.8275.2's unicast message negotiation. Selecting
+ *    either of those two raises PTP_ALARM_PROFILE_UNSUPPORTED, and
+ *    ptp_profile_deviation_text() names the gap. Default and G.8275.1 raise
+ *    nothing.
  *
  * 2. **Ordinary clock, grandmaster-only.** This appliance is a GNSS-disciplined
  *    grandmaster; it never slaves to another clock. BMCA still runs in full, but
@@ -43,7 +45,12 @@
  *
  * 6. **No management/signaling responder.** Both are parsed far enough to be
  *    counted and dropped without error (spec §4.4: "PTP management messages
- *    gated"). Annex-P integrity (ICV TLV) is deferred.
+ *    gated").
+ *
+ * 7. **Annex-P integrity is available but opt-in.** ptp_port_set_icv() attaches
+ *    a ptp_icv_ctx_t; from then on every transmitted PDU carries an
+ *    AUTHENTICATION TLV and every received PDU is subject to the configured
+ *    policy. Without it the engine behaves exactly as before. See ptp_icv.h.
  *
  * ---------------------------------------------------------------------------
  * Quality input
@@ -64,7 +71,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "ptp/ptp_icv.h"
 #include "ptp/ptp_msg.h"
+#include "ptp/ptp_profile.h"
 #include "quality/quality.h"
 
 #ifdef __cplusplus
@@ -101,8 +110,21 @@ extern "C" {
 #define PTP_ALARM_FAULTY           0x00000002U
 /** The most recent transmit callback failed. */
 #define PTP_ALARM_TX_ERROR         0x00000004U
-/** A non-Default profile is configured; Default-profile behaviour is in force. */
+/**
+ * The configured profile has a *material* unimplemented feature.
+ *
+ * Raised at ptp_port_init() when the selected profile's descriptor carries a
+ * deviation in PTP_DEV_MATERIAL — currently C37.238's peer-delay requirement and
+ * G.8275.2's unicast message negotiation. Default and G.8275.1 do not raise it.
+ * ptp_profile_deviation_text() renders the reason for the operator.
+ *
+ * The two deviations every profile shares here (two-step Sync, grandmaster-only)
+ * deliberately do *not* raise it: an alarm that is always on tells nobody
+ * anything. They are documented in the scope note at the top of this file.
+ */
 #define PTP_ALARM_PROFILE_UNSUPPORTED 0x00000008U
+/** A received PDU failed the Annex-P integrity policy; see ptp_icv_counters(). */
+#define PTP_ALARM_ICV_FAILED       0x00000010U
 
 /* ------------------------------------------------------------ enums, cfg -- */
 
@@ -114,7 +136,10 @@ typedef enum {
 	PTP_TRANSPORT_COUNT,
 } ptp_transport_t;
 
-/** Profile selector. Only PTP_PROFILE_DEFAULT changes behaviour; see the scope note. */
+/**
+ * Profile selector. The parameters of each live in ptp_profile.h; index into
+ * ptp_profile_desc() with one of these.
+ */
 typedef enum {
 	PTP_PROFILE_DEFAULT = 0,
 	PTP_PROFILE_TELECOM_G8275_1,
@@ -122,6 +147,15 @@ typedef enum {
 	PTP_PROFILE_POWER_C37_238,
 	PTP_PROFILE_COUNT,
 } ptp_profile_t;
+
+/**
+ * Deviations that make PTP_ALARM_PROFILE_UNSUPPORTED worth raising.
+ *
+ * PTP_DEV_TWO_STEP_ONLY and PTP_DEV_GM_ONLY are excluded on purpose: they apply
+ * to every profile this firmware offers, Default included, so including them
+ * would light the alarm permanently.
+ */
+#define PTP_DEV_MATERIAL (PTP_DEV_E2E_ONLY | PTP_DEV_NO_UNICAST_NEG)
 
 /**
  * clockClass to advertise once holdover leaves its specified window.
@@ -187,18 +221,74 @@ typedef struct {
 	ptp_profile_t profile;              /* default Default profile */
 	ptp_degradation_t degradation;      /* default alternative A */
 	uint16_t oslv_locked;               /* 0 forces the ADEV-derived value */
+
+	/* ---- profile-specific; see ptp_profile.h ---------------------------- */
+
+	/**
+	 * defaultDS.localPriority (G.8275.1 §6.3), 1..255, default 128.
+	 *
+	 * Our own dataset's alternate-BMCA tiebreak. Read only by the telecom
+	 * profiles' comparison.
+	 */
+	uint8_t local_priority;
+	/**
+	 * portDS.localPriority, 1..255, default 128.
+	 *
+	 * Assigned to every Announce *received* on this port. It is what makes
+	 * localPriority useful on a single-port clock: an operator raises this
+	 * above defaultDS.localPriority to defer to an upstream T-GM, or lowers
+	 * it to keep grandmastering against one.
+	 */
+	uint8_t port_local_priority;
+	/**
+	 * portDS.notSlave (G.8275.1). Structural here: this appliance never
+	 * enters SLAVE at all (scope note 2), which is strictly stronger. Kept
+	 * so the profile default is visible in telemetry and configuration.
+	 */
+	bool not_slave;
+	uint8_t l2_mac;      /* ptp_l2_mac_t; read by the glue for PTP_TRANSPORT_L2 */
+	ptp_c37238_t c37238; /* Power-profile Announce TLV contents */
 } ptp_cfg_t;
 
-/** Fill @p cfg with the defaults named above. */
+/** Fill @p cfg with the defaults named above (the Default profile's). */
 void ptp_cfg_defaults(ptp_cfg_t *cfg);
 
 /**
- * Check @p cfg against the ranges the engine relies on.
+ * Overwrite every profile-derived field of @p cfg with @p profile's defaults.
+ *
+ * Sets profile, domain, priority1/2, localPriority (both), the three log
+ * intervals, announceReceiptTimeout, transport, the L2 destination MAC and
+ * notSlave. Leaves portNumber, majorSdoId/minorSdoId, degradation, oslv_locked
+ * and the C37.238 payload alone — those are site settings, not profile
+ * settings. Call it whenever an operator changes the profile; the resulting
+ * configuration always passes ptp_cfg_validate().
+ *
+ * @retval 0        Applied.
+ * @retval -EINVAL  @p cfg is NULL or @p profile is out of range.
+ */
+int ptp_cfg_apply_profile(ptp_cfg_t *cfg, uint8_t profile);
+
+/**
+ * Check @p cfg against the ranges the engine relies on, and against the
+ * selected profile's own restrictions.
+ *
+ * Engine-level checks (all profiles): log intervals inside
+ * [PTP_LOG_INTERVAL_MIN, PTP_LOG_INTERVAL_MAX], announceReceiptTimeout >= 2
+ * (§7.7.3.1), portNumber != 0 (§7.5.2.3), majorSdoId <= 0x0F, and in-range
+ * transport / profile / degradation / l2_mac selectors.
+ *
+ * Profile-level checks: for every profile *except* Default, domain, priority1,
+ * priority2, localPriority, the three log intervals, announceReceiptTimeout and
+ * the transport must sit inside the descriptor's ranges. The Default profile's
+ * ranges are treated as advisory, because IEEE 1588-2019 Annex I.3 states them
+ * as recommendations and the standard permits any value the field can hold —
+ * whereas G.8275.1's ranges are normative and a value outside them is simply
+ * not that profile.
  *
  * @retval 0        Usable.
- * @retval -EINVAL  NULL, a log interval outside [-7, 7], announceReceiptTimeout
- *                  below 2 (§7.7.3.1 requires N >= 2), portNumber 0 (reserved),
- *                  or an out-of-range transport/profile/degradation selector.
+ * @retval -EINVAL  An engine-level check failed.
+ * @retval -ERANGE  A profile-level restriction was violated;
+ *                  ptp_cfg_apply_profile() produces a conforming set.
  */
 int ptp_cfg_validate(const ptp_cfg_t *cfg);
 

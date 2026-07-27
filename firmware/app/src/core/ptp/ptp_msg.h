@@ -57,11 +57,14 @@ extern "C" {
 /**
  * Largest PDU this module will build or accept for parsing.
  *
- * The longest message it produces is a 64-octet Announce; the headroom is for
- * suffix TLVs on received messages (which are skipped) and for the deferred
- * Annex-P ICV TLV.
+ * Sized by the worst case this firmware actually emits: a 64-octet Announce,
+ * plus the 22-octet IEEE C37.238 organization TLV the Power profile mandates
+ * (ptp_profile.h), plus an Annex-P AUTHENTICATION TLV carrying a full 32-octet
+ * ICV — 4 header + 6 fixed + 4 sequenceNo + 32 = 46 octets (ptp_icv.h). That is
+ * 132; 160 leaves room for one more suffix TLV without another audit of every
+ * buffer that is declared with this bound.
  */
-#define PTP_MSG_MAX_LEN 128U
+#define PTP_MSG_MAX_LEN 160U
 
 /** versionPTP of IEEE 1588-2008 and -2019 (§13.3.2.3). */
 #define PTP_VERSION 2U
