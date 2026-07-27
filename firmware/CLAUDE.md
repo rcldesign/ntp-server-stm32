@@ -6,8 +6,11 @@ spec** and `../docs/ntp_server_peripheral_map.md` is the **authoritative hardwar
 reference**. This file is the working preamble for the firmware tree, not a re-statement
 of those docs. Where this file and the spec disagree, the spec wins.
 
-> Status: greenfield. The application is not yet scaffolded — treat the commands and
-> layout below as the intended target and adjust this file to match reality as it lands.
+> Status: **scaffolded and building.** Board definition, MCUboot chain, all 18 core
+> modules and the four Zephyr glue areas are in tree and link into signed images.
+> See `ARCHITECTURE.md` for the binding structure contract (module boundaries, flash
+> map, MCP console protocol, coverage policy) and `README.md` for build/test/flash
+> commands and the current build figures.
 
 ---
 
@@ -149,18 +152,26 @@ expose LI bits (NTP) and PTP leap flags.
 
 ---
 
-## Intended toolchain & commands (adjust once scaffolded)
+## Toolchain & commands (as-built)
+
+Zephyr **v4.2.2** pinned in `west.yml` (T2 manifest, this repo is the manifest repo);
+Zephyr SDK **0.17.2** (`arm-zephyr-eabi`). Workspace root is the repo's parent.
 
 ```sh
-# Zephyr west workspace + SDK assumed; custom board under boards/
-west build -b sts1000_meridian firmware/app
-west flash                      # via on-board SWD (PA13/PA14/PB3)
-west build -t menuconfig        # Kconfig
-# MCUboot signing + SMP recovery over the USB CDC console (PA11/PA12) for field update
+# one-time workspace bootstrap
+cd <workspace> && west init -l ntp-server-stm32 --mf firmware/west.yml
+west update --narrow -o=--depth=1 && west zephyr-export
+
+# build (sysbuild: MCUboot + signed app), test, coverage
+firmware/scripts/build.sh -p            # west build -b sts1000_meridian --sysbuild firmware/app
+firmware/scripts/test.sh                # 25 host suites (TESTS='disc ntp' for a subset)
+firmware/scripts/coverage.sh            # gcovr over app/src/core, fails under 80%
+west flash                              # SWD (PA13/PA14/PB3) — first load only
 ```
 
-Provide a `west.yml` manifest pinning Zephyr + MCUboot + CryptoAuthLib revisions before the
-first real build, and record the Zephyr SDK version here.
+Field update is serial: `tools/meridian_ctl.py --port /dev/ttyACM1 fw-upload zephyr.signed.bin`
+(MCP DFU into slot 1, test-boot, self-confirm/revert). MCUboot serial recovery over USB
+CDC is the unbootable-image fallback — hold BUTTON_1 (PF0) through reset.
 
 ---
 
