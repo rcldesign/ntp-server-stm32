@@ -865,6 +865,11 @@ static const snmp_node_t mib[] = {
 
 #define MIB_COUNT (sizeof(mib) / sizeof(mib[0]))
 
+/* snmp.h sizes the notification rate-limiter arrays before the trap enum is
+ * visible; this is the tie that stops the two from drifting. */
+_Static_assert(SNMP_NOTIFY_TYPES == (unsigned int)SNMP_TRAP__COUNT,
+	       "SNMP_NOTIFY_TYPES must equal SNMP_TRAP__COUNT");
+
 /* Notification OIDs. coldStart is the standard snmpTraps.coldStart; the rest
  * live under <enterprise>.1.0.<n>, the SMIv2 placement that keeps them out of
  * the subtree a manager walks. */
@@ -1258,8 +1263,51 @@ static int emit_next(snmp_ctx_t *c, snmp_wr_t *w, const snmp_vb_t *vb, int from,
 	return from;
 }
 
+int snmp__emit_pdu(snmp_wr_t *w, uint8_t pdu_tag, int32_t reqid, int32_t err,
+		   int32_t err_index, snmp__vbl_fn fill, void *fill_ctx)
+{
+	size_t m_pdu;
+	size_t m_vbl;
+	int rc;
+
+	if (w == NULL) {
+		return -EINVAL;
+	}
+	rc = snmp_wr_begin(w, pdu_tag, &m_pdu);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = snmp_wr_int(w, SNMP_TAG_INTEGER, reqid);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = snmp_wr_int(w, SNMP_TAG_INTEGER, err);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = snmp_wr_int(w, SNMP_TAG_INTEGER, err_index);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = snmp_wr_begin(w, SNMP_TAG_SEQUENCE, &m_vbl);
+	if (rc != 0) {
+		return rc;
+	}
+	if (fill != NULL) {
+		rc = fill(w, fill_ctx);
+		if (rc != 0) {
+			return rc;
+		}
+	}
+	rc = snmp_wr_end(w, m_vbl);
+	if (rc != 0) {
+		return rc;
+	}
+	return snmp_wr_end(w, m_pdu);
+}
+
 /**
- * Build a complete response message.
+ * Emit a Response PDU for @p rq.
  *
  * @param err  When non-zero, the varbind list is emitted empty (the tooBig
  *             shape of RFC 3416 §4.2.1/§4.2.2) — except for a refused SET,
@@ -1269,40 +1317,24 @@ static int emit_next(snmp_ctx_t *c, snmp_wr_t *w, const snmp_vb_t *vb, int from,
  * it as tooBig; a GETBULK instead stops at the last varbind that fitted, which
  * RFC 3416 §4.2.3 explicitly allows and every manager expects.
  *
- * @retval 0        Built.
+ * @retval 0        Written.
  * @retval -ENOSPC  A GET/GETNEXT response did not fit.
  */
-static int build_response(snmp_ctx_t *c, snmp_req_t *rq, int32_t err,
-			  int32_t err_index, uint32_t uptime_cs, uint8_t *rsp,
-			  size_t cap, size_t *out_len)
+int snmp__emit_response(snmp_ctx_t *c, snmp_req_t *rq, int32_t err,
+			int32_t err_index, uint32_t uptime_cs, snmp_wr_t *w_out)
 {
 	snmp_wr_t w;
-	size_t m_msg;
 	size_t m_pdu;
 	size_t m_vbl = 0U;
 	size_t emitted = 0U;
 	size_t i;
 	int rc;
 
-	rc = snmp_wr_init(&w, rsp, cap);
-	if (rc != 0) {
-		return rc;
+	if (c == NULL || rq == NULL || w_out == NULL) {
+		return -EINVAL;
 	}
+	w = *w_out;
 
-	rc = snmp_wr_begin(&w, SNMP_TAG_SEQUENCE, &m_msg);
-	if (rc != 0) {
-		return rc;
-	}
-	rc = snmp_wr_int(&w, SNMP_TAG_INTEGER, SNMP_VERSION_2C);
-	if (rc != 0) {
-		return rc;
-	}
-	rc = snmp_wr_tlv(&w, SNMP_TAG_OCTET_STRING,
-			 (const uint8_t *)c->cfg.community,
-			 strlen(c->cfg.community));
-	if (rc != 0) {
-		return rc;
-	}
 	rc = snmp_wr_begin(&w, SNMP_PDU_RESPONSE, &m_pdu);
 	if (rc != 0) {
 		return rc;
@@ -1458,71 +1490,73 @@ close:
 	if (rc != 0) {
 		return rc;
 	}
-	rc = snmp_wr_end(&w, m_msg);
+
+	c->stats.varbinds += emitted;
+	*w_out = w;
+	return 0;
+}
+
+/**
+ * Build a complete SNMPv2c response message.
+ *
+ * The envelope only; the PDU comes from snmp__emit_response(), which the v3
+ * path uses too.
+ */
+static int build_response(snmp_ctx_t *c, snmp_req_t *rq, int32_t err,
+			  int32_t err_index, uint32_t uptime_cs, uint8_t *rsp,
+			  size_t cap, size_t *out_len)
+{
+	snmp_wr_t w;
+	size_t m_msg;
+	const char *comm = community_of(c);
+	int rc;
+
+	rc = snmp_wr_init(&w, rsp, cap);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = snmp_wr_begin(&w, SNMP_TAG_SEQUENCE, &m_msg);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = snmp_wr_int(&w, SNMP_TAG_INTEGER, SNMP_VERSION_2C);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = snmp_wr_tlv(&w, SNMP_TAG_OCTET_STRING, (const uint8_t *)comm,
+			 strlen(comm));
 	if (rc != 0) {
 		return rc;
 	}
 
-	c->stats.varbinds += emitted;
+	rc = snmp__emit_response(c, rq, err, err_index, uptime_cs, &w);
+	if (rc != 0) {
+		return rc;
+	}
+
+	rc = snmp_wr_end(&w, m_msg);
+	if (rc != 0) {
+		return rc;
+	}
 	*out_len = snmp_wr_len(&w);
 	return 0;
 }
 
-/** Parse the message envelope and PDU into @p rq. */
-static int parse_request(snmp_ctx_t *c, const uint8_t *req, size_t req_len,
-			 snmp_req_t *rq)
+int snmp__parse_pdu(uint8_t pdu_tag, const uint8_t *body, size_t body_len,
+		    snmp_req_t *rq)
 {
-	snmp_rd_t r;
-	snmp_rd_t body;
 	snmp_rd_t pdu;
 	snmp_rd_t vbl;
 	uint8_t tag;
 	size_t len;
 	int64_t v64;
-	const uint8_t *comm;
-	size_t comm_len;
-	size_t clen;
 	int rc;
 
-	rc = snmp_rd_init(&r, req, req_len);
-	if (rc != 0) {
-		return rc;
-	}
-	rc = snmp_rd_hdr(&r, &tag, &len);
-	if (rc != 0 || tag != SNMP_TAG_SEQUENCE) {
-		return -EBADMSG;
-	}
-	rc = snmp_rd_init(&body, &req[r.off], len);
-	if (rc != 0) {
-		return rc;
+	if (body == NULL || rq == NULL) {
+		return -EINVAL;
 	}
 
-	rc = snmp_rd_int(&body, &v64);
-	if (rc != 0) {
-		return -EBADMSG;
-	}
-	if (v64 != SNMP_VERSION_2C) {
-		return -EPROTO;
-	}
-
-	rc = snmp_rd_octets(&body, &comm, &comm_len);
-	if (rc != 0) {
-		return -EBADMSG;
-	}
-	if (c->cfg.community == NULL) {
-		return -EACCES;
-	}
-	clen = strlen(c->cfg.community);
-	if (clen == 0U || clen != comm_len ||
-	    memcmp(comm, c->cfg.community, clen) != 0) {
-		return -EACCES;
-	}
-
-	rc = snmp_rd_hdr(&body, &tag, &len);
-	if (rc != 0) {
-		return -EBADMSG;
-	}
-	switch (tag) {
+	switch (pdu_tag) {
 	case SNMP_PDU_GET:
 	case SNMP_PDU_GETNEXT:
 	case SNMP_PDU_GETBULK:
@@ -1531,9 +1565,9 @@ static int parse_request(snmp_ctx_t *c, const uint8_t *req, size_t req_len,
 	default:
 		return -ENOTSUP;
 	}
-	rq->pdu = tag;
+	rq->pdu = pdu_tag;
 
-	rc = snmp_rd_init(&pdu, &body.buf[body.off], len);
+	rc = snmp_rd_init(&pdu, body, body_len);
 	if (rc != 0) {
 		return rc;
 	}
@@ -1622,6 +1656,67 @@ static int parse_request(snmp_ctx_t *c, const uint8_t *req, size_t req_len,
 	return 0;
 }
 
+/** Parse the SNMPv2c message envelope and PDU into @p rq. */
+static int parse_request(snmp_ctx_t *c, const uint8_t *req, size_t req_len,
+			 snmp_req_t *rq)
+{
+	snmp_rd_t r;
+	snmp_rd_t body;
+	uint8_t tag;
+	size_t len;
+	int64_t v64;
+	const uint8_t *comm;
+	size_t comm_len;
+	size_t clen;
+	int rc;
+
+	rc = snmp_rd_init(&r, req, req_len);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = snmp_rd_hdr(&r, &tag, &len);
+	if (rc != 0 || tag != SNMP_TAG_SEQUENCE) {
+		return -EBADMSG;
+	}
+	rc = snmp_rd_init(&body, &req[r.off], len);
+	if (rc != 0) {
+		return rc;
+	}
+
+	rc = snmp_rd_int(&body, &v64);
+	if (rc != 0) {
+		return -EBADMSG;
+	}
+	if (v64 != SNMP_VERSION_2C) {
+		return -EPROTO;
+	}
+	/* Spec §9.5: v2c answers only when explicitly enabled. The check sits
+	 * after the version decode so the refusal is attributable, and before
+	 * the community compare so a disabled v2c leaks nothing about it. */
+	if (c->cfg.v2c_disabled) {
+		return -EPERM;
+	}
+
+	rc = snmp_rd_octets(&body, &comm, &comm_len);
+	if (rc != 0) {
+		return -EBADMSG;
+	}
+	if (c->cfg.community == NULL) {
+		return -EACCES;
+	}
+	clen = strlen(c->cfg.community);
+	if (clen == 0U || clen != comm_len ||
+	    memcmp(comm, c->cfg.community, clen) != 0) {
+		return -EACCES;
+	}
+
+	rc = snmp_rd_hdr(&body, &tag, &len);
+	if (rc != 0) {
+		return -EBADMSG;
+	}
+	return snmp__parse_pdu(tag, &body.buf[body.off], len, rq);
+}
+
 int snmp_handle(snmp_ctx_t *c, const uint8_t *req, size_t req_len,
 		uint32_t uptime_cs, uint8_t *rsp, size_t rsp_cap,
 		size_t *rsp_len)
@@ -1656,6 +1751,9 @@ int snmp_handle(snmp_ctx_t *c, const uint8_t *req, size_t req_len,
 	case -EACCES:
 		c->stats.bad_community++;
 		return -EACCES;
+	case -EPERM:
+		c->stats.v2c_refused++;
+		return -EPERM;
 	case -ENOTSUP:
 		c->stats.unsupported_pdu++;
 		return -ENOTSUP;
@@ -1795,8 +1893,8 @@ int snmp_make_trap(snmp_ctx_t *c, snmp_trap_t t, uint32_t uptime_cs,
 		return rc;
 	}
 	rc = snmp_wr_tlv(&w, SNMP_TAG_OCTET_STRING,
-			 (const uint8_t *)c->cfg.community,
-			 strlen(c->cfg.community));
+			 (const uint8_t *)community_of(c),
+			 strlen(community_of(c)));
 	if (rc != 0) {
 		return rc;
 	}
@@ -1842,9 +1940,10 @@ int snmp_make_trap(snmp_ctx_t *c, snmp_trap_t t, uint32_t uptime_cs,
 		return n;
 	}
 	snmp_val_oid(&v, arcs, (size_t)n);
-	rc = snmp__put_varbind(&w, o_snmp_trap_oid,
-			 sizeof(o_snmp_trap_oid) / sizeof(o_snmp_trap_oid[0]),
-			 &v);
+	rc = snmp__put_varbind(&w, snmp__oid_trap_oid,
+			       sizeof(snmp__oid_trap_oid) /
+				       sizeof(snmp__oid_trap_oid[0]),
+			       &v);
 	if (rc != 0) {
 		return rc;
 	}
@@ -1879,5 +1978,115 @@ int snmp_make_trap(snmp_ctx_t *c, snmp_trap_t t, uint32_t uptime_cs,
 
 	c->stats.traps++;
 	*out_len = snmp_wr_len(&w);
+	return 0;
+}
+
+/* ========================================================================= */
+/* version peek, v2c gate, notification rate limiter                         */
+/* ========================================================================= */
+
+int snmp_peek_version(const uint8_t *msg, size_t len, int32_t *out_ver)
+{
+	snmp_rd_t r;
+	snmp_rd_t body;
+	uint8_t tag;
+	size_t clen;
+	int64_t v64;
+	int rc;
+
+	if (msg == NULL || out_ver == NULL) {
+		return -EINVAL;
+	}
+	rc = snmp_rd_init(&r, msg, len);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = snmp_rd_hdr(&r, &tag, &clen);
+	if (rc != 0 || tag != SNMP_TAG_SEQUENCE) {
+		return -EBADMSG;
+	}
+	rc = snmp_rd_init(&body, &msg[r.off], clen);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = snmp_rd_int(&body, &v64);
+	if (rc != 0) {
+		return -EBADMSG;
+	}
+	if (v64 < INT32_MIN || v64 > INT32_MAX) {
+		return -EBADMSG;
+	}
+	*out_ver = (int32_t)v64;
+	return 0;
+}
+
+int snmp_set_v2c_enabled(snmp_ctx_t *c, bool enabled)
+{
+	if (c == NULL || !c->ready) {
+		return -EINVAL;
+	}
+	c->cfg.v2c_disabled = !enabled;
+	return 0;
+}
+
+/*
+ * Notification rate limiting.
+ *
+ * A single unauthenticated peer can generate one authentication-failure event
+ * per datagram, and an unthrottled agent turns that into one trap per datagram
+ * — amplifying an attack against this box into an attack against the trap
+ * receiver, and burying the genuine events. The gate is per notification type
+ * so a burst of authFailure cannot starve a lockLost.
+ *
+ * The policy is leaky-bucket-free on purpose: a minimum interval plus a count
+ * of what was suppressed is enough. The count is what an operator needs ("47
+ * suppressed since the last one") and it costs one counter, where a token
+ * bucket would cost per-type state and a tuning argument.
+ */
+bool snmp_notify_gate(snmp_ctx_t *c, snmp_trap_t t, uint64_t mono_ms,
+		      uint32_t *out_suppressed)
+{
+	uint32_t min_ms;
+
+	if (out_suppressed != NULL) {
+		*out_suppressed = 0U;
+	}
+	if (c == NULL || !c->ready ||
+	    (unsigned int)t >= (unsigned int)SNMP_TRAP__COUNT) {
+		return false;
+	}
+
+	min_ms = c->cfg.notify_min_interval_ms;
+	if (min_ms == 0U) {
+		return true;
+	}
+
+	/* First ever notification of this type always passes: `last_ms == 0`
+	 * cannot be confused with a real timestamp because the caller's clock
+	 * is monotonic-since-boot and the very first pass sets `sent`. */
+	if (c->notify_sent[t] && (mono_ms - c->notify_last_ms[t]) < min_ms) {
+		if (c->notify_suppressed[t] < UINT32_MAX) {
+			c->notify_suppressed[t]++;
+		}
+		c->stats.notify_suppressed++;
+		return false;
+	}
+
+	if (out_suppressed != NULL) {
+		*out_suppressed = c->notify_suppressed[t];
+	}
+	c->notify_suppressed[t] = 0U;
+	c->notify_last_ms[t] = mono_ms;
+	c->notify_sent[t] = true;
+	return true;
+}
+
+int snmp_notify_suppressed(const snmp_ctx_t *c, snmp_trap_t t, uint32_t *out)
+{
+	if (c == NULL || out == NULL ||
+	    (unsigned int)t >= (unsigned int)SNMP_TRAP__COUNT) {
+		return -EINVAL;
+	}
+	*out = c->notify_suppressed[t];
 	return 0;
 }

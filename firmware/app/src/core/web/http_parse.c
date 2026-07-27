@@ -235,8 +235,8 @@ int http_path_decode(const http_req_t *r, char *out, size_t cap)
 /* ------------------------------------------------------------------------- */
 
 /*
- * Locate `name` in the query string. On success *vp/*vn describe the raw
- * (still-encoded) value, which may be empty.
+ * Locate `name` in the query string. On success @p vp and @p vn describe the
+ * raw (still-encoded) value, which may be empty.
  */
 static bool query_find(const http_req_t *r, const char *name, const char **vp,
 		       size_t *vn)

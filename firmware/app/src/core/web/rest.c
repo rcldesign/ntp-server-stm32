@@ -3106,9 +3106,9 @@ void rest_resolve_auth(rest_ctx_t *c, const http_req_t *req,
 }
 
 /*
- * Find the route for this request. Sets *tail/*tail_len for prefix routes.
- * Returns the route, or NULL. *method_mismatch is set when some route matched
- * the path but not the method (405 rather than 404).
+ * Find the route for this request. Sets @p tail and @p tail_len for prefix
+ * routes. Returns the route, or NULL. @p method_mismatch is set when some route
+ * matched the path but not the method (405 rather than 404).
  */
 static const rest_route_t *find_route(const http_req_t *req, const char **tail,
 				      size_t *tail_len, bool *method_mismatch)

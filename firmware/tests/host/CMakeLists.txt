@@ -108,6 +108,15 @@ module_deps(mcp_dfu  mcp util cfg logring quality)
 
 # `ptp` is split by layer: the wire codecs, the best-master algorithm and the
 # port state machine are independent enough to fail independently.
+# core/web (Wave 4b): the web management plane. One module directory, four
+# focused suites — the HTTP parser, the REST router, the WebSocket codec and the
+# session/auth layer fail independently and are fuzzed independently.
+module_deps(web        util cfg logring quality)
+module_deps(http_parse web)
+module_deps(rest       web)
+module_deps(wss        web)
+module_deps(auth_web   web)
+
 module_deps(ptp_msg  ptp)
 module_deps(ptp_bmca ptp)
 module_deps(ptp_port ptp)

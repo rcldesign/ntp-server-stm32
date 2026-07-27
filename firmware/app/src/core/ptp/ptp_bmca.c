@@ -233,15 +233,40 @@ const char *ptp_recommended_name(ptp_recommended_t r)
  * 8 s must not be pruned on our 2 s cadence. An out-of-range logMessageInterval
  * — 0x7F "unspecified", or an absurd exponent — falls back to our own interval
  * rather than producing a multi-minute timeout.
+ *
+ * The result is then *capped*, and that cap is a security control rather than a
+ * tuning knob. logMessageInterval is an attacker-chosen octet: taking it at face
+ * value means two spoofed Announces advertising +7 (128 s) hold this port in
+ * PASSIVE for announceReceiptTimeout x 128 s — over six minutes — and can be
+ * renewed at roughly one packet every three minutes. That is total denial of the
+ * PTP service for a negligible packet cost, and it works whether or not the
+ * spoofed dataset is otherwise plausible, because the outage is bought with the
+ * timer and not with the election.
+ *
+ * The cap floor is our own interval, so a profile that announces more slowly
+ * than the configured ceiling is never penalised: we always tolerate a peer at
+ * least as slow as ourselves, which is what the honest-slow-master case needs.
  */
 static uint32_t foreign_interval_ms(const ptp_foreign_policy_t *pol,
 				    const ptp_foreign_t *f)
 {
+	uint32_t ms;
+	uint32_t cap;
+
 	if ((f->log_announce_interval < PTP_LOG_INTERVAL_MIN) ||
 	    (f->log_announce_interval > PTP_LOG_INTERVAL_MAX)) {
 		return pol->default_interval_ms;
 	}
-	return ptp_log_interval_ms(f->log_announce_interval);
+	ms = ptp_log_interval_ms(f->log_announce_interval);
+
+	if (pol->cap_interval_ms == 0U) {
+		return ms; /* explicitly uncapped by configuration */
+	}
+	cap = (pol->cap_interval_ms > pol->default_interval_ms)
+		      ? pol->cap_interval_ms
+		      : pol->default_interval_ms;
+
+	return (ms > cap) ? cap : ms;
 }
 
 void ptp_foreign_init(ptp_foreign_tbl_t *t)

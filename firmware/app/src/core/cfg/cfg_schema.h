@@ -144,16 +144,27 @@ typedef enum {
 	  1, 0, 1)                                                                             \
 	U(NTP_KOD_ENABLE,    0x0202, "ntp.kod",         BOOL, CFG_F_RUNTIME_APPLY,             \
 	  1, 0, 1)                                                                             \
+	/* 8 req/s, burst 16 — core/ntp's own documented per-client default        */  \
+	/* (ntp.h "Defaults: 8 req/s burst 16 per client"). 0 disables the         */  \
+	/* per-client bucket entirely, which lets one source drain the aggregate   */  \
+	/* bucket and KoD every other client, so it is deliberately NOT the        */  \
+	/* default: an operator who wants that has to ask for it.                  */  \
 	U(NTP_RATE_QPS,      0x0203, "ntp.rate.qps",    U16,  CFG_F_RUNTIME_APPLY,             \
-	  0, 0, 65535)                                                                         \
+	  8, 0, 65535)                                                                         \
 	U(NTP_RATE_BURST,    0x0204, "ntp.rate.burst",  U16,  CFG_F_RUNTIME_APPLY,             \
-	  8, 1, 4096)                                                                          \
+	  16, 1, 4096)                                                                         \
 	U(NTP_MIN_POLL,      0x0205, "ntp.minpoll",     U8,   CFG_F_RUNTIME_APPLY,             \
 	  4, 3, 17)                                                                            \
 	U(NTP_SYMKEY_REF,    0x0206, "ntp.symkey.ref",  U16,  CFG_F_RUNTIME_APPLY,             \
 	  0, 0, 65535)                                                                         \
+	/* Opt-in, not opt-out. RFC 9769 interleaved mode is the whole reason the   */  \
+	/* transmit-timestamp cache exists, but it is also the largest piece of     */  \
+	/* per-client state the server keeps, and the glue reads THIS key rather    */  \
+	/* than core/ntp's library default — so a `1` here is what actually puts    */  \
+	/* the mode (and its attack surface) live on a shipped box. It stays 0      */  \
+	/* until the interleave pairing path has been proven in the glue.           */  \
 	U(NTP_INTERLEAVED,   0x0207, "ntp.interleaved", BOOL, CFG_F_RUNTIME_APPLY,             \
-	  1, 0, 1)                                                                             \
+	  0, 0, 1)                                                                             \
 	                                                                                       \
 	/* -- 0x03 nts ------------------------------------------------------------------ */  \
 	U(NTS_ENABLE,        0x0301, "nts.enable",      BOOL, CFG_F_REBOOT_REQUIRED,           \
@@ -266,8 +277,14 @@ typedef enum {
 	/* -- 0x0B snmp ----------------------------------------------------------------- */  \
 	U(SNMP_ENABLE,       0x0B01, "snmp.enable",     BOOL, CFG_F_REBOOT_REQUIRED,           \
 	  0, 0, 1)                                                                             \
+	/* Ships EMPTY, not "public". An empty community fails closed twice over:   */  \
+	/* the glue passes NULL to snmp_set_community() (which disables the agent)   */  \
+	/* and core/snmp rejects a zero-length configured community outright. The    */  \
+	/* cfg_schema_xvalidate() hook additionally refuses to commit               */  \
+	/* snmp.enable = 1 while this is empty, so the agent cannot be turned on     */  \
+	/* with a guessable community by accident.                                   */  \
 	S(SNMP_COMMUNITY,    0x0B02, "snmp.community",        CFG_F_RUNTIME_APPLY|CFG_F_SECRET,\
-	  31, "public")                                                                        \
+	  31, "")                                                                              \
 	S(SNMP_TRAP_HOST,    0x0B03, "snmp.trap.host",        CFG_F_RUNTIME_APPLY,             \
 	  63, "")                                                                              \
 	U(SNMP_TRAP_PORT,    0x0B04, "snmp.trap.port",  U16,  CFG_F_RUNTIME_APPLY,             \

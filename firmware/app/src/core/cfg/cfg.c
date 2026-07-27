@@ -514,6 +514,44 @@ int cfg_set_validate_hook(cfg_ctx_t *c, cfg_validate_fn fn, void *user)
 	return 0;
 }
 
+int cfg_schema_xvalidate(const struct cfg_ctx *c, void *user)
+{
+	cfg_val_t v;
+	bool snmp_on = false;
+
+	(void)user;
+
+	if (c == NULL) {
+		return -EINVAL;
+	}
+
+	/*
+	 * snmp.enable requires a non-empty snmp.community. Read the *effective*
+	 * tree so enabling the agent and setting the community in one commit is
+	 * accepted, and enabling it alone against the empty default is not.
+	 */
+	if (cfg_get_bool(c, (uint16_t)CFG_ID_SNMP_ENABLE, &snmp_on) != 0) {
+		return -EPROTO;
+	}
+	if (cfg_is_staged(c, (uint16_t)CFG_ID_SNMP_ENABLE)) {
+		if (cfg_get_effective(c, (uint16_t)CFG_ID_SNMP_ENABLE, &v) != 0) {
+			return -EPROTO;
+		}
+		snmp_on = (v.v.u != 0U);
+	}
+	if (snmp_on) {
+		if (cfg_get_effective(c, (uint16_t)CFG_ID_SNMP_COMMUNITY, &v) !=
+		    0) {
+			return -EPROTO;
+		}
+		if (v.len == 0U) {
+			return -EPROTO;
+		}
+	}
+
+	return 0;
+}
+
 int cfg_set_migrations(cfg_ctx_t *c, const cfg_migration_t *tbl, size_t n,
 		       void *user)
 {

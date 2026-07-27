@@ -63,6 +63,9 @@ void ptp_cfg_defaults(ptp_cfg_t *cfg)
 	cfg->not_slave = false;
 	cfg->l2_mac = (uint8_t)PTP_L2_MAC_FORWARDABLE;
 	ptp_c37238_defaults(&cfg->c37238);
+	cfg->foreign_interval_cap_ms = PTP_FOREIGN_INTERVAL_CAP_MS_DEFAULT;
+	/* Standards-conformant by default; hardening is opt-in. */
+	cfg->never_yield = (uint8_t)PTP_NEVER_YIELD_OFF;
 }
 
 int ptp_cfg_apply_profile(ptp_cfg_t *cfg, uint8_t profile)

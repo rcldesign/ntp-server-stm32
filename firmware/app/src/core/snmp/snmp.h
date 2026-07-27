@@ -11,13 +11,16 @@
  * Scope — deliberate
  * ---------------------------------------------------------------------------
  *
- * 1. **SNMPv2c only, read-only.** Spec §5.3 wants SNMPv3/USM as the primary
- *    interface with v2c behind an ACL; USM (SHA-256 auth, AES priv) is listed
- *    as deferred in ARCHITECTURE.md §5 and is not here. A version field that is
- *    not 1 (v2c) is counted and dropped rather than answered, because answering
- *    a v1 manager with a v2c PDU is worse than silence. SET is answered with
- *    errorStatus notWritable(17) — the agent exposes no writable object, and
- *    saying so is more useful to a manager than dropping.
+ * 1. **This file is the SNMPv2c envelope; USM lives in snmp_v3.h.** Spec §5.3
+ *    makes SNMPv3/USM the primary interface with v2c behind an explicit enable,
+ *    so `cfg.v2c_disabled` gates this path and `snmp_peek_version()` routes a
+ *    datagram to whichever handler owns it. Both share one PDU layer
+ *    (snmp_internal.h) so a v2c and a v3 manager can never get different
+ *    answers. A version field this handler does not own is counted and dropped
+ *    rather than answered, because answering a v1 manager with a v2c PDU is
+ *    worse than silence. SET is answered with errorStatus notWritable(17) — the
+ *    agent exposes no writable object, and saying so is more useful to a manager
+ *    than dropping.
  *
  * 2. **No SMIv2 file is generated from this table.** The OID catalogue below is
  *    the normative description of the enterprise MIB; the shipped
@@ -80,6 +83,15 @@ extern "C" {
 
 /** Longest community string compared, excluding the NUL. */
 #define SNMP_COMMUNITY_MAX 31U
+
+/**
+ * Notification types the rate limiter keeps state for.
+ *
+ * Must equal SNMP_TRAP__COUNT, which is declared further down (the enum needs
+ * SNMP_PEN, which needs the BER tags). snmp.c carries a `_Static_assert` that
+ * ties the two together, so the duplication cannot silently drift.
+ */
+#define SNMP_NOTIFY_TYPES 10U
 
 /** Variable bindings accepted in one request. */
 #ifndef SNMP_MAX_VARBINDS
@@ -495,6 +507,22 @@ typedef struct {
 	snmp_getter_t getter;
 	/** Repetitions honoured per GETBULK; 0 selects SNMP_MAX_REPETITIONS. */
 	uint16_t max_repetitions;
+	/**
+	 * Refuse SNMPv2c outright (spec §9.5: "v2c only if explicitly
+	 * enabled").
+	 *
+	 * Spelled negatively so a zero-initialised configuration keeps the
+	 * historical behaviour — v2c available whenever the agent is enabled —
+	 * and every existing caller and test is unaffected. The Zephyr glue
+	 * drives it from cfg key `sec.snmp.v2c`, which defaults to 0, so a
+	 * shipped box is SNMPv3-only until an operator says otherwise.
+	 */
+	bool v2c_disabled;
+	/**
+	 * Minimum interval between two notifications of the *same* type, ms.
+	 * 0 disables rate limiting. See @ref snmp_notify_gate.
+	 */
+	uint32_t notify_min_interval_ms;
 } snmp_cfg_t;
 
 /* ------------------------------------------------------------------- stats */
@@ -513,6 +541,8 @@ typedef struct {
 	uint64_t unsupported_pdu; /**< A PDU tag this agent does not serve. */
 	uint64_t traps;           /**< Trap PDUs built. */
 	uint64_t varbinds;        /**< Varbinds answered across all responses. */
+	uint64_t v2c_refused;     /**< v2c datagram dropped because v2c is off. */
+	uint64_t notify_suppressed; /**< Notifications the rate limiter dropped. */
 } snmp_stats_t;
 
 /* ----------------------------------------------------------------- context */
@@ -522,6 +552,10 @@ typedef struct {
 	snmp_cfg_t cfg;
 	snmp_stats_t stats;
 	uint32_t trap_reqid;
+	/* Per-notification rate-limiter state (@ref snmp_notify_gate). */
+	uint64_t notify_last_ms[SNMP_NOTIFY_TYPES];
+	uint32_t notify_suppressed[SNMP_NOTIFY_TYPES];
+	bool notify_sent[SNMP_NOTIFY_TYPES];
 	bool ready;
 } snmp_ctx_t;
 
@@ -612,6 +646,51 @@ const char *snmp_trap_name(snmp_trap_t t);
 int snmp_make_trap(snmp_ctx_t *c, snmp_trap_t t, uint32_t uptime_cs,
 		   const snmp_bind_t *binds, size_t n_binds, uint8_t *out,
 		   size_t cap, size_t *out_len);
+
+/* ------------------------------------------------- version peek & v2c gate */
+
+/**
+ * Read the msgVersion field without validating anything else.
+ *
+ * A dual-stack agent has to route a datagram to the v2c or the v3 handler before
+ * either of them can parse it, and both handlers reject a wrong version — so the
+ * routing decision needs this and nothing more.
+ *
+ * @retval 0         @p out_ver holds the version (0 = v1, 1 = v2c, 3 = v3).
+ * @retval -EINVAL   NULL argument.
+ * @retval -EBADMSG  Not a BER SEQUENCE with an INTEGER first.
+ */
+int snmp_peek_version(const uint8_t *msg, size_t len, int32_t *out_ver);
+
+/** Enable or disable the SNMPv2c path at runtime (a cfg apply). */
+int snmp_set_v2c_enabled(snmp_ctx_t *c, bool enabled);
+
+/* ----------------------------------------------------- notification gating */
+
+/**
+ * Should notification @p t be emitted now?
+ *
+ * Enforces `cfg.notify_min_interval_ms` per notification *type*. Call it once
+ * per candidate event and only build the trap when it returns true.
+ *
+ * Without this, one unauthenticated peer generates one authentication-failure
+ * trap per datagram: the agent then amplifies an attack on this box into an
+ * attack on the trap receiver, and the flood buries every genuine event. Gating
+ * per type keeps an authFailure burst from starving a lockLost.
+ *
+ * @param mono_ms         Monotonic milliseconds; the caller owns the clock.
+ * @param out_suppressed  Optional; on a `true` return, how many notifications
+ *                        of this type were suppressed since the last one got
+ *                        through — worth putting in the log line that
+ *                        accompanies the trap.
+ *
+ * @return true when the caller should send; false when it should not.
+ */
+bool snmp_notify_gate(snmp_ctx_t *c, snmp_trap_t t, uint64_t mono_ms,
+		      uint32_t *out_suppressed);
+
+/** Notifications of @p t suppressed since the last one that passed the gate. */
+int snmp_notify_suppressed(const snmp_ctx_t *c, snmp_trap_t t, uint32_t *out);
 
 /* ------------------------------------------------------------------- stats */
 

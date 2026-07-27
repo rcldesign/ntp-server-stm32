@@ -322,7 +322,7 @@ typedef enum {
 /** Classify @p interval_ms against the TPS3430 valid window. */
 pwrseq_wdt_interval_t pwrseq_wdt_classify_interval(uint32_t interval_ms);
 
-/** What one supervisor tick decided about the watchdog. */
+/** What one watchdog service call decided. */
 typedef struct {
 	/** Drive a WDI edge now. The caller does the pin, nothing else may. */
 	bool kick;
@@ -348,6 +348,71 @@ typedef enum {
 #define PWRSEQ_LIVE_ALL                                                        \
 	((uint32_t)(PWRSEQ_LIVE_TIMING | PWRSEQ_LIVE_NETWORK |                 \
 		    PWRSEQ_LIVE_HOUSEKEEPING))
+
+/**
+ * Watchdog cadence state.
+ *
+ * Deliberately **not** part of pwrseq_ctx_t. The kick has to be issued by
+ * something that cannot be starved — a flood that keeps a higher-priority
+ * network thread runnable must not be able to silence a low-priority
+ * housekeeping tick and so cold-cycle the board through WDO_N -> POE_KILL. So
+ * the owner of this struct is a dedicated high-priority thread, and it must not
+ * share a struct with the sequencer that a low-priority thread steps.
+ *
+ * Whoever owns an instance owns it exclusively: pwrseq_wdt_service() is the only
+ * mutator and there is no internal locking.
+ */
+typedef struct {
+	uint32_t period_ms;     /* configured cadence, inside the window */
+	uint32_t last_kick_ms;  /* monotonic ms of the last issued edge */
+	uint32_t kicks;         /* edges issued */
+	uint32_t withheld;      /* times a due kick was refused by liveness */
+	uint32_t early;         /* observed intervals below the window */
+	uint32_t late;          /* observed intervals above the window */
+	bool armed;             /* WDT_EN is asserted; the TPS3430 is watching */
+	bool have_kicked;       /* at least one edge has been issued since arming */
+} pwrseq_wdt_t;
+
+/**
+ * Initialise @p w with a cadence of @p period_ms.
+ *
+ * @retval 0        Ready, disarmed.
+ * @retval -EINVAL  @p w is NULL, or @p period_ms falls outside the TPS3430
+ *                  window — a kick that is too fast trips the runaway boundary
+ *                  as surely as one too slow trips the stall boundary.
+ */
+int pwrseq_wdt_init(pwrseq_wdt_t *w, uint32_t period_ms);
+
+/**
+ * Arm: WDT_EN has been asserted at @p mono_ms and the first window is open.
+ *
+ * The caller is expected to have issued one edge immediately before asserting
+ * WDT_EN, so @p mono_ms doubles as the seed for the cadence.
+ *
+ * @retval 0 / -EINVAL.
+ */
+int pwrseq_wdt_arm(pwrseq_wdt_t *w, uint32_t mono_ms);
+
+/** True once pwrseq_wdt_arm() has been called. */
+bool pwrseq_wdt_is_armed(const pwrseq_wdt_t *w);
+
+/**
+ * Decide whether to issue a WDI edge now, and record it if so.
+ *
+ * Call this as often as convenient — every 100 ms is fine, every 250 ms is fine.
+ * The cadence is enforced here, not by the call rate, which is the whole point:
+ * a caller that runs at 4 Hz must not produce a 4 Hz kick.
+ *
+ * A kick requires the watchdog to be armed, **all** liveness bits set, and the
+ * configured cadence to have elapsed. When it says kick, it has already recorded
+ * the edge and filled in the interval since the previous one, so the caller can
+ * annunciate a window violation instead of discovering it as a field reboot.
+ *
+ * @retval 0        @p out filled in.
+ * @retval -EINVAL  @p w or @p out is NULL.
+ */
+int pwrseq_wdt_service(pwrseq_wdt_t *w, uint32_t liveness, uint32_t mono_ms,
+		       pwrseq_wdt_tick_t *out);
 
 /* --------------------------------------------------- rubidium rail transfer */
 
@@ -687,10 +752,18 @@ typedef struct {
 	bool kill_armed;
 
 	uint8_t shed; /* pwrseq_shed_level_t */
+	/* Dwell accumulators for the PoE shed ladder. */
+	uint32_t poe_pressure_ms;
+	uint32_t poe_relief_ms;
+	/* Dwell accumulator for the thermal cold-cycle request. */
+	uint32_t kill_confirm_ms;
+
+	/* Automatic rubidium retry bookkeeping. */
+	uint8_t rb_auto_retries;
+	bool rb_retry_pending;   /* a failure/deferral is waiting out its delay */
+	uint32_t rb_retry_at_ms; /* earliest monotonic ms of the next attempt */
 
 	uint32_t alarms;
-
-	uint32_t last_kick_ms;
 
 	pwrseq_act_t q[PWRSEQ_ACT_QUEUE_LEN];
 	uint16_t q_head;
@@ -720,6 +793,7 @@ typedef struct {
 	bool pfi_seen;
 	bool pfi_expected;
 	pwrseq_shed_level_t shed;
+	uint8_t rb_auto_retries;
 	uint32_t alarms;
 } pwrseq_status_t;
 
@@ -828,8 +902,13 @@ bool pwrseq_rb_fault(const pwrseq_ctx_t *ctx);
 /**
  * Re-enter @p stage from its first step, clearing any halt.
  *
+ * Any stage at or below 8 re-traverses the guarded rubidium sequence, so a live
+ * rubidium is shut down first for the reason spelled out on pwrseq_rb_retry().
+ *
  * @retval 0        Re-entered.
  * @retval -EINVAL  @p ctx is NULL or @p stage is not a real stage.
+ * @retval -EAGAIN  No queue room for the rubidium shutdown pair; retry after
+ *                  draining.
  */
 int pwrseq_restart_stage(pwrseq_ctx_t *ctx, pwrseq_stage_t stage,
 			 uint32_t mono_ms);
@@ -845,11 +924,21 @@ int pwrseq_restart_stage(pwrseq_ctx_t *ctx, pwrseq_stage_t stage,
  * pwrseq_restart_stage() clears a halt, and only under explicit operator
  * intent (HIGH-2).
  *
+ * A live rubidium is shut down first — RB_VCC_GATE then RB_PWR_EN — before the
+ * stage is re-entered. Re-running the guarded sequence commands the rail back to
+ * the safe-low precharge point (~4.5 V), so leaving the FE gated across that
+ * would brown it out, cost it its lock and a full re-warm, and make the
+ * precharge window fail on the way down.
+ *
  * @retval 0        Re-entered stage 8.
  * @retval -EINVAL  @p ctx is NULL.
  * @retval -EPERM   The sequencer is halted; use pwrseq_restart_stage().
+ * @retval -EAGAIN  No queue room for the shutdown pair; retry after draining.
  */
 int pwrseq_rb_retry(pwrseq_ctx_t *ctx, uint32_t mono_ms);
+
+/** Automatic stage-8 retries consumed since the last successful gate. */
+uint8_t pwrseq_rb_auto_retries(const pwrseq_ctx_t *ctx);
 
 /* -------------------------------------------------------------- shed ladder */
 
@@ -862,8 +951,53 @@ pwrseq_shed_level_t pwrseq_shed_level(const pwrseq_ctx_t *ctx);
  * @retval 0        Shed; actions queued.
  * @retval -EINVAL  @p ctx is NULL.
  * @retval -ENOENT  Everything sheddable is already shed.
+ * @retval -EAGAIN  The rubidium rung needs two queue slots and has neither;
+ *                  nothing was shed, so retry after draining. A half-applied
+ *                  rubidium shutdown (gate opened, buck still on) is worse than
+ *                  a late one.
  */
 int pwrseq_shed_step(pwrseq_ctx_t *ctx, uint32_t mono_ms);
+
+/**
+ * The shed level the current pressure justifies.
+ *
+ * Pure — nothing is changed, so a caller (and a test) can ask what the policy
+ * wants before anything acts on it. Two independent pressures feed it:
+ *
+ *   - Thermal. `pwrseq_in_t::thermal_shed_rb` is core/thermal's rung-2 output,
+ *     already hysteresis-latched by that module. Rung 2 means "shed the
+ *     rubidium", which on this ladder is PWRSEQ_SHED_RB; the display and panel
+ *     LEDs go with it because they sit below it (spec §13).
+ *   - PoE. Sustained zero headroom escalates one rung per
+ *     `cfg.poe_shed_dwell_ms`; sustained headroom of at least
+ *     `cfg.poe_relief_mw` releases one rung per `cfg.poe_restore_dwell_ms`
+ *     (spec §10.3: display first, then the panel LEDs, then the rubidium).
+ *
+ * The answer is the higher of the two demands, so thermal pressure can never be
+ * undone by PoE headroom appearing.
+ */
+pwrseq_shed_level_t pwrseq_shed_target(const pwrseq_ctx_t *ctx,
+				       const pwrseq_in_t *in);
+
+/**
+ * Move one rung toward @p target.
+ *
+ * One rung per call, so each rung's actions are drained and executed before the
+ * next is decided — the same reason the step machine advances one row at a time.
+ *
+ * Restoring a UI load on a unit that never wanted one would *enable* a rail that
+ * was never on, so with @p ui_wanted false the display and panel-LED rungs are
+ * unwound without emitting their enables.
+ *
+ * @retval 0         One rung moved (or unwound); actions queued.
+ * @retval -EALREADY Already at @p target.
+ * @retval -EINVAL   @p ctx is NULL.
+ * @retval -ENOENT   The ladder is already at its end in that direction.
+ * @retval -EAGAIN   No queue room; retry after draining.
+ * @retval -EPERM    The sequencer is halted (restore direction only).
+ */
+int pwrseq_shed_track(pwrseq_ctx_t *ctx, pwrseq_shed_level_t target,
+		      bool ui_wanted, uint32_t mono_ms);
 
 /**
  * Restore one level.
@@ -972,27 +1106,12 @@ int pwrseq_poe_kill(pwrseq_ctx_t *ctx, uint32_t magic, uint32_t mono_ms);
 /* ----------------------------------------------------------------- watchdog */
 
 /**
- * True when a WDT_KICK edge should be issued now.
+ * True once the sequencer has emitted PWRSEQ_ACT_WDT_EN.
  *
- * Requires the watchdog to be armed, **all** liveness bits set, and the
- * configured cadence to have elapsed since the last kick. A windowed watchdog
- * kicked unconditionally on a timer protects nothing, which is why the liveness
- * gate is inside this predicate rather than left to the caller.
- *
- * Pure: call pwrseq_wdt_kicked() after actually driving the pin.
+ * This is the sequencer's own bookkeeping. The kick cadence lives in a separate
+ * pwrseq_wdt_t owned by whoever drives the pin — see that type's comment for why
+ * the two are not the same struct.
  */
-bool pwrseq_wdt_kick_ok(const pwrseq_ctx_t *ctx, uint32_t liveness,
-			uint32_t mono_ms);
-
-/**
- * Record that a kick edge was issued.
- *
- * @retval 0        Recorded.
- * @retval -EINVAL  @p ctx is NULL.
- */
-int pwrseq_wdt_kicked(pwrseq_ctx_t *ctx, uint32_t mono_ms);
-
-/** True once WDT_EN has been asserted. */
 bool pwrseq_wdt_armed(const pwrseq_ctx_t *ctx);
 
 #ifdef __cplusplus

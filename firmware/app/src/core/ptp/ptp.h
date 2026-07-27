@@ -96,6 +96,28 @@ extern "C" {
 /** stepsRemoved at or above which an Announce is ignored (§9.3.2.5 d). */
 #define PTP_STEPS_REMOVED_MAX 255U
 
+/**
+ * Default ceiling on the per-record announce interval a *peer* can impose, ms.
+ *
+ * §9.3.2.4.5 derives a foreign master's qualification window and its receipt
+ * timeout from the interval that master advertises in its own
+ * logMessageInterval. Honouring that is right — a master announcing every 8 s
+ * must not be pruned on our 2 s cadence — but honouring it *without a bound* is
+ * a denial-of-service primitive: logMessageInterval is an attacker-chosen field
+ * with a range up to 2^7 s, so two spoofed Announces claiming +7 buy
+ * announceReceiptTimeout x 128 s = over six minutes of PASSIVE for the cost of
+ * two packets, renewable at 0.005 packets per second. A grandmaster that stops
+ * grandmastering for six minutes per two packets is not serving time.
+ *
+ * 2 s is the ceiling because it is exactly the slowest Announce cadence any
+ * profile in scope uses as its own default (the 1588 Default profile's 2 s;
+ * G.8275.1 uses 125 ms and C37.238 1 s), so no conforming peer is affected,
+ * while the worst outage a spoofed record can buy falls to
+ * announceReceiptTimeout x 2 s = 6 s. A deployment with a genuinely slower peer
+ * can raise ptp_cfg_t::foreign_interval_cap_ms.
+ */
+#define PTP_FOREIGN_INTERVAL_CAP_MS_DEFAULT 2000U
+
 /* ---------------------------------------------------------------- alarms -- */
 
 /**
@@ -125,6 +147,22 @@ extern "C" {
 #define PTP_ALARM_PROFILE_UNSUPPORTED 0x00000008U
 /** A received PDU failed the Annex-P integrity policy; see ptp_icv_counters(). */
 #define PTP_ALARM_ICV_FAILED       0x00000010U
+/**
+ * A *disciplined* clock has been displaced from the master role.
+ *
+ * Raised whenever the BMCA recommends P1, P2 or S1 while this clock's own sync
+ * state is LOCKED — that is, a GNSS-disciplined primary reference has been told
+ * by the segment that something on it is better. That is a legitimate 1588
+ * outcome and it is also exactly what a spoofed Announce looks like, so it is
+ * broken out from PTP_ALARM_NOT_BEST_MASTER: the operator needs to distinguish
+ * "we were degraded and deferred" (expected) from "we were locked and deferred"
+ * (investigate).
+ *
+ * With Annex-P integrity armed and the policy at REQUIRE, a peer that reaches
+ * the foreign-master table has authenticated, so the alarm is informational.
+ * Without it, treat it as unauthenticated and see ptp_cfg_t::never_yield.
+ */
+#define PTP_ALARM_DISPLACED_WHILE_LOCKED 0x00000020U
 
 /* ------------------------------------------------------------ enums, cfg -- */
 
@@ -154,6 +192,38 @@ typedef enum {
  * would light the alarm permanently.
  */
 #define PTP_DEV_MATERIAL (PTP_DEV_E2E_ONLY | PTP_DEV_NO_UNICAST_NEG)
+
+/**
+ * How willing this clock is to hand the master role to a network peer.
+ *
+ * The BMCA runs identically in all three modes and reports identically — the
+ * recommended state, the counters and the alarms are unaffected. What changes is
+ * whether that recommendation is *executed*.
+ *
+ * This exists because the threat model of a GNSS-disciplined stratum-1
+ * grandmaster is not the threat model 1588 was written for. An Announce is
+ * unauthenticated unless Annex P is armed (ptp_icv.h), and anything that can put
+ * a frame on the segment can claim priority1 = 0 and clockClass = 6 and take the
+ * role away from a clock that actually has a GNSS antenna.
+ */
+typedef enum {
+	/**
+	 * Standard behaviour: execute the BMCA's recommendation, deferring to a
+	 * better peer. The only conformant setting, and the default.
+	 */
+	PTP_NEVER_YIELD_OFF = 0,
+	/**
+	 * Defer only while undisciplined. A LOCKED clock stays MASTER whatever
+	 * the segment claims; a free-running or holdover-exceeded one defers
+	 * normally. This is the recommended setting for an unprotected segment:
+	 * it keeps a real primary reference serving while still standing aside
+	 * when it genuinely has nothing to offer.
+	 */
+	PTP_NEVER_YIELD_WHEN_LOCKED,
+	/** Never defer, in any state. Non-conformant; two masters can result. */
+	PTP_NEVER_YIELD_ALWAYS,
+	PTP_NEVER_YIELD_COUNT,
+} ptp_never_yield_t;
 
 /**
  * clockClass to advertise once holdover leaves its specified window.
@@ -246,6 +316,21 @@ typedef struct {
 	bool not_slave;
 	uint8_t l2_mac;      /* ptp_l2_mac_t; read by the glue for PTP_TRANSPORT_L2 */
 	ptp_c37238_t c37238; /* Power-profile Announce TLV contents */
+
+	/* ---- segment-hostility hardening ------------------------------------ */
+
+	/**
+	 * Ceiling on the announce interval a peer's own logMessageInterval may
+	 * impose on its foreign-master record, in milliseconds.
+	 *
+	 * Default PTP_FOREIGN_INTERVAL_CAP_MS_DEFAULT. **0 disables the cap**,
+	 * restoring the literal §9.3.2.4.5 behaviour and with it the
+	 * two-packets-for-six-minutes denial of service described there; do that
+	 * only on a segment you control end to end.
+	 */
+	uint32_t foreign_interval_cap_ms;
+	/** How willing this clock is to give up the master role. */
+	uint8_t never_yield; /* ptp_never_yield_t */
 } ptp_cfg_t;
 
 /** Fill @p cfg with the defaults named above (the Default profile's). */
@@ -333,6 +418,27 @@ typedef struct {
 	uint8_t time_source;       /* ptp_time_source_t */
 	uint64_t est_accuracy_ns;  /* estimated |time error|, ns; 0 = unknown */
 	uint64_t adev_tau1_e18;    /* ADEV at tau = 1 s, scaled by 1e18; 0 = unknown */
+	/**
+	 * This clock has been disciplined at least once since boot.
+	 *
+	 * Governs the free-run clockClass, and the distinction is not cosmetic. A
+	 * unit cold-booted with no antenna is free-running on an OCXO whose
+	 * absolute time is unknown. Advertising a *degradation* class (52 or 187)
+	 * for that state claims traceability it does not have, and because BMCA
+	 * part 1 compares clockClass before clockAccuracy, class 52 beats an
+	 * honest peer at 187 and a default-class peer at 248 outright — the box
+	 * with no idea what time it is wins the election and distributes
+	 * free-running OCXO time as grandmaster. With this false the free-run
+	 * class becomes 248 ("not traceable"), the peer wins, and the segment
+	 * gets the better clock.
+	 *
+	 * ptp_port_set_quality() latches this in the port context — once true it
+	 * never goes false, because the OCXO's frequency really has been
+	 * calibrated and remains a usable flywheel however long GNSS stays away.
+	 * ptp_quality_view_from_block() infers it from the block's lock state,
+	 * which is the most a single snapshot can say.
+	 */
+	bool ever_locked;
 } ptp_quality_view_t;
 
 /**
@@ -584,6 +690,16 @@ typedef struct {
 typedef struct {
 	uint8_t receipt_timeout;      /* announceReceiptTimeout, N */
 	uint32_t default_interval_ms; /* used when a peer's logInterval is out of range */
+	/**
+	 * Ceiling on the interval a peer's own logMessageInterval may impose,
+	 * milliseconds. 0 = uncapped (see ptp_cfg_t::foreign_interval_cap_ms for
+	 * why that is a denial-of-service primitive).
+	 *
+	 * The effective cap is max(default_interval_ms, cap_interval_ms), so a
+	 * profile whose own cadence is *slower* than the cap is never penalised
+	 * by it: we always at least tolerate a peer as slow as ourselves.
+	 */
+	uint32_t cap_interval_ms;
 } ptp_foreign_policy_t;
 
 /** Empty the table and zero its counters. */
@@ -786,6 +902,12 @@ typedef struct {
 	ptp_port_state_t state;
 	ptp_recommended_t last_rec;
 	uint32_t alarms;
+	/**
+	 * Latched ptp_quality_view_t::ever_locked. Set by ptp_port_set_quality()
+	 * the first time a disciplined state is seen; never cleared, including by
+	 * ptp_port_fault() — losing the link does not un-calibrate the OCXO.
+	 */
+	bool ever_locked;
 
 	uint32_t announce_ms;       /* announceInterval, ms */
 	uint32_t sync_ms;           /* syncInterval, ms */

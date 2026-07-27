@@ -105,6 +105,7 @@ static const char *const alarm_names[PWRSEQ_ALARM_COUNT] = {
 	[PWRSEQ_ALARM_RB_OV] = "rb-ov",
 	[PWRSEQ_ALARM_RB_FAULT] = "rb-fault",
 	[PWRSEQ_ALARM_LIVENESS] = "liveness",
+	[PWRSEQ_ALARM_RB_TELEMETRY] = "rb-telemetry",
 };
 
 const char *pwrseq_alarm_name(pwrseq_alarm_t a)
@@ -147,9 +148,33 @@ void pwrseq_cfg_default(pwrseq_cfg_t *cfg)
 	cfg->ocxo_warm_timeout_ms = 600000U;      /* 10 min */
 	cfg->rb_precondition_timeout_ms = 30000U; /* 30 s */
 	cfg->rb_softstart_ms = 500U;
-	cfg->rb_window_timeout_ms = 200U;
+	/*
+	 * 3 s, sized against the telemetry cadence rather than the buck.
+	 *
+	 * The rail is judged from the caller's INA228 0x47 cache, which on this
+	 * board refreshes on request at 4 Hz and unconditionally at 1 Hz. The
+	 * previous 200 ms could not span even one unconditional sweep, so the
+	 * step got a single evaluation against a reading up to a second older
+	 * than the event it was supposed to observe — and failed on every board.
+	 * 3 s allows at least two full sweeps plus the ramp, and staleness is
+	 * additionally held out of the timeout (cfg.ina_max_age_ms).
+	 */
+	cfg->rb_window_timeout_ms = 3000U;
 	cfg->rb_lock_timeout_ms = 600000U; /* 10 min */
 	cfg->liveness_timeout_ms = 30000U;
+
+	/* 1.5 s: one unconditional 1 Hz sweep plus jitter. With the on-action
+	 * re-read request the observed age is normally under 300 ms. */
+	cfg->ina_max_age_ms = 1500U;
+	cfg->rb_stale_stall_ms = 5000U;
+
+	cfg->rb_auto_retry_max = 2U;
+	cfg->rb_auto_retry_delay_ms = 60000U; /* 1 min between attempts */
+
+	cfg->poe_shed_dwell_ms = 5000U;
+	cfg->poe_restore_dwell_ms = 30000U;
+	cfg->poe_relief_mw = 4000U; /* the display rail is ~2.5 W */
+	cfg->poe_kill_confirm_ms = 3000U;
 
 	cfg->rail_tol_pct = 10U;
 	cfg->poe_min_mv = 42500; /* IEEE 802.3bt Type-3 PD operating floor */
@@ -168,7 +193,14 @@ void pwrseq_cfg_default(pwrseq_cfg_t *cfg)
 	cfg->digipot_operating_code = 500U;
 	cfg->rb_vmax_mv = 15000U; /* cfg key PWR_RB_VMAX_MV default */
 	cfg->rb_vbus_tol_pct = 5U;
-	cfg->rb_ramp_ms = 100U;
+	/*
+	 * 500 ms: the MIC28516 ramps from precharge to setpoint in ~100 ms, but
+	 * the *observation* of that rail only refreshes on the caller's telemetry
+	 * tick. A 100 ms settle therefore expired before any post-ramp reading
+	 * existed, so the trust gate judged the pre-ramp rail. 500 ms covers the
+	 * ramp plus two 250 ms telemetry ticks.
+	 */
+	cfg->rb_ramp_ms = 500U;
 	cfg->rb_cold_start_mw = 16000U;
 
 	cfg->rb_xfer.vref_mv = 3000U;
@@ -350,6 +382,22 @@ static bool rb_rail_in_window(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 }
 
 /*
+ * Is the VCC_RB reading recent enough to decide a rail window on?
+ *
+ * `ina_valid` only says the reading was taken after the SHUNT_CAL trim. A rail
+ * that was commanded to move 100 ms ago, judged against a reading taken 900 ms
+ * before the command, is not a measurement of the commanded state — and the
+ * verdict it produces ("wrong") is indistinguishable from a real fault. So the
+ * two rail-window steps treat an over-age reading as *no answer yet* and keep
+ * waiting; see step_stall_ms and PWRSEQ_ALARM_RB_TELEMETRY.
+ */
+static bool rb_rail_fresh(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
+{
+	return in->ina_valid[INA228_RAIL_VCC_RB] &&
+	       (in->ina_age_ms[INA228_RAIL_VCC_RB] <= ctx->cfg.ina_max_age_ms);
+}
+
+/*
  * The independent FE-protection gate: the *measured* rail, straight off INA228
  * 0x47, at or below the FE ceiling. This does not consult the digipot code at
  * all, so a buck that has run away cannot pass it by happening to match its own
@@ -392,6 +440,14 @@ typedef struct {
 	pwrseq_tmo_fn delay;    /* NULL = no settle delay */
 	pwrseq_pred_fn exit;    /* NULL = advance once the delay is done */
 	pwrseq_tmo_fn timeout;  /* NULL = wait forever */
+	/*
+	 * Is the evidence this row's exit predicate needs available at all?
+	 * NULL = always. While false the row's clock is held: the exit predicate
+	 * is not consulted and the timeout does not run, because "I cannot see"
+	 * must not be recorded as "it did not happen". Bounded by
+	 * cfg.rb_stale_stall_ms so a dead sensor cannot park the sequencer.
+	 */
+	pwrseq_pred_fn evidence;
 	const char *name;
 } pwrseq_step_def_t;
 
@@ -558,6 +614,12 @@ static bool p_digipot_op(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 static bool p_rb_window(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 {
 	return rb_rail_in_window(ctx, in);
+}
+
+/* Evidence gate for both rail-window rows: a reading recent enough to judge. */
+static bool e_rb_fresh(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
+{
+	return rb_rail_fresh(ctx, in);
 }
 
 /*
@@ -863,6 +925,7 @@ static const pwrseq_step_def_t step_tbl[] = {
 		.stage = PWRSEQ_STAGE_8_RB,
 		.guard = g_rb,
 		.exit = p_rb_window, .timeout = t_rb_win,
+		.evidence = e_rb_fresh,
 		.onfail = PWRSEQ_ONFAIL_ALARM,
 		.failact = PWRSEQ_FAILACT_RB_OFF,
 		.alarm = PWRSEQ_ALARM_RB_WINDOW,
@@ -899,7 +962,15 @@ static const pwrseq_step_def_t step_tbl[] = {
 		.guard = g_rb,
 		.delay = t_ramp,
 		.exit = p_rb_operating_ok, .timeout = t_rb_win,
-		.onfail = PWRSEQ_ONFAIL_ALARM,
+		.evidence = e_rb_fresh,
+		/*
+		 * Retries before the alarm: the trust gate is the one row whose
+		 * failure costs the board its rubidium for the rest of the boot,
+		 * and the commonest reason for it to be unsatisfied is a rail
+		 * still finding its setpoint, not a rail that is wrong. Each
+		 * retry re-runs the ramp delay and the whole window.
+		 */
+		.onfail = PWRSEQ_ONFAIL_RETRY, .retries = 2,
 		.failact = PWRSEQ_FAILACT_RB_OFF,
 		.alarm = PWRSEQ_ALARM_RB_WINDOW,
 		.name = "8.13d rail-window-op",
@@ -971,7 +1042,7 @@ static size_t act_free(const pwrseq_ctx_t *ctx)
 	return (size_t)PWRSEQ_ACT_QUEUE_LEN - (size_t)ctx->q_len;
 }
 
-static void act_push_raw(pwrseq_ctx_t *ctx, pwrseq_action_t a, uint16_t arg)
+static int act_push_raw(pwrseq_ctx_t *ctx, pwrseq_action_t a, uint16_t arg)
 {
 	pwrseq_act_t *e;
 
@@ -984,13 +1055,14 @@ static void act_push_raw(pwrseq_ctx_t *ctx, pwrseq_action_t a, uint16_t arg)
 		 * the caller is expected to check, not a silent drop.
 		 */
 		ctx->q_dropped++;
-		return;
+		return -ENOSPC;
 	}
 
 	e = &ctx->q[(ctx->q_head + ctx->q_len) % (uint16_t)PWRSEQ_ACT_QUEUE_LEN];
 	e->action = (uint16_t)a;
 	e->arg = arg;
 	ctx->q_len++;
+	return 0;
 }
 
 static uint16_t action_arg(const pwrseq_ctx_t *ctx, pwrseq_action_t a)
@@ -1007,8 +1079,9 @@ static uint16_t action_arg(const pwrseq_ctx_t *ctx, pwrseq_action_t a)
 	return 0U;
 }
 
-/* Queue @p a and fold its effect into the sequencer's model of the board. */
-static void emit(pwrseq_ctx_t *ctx, pwrseq_action_t a)
+/* Fold @p a's effect into the sequencer's model of the board. Called only after
+ * the action is safely on the queue — see emit(). */
+static void fold_state(pwrseq_ctx_t *ctx, pwrseq_action_t a)
 {
 	switch (a) {
 	case PWRSEQ_ACT_NOR_RST_RELEASE:
@@ -1074,9 +1147,6 @@ static void emit(pwrseq_ctx_t *ctx, pwrseq_action_t a)
 	case PWRSEQ_ACT_WDT_EN:
 		ctx->wdt_armed = true;
 		break;
-	case PWRSEQ_ACT_WDT_KICK_START:
-		ctx->last_kick_ms = ctx->now_ms;
-		break;
 	case PWRSEQ_ACT_RELAY_ELIGIBLE:
 		ctx->relay_eligible = true;
 		break;
@@ -1086,8 +1156,29 @@ static void emit(pwrseq_ctx_t *ctx, pwrseq_action_t a)
 	default:
 		break;
 	}
+}
 
-	act_push_raw(ctx, a, action_arg(ctx, a));
+/*
+ * Queue @p a, then fold its effect into the model — in that order.
+ *
+ * Order is load-bearing (MEDIUM-4). Folding first meant a full queue could leave
+ * `rb_enabled` cleared while RB_PWR_EN was never dropped at the pin: the module
+ * would believe the rubidium was off, and every piece of supervision is behind
+ * `if (ctx->rb_enabled)`, so the rail would run unwatched. Pushing first makes
+ * "the model changed" imply "the action will reach the pin".
+ *
+ * @retval 0        Queued and folded.
+ * @retval -EAGAIN  Queue full; nothing was queued and nothing was folded, so the
+ *                  caller can simply try again after draining.
+ */
+static int emit(pwrseq_ctx_t *ctx, pwrseq_action_t a)
+{
+	if (act_push_raw(ctx, a, action_arg(ctx, a)) != 0) {
+		return -EAGAIN;
+	}
+
+	fold_state(ctx, a);
+	return 0;
 }
 
 int pwrseq_action_get(pwrseq_ctx_t *ctx, pwrseq_act_t *out)
@@ -1155,30 +1246,58 @@ bool pwrseq_rb_fault(const pwrseq_ctx_t *ctx)
  * and it must not depend on the sequencer's own bookkeeping being correct — the
  * writes are idempotent at the pin.
  */
-static void rb_shutdown(pwrseq_ctx_t *ctx)
+static int rb_shutdown(pwrseq_ctx_t *ctx)
 {
-	emit(ctx, PWRSEQ_ACT_RB_VCC_GATE_DIS);
-	emit(ctx, PWRSEQ_ACT_RB_PWR_DIS);
+	/*
+	 * Reserve both slots before either is taken. A gate opened with the buck
+	 * still on is worse than a shutdown that happens one tick later, and with
+	 * the push-before-fold ordering a partial push would otherwise leave the
+	 * model and the pins disagreeing about the half that did not fit.
+	 */
+	if (act_free(ctx) < 2U) {
+		return -EAGAIN;
+	}
+
+	(void)emit(ctx, PWRSEQ_ACT_RB_VCC_GATE_DIS);
+	(void)emit(ctx, PWRSEQ_ACT_RB_PWR_DIS);
 	ctx->rb_locked = false;
+	return 0;
+}
+
+/** Queue slots @p fa needs, so a failure path can be deferred as a whole. */
+static size_t failact_slots(uint8_t fa)
+{
+	switch ((pwrseq_failact_t)fa) {
+	case PWRSEQ_FAILACT_RB_OFF:
+		return 2U;
+	case PWRSEQ_FAILACT_GPS_OFF:
+	case PWRSEQ_FAILACT_ANT_OFF:
+	case PWRSEQ_FAILACT_DISP_OFF:
+	case PWRSEQ_FAILACT_PANEL_OFF:
+		return 1U;
+	case PWRSEQ_FAILACT_NONE:
+	default:
+		return 0U;
+	}
 }
 
 static void do_failact(pwrseq_ctx_t *ctx, uint8_t fa)
 {
 	switch ((pwrseq_failact_t)fa) {
 	case PWRSEQ_FAILACT_GPS_OFF:
-		emit(ctx, PWRSEQ_ACT_GPS_PWR_DIS);
+		(void)emit(ctx, PWRSEQ_ACT_GPS_PWR_DIS);
 		break;
 	case PWRSEQ_FAILACT_ANT_OFF:
-		emit(ctx, PWRSEQ_ACT_ANT_BIAS_DIS);
+		(void)emit(ctx, PWRSEQ_ACT_ANT_BIAS_DIS);
 		break;
 	case PWRSEQ_FAILACT_DISP_OFF:
-		emit(ctx, PWRSEQ_ACT_DISP_DIS);
+		(void)emit(ctx, PWRSEQ_ACT_DISP_DIS);
 		break;
 	case PWRSEQ_FAILACT_PANEL_OFF:
-		emit(ctx, PWRSEQ_ACT_PANEL_LED_DIS);
+		(void)emit(ctx, PWRSEQ_ACT_PANEL_LED_DIS);
 		break;
 	case PWRSEQ_FAILACT_RB_OFF:
-		rb_shutdown(ctx);
+		(void)rb_shutdown(ctx);
 		break;
 	case PWRSEQ_FAILACT_NONE:
 	default:
@@ -1201,6 +1320,7 @@ static void enter_stage(pwrseq_ctx_t *ctx, uint8_t stage, uint32_t ms)
 	ctx->stage = stage;
 	ctx->stage_entered_ms = ms;
 	ctx->step_entered_ms = ms;
+	ctx->step_stall_ms = 0U;
 	ctx->retries = 0U;
 	ctx->step_armed = false;
 	ctx->step = first_step_of(stage);
@@ -1225,6 +1345,7 @@ static void advance_step(pwrseq_ctx_t *ctx, uint32_t ms)
 	ctx->step_armed = false;
 	ctx->retries = 0U;
 	ctx->step_entered_ms = ms;
+	ctx->step_stall_ms = 0U;
 
 	if (ctx->step >= STEP_COUNT) {
 		ctx->stage = (uint8_t)PWRSEQ_STAGE_DONE;

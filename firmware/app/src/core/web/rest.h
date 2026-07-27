@@ -321,8 +321,16 @@ typedef struct {
 	int (*reboot)(void *u, uint8_t mode);
 	int (*factory_reset)(void *u);
 
-	/* firmware — these MUST be bound to the existing core/mcp DFU engine,
-	 * not to a second staging implementation (see sts_web.c). */
+	/*
+	 * Firmware. These MUST be bound to the existing core/mcp DFU engine,
+	 * not to a second staging implementation (see sts_web.c).
+	 *
+	 * Error contract, so the router can produce the right status code:
+	 *   fw_begin  -ENOSPC   image larger than the staging slot   -> 413
+	 *   fw_data   -EBADE    offset gap; *out_next is the frontier -> 409
+	 *   fw_end    -EBADMSG  SHA-256 / MCUboot header mismatch    -> 422
+	 * Anything else negative becomes 409 (or 500 for fw_data).
+	 */
 	int (*fw_info)(void *u, rest_fw_t *out);
 	int (*fw_begin)(void *u, uint32_t size, const uint8_t sha256[32],
 			uint32_t *out_next);
@@ -332,7 +340,11 @@ typedef struct {
 	int (*fw_confirm)(void *u);
 	int (*fw_revert)(void *u);
 
-	/* TLS */
+	/*
+	 * TLS. cert_install() error contract:
+	 *   -EBADMSG       the body is not a PEM cert + key pair  -> 422
+	 *   -EKEYREJECTED  the key does not match the certificate -> 422
+	 */
 	int (*cert_info)(void *u, rest_cert_t *out);
 	int (*cert_install)(void *u, const char *pem, size_t len);
 	int (*csr_make)(void *u, const char *subject, char *out, size_t cap,

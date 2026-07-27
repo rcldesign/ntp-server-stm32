@@ -13,8 +13,15 @@
  *   - TLV export/import with a CRC-32 trailer, schema versioning and a
  *     migration hook table.
  *
- * Threading: a cfg_ctx_t is not internally locked. On target it is owned by
- * the management thread; other threads read published snapshots, not this.
+ * Threading: a cfg_ctx_t is not internally locked, and it is NOT owned by a
+ * single thread — the MCP engine, the Zephyr shell and the local UI all reach
+ * the same context. Mutual exclusion is therefore the caller's job and is not
+ * optional: every call that takes a non-const cfg_ctx_t *, and every read that
+ * must not observe a half-applied commit, has to run inside one. On target that
+ * critical section is sts_cfg_lock()/sts_cfg_unlock() (zephyr/sts_app.h); core
+ * modules take it through a callback supplied by the glue (see mcp.h "Config
+ * locking"). Timing state is different and is never read from here: services
+ * use the lock-free quality snapshot.
  *
  * Atomicity, precisely
  * --------------------
@@ -191,8 +198,31 @@ int cfg_init(cfg_ctx_t *c, const port_store_t *store);
  */
 int cfg_load_all(cfg_ctx_t *c, uint32_t *out_corrupt);
 
-/** Install the cross-field validation hook (NULL clears it). */
+/**
+ * Install the cross-field validation hook (NULL clears it).
+ *
+ * cfg_init() clears it, so re-install after every cfg_init() — including the
+ * one that swaps a RAM store for the persistent one.
+ */
 int cfg_set_validate_hook(cfg_ctx_t *c, cfg_validate_fn fn, void *user);
+
+/**
+ * The schema's own cross-field rules, in cfg_validate_fn form.
+ *
+ * Install with cfg_set_validate_hook(c, cfg_schema_xvalidate, NULL). Rules are
+ * constraints no single row can express, i.e. combinations that are individually
+ * in range but jointly unsafe:
+ *
+ *   snmp.enable requires a non-empty snmp.community — the community IS the
+ *   agent's only authentication, and the schema default is empty precisely so
+ *   the agent cannot come up guessable. Refusing the combination gives the
+ *   operator an error instead of an agent that answers nobody.
+ *
+ * @param user  Unused; pass NULL.
+ * @retval 0        The candidate tree is acceptable.
+ * @retval -EPROTO  A cross-field rule was violated; nothing is applied.
+ */
+int cfg_schema_xvalidate(const struct cfg_ctx *c, void *user);
 
 /** Install the import migration table (NULL/0 clears it). */
 int cfg_set_migrations(cfg_ctx_t *c, const cfg_migration_t *tbl, size_t n,
