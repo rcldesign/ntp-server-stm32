@@ -628,6 +628,25 @@ static int prov_cfg_commit(void *user, cfg_commit_res_t *res)
 }
 
 /**
+ * The host->device half of passthrough channels 0x07 and 0x08.
+ *
+ * An adapter only, for the `void *user` core passes and this side does not
+ * need: mp_tunnel.c holds the channel-to-UART map and the platform's own
+ * refusals, and duplicating either here would give the device two answers.
+ *
+ * Core has already established that the channel names a passthrough holding a
+ * live override lease before it calls (mp_rpc.c:3307), and sts_mp_tunnel_write()
+ * checks the same thing again from the platform's side — deliberately, because a
+ * sink that trusts its caller to have checked is one refactor away from writing
+ * into a port firmware still owns.
+ */
+static int prov_raw_tx(void *user, uint8_t ch, const uint8_t *data, size_t len)
+{
+	ARG_UNUSED(user);
+	return sts_mp_tunnel_write(ch, data, len);
+}
+
+/**
  * The maintenance credential check (FMT §5.3).
  *
  * One line of substance, and that is the point: the throttle, the hard lockout
@@ -1548,6 +1567,16 @@ int sts_mp_start(void)
 	 * feature does not exist, on a build that contains all of it.
 	 */
 	w.fwupd = sts_fwupd_mp_port();
+	/*
+	 * The host->device direction of channels 0x07/0x08. Leaving this NULL is
+	 * how the tunnels stayed device-to-host for as long as they did: core
+	 * null-checks it (mp_rpc.c:3307) and answers politely, so the whole
+	 * inbound path — sink, policy header and its suite — sat in the tree with
+	 * no caller and was collected out of the image. mp_tunnel.c's header used
+	 * to describe that as "still not wired"; this is the line that changed it.
+	 */
+	w.raw_tx = prov_raw_tx;
+	w.raw_tx_user = NULL;
 	w.cfg = sts_cfg();
 	w.log = sts_logring();
 	w.scratch = mp_scratch;
