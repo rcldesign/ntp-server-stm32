@@ -2385,7 +2385,9 @@ int mp_init(mp_ctx_t *c, const mp_wiring_t *w)
 		return rc;
 	}
 
-	c->manifest_hash = mp_manifest_hash();
+	/* Lend the reply buffer as the serialisation scratch, so the hash
+	 * costs no stack of its own. */
+	c->manifest_hash = mp_manifest_hash(c->reply, sizeof(c->reply));
 	return 0;
 }
 

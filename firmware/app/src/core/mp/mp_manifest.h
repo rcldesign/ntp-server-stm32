@@ -240,10 +240,13 @@ int mp_manifest_obj_json(size_t idx, char *buf, size_t cap);
 
 /**
  * Largest single-object JSON form the table can produce, including the NUL.
- * Sized generously: the longest id, net, desc and enum list together are well
- * under this, and a fixed bound is what keeps the emitter allocation-free.
+ *
+ * Dominated by `sensor.alarms`, whose 49 bit names run to about 1.1 KB; every
+ * other object is under 400 B. A fixed bound is what keeps the emitter
+ * allocation-free, and the manifest self-consistency test proves no object
+ * exceeds it.
  */
-#define MP_MANIFEST_OBJ_JSON_MAX 512U
+#define MP_MANIFEST_OBJ_JSON_MAX 1408U
 
 /**
  * Emit a page of the manifest as a JSON array fragment (no enclosing brackets).
@@ -267,12 +270,19 @@ int mp_manifest_page(size_t from, char *buf, size_t cap, size_t *out_len,
  *
  * CRC-32/ISO-HDLC (`sts_crc32_ieee`) over MP_MANIFEST_VER as one decimal ASCII
  * byte sequence followed by every object's canonical JSON form in table order.
- * A CRC rather than a digest because the manifest is not a security object —
- * the host uses the hash to cache the document and to detect a firmware change,
- * and a 32-bit check is enough for both. Computed on each call (about 90 short
- * snprintf-free serialisations); the caller should cache it.
+ * A CRC rather than a digest because the manifest is not a security object — the
+ * host uses the hash to cache the document and to detect a firmware change, and
+ * a 32-bit check is enough for both.
+ *
+ * The serialisation scratch is caller-supplied so this never puts a
+ * MP_MANIFEST_OBJ_JSON_MAX frame on the calling thread's stack; `mp_init()`
+ * lends it the reply buffer and caches the result.
+ *
+ * @param scratch  Working buffer, at least MP_MANIFEST_OBJ_JSON_MAX bytes.
+ * @param cap      Capacity of @p scratch.
+ * @return         The hash, or 0 when @p scratch is NULL or too small.
  */
-uint32_t mp_manifest_hash(void);
+uint32_t mp_manifest_hash(char *scratch, size_t cap);
 
 #ifdef __cplusplus
 }

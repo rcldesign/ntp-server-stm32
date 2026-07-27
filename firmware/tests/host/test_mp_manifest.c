@@ -797,10 +797,10 @@ static void test_paging_edges(void)
 
 static void test_hash_is_stable_and_covers_the_table(void)
 {
-	uint32_t h1 = mp_manifest_hash();
-	uint32_t h2 = mp_manifest_hash();
+	static char scratch[MP_MANIFEST_OBJ_JSON_MAX];
+	uint32_t h1 = mp_manifest_hash(scratch, sizeof(scratch));
+	uint32_t h2 = mp_manifest_hash(scratch, sizeof(scratch));
 	uint32_t crc;
-	char scratch[MP_MANIFEST_OBJ_JSON_MAX];
 	size_t i;
 	const char ver = (char)('0' + (char)(MP_MANIFEST_VER % 10U));
 
@@ -820,6 +820,32 @@ static void test_hash_is_stable_and_covers_the_table(void)
 
 	/* It is not simply the CRC of the version byte — the objects contribute. */
 	TEST_ASSERT_NOT_EQUAL_UINT32(sts_crc32_ieee(&ver, 1U), h1);
+
+	/* A scratch buffer that cannot hold the widest object is refused rather
+	 * than producing a hash over truncated objects. */
+	TEST_ASSERT_EQUAL_UINT32(0U, mp_manifest_hash(NULL, sizeof(scratch)));
+	TEST_ASSERT_EQUAL_UINT32(0U, mp_manifest_hash(scratch, 16U));
+}
+
+/** Every object must fit the documented single-object bound. */
+static void test_no_object_exceeds_the_json_bound(void)
+{
+	static char buf[MP_MANIFEST_OBJ_JSON_MAX];
+	size_t i;
+	int widest = 0;
+
+	for (i = 0U; i < mp_obj_count(); i++) {
+		int n = mp_manifest_obj_json(i, buf, sizeof(buf));
+
+		TEST_ASSERT_TRUE_MESSAGE(n > 0, mp_obj_at(i)->id);
+		if (n > widest) {
+			widest = n;
+		}
+	}
+	/* And the bound is not wildly oversized either. */
+	TEST_ASSERT_TRUE(widest > 0);
+	TEST_ASSERT_TRUE((size_t)widest <= MP_MANIFEST_OBJ_JSON_MAX);
+	TEST_ASSERT_TRUE((size_t)widest > (MP_MANIFEST_OBJ_JSON_MAX / 2U));
 }
 
 /* ------------------------------------------------------------------- runner */
@@ -854,6 +880,7 @@ int main(void)
 	RUN_TEST(test_paging_covers_the_whole_table_exactly_once);
 	RUN_TEST(test_paging_edges);
 	RUN_TEST(test_hash_is_stable_and_covers_the_table);
+	RUN_TEST(test_no_object_exceeds_the_json_bound);
 
 	return UNITY_END();
 }

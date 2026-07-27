@@ -766,7 +766,13 @@ static void test_hello(void)
 						  mp_json_obj_get(&g_rp, m,
 								  "hash"),
 						  &hash));
-		TEST_ASSERT_EQUAL_INT64((int64_t)mp_manifest_hash(), hash);
+		{
+			static char hb[MP_MANIFEST_OBJ_JSON_MAX];
+
+			TEST_ASSERT_EQUAL_INT64((int64_t)mp_manifest_hash(hb,
+									 sizeof(hb)),
+						hash);
+		}
 		TEST_ASSERT_EQUAL_INT(0,
 				      mp_json_i64(&g_rp,
 						  mp_json_obj_get(&g_rp, m,

@@ -777,17 +777,20 @@ int mp_manifest_page(size_t from, char *buf, size_t cap, size_t *out_len,
 	return n;
 }
 
-uint32_t mp_manifest_hash(void)
+uint32_t mp_manifest_hash(char *scratch, size_t cap)
 {
-	char scratch[MP_MANIFEST_OBJ_JSON_MAX];
 	uint32_t crc = STS_CRC32_IEEE_SEED;
 	const char ver = (char)('0' + (char)(MP_MANIFEST_VER % 10U));
 	size_t i;
 
+	if ((scratch == NULL) || (cap < MP_MANIFEST_OBJ_JSON_MAX)) {
+		return 0U;
+	}
+
 	crc = sts_crc32_ieee_update(crc, &ver, 1U);
 
 	for (i = 0U; i < MP_OBJ_N; i++) {
-		int n = mp_manifest_obj_json(i, scratch, sizeof(scratch));
+		int n = mp_manifest_obj_json(i, scratch, cap);
 
 		if (n < 0) {
 			/* A table entry that cannot be serialised would make the
