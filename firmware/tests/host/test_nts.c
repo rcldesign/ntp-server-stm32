@@ -422,6 +422,139 @@ static void test_cookie_bad_arguments_and_port_failures(void)
 						      sizeof(cookie), &back));
 }
 
+/*
+ * L7: installing a key with make_current=false into a full ring must evict the
+ * oldest *non-current* key, never the current one — evicting the current key
+ * would leave freshly minted cookies sealed under a key no longer in the ring.
+ */
+static void test_keyring_install_preserves_current(void)
+{
+	nts_keyring_t r;
+	nts_cookie_keys_t keys;
+	nts_cookie_keys_t back;
+	uint8_t key[NTS_MASTER_KEY_LEN];
+	uint8_t before[NTS_COOKIE_LEN];
+	uint8_t after[NTS_COOKIE_LEN];
+
+	make_keys(&keys);
+	memset(key, 0x33U, sizeof(key));
+	TEST_ASSERT_EQUAL_INT(0, nts_keyring_init(&r, &g_port, 1000, 0));
+
+	/* A cookie under the initial current key (id 1). */
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_seal(&r, &keys, before));
+	TEST_ASSERT_EQUAL_UINT16(1U, bytes_get_be16(before));
+
+	/* Fill the ring, then overflow it — all non-current installs. */
+	TEST_ASSERT_EQUAL_INT(0, nts_keyring_install(&r, 100U, key, 2000, false));
+	TEST_ASSERT_EQUAL_INT(0, nts_keyring_install(&r, 101U, key, 3000, false));
+	TEST_ASSERT_EQUAL_INT(0, nts_keyring_install(&r, 102U, key, 4000, false));
+
+	/* The current key (id 1) survived the eviction: new cookies still use
+	 * it, and the cookie sealed under it before is still decryptable. */
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_seal(&r, &keys, after));
+	TEST_ASSERT_EQUAL_UINT16(1U, bytes_get_be16(after));
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_unseal(&r, before, sizeof(before),
+						   &back));
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(keys.c2s, back.c2s, NTS_KEY_LEN);
+}
+
+/*
+ * M3: nts_cookie_seal snapshots the current key's {id, material} up front, so
+ * a cookie is always sealed under a consistent pair. The host harness is
+ * single-threaded and cannot inject a mid-call rotation, so this pins the
+ * observable contract: a seal immediately after a rotation uses the new
+ * current key — id and material together — and the cookie round-trips.
+ */
+static void test_cookie_seal_snapshots_current(void)
+{
+	nts_cookie_keys_t keys;
+	nts_cookie_keys_t back;
+	uint8_t a[NTS_COOKIE_LEN];
+	uint8_t b[NTS_COOKIE_LEN];
+
+	make_keys(&keys);
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_seal(&g_ring, &keys, a));
+	TEST_ASSERT_EQUAL_UINT16(1U, bytes_get_be16(a));
+
+	TEST_ASSERT_EQUAL_INT(0, nts_keyring_rotate(&g_ring, 2000));
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_seal(&g_ring, &keys, b));
+	/* The new cookie names the new current key, not the old one. */
+	TEST_ASSERT_EQUAL_UINT16(2U, bytes_get_be16(b));
+
+	/* Both are internally consistent: each unseals under the key its own id
+	 * names, which is exactly what the snapshot guarantees. */
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_unseal(&g_ring, a, sizeof(a), &back));
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(keys.s2c, back.s2c, NTS_KEY_LEN);
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_unseal(&g_ring, b, sizeof(b), &back));
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(keys.s2c, back.s2c, NTS_KEY_LEN);
+}
+
+/* L9/L10/L13: extension-field edge cases on the request datapath. */
+static void test_process_low_findings(void)
+{
+	nts_cookie_keys_t keys;
+	nts_req_t req;
+	pkt_t p;
+	uint8_t uniq[NTS_UNIQ_MIN];
+	uint8_t cookie[NTS_COOKIE_LEN];
+	uint8_t filler[NTS_COOKIE_LEN];
+	size_t auth_off;
+
+	make_keys(&keys);
+	make_uniq(uniq, sizeof(uniq));
+	memset(filler, 0, sizeof(filler));
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_seal(&g_ring, &keys, cookie));
+
+	/* L9: a cookie placeholder whose body is not the cookie length is a
+	 * malformed request (RFC 8915 §5.5). Build it before the authenticator
+	 * so the packet is otherwise well formed. */
+	pkt_hdr(&p);
+	pkt_ef(&p, (uint16_t)NTS_EF_UNIQUE_ID, uniq, sizeof(uniq));
+	pkt_ef(&p, (uint16_t)NTS_EF_COOKIE, cookie, sizeof(cookie));
+	pkt_ef(&p, (uint16_t)NTS_EF_COOKIE_PLACEHOLDER, filler,
+	       NTS_COOKIE_LEN - 4U); /* one field-unit short of a cookie */
+	pkt_auth(&p, keys.c2s, 0x40U);
+	TEST_ASSERT_EQUAL_INT(NTS_ACT_DROP,
+			      nts_process_request(&g_nts, p.buf, p.len, &req));
+
+	/* A correctly sized placeholder is accepted (control for the above). */
+	build_request(&p, &keys, 1U);
+	TEST_ASSERT_EQUAL_INT(NTS_ACT_OK,
+			      nts_process_request(&g_nts, p.buf, p.len, &req));
+
+	/* L10: a zero-length or oversized authenticator nonce is rejected. */
+	build_request(&p, &keys, 0U);
+	auth_off = p.len - 40U;
+	bytes_put_be16(&p.buf[auth_off + 4U], 0U); /* nonce_len = 0 */
+	TEST_ASSERT_EQUAL_INT(NTS_ACT_DROP,
+			      nts_process_request(&g_nts, p.buf, p.len, &req));
+
+	build_request(&p, &keys, 0U);
+	auth_off = p.len - 40U;
+	bytes_put_be16(&p.buf[auth_off + 4U], NTS_REQ_NONCE_MAX + 1U);
+	TEST_ASSERT_EQUAL_INT(NTS_ACT_DROP,
+			      nts_process_request(&g_nts, p.buf, p.len, &req));
+
+	/*
+	 * L13: a plain NTP packet carrying a legacy 4/20/24-octet MAC tail must
+	 * be classed "not ours" (RFC 7822 §7.5.1 disambiguation), so the plain
+	 * datapath and its symmetric-key auth handle it — not dropped here as a
+	 * broken extension field.
+	 */
+	{
+		static const size_t mac_tails[] = { 4U, 20U, 24U };
+
+		for (size_t i = 0U; i < ARRAY_LEN(mac_tails); i++) {
+			pkt_hdr(&p);
+			memset(&p.buf[p.len], 0xA5U, mac_tails[i]);
+			p.len += mac_tails[i];
+			TEST_ASSERT_EQUAL_INT(NTS_ACT_NONE,
+					      nts_process_request(&g_nts, p.buf,
+								  p.len, &req));
+		}
+	}
+}
+
 /* ------------------------------------------------- request-side processing */
 
 static void test_process_plain_ntp_is_not_ours(void)
@@ -1791,7 +1924,11 @@ static void test_remaining_rejection_and_clamp_paths(void)
 	uint8_t rsp[PKT_CAP];
 	uint8_t uniq[NTS_UNIQ_MIN];
 	uint8_t cookie[NTS_COOKIE_LEN];
-	const size_t empty_rsp = NTS_NTP_HDR_LEN + 4U + NTS_UNIQ_MIN + 40U;
+	/* Echo + authenticator envelope + exactly one cookie: the minimum a
+	 * response may be after L12, and enough room that the seal actually runs
+	 * and meets the injected AES failure. */
+	const size_t one_cookie_rsp =
+		NTS_NTP_HDR_LEN + 4U + NTS_UNIQ_MIN + 40U + NTS_COOKIE_EF_LEN;
 	size_t auth_off;
 	size_t len;
 
@@ -1849,7 +1986,7 @@ static void test_remaining_rejection_and_clamp_paths(void)
 	len = NTS_NTP_HDR_LEN;
 	g_hc.fail_aes_in = 1U;
 	TEST_ASSERT_EQUAL_INT(-EIO, nts_append_response(&g_nts, &req, rsp, &len,
-							empty_rsp));
+							one_cookie_rsp));
 }
 
 int main(void)
@@ -1864,6 +2001,9 @@ int main(void)
 	RUN_TEST(test_cookie_layout_and_roundtrip);
 	RUN_TEST(test_cookie_rejects_mutation);
 	RUN_TEST(test_cookie_bad_arguments_and_port_failures);
+	RUN_TEST(test_keyring_install_preserves_current);
+	RUN_TEST(test_cookie_seal_snapshots_current);
+	RUN_TEST(test_process_low_findings);
 	RUN_TEST(test_process_plain_ntp_is_not_ours);
 	RUN_TEST(test_process_accepts_a_valid_request);
 	RUN_TEST(test_process_clamps_cookie_demand);

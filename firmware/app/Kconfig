@@ -80,6 +80,16 @@ endmenu
 
 menu "STS1000 Meridian platform area"
 
+# The clock-mux glue calls LL_RCC_GetSystemClocksFreq() to read the live SYSCLK
+# across the HSI bridge. That is one of the few non-inline LL functions, so its
+# source (stm32h5xx_ll_rcc.c) must be compiled — but USE_STM32_LL_RCC is a
+# promptless symbol that can only be select-ed, and the STM32 clock driver
+# selects it only on MP-series parts. Force it on here.
+config STS1000_FORCE_LL_RCC
+	bool
+	default y
+	select USE_STM32_LL_RCC
+
 config STS1000_LOGRING_SLOTS
 	int "Structured log ring depth (records)"
 	default 192

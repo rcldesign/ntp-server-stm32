@@ -44,6 +44,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/pwm.h>
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
@@ -87,6 +88,14 @@ static const struct device *const i2c1 = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 
 static const struct device *const fan_pwm = DEVICE_DT_GET(FAN_PWM_NODE);
 static const struct gpio_dt_spec fan_tach = STS_USER_GPIO(fan_tach_gpios);
+
+/* STM32 internal die-temperature sensor — thermal ladder tertiary fallback. */
+#define DIE_TEMP_NODE DT_NODELABEL(die_temp)
+#if DT_NODE_HAS_STATUS(DIE_TEMP_NODE, okay)
+static const struct device *const die_temp = DEVICE_DT_GET(DIE_TEMP_NODE);
+#else
+static const struct device *const die_temp;
+#endif
 
 /* ---- module state -------------------------------------------------------- */
 
@@ -550,6 +559,23 @@ static void hk_thermal_1hz(uint32_t now_ms)
 	in.enclosure_valid = snap.temp_enclosure_valid;
 	in.osc_mc = snap.temp_osc_mc;
 	in.osc_valid = snap.temp_osc_valid;
+
+	/*
+	 * die_mc/die_valid are load-bearing, not telemetry: they are the
+	 * thermal ladder's tertiary sensor when the enclosure TMP117 fails
+	 * (Wave-2b contract). Read the STM32 die sensor every tick; if it is
+	 * unavailable the ladder still has the oscillator TMP117 above it.
+	 */
+	in.die_valid = false;
+	if (die_temp != NULL && device_is_ready(die_temp)) {
+		struct sensor_value v;
+
+		if (sensor_sample_fetch(die_temp) == 0 &&
+		    sensor_channel_get(die_temp, SENSOR_CHAN_DIE_TEMP, &v) == 0) {
+			in.die_mc = v.val1 * 1000 + v.val2 / 1000;
+			in.die_valid = true;
+		}
+	}
 
 	in.fan_rpm = (uint16_t)MIN(hk_tach_rpm(now_ms), (uint32_t)UINT16_MAX);
 	in.rpm_valid = true;

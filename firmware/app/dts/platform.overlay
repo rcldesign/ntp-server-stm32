@@ -41,3 +41,16 @@
 &zephyr_user {
 	/delete-property/ panel-led-pwm-gpios;
 };
+
+/*
+ * STM32 internal die-temperature sensor (ADC1 internal channel 16, factory
+ * cal). It is the tertiary input to the thermal over-temp ladder: when the
+ * enclosure TMP117 (0x48) fails, the ladder falls back to the oscillator
+ * TMP117 (0x49) and then to this (ARCHITECTURE.md §10.2, thermal Wave-2b
+ * contract). Disabled in the SoC dtsi; the housekeeping thread reads it via
+ * the sensor API and degrades to die_valid=false if it is not ready, so the
+ * ladder still has the two TMP117s.
+ */
+&die_temp {
+	status = "okay";
+};

@@ -1394,11 +1394,22 @@ int pwrseq_step(pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 		} else if (ctx->ov_latched) {
 			drop = true;
 			alarm = (uint8_t)PWRSEQ_ALARM_RB_OV;
-		} else if (ctx->rb_gated &&
-			   (!rb_rail_in_window(ctx, in) ||
-			    !rb_measured_le_vmax(ctx, in))) {
-			drop = true;
-			alarm = (uint8_t)PWRSEQ_ALARM_RB_WINDOW;
+		} else if (ctx->rb_gated) {
+			/*
+			 * Evaluate the two gates independently (no short-circuit)
+			 * so the code-independent measured<=vmax check is a real
+			 * second gate, not one the window check can mask — and so
+			 * a stale reading, which fails both, drops a gated FE
+			 * rather than leaving it connected to an unconfirmable
+			 * rail.
+			 */
+			bool in_window = rb_rail_in_window(ctx, in);
+			bool under_vmax = rb_measured_le_vmax(ctx, in);
+
+			if (!in_window || !under_vmax) {
+				drop = true;
+				alarm = (uint8_t)PWRSEQ_ALARM_RB_WINDOW;
+			}
 		}
 
 		if (drop) {

@@ -243,6 +243,12 @@ int sts_discipline_start(void);
 /** PFI handler: park the loop and freeze the DAC. ISR-safe. */
 void sts_discipline_park(void);
 
+/* refsel handoff bracket: transient park/unpark around a mux flip, called by
+ * the clock-mux executor on REFSEL_ACT_PARK/UNPARK_DISCIPLINE. Discipline
+ * thread context only. */
+void sts_disc_handoff_park(void);
+void sts_disc_handoff_unpark(void);
+
 /* ------------------------------------------------------------------------- */
 /* pfi.c — PE8 power-fail early warning (EXTI8)                              */
 /* ------------------------------------------------------------------------- */

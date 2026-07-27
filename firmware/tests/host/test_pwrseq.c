@@ -1029,6 +1029,36 @@ static void test_a_rail_excursion_after_gating_drops_the_rubidium(void)
 	TEST_ASSERT_EQUAL_size_t(settled + 2U, m.log_len);
 }
 
+static void test_a_gated_rail_going_unreadable_drops_the_rubidium(void)
+{
+	model_t m;
+	size_t settled;
+
+	/*
+	 * A gated FE with a VCC_RB reading that has gone stale cannot be
+	 * confirmed safe, so it must be dropped — "unknown" is not "in range".
+	 * This also exercises the independent measured<=vmax gate's invalid-read
+	 * path, which the window check would otherwise mask.
+	 */
+	model_init(&m, NULL);
+	run_out(&m, 100U, 100U);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+	settled = m.log_len;
+
+	m.rb_glue = false; /* stop the glue refreshing the reading */
+	m.in.ina_valid[INA228_RAIL_VCC_RB] = false;
+	advance(&m, 100U);
+
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
+	TEST_ASSERT_FALSE(m.ctx.rb_gated);
+	TEST_ASSERT_EQUAL_size_t(settled + 2U, m.log_len);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_ACT_RB_VCC_GATE_DIS,
+			      (int)m.log[settled].action);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_ACT_RB_PWR_DIS,
+			      (int)m.log[settled + 1U].action);
+	TEST_ASSERT_TRUE(pwrseq_rb_fault(&m.ctx));
+}
+
 static void test_an_over_voltage_latch_drops_the_rubidium_at_any_stage(void)
 {
 	model_t m;
@@ -1495,8 +1525,13 @@ static void test_a_rail_excursion_between_gating_and_lock_aborts_stage_8(void)
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_TRUE(m.ctx.rb_gated);
 
-	/* The buck wanders to 20 V while gated to the FE. */
-	m.force_op_rail_mv = 20000;
+	/*
+	 * The buck wanders to 20 V while gated to the FE. Freeze the glue and
+	 * inject the reading directly so the very next step() sees the excursion
+	 * (the glue applies its response only after each step).
+	 */
+	m.rb_glue = false;
+	m.in.ina_vbus_mv[INA228_RAIL_VCC_RB] = 20000;
 	advance(&m, 100U);
 
 	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
@@ -2393,6 +2428,7 @@ int main(void)
 	RUN_TEST(test_lock_timeout_drops_the_rubidium);
 	RUN_TEST(test_an_out_of_band_external_reference_is_not_a_lock);
 	RUN_TEST(test_a_rail_excursion_after_gating_drops_the_rubidium);
+	RUN_TEST(test_a_gated_rail_going_unreadable_drops_the_rubidium);
 	RUN_TEST(test_an_over_voltage_latch_drops_the_rubidium_at_any_stage);
 	RUN_TEST(test_withdrawing_rb_wanted_mid_stage_8_shuts_down);
 	RUN_TEST(test_withdrawing_rb_wanted_before_the_gate_shuts_down);

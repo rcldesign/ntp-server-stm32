@@ -314,6 +314,8 @@ int sts_clkmux_execute(const void *steps_v, size_t n_steps)
 	unsigned int key;
 	uint32_t settle_ms = 0;
 	int target = -1;
+	bool want_park = false;
+	bool want_unpark = false;
 	int rc = 0;
 
 	if (steps == NULL || n_steps == 0U) {
@@ -324,8 +326,8 @@ int sts_clkmux_execute(const void *steps_v, size_t n_steps)
 	}
 
 	/*
-	 * Read the whole list before touching anything. refsel always emits
-	 * the same shape (BRIDGE, SET_MUX, WAIT, RESELECT_HSE, VERIFY_PLL,
+	 * Read the whole list before touching anything. refsel emits a fixed
+	 * shape (PARK, BRIDGE, SET_MUX, WAIT, RESELECT_HSE, VERIFY_PLL, UNPARK,
 	 * DONE); pre-scanning it means the interrupt-locked region contains
 	 * only register work, and an unexpected action is rejected before the
 	 * clock tree is disturbed rather than halfway through it.
@@ -337,6 +339,12 @@ int sts_clkmux_execute(const void *steps_v, size_t n_steps)
 		case REFSEL_ACT_VERIFY_PLL:
 		case REFSEL_ACT_DONE:
 		case REFSEL_ACT_NONE:
+			break;
+		case REFSEL_ACT_PARK_DISCIPLINE:
+			want_park = true;
+			break;
+		case REFSEL_ACT_UNPARK_DISCIPLINE:
+			want_unpark = true;
 			break;
 		case REFSEL_ACT_SET_MUX:
 			target = (steps[i].arg == REFSEL_MUX_B) ? 1 : 0;
@@ -359,6 +367,18 @@ int sts_clkmux_execute(const void *steps_v, size_t n_steps)
 		LOG_WRN("clkmux: settle %u ms clamped to %u ms", settle_ms,
 			(unsigned int)CONFIG_STS1000_CLKMUX_MAX_SETTLE_MS);
 		settle_ms = CONFIG_STS1000_CLKMUX_MAX_SETTLE_MS;
+	}
+
+	/*
+	 * Park the discipline loop before the bridge and unpark after it
+	 * (ARCHITECTURE.md §3.5). Both are pure disc-context state changes done
+	 * outside the irq_lock: the DAC holds its last code through the flip,
+	 * and disc_unpark() resumes in RECOVERING so the phase realignment the
+	 * bridge introduces is ramped in, never stepped. Skipping this would
+	 * demote the server on a healthy handoff.
+	 */
+	if (want_park) {
+		sts_disc_handoff_park();
 	}
 
 	key = irq_lock();
@@ -386,6 +406,16 @@ int sts_clkmux_execute(const void *steps_v, size_t n_steps)
 	}
 
 	irq_unlock(key);
+
+	/*
+	 * Unpark whenever the list asked for it, on success or failure: a
+	 * handoff that fell back to the OCXO still left the loop parked, and
+	 * leaving it parked would freeze the DAC indefinitely. disc_unpark()
+	 * resumes in RECOVERING either way.
+	 */
+	if (want_unpark) {
+		sts_disc_handoff_unpark();
+	}
 
 	if (rc == 0) {
 		LOG_INF("clkmux: MUX_SEL -> %s, SYSCLK re-locked at %u Hz",

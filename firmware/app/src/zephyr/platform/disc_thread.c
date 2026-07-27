@@ -169,6 +169,30 @@ void sts_discipline_park(void)
 	atomic_set(&disc_park_req, 1);
 }
 
+/*
+ * refsel handoff bracket (ARCHITECTURE.md §3.5, Wave-2b contract). The refsel
+ * action list now opens with REFSEL_ACT_PARK_DISCIPLINE and closes with
+ * REFSEL_ACT_UNPARK_DISCIPLINE around the mux flip; the clock-mux executor
+ * calls these on those actions. Both run in the discipline thread (the
+ * executor is invoked from disc_step_refsel), so there is no concurrency
+ * against the loop, and this is a *transient* park distinct from the latched
+ * PFI park above — disc_unpark() resumes in RECOVERING, which absorbs the
+ * HSI-bridge phase realignment with no step.
+ */
+void sts_disc_handoff_park(void)
+{
+	uint16_t code = 0;
+
+	if (disc_park(&disc, &code) == 0) {
+		disc_write_dac(code);
+	}
+}
+
+void sts_disc_handoff_unpark(void)
+{
+	(void)disc_unpark(&disc);
+}
+
 /* ---- environment -------------------------------------------------------- */
 
 static void disc_fill_env(disc_env_t *env, uint64_t mono_ms)
