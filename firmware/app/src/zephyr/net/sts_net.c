@@ -223,10 +223,15 @@ static int encode_net(void *ctx, uint8_t group, uint8_t *buf, size_t cap)
 			    (link.ipv4_ok ? 2U : 0U) |
 			    (link.ipv6_ok ? 4U : 0U) |
 			    (link.dhcp_bound ? 8U : 0U)));
+	/* Bit 3 (epoch_set) and bit 4 (traceable) are what an operator actually
+	 * needs: `synced` only says the servo had a reference this second, while
+	 * traceability is the claim NTP and PTP are gated on (F1). */
 	pk_u8(&p, (uint8_t)((cs.clock_ok ? 1U : 0U) |
 			    (cs.synced ? 2U : 0U) |
-			    (sts_time_is_fallback() ? 4U : 0U)));
-	pk_u8(&p, 0U); /* reserved */
+			    (sts_time_is_fallback() ? 4U : 0U) |
+			    (cs.epoch_set ? 8U : 0U) |
+			    (cs.traceable ? 16U : 0U)));
+	pk_u8(&p, (uint8_t)(ns.nts_enabled ? 1U : 0U));
 	pk_u32(&p, link.ipv4_addr);
 	pk_u32(&p, link.ipv4_mask);
 	pk_u32(&p, link.ipv4_gw);

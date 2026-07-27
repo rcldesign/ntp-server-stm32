@@ -64,6 +64,19 @@ typedef enum {
 	GNSSMGR_ST_FIXED,         /**< fixed-position timing mode — steady state */
 	GNSSMGR_ST_CONFIG_FAILED, /**< an essential step was refused or went
 				    *  unanswered; needs an explicit restart */
+	/**
+	 * Firmware update in progress: the receiver belongs to core/fwupd.
+	 *
+	 * Entered by gnssmgr_fw_enter() and left by gnssmgr_fw_exit(). While in
+	 * this state the manager sends nothing, ACK timeouts do not run, and
+	 * arriving messages are ignored — the receiver is either in safeboot or
+	 * rebooting, and a config retry aimed into a flash loader is the one thing
+	 * that must not happen. Everything the manager believed about the receiver
+	 * is dropped on entry, and gnssmgr_fw_exit() re-runs the whole
+	 * configuration walk, which is spec §8.5's "restores timing config
+	 * afterward".
+	 */
+	GNSSMGR_ST_FW_UPDATE,
 } gnssmgr_state_t;
 
 /**
@@ -460,6 +473,44 @@ int gnssmgr_start(gnssmgr_t *g, uint32_t mono_ms);
  * Returns as gnssmgr_start().
  */
 int gnssmgr_notify_reset(gnssmgr_t *g, uint32_t mono_ms);
+
+/**
+ * Hand the receiver over to a firmware update (spec §8.5).
+ *
+ * Suspends this manager: no frames are emitted, no ACK deadlines are evaluated,
+ * and gnssmgr_on_msg() drops whatever arrives. Everything measured is
+ * invalidated, because after the update it describes a different firmware — the
+ * stored position and the leap schedule survive, exactly as they do across
+ * gnssmgr_notify_reset(), because they describe the world rather than the
+ * receiver.
+ *
+ * The caller must have suspended its own use of the UART; this call does not
+ * touch the transport.
+ *
+ * @retval 0        Suspended; the state is GNSSMGR_ST_FW_UPDATE.
+ * @retval -EINVAL  @p g is NULL.
+ * @retval -EBUSY   Already in GNSSMGR_ST_FW_UPDATE.
+ */
+int gnssmgr_fw_enter(gnssmgr_t *g);
+
+/**
+ * Take the receiver back and restore its configuration.
+ *
+ * Re-runs the full configuration walk from the first step, which is what makes
+ * the receiver usable again: a firmware update clears the receiver's
+ * configuration, so every VALSET group — port filters, message rates, timepulse
+ * setup, timing mode — has to be re-sent. Survey-in is *not* re-run when a
+ * position is stored; the site has not moved.
+ *
+ * @retval 0        Configuration walk restarted.
+ * @retval -EINVAL  @p g is NULL.
+ * @retval -EPERM   Not in GNSSMGR_ST_FW_UPDATE.
+ * @retval other    As gnssmgr_start(): the first frame could not be sent.
+ */
+int gnssmgr_fw_exit(gnssmgr_t *g, uint32_t mono_ms);
+
+/** True while the receiver is handed over to a firmware update. */
+bool gnssmgr_fw_active(const gnssmgr_t *g);
 
 /**
  * Pump ACK timeouts and retries. Cheap; call from the gnss thread whenever it

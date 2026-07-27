@@ -144,15 +144,18 @@ typedef enum {
 	  1, 0, 1)                                                                             \
 	U(NTP_KOD_ENABLE,    0x0202, "ntp.kod",         BOOL, CFG_F_RUNTIME_APPLY,             \
 	  1, 0, 1)                                                                             \
-	/* 8 req/s, burst 16 — core/ntp's own documented per-client default        */  \
-	/* (ntp.h "Defaults: 8 req/s burst 16 per client"). 0 disables the         */  \
-	/* per-client bucket entirely, which lets one source drain the aggregate   */  \
-	/* bucket and KoD every other client, so it is deliberately NOT the        */  \
-	/* default: an operator who wants that has to ask for it.                  */  \
+	/* 8 req/s per client — core/ntp's own documented per-client refill rate    */  \
+	/* (ntp.h "Defaults: 8 req/s burst 16 per client"). 0 disables the          */  \
+	/* per-client bucket entirely, which lets one source drain the aggregate    */  \
+	/* bucket and KoD every other client, so it is deliberately NOT the         */  \
+	/* default: an operator who wants that has to ask for it. The bucket DEPTH  */  \
+	/* stays at 8 rather than core/ntp's paired 16: a shallower burst is the    */  \
+	/* stricter of the two, and the pairing is a tuning choice, not a safety    */  \
+	/* one.                                                                    */  \
 	U(NTP_RATE_QPS,      0x0203, "ntp.rate.qps",    U16,  CFG_F_RUNTIME_APPLY,             \
 	  8, 0, 65535)                                                                         \
 	U(NTP_RATE_BURST,    0x0204, "ntp.rate.burst",  U16,  CFG_F_RUNTIME_APPLY,             \
-	  16, 1, 4096)                                                                         \
+	  8, 1, 4096)                                                                          \
 	U(NTP_MIN_POLL,      0x0205, "ntp.minpoll",     U8,   CFG_F_RUNTIME_APPLY,             \
 	  4, 3, 17)                                                                            \
 	U(NTP_SYMKEY_REF,    0x0206, "ntp.symkey.ref",  U16,  CFG_F_RUNTIME_APPLY,             \

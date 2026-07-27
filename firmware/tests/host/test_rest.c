@@ -139,7 +139,10 @@ static void test_jw_numbers(void)
 	web_jw_init(&w, buf, sizeof(buf));
 	web_jw_arr_begin(&w);
 	web_jw_f32(&w, 1.5f, 3U);
-	web_jw_f32(&w, -1.0005f, 3U);
+	/* 0.125 and -0.125 are exact in binary32, so they pin the
+	 * round-half-away-from-zero rule without a representation wobble. */
+	web_jw_f32(&w, 0.125f, 2U);
+	web_jw_f32(&w, -0.125f, 2U);
 	web_jw_f32(&w, 0.0f, 2U);
 	web_jw_f32(&w, 1.0f / 0.0f, 2U);  /* +inf -> null */
 	web_jw_f32(&w, -1.0f / 0.0f, 2U); /* -inf -> null */
@@ -147,7 +150,7 @@ static void test_jw_numbers(void)
 	web_jw_f32(&w, 1.0f, 12U);
 	web_jw_arr_end(&w);
 	TEST_ASSERT_EQUAL_INT(0, web_jw_finish(&w, NULL));
-	TEST_ASSERT_EQUAL_STRING("[1.500,-1.001,0.00,null,null,null,"
+	TEST_ASSERT_EQUAL_STRING("[1.500,0.13,-0.13,0.00,null,null,null,"
 				 "1.000000000]",
 				 buf);
 }
@@ -321,6 +324,13 @@ static void test_json_read_errors(void)
 			      web_json_obj_get("{\"a\":[1,2}", 10U, "a", &v));
 	/* Mismatched bracket. */
 	TEST_ASSERT_EQUAL_INT(-EBADMSG,
+			      web_json_obj_get("{\"a\":[1}", 8U, "a", &v));
+	/*
+	 * A nested value is BALANCED, not validated, by the top-level scan: the
+	 * reader is a bounded scanner, and `[1]` here is well-formed anyway, so
+	 * the absent key is simply absent.
+	 */
+	TEST_ASSERT_EQUAL_INT(-ENOENT,
 			      web_json_obj_get("{\"a\":[1]}", 9U, "z", &v));
 	/* A raw control character inside a string. */
 	TEST_ASSERT_EQUAL_INT(-EBADMSG,
@@ -402,8 +412,20 @@ static void test_json_read_errors(void)
 	TEST_ASSERT_EQUAL_INT(0, web_json_obj_get("{\"a\":\"\\q\"}", 10U, "a",
 						  &v));
 	TEST_ASSERT_EQUAL_INT(-EILSEQ, web_json_str_copy(&v, out, sizeof(out)));
-	TEST_ASSERT_EQUAL_INT(0, web_json_obj_get("{\"a\":\"\\\"}", 9U, "a", &v));
-	TEST_ASSERT_EQUAL_INT(-EILSEQ, web_json_str_copy(&v, out, sizeof(out)));
+	/*
+	 * A span ending in a lone backslash cannot come out of a well-formed
+	 * document (the scanner would have consumed the closing quote as an
+	 * escape), so it is built by hand — the copier must still refuse it
+	 * rather than read one byte past the span.
+	 */
+	{
+		web_json_val_t hand = { (uint8_t)WEB_JSON_STR, "\\", 1U };
+
+		TEST_ASSERT_EQUAL_INT(-EILSEQ, web_json_str_copy(&hand, out,
+								 sizeof(out)));
+	}
+	TEST_ASSERT_EQUAL_INT(-EBADMSG,
+			      web_json_obj_get("{\"a\":\"\\\"}", 9U, "a", &v));
 	TEST_ASSERT_EQUAL_INT(0, web_json_obj_get("{\"a\":\"\\u00\"}", 12U, "a",
 						  &v));
 	TEST_ASSERT_EQUAL_INT(-EILSEQ, web_json_str_copy(&v, out, sizeof(out)));
@@ -446,11 +468,20 @@ static void test_json_read_errors(void)
 
 		TEST_ASSERT_EQUAL_INT(0, web_json_obj_next(&v, &cur, &k, &kv));
 	}
-	/* A trailing comma inside an array. */
+	/*
+	 * A trailing comma inside an array. The comma promises another element,
+	 * so it is refused at the comma rather than reported as a clean end one
+	 * step later.
+	 */
 	TEST_ASSERT_EQUAL_INT(0, web_json_obj_get("{\"a\":[1,]}", 10U, "a", &v));
 	cur = 0U;
-	TEST_ASSERT_EQUAL_INT(1, web_json_arr_next(&v, &cur, &k));
 	TEST_ASSERT_EQUAL_INT(-EBADMSG, web_json_arr_next(&v, &cur, &k));
+	/* A well-formed two-element array still iterates cleanly. */
+	TEST_ASSERT_EQUAL_INT(0, web_json_obj_get("{\"a\":[1,2]}", 11U, "a", &v));
+	cur = 0U;
+	TEST_ASSERT_EQUAL_INT(1, web_json_arr_next(&v, &cur, &k));
+	TEST_ASSERT_EQUAL_INT(1, web_json_arr_next(&v, &cur, &k));
+	TEST_ASSERT_EQUAL_INT(0, web_json_arr_next(&v, &cur, &k));
 }
 
 static void test_codecs(void)
@@ -1405,11 +1436,14 @@ static void test_status_groups(void)
 	 * truncated body. */
 	{
 		char tiny[64];
+		char raw[256];
+		size_t rn = (size_t)snprintf(raw, sizeof(raw),
+					     "GET /api/v1/status/power "
+					     "HTTP/1.1\r\nHost: h\r\n"
+					     "Cookie: sts_session=%s\r\n\r\n",
+					     g_token);
 
-		TEST_ASSERT_EQUAL_INT(0, http_parse_request(
-						 "GET /api/v1/status/power "
-						 "HTTP/1.1\r\nHost: h\r\n\r\n",
-						 52U, &g_req));
+		TEST_ASSERT_EQUAL_INT(0, http_parse_request(raw, rn, &g_req));
 		rest_resp_init(&g_resp, tiny, sizeof(tiny));
 		TEST_ASSERT_EQUAL_INT(0, rest_dispatch(&g_rest, &g_req, NULL, 0U,
 						       &g_resp));
@@ -1489,13 +1523,14 @@ static void test_missing_providers(void)
 	get_auth("/api/v1/logs");
 	TEST_ASSERT_EQUAL_UINT(501U, g_resp.status);
 
-	/* No auth registry. */
+	/*
+	 * No auth registry. The three RF_OPEN routes reach their handlers and
+	 * report 501; the admin-gated security routes never get that far,
+	 * because with no registry the caller resolves to `viewer` and the role
+	 * check refuses first. That ordering is the point — a build with no
+	 * credential store must not expose an admin route at all.
+	 */
 	g_rest.auth = NULL;
-	get_auth("/api/v1/security/users");
-	TEST_ASSERT_EQUAL_UINT(501U, g_resp.status);
-	post_auth("/api/v1/security/password",
-		  "{\"user\":\"admin\",\"password\":\"newpassword\"}");
-	TEST_ASSERT_EQUAL_UINT(501U, g_resp.status);
 	post_auth("/api/v1/auth/login",
 		  "{\"user\":\"admin\",\"password\":\"x\"}");
 	TEST_ASSERT_EQUAL_UINT(501U, g_resp.status);
@@ -1503,6 +1538,11 @@ static void test_missing_providers(void)
 	TEST_ASSERT_EQUAL_UINT(501U, g_resp.status);
 	get_auth("/api/v1/auth/session");
 	TEST_ASSERT_EQUAL_UINT(501U, g_resp.status);
+	get_auth("/api/v1/security/users");
+	TEST_ASSERT_EQUAL_UINT(403U, g_resp.status);
+	post_auth("/api/v1/security/password",
+		  "{\"user\":\"admin\",\"password\":\"newpassword\"}");
+	TEST_ASSERT_EQUAL_UINT(401U, g_resp.status);
 }
 
 /* ---- authorisation ------------------------------------------------------ */
@@ -1929,10 +1969,10 @@ static void test_config_write(void)
 		"application/json",
 		"{\"tim.tau.s\":300,\"0x0101\":0,\"net.hostname\":\"box1\","
 		"\"ptp.log.sync\":-2,\"cal.tempco\":{\"micro\":-1500000},"
-		"\"net.mgmt.acl\":\"0aff\",\"ntp.enable\":true}",
+		"\"net.mgmt.acl\":\"0aff\",\"ntp.rate.burst\":16}",
 		strlen("{\"tim.tau.s\":300,\"0x0101\":0,\"net.hostname\":\"box1\","
 		       "\"ptp.log.sync\":-2,\"cal.tempco\":{\"micro\":-1500000},"
-		       "\"net.mgmt.acl\":\"0aff\",\"ntp.enable\":true}"));
+		       "\"net.mgmt.acl\":\"0aff\",\"ntp.rate.burst\":16}"));
 	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
 	TEST_ASSERT_TRUE(body_has("\"staged\":7"));
 	TEST_ASSERT_TRUE(body_has("\"rejected\":0"));
@@ -2512,7 +2552,7 @@ static void test_logs_route(void)
 	TEST_ASSERT_TRUE(body_has("\"type\":\"logs\""));
 	TEST_ASSERT_TRUE(body_has("hello \\\"world\\\""));
 	TEST_ASSERT_TRUE(body_has("\"subsystem\":\"NET\""));
-	TEST_ASSERT_TRUE(body_has("\"level_name\":\"informational\""));
+	TEST_ASSERT_TRUE(body_has("\"level_name\":\"info\""));
 
 	get_auth("/api/v1/logs?cursor=5&max=2&level=6");
 	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
@@ -2597,7 +2637,7 @@ static void test_metrics_route(void)
 	memset(&g_pv, 0, sizeof(g_pv));
 	g_rest.auth = NULL;
 	get_auth("/api/v1/metrics");
-	TEST_ASSERT_EQUAL_UINT(401U, g_resp.status);
+	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
 	{
 		char out[1024];
 

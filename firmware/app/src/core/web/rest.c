@@ -1502,7 +1502,11 @@ static int h_config_list(rest_ctx_t *c, const http_req_t *req,
 	}
 	want_group = (http_query_get_u32(req, "group", &group) == 0);
 	(void)http_query_get_u32(req, "start", &start);
-	(void)http_query_get_u32(req, "max", &max);
+	if (http_query_get_u32(req, "max", &max) != 0 && !want_group) {
+		/* An unqualified listing pages rather than overflowing the
+		 * response buffer (see REST_CONFIG_PAGE_DEFAULT). */
+		max = REST_CONFIG_PAGE_DEFAULT;
+	}
 
 	/*
 	 * Secrets require BOTH the admin role and an explicit request, and the

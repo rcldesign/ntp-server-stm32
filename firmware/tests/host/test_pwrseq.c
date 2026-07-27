@@ -271,6 +271,19 @@ static void pump(model_t *m)
 	}
 }
 
+/* Drain the queue into the log without stepping — for asserting on the actions an
+ * out-of-band entry point queued. */
+static void drain(model_t *m)
+{
+	pwrseq_act_t a;
+
+	while (pwrseq_action_get(&m->ctx, &a) == 0) {
+		TEST_ASSERT_TRUE_MESSAGE(m->log_len < LOG_MAX,
+					 "action log overflowed");
+		m->log[m->log_len++] = a;
+	}
+}
+
 static void advance(model_t *m, uint32_t ms)
 {
 	m->in.mono_ms += ms;
@@ -2715,6 +2728,421 @@ static void test_ov_clear_also_clears_the_rb_fault_umbrella(void)
 	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
 }
 
+
+/* ------------------------------------- F2: the guarded Rb sequence completes */
+
+/*
+ * The regression that mattered most: with the previous 200 ms window timeout and
+ * 100 ms ramp, steps 8.13 and 8.13d got one evaluation each against a VCC_RB
+ * reading up to a second old, so both windows failed on every board — RB_WINDOW |
+ * RB_FAULT latched, abandon_stage() ran, and nothing anywhere called
+ * pwrseq_rb_retry(). This drives the whole sequence at hk.c's real 250 ms tick
+ * with a 1 Hz telemetry cache and asserts it reaches lock.
+ */
+static void test_rb_completes_at_the_real_telemetry_cadence(void)
+{
+	model_t m;
+
+	model_init(&m, NULL);
+	run_out_realtime(&m, 400U);
+
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
+	expect_present(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
+	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+	TEST_ASSERT_TRUE(m.ctx.rb_locked);
+
+	/* No rubidium alarm at all: not RB_WINDOW, not the umbrella. */
+	TEST_ASSERT_EQUAL_UINT32(0U, pwrseq_alarms(&m.ctx) & PWRSEQ_ALARM_RB_MASK);
+	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
+	TEST_ASSERT_FALSE(m.ctx.rb_deferred);
+
+	/* And the FE was never connected before the trust gate passed. */
+	TEST_ASSERT_TRUE(idx_of(&m, PWRSEQ_ACT_DIGIPOT_WRITE_OP) <
+			 idx_of(&m, PWRSEQ_ACT_RB_VCC_GATE_EN));
+}
+
+static void test_the_window_timeouts_are_sized_against_the_telemetry_cadence(void)
+{
+	pwrseq_cfg_t cfg;
+
+	pwrseq_cfg_default(&cfg);
+
+	/*
+	 * The numbers themselves are the fix, so pin them against the cadence they
+	 * were sized for rather than against magic constants: the window must span
+	 * at least two unconditional sweeps, and the ramp must span at least one
+	 * cache refresh on top of the buck's own settling.
+	 */
+	TEST_ASSERT_TRUE(cfg.rb_window_timeout_ms >= (2U * HK_SWEEP_MS));
+	TEST_ASSERT_TRUE(cfg.rb_ramp_ms > HK_TICK_MS);
+	TEST_ASSERT_TRUE(cfg.rb_ramp_ms < cfg.rb_window_timeout_ms);
+	/* Staleness must tolerate a full sweep interval or the freshness gate would
+	 * trip on a perfectly healthy 1 Hz cache. */
+	TEST_ASSERT_TRUE(cfg.ina_max_age_ms > HK_SWEEP_MS);
+	TEST_ASSERT_TRUE(cfg.rb_stale_stall_ms > cfg.ina_max_age_ms);
+	TEST_ASSERT_TRUE(cfg.rb_auto_retry_max > 0U);
+}
+
+static void test_a_stale_rail_reading_waits_and_never_latches_rb_fault(void)
+{
+	model_t m;
+	unsigned int i;
+
+	model_init(&m, NULL);
+
+	/* Reach stage 8 with a healthy board, then freeze the telemetry cache so
+	 * the rail can no longer be observed at all. */
+	run_to_stage(&m, PWRSEQ_STAGE_8_RB, HK_TICK_MS, 400U);
+	m.no_ina_refresh = true;
+
+	/*
+	 * Hold it there for well past a window timeout but inside the stall budget.
+	 * A stale reading is UNKNOWN, not WRONG: the step keeps waiting, so no
+	 * RB_WINDOW and no RB_FAULT.
+	 */
+	for (i = 0U; i < 12U; i++) {
+		advance(&m, HK_TICK_MS);
+	}
+	TEST_ASSERT_TRUE(m.in.ina_age_ms[INA228_RAIL_VCC_RB] >
+			 m.ctx.cfg.rb_window_timeout_ms / 2U);
+	TEST_ASSERT_EQUAL_UINT32(
+		0U, pwrseq_alarms(&m.ctx) &
+			    PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_WINDOW));
+	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
+
+	/*
+	 * Past the stall budget it gives up — but as RB_TELEMETRY and a *deferral*,
+	 * never as a hard fault. That distinction is what keeps a telemetry hiccup
+	 * from costing the board its rubidium for the rest of the boot, and it lets
+	 * the sequence reach stage 9 and arm the watchdog.
+	 */
+	for (i = 0U; i < 40U; i++) {
+		advance(&m, HK_TICK_MS);
+	}
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_TELEMETRY)) != 0U);
+	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
+	TEST_ASSERT_TRUE(m.ctx.rb_deferred);
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
+	TEST_ASSERT_TRUE(pwrseq_stage(&m.ctx) >= PWRSEQ_STAGE_9_ARM);
+	TEST_ASSERT_TRUE(pwrseq_wdt_armed(&m.ctx));
+
+	/* RB_TELEMETRY is not in the hard-fault set, so it must not have raised
+	 * the umbrella. */
+	TEST_ASSERT_EQUAL_UINT32(
+		0U, pwrseq_alarms(&m.ctx) &
+			    PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_FAULT));
+}
+
+static void test_the_trust_gate_retries_before_it_gives_up(void)
+{
+	model_t m;
+	unsigned int i;
+
+	model_init(&m, NULL);
+
+	/*
+	 * A rail that settles late: the operating window is not satisfied on the
+	 * first pass. Step 8.13d must retry rather than latch, because the commonest
+	 * reason for it to be unsatisfied is a rail still finding its setpoint.
+	 */
+	m.force_op_rail_mv = 4515; /* stuck at safe-low, i.e. out of the op window */
+	run_to_stage(&m, PWRSEQ_STAGE_8_RB, HK_TICK_MS, 400U);
+
+	/* Let 8.13d time out once, then let the rail come good. */
+	for (i = 0U; i < 20U; i++) {
+		advance(&m, HK_TICK_MS);
+	}
+	TEST_ASSERT_TRUE(m.ctx.retries > 0U);
+	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
+
+	m.force_op_rail_mv = 0; /* the buck finds its setpoint */
+	run_out_realtime(&m, 400U);
+
+	expect_present(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
+}
+
+static void test_a_failed_rb_stage_is_retried_automatically_and_bounded(void)
+{
+	model_t m;
+	unsigned int i;
+
+	model_init(&m, NULL);
+	/* A rail that never reaches the operating setpoint: a genuine hard fault. */
+	m.force_op_rail_mv = 20000; /* above rb_vmax_mv, so the vmax gate refuses */
+
+	run_out_realtime(&m, 400U);
+	TEST_ASSERT_TRUE(pwrseq_rb_fault(&m.ctx));
+	TEST_ASSERT_FALSE(m.ctx.rb_gated);
+	TEST_ASSERT_TRUE(pwrseq_stage(&m.ctx) >= PWRSEQ_STAGE_9_ARM);
+
+	/*
+	 * The retry path exists and is reachable. Previously abandon_stage() was the
+	 * end of it: pwrseq_rb_retry() had no caller anywhere in the firmware, so
+	 * one bad window meant no rubidium until the next reboot.
+	 */
+	for (i = 0U; i < 2000U; i++) {
+		advance(&m, m.ctx.cfg.rb_auto_retry_delay_ms / 4U);
+		if (pwrseq_rb_auto_retries(&m.ctx) >=
+		    m.ctx.cfg.rb_auto_retry_max) {
+			break;
+		}
+	}
+	TEST_ASSERT_EQUAL_UINT8(m.ctx.cfg.rb_auto_retry_max,
+				pwrseq_rb_auto_retries(&m.ctx));
+
+	/* Bounded: it does not keep re-powering a rail that is genuinely wrong. */
+	for (i = 0U; i < 200U; i++) {
+		advance(&m, m.ctx.cfg.rb_auto_retry_delay_ms);
+	}
+	TEST_ASSERT_EQUAL_UINT8(m.ctx.cfg.rb_auto_retry_max,
+				pwrseq_rb_auto_retries(&m.ctx));
+	TEST_ASSERT_FALSE(m.ctx.rb_gated);
+
+	/* An operator retry is still available on top of the automatic budget. */
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_rb_retry(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
+}
+
+/* ----------------------------------------- F9: a retry must drop a live Rb */
+
+static void test_rb_retry_shuts_down_a_live_rubidium_first(void)
+{
+	model_t m;
+	size_t base;
+	int gate_dis;
+	int pwr_dis;
+	int write_safe;
+
+	model_init(&m, NULL);
+	run_out_realtime(&m, 400U);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
+
+	base = m.log_len;
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_rb_retry(&m.ctx, m.in.mono_ms));
+	drain(&m);
+
+	/*
+	 * MEDIUM-2. Re-entering stage 8 commands the rail back to the safe-low
+	 * precharge point, so the FE must be disconnected and the buck disabled
+	 * BEFORE that happens — otherwise the FE browns out at ~4.5 V, loses lock
+	 * and needs a full re-warm, and with real telemetry latency the precharge
+	 * window then fails against a rail on its way down and raises a spurious
+	 * RB_WINDOW hard fault.
+	 */
+	TEST_ASSERT_FALSE(m.ctx.rb_gated);
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
+
+	gate_dis = idx_of_from(&m, PWRSEQ_ACT_RB_VCC_GATE_DIS, base);
+	pwr_dis = idx_of_from(&m, PWRSEQ_ACT_RB_PWR_DIS, base);
+	TEST_ASSERT_TRUE_MESSAGE(gate_dis >= 0, "no gate-off before the retry");
+	TEST_ASSERT_TRUE_MESSAGE(pwr_dis >= 0, "no supply-off before the retry");
+	TEST_ASSERT_TRUE_MESSAGE(gate_dis < pwr_dis, "load must drop before supply");
+
+	/* And the safe-code write comes after both. */
+	pump(&m);
+	write_safe = idx_of_from(&m, PWRSEQ_ACT_DIGIPOT_WRITE, base);
+	TEST_ASSERT_TRUE(write_safe > pwr_dis);
+
+	/* The whole guarded sequence runs again and gets back to lock. */
+	run_out_realtime(&m, 400U);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
+}
+
+static void test_restart_stage_also_drops_a_live_rubidium(void)
+{
+	model_t m;
+	size_t base;
+
+	model_init(&m, NULL);
+	run_out_realtime(&m, 400U);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+
+	/* Any stage at or below 8 re-traverses the guarded sequence. */
+	base = m.log_len;
+	TEST_ASSERT_EQUAL_INT(0,
+			      pwrseq_restart_stage(&m.ctx, PWRSEQ_STAGE_5_GNSS,
+						   m.in.mono_ms));
+	drain(&m);
+	TEST_ASSERT_FALSE(m.ctx.rb_gated);
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
+	TEST_ASSERT_TRUE(idx_of_from(&m, PWRSEQ_ACT_RB_VCC_GATE_DIS, base) >= 0);
+
+	/* Stage 9 does not touch the rubidium, so it is left alone. */
+	run_out_realtime(&m, 400U);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+	base = m.log_len;
+	TEST_ASSERT_EQUAL_INT(0,
+			      pwrseq_restart_stage(&m.ctx, PWRSEQ_STAGE_9_ARM,
+						   m.in.mono_ms));
+	drain(&m);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+	TEST_ASSERT_EQUAL_INT(-1, idx_of_from(&m, PWRSEQ_ACT_RB_VCC_GATE_DIS, base));
+}
+
+/* --------------------------------- F6: the shed ladder has an actuator now */
+
+static void test_thermal_rung_2_sheds_the_rubidium(void)
+{
+	model_t m;
+	size_t base;
+	unsigned int i;
+
+	model_init(&m, NULL);
+	run_out_realtime(&m, 400U);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+	base = m.log_len;
+
+	/*
+	 * thermal_out_t::request_rb_shed had no consumer at all: a stalled fan past
+	 * the shed threshold produced an alarm bit, a trap and a red LED while the
+	 * ~12 W rubidium kept running. It now drives the ladder.
+	 */
+	m.in.thermal_shed_rb = true;
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_RB,
+			      pwrseq_shed_target(&m.ctx, &m.in));
+
+	for (i = 0U; i < 12U; i++) {
+		advance(&m, HK_TICK_MS);
+		if (pwrseq_shed_level(&m.ctx) == PWRSEQ_SHED_RB) {
+			break;
+		}
+	}
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_RB, pwrseq_shed_level(&m.ctx));
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
+	TEST_ASSERT_FALSE(m.ctx.rb_gated);
+
+	/* The ladder walked down in the documented order: display, panel, Rb. */
+	TEST_ASSERT_TRUE(idx_of_from(&m, PWRSEQ_ACT_DISP_DIS, base) <
+			 idx_of_from(&m, PWRSEQ_ACT_PANEL_LED_DIS, base));
+	TEST_ASSERT_TRUE(idx_of_from(&m, PWRSEQ_ACT_PANEL_LED_DIS, base) <
+			 idx_of_from(&m, PWRSEQ_ACT_RB_PWR_DIS, base));
+
+	/* Releasing the rung (thermal's own hysteresis) restores, and the rubidium
+	 * comes back through the guarded sequence, never a bare RB_PWR_EN. */
+	m.in.thermal_shed_rb = false;
+	for (i = 0U; i < 400U; i++) {
+		advance(&m, HK_TICK_MS);
+		if (pwrseq_shed_level(&m.ctx) == PWRSEQ_SHED_NONE) {
+			break;
+		}
+	}
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_NONE, pwrseq_shed_level(&m.ctx));
+	run_out_realtime(&m, 400U);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+	TEST_ASSERT_TRUE(idx_of_from(&m, PWRSEQ_ACT_DIGIPOT_WRITE, base) >= 0);
+}
+
+static void test_thermal_rung_3_cold_cycles_the_board_after_a_confirm_dwell(void)
+{
+	model_t m;
+	unsigned int i;
+
+	model_init(&m, NULL);
+	run_out_realtime(&m, 400U);
+
+	/* One glitched sample must not cold-cycle a grandmaster. */
+	m.in.thermal_poe_kill = true;
+	advance(&m, HK_TICK_MS);
+	expect_absent(&m, PWRSEQ_ACT_POE_KILL);
+	m.in.thermal_poe_kill = false;
+	advance(&m, HK_TICK_MS);
+	expect_absent(&m, PWRSEQ_ACT_POE_KILL);
+
+	/* A sustained request does. pwrseq_poe_kill() had no caller either, so
+	 * nothing on the board could act on rung 3 at all. */
+	m.in.thermal_poe_kill = true;
+	for (i = 0U; i < 40U; i++) {
+		advance(&m, HK_TICK_MS);
+	}
+	expect_present(&m, PWRSEQ_ACT_POE_KILL);
+	TEST_ASSERT_TRUE(m.ctx.kill_armed);
+	TEST_ASSERT_EQUAL_UINT32(1U, count_of(&m, PWRSEQ_ACT_POE_KILL));
+}
+
+static void test_sustained_poe_pressure_walks_the_ladder_and_releases(void)
+{
+	model_t m;
+	unsigned int i;
+
+	model_init(&m, NULL);
+	run_out_realtime(&m, 400U);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_NONE, pwrseq_shed_level(&m.ctx));
+
+	/* Over budget: spec §10.3's ladder, display first. */
+	m.in.poe_measured_mw = m.in.poe_granted_mw + 1000U;
+	for (i = 0U; i < 60U; i++) {
+		advance(&m, HK_TICK_MS);
+		if (pwrseq_shed_level(&m.ctx) >= PWRSEQ_SHED_DISPLAY) {
+			break;
+		}
+	}
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_DISPLAY, pwrseq_shed_level(&m.ctx));
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_POE_BUDGET)) == 0U);
+
+	/* Still over budget after the display went: the next rung. */
+	for (i = 0U; i < 60U; i++) {
+		advance(&m, HK_TICK_MS);
+		if (pwrseq_shed_level(&m.ctx) >= PWRSEQ_SHED_PANEL_LED) {
+			break;
+		}
+	}
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_PANEL_LED, pwrseq_shed_level(&m.ctx));
+
+	/* Headroom returns: release one rung per restore dwell, with hysteresis —
+	 * PWRSEQ_ALARM_POE_BUDGET and the deferral can now actually resolve. */
+	m.in.poe_measured_mw = 14000U;
+	for (i = 0U; i < 400U; i++) {
+		advance(&m, HK_TICK_MS);
+		if (pwrseq_shed_level(&m.ctx) == PWRSEQ_SHED_NONE) {
+			break;
+		}
+	}
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_NONE, pwrseq_shed_level(&m.ctx));
+	expect_present(&m, PWRSEQ_ACT_DISP_EN);
+}
+
+static void test_a_headless_unit_does_not_gain_a_display_by_restoring(void)
+{
+	pwrseq_ctx_t ctx;
+	pwrseq_act_t a;
+	unsigned int enables = 0U;
+
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_init(&ctx, NULL));
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_start(&ctx, 0U));
+
+	/* Shed down two rungs, then unwind them with ui_wanted false. */
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_step(&ctx, 0U));
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_step(&ctx, 0U));
+	while (pwrseq_action_get(&ctx, &a) == 0) {
+	}
+
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_track(&ctx, PWRSEQ_SHED_DISPLAY, false,
+						   100U));
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_track(&ctx, PWRSEQ_SHED_NONE, false,
+						   200U));
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_NONE, pwrseq_shed_level(&ctx));
+
+	while (pwrseq_action_get(&ctx, &a) == 0) {
+		if ((a.action == PWRSEQ_ACT_DISP_EN) ||
+		    (a.action == PWRSEQ_ACT_PANEL_LED_EN)) {
+			enables++;
+		}
+	}
+	TEST_ASSERT_EQUAL_UINT32(0U, enables);
+
+	TEST_ASSERT_EQUAL_INT(-EALREADY,
+			      pwrseq_shed_track(&ctx, PWRSEQ_SHED_NONE, false, 300U));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      pwrseq_shed_track(NULL, PWRSEQ_SHED_NONE, false, 0U));
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -2772,6 +3200,19 @@ int main(void)
 	RUN_TEST(test_a_rail_excursion_between_gating_and_lock_aborts_stage_8);
 	RUN_TEST(test_an_over_voltage_during_the_lock_wait_aborts_stage_8);
 	RUN_TEST(test_settle_delays_are_observed);
+
+	RUN_TEST(test_rb_completes_at_the_real_telemetry_cadence);
+	RUN_TEST(test_the_window_timeouts_are_sized_against_the_telemetry_cadence);
+	RUN_TEST(test_a_stale_rail_reading_waits_and_never_latches_rb_fault);
+	RUN_TEST(test_the_trust_gate_retries_before_it_gives_up);
+	RUN_TEST(test_a_failed_rb_stage_is_retried_automatically_and_bounded);
+	RUN_TEST(test_rb_retry_shuts_down_a_live_rubidium_first);
+	RUN_TEST(test_restart_stage_also_drops_a_live_rubidium);
+
+	RUN_TEST(test_thermal_rung_2_sheds_the_rubidium);
+	RUN_TEST(test_thermal_rung_3_cold_cycles_the_board_after_a_confirm_dwell);
+	RUN_TEST(test_sustained_poe_pressure_walks_the_ladder_and_releases);
+	RUN_TEST(test_a_headless_unit_does_not_gain_a_display_by_restoring);
 
 	RUN_TEST(test_shed_ladder_order_and_exhaustion);
 	RUN_TEST(test_restoring_the_rubidium_re_runs_the_guarded_sequence);

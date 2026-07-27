@@ -411,6 +411,37 @@ int ui_surface_hint(ui_surface_t *s, const ui_hint_t *h)
 	    h->kind >= (uint8_t)UI_HINT__COUNT) {
 		return -EINVAL;
 	}
+
+	/*
+	 * Geometry validation. Every text accessor on this surface clips, so page
+	 * code is free to compose past the edge and let the surface sort it out —
+	 * but a hint is not text. It is a rectangle handed to the glue, which
+	 * rasterises it with pointer arithmetic derived from row/col/len
+	 * (src/zephyr/ui/ui_display.c). An out-of-range hint would therefore be
+	 * accepted here and turn into an out-of-bounds framebuffer write there, a
+	 * long way from the page that produced it. Rejecting it at the seam keeps
+	 * the invariant where it can be tested.
+	 *
+	 * BIGNUM additionally occupies row + 1, so it needs two rows in hand.
+	 */
+	if (h->row >= s->rows) {
+		return -EDOM;
+	}
+	if ((h->kind == (uint8_t)UI_HINT_BIGNUM) &&
+	    ((uint8_t)(h->row + 1u) >= s->rows)) {
+		return -EDOM;
+	}
+	if (h->col >= s->cols) {
+		return -EDOM;
+	}
+	/* len is a count, so col + len is the exclusive right edge. */
+	if (((uint32_t)h->col + (uint32_t)h->len) > (uint32_t)s->cols) {
+		return -EDOM;
+	}
+	if (h->kind == (uint8_t)UI_HINT_PROGRESS && h->value > 1000u) {
+		return -EDOM;
+	}
+
 	if (s->hint_count >= (uint8_t)UI_SURF_MAX_HINTS) {
 		s->hint_dropped++;
 		return -ENOSPC;
@@ -1036,6 +1067,16 @@ static void nav_enter(ui_ctx_t *ctx)
 				    (int32_t)ctx->alarm_id[f->sel]);
 		}
 		break;
+	case UI_PAGE_SKYPLOT:
+		/*
+		 * Cycle the polar plot and the numeric table (§6.3). Descending
+		 * from a leaf page previously did nothing, so this adds a binding
+		 * rather than changing one — FN still opens the menu from here,
+		 * exactly as it does from every other page.
+		 */
+		ctx->sky_view = (uint8_t)((ctx->sky_view + 1u) %
+					  (uint8_t)UI_SKY_VIEW__COUNT);
+		break;
 	default:
 		break;
 	}
@@ -1611,6 +1652,18 @@ static void page_home(const quality_block_t *q, const ui_health_t *h,
  * Fill @p out with the indices of the @p want strongest satellites by C/N0.
  * Partial selection sort over a bounded array — no allocation, no qsort.
  */
+const char *ui_sky_view_name(uint8_t v)
+{
+	switch (v) {
+	case (uint8_t)UI_SKY_VIEW_PLOT:
+		return "PLOT";
+	case (uint8_t)UI_SKY_VIEW_TABLE:
+		return "TABLE";
+	default:
+		return "?";
+	}
+}
+
 static uint8_t sky_top(const ui_health_t *h, uint8_t *out, uint8_t want)
 {
 	uint8_t taken[UI_MAX_SV];
@@ -1642,17 +1695,92 @@ static uint8_t sky_top(const ui_health_t *h, uint8_t *out, uint8_t want)
 	return n;
 }
 
+/*
+ * The polar view. Everything below the summary lines is left blank and claimed
+ * by a UI_HINT_SKYPLOT: the plot is pixels, and pixels are the glue's business
+ * (core/ui/skyplot.h renders them, this decides where).
+ */
+static void page_sky_plot(const ui_health_t *h, ui_surface_t *s, uint8_t r,
+			  uint8_t last, uint8_t view)
+{
+	ui_hint_t hint;
+	uint8_t rows;
+
+	if (r > last) {
+		return;
+	}
+	rows = (uint8_t)((last - r) + 1u);
+
+	(void)ui_surface_fill(s, r, 0u, (size_t)s->cols * (size_t)rows, ' ',
+			      UI_ATTR_NORMAL);
+
+	(void)memset(&hint, 0, sizeof(hint));
+	hint.kind = (uint8_t)UI_HINT_SKYPLOT;
+	hint.row = r;
+	hint.col = 0u;
+	/* `len` is a ROW count for this hint kind — see ui.h. */
+	hint.len = rows;
+	hint.attr = (h->ant_state == (uint8_t)UI_ANT_OK) ? UI_ATTR_NORMAL
+							: UI_ATTR_WARN;
+	hint.value = view;
+	(void)ui_surface_hint(s, &hint);
+}
+
+static void page_sky_table(const ui_health_t *h, ui_surface_t *s, uint8_t r,
+			   uint8_t last)
+{
+	char buf[64];
+	sb_t sb;
+	uint8_t top_idx[UI_SKY_TOP_N];
+	uint8_t ntop;
+	uint8_t i;
+
+	sb_init(&sb, buf, sizeof(buf));
+	sb_str(&sb, "SYS");
+	sb_rjust(&sb, "SVID", 10u);
+	sb_rjust(&sb, "AZ", 16u);
+	sb_rjust(&sb, "EL", 22u);
+	sb_rjust(&sb, "C/N0", 29u);
+	sb_rjust(&sb, "USE", 35u);
+	(void)ui_surface_put(s, r, 1u, buf, UI_ATTR_DIM);
+
+	ntop = sky_top(h, top_idx, (uint8_t)UI_SKY_TOP_N);
+	for (i = 0u; i < ntop; i++) {
+		const ui_sv_t *sv = &h->sv[top_idx[i]];
+
+		r++;
+		if (r > last) {
+			break;
+		}
+		sb_init(&sb, buf, sizeof(buf));
+		sb_str(&sb, ui_gnss_sys_name(
+				    (sv->sys < (uint8_t)UI_GNSS__COUNT)
+					    ? sv->sys
+					    : (uint8_t)UI_GNSS_OTHER));
+		sb_rjust_i(&sb, sv->svid, 10u);
+		sb_rjust_i(&sb, sv->azim_deg, 16u);
+		sb_rjust_i(&sb, sv->elev_deg, 22u);
+		sb_rjust_i(&sb, sv->cno_dbhz, 29u);
+		sb_rjust(&sb, sv->used ? "YES" : "-", 35u);
+		(void)ui_surface_put(s, r, 1u, buf,
+				     sv->used ? UI_ATTR_OK : UI_ATTR_DIM);
+	}
+
+	if (ntop == 0u && (uint8_t)(r + 1u) <= last) {
+		(void)ui_surface_put(s, (uint8_t)(r + 1u), 1u,
+				     "(no satellite data)", UI_ATTR_DIM);
+	}
+}
+
 static void page_sky(const quality_block_t *q, const ui_health_t *h,
-		     ui_surface_t *s)
+		     ui_surface_t *s, uint8_t view)
 {
 	char buf[64];
 	sb_t sb;
 	uint8_t used[UI_GNSS__COUNT];
 	uint8_t vis[UI_GNSS__COUNT];
-	uint8_t top_idx[UI_SKY_TOP_N];
 	uint8_t count = (h->sv_count > (uint8_t)UI_MAX_SV) ? (uint8_t)UI_MAX_SV
 							   : h->sv_count;
-	uint8_t ntop;
 	uint8_t i;
 	uint8_t r = (uint8_t)BODY_TOP;
 	uint8_t last = body_bottom(s, false);
@@ -1716,6 +1844,7 @@ static void page_sky(const quality_block_t *q, const ui_health_t *h,
 		sb_u32(&sb, h->survey_acc_mm);
 		sb_str(&sb, " mm");
 	}
+
 	(void)ui_surface_put(s, r, 1u, buf,
 			     (h->ant_state == (uint8_t)UI_ANT_OK)
 				     ? UI_ATTR_NORMAL
@@ -1725,40 +1854,10 @@ static void page_sky(const quality_block_t *q, const ui_health_t *h,
 	draw_rule(s, r);
 
 	r++;
-	sb_init(&sb, buf, sizeof(buf));
-	sb_str(&sb, "SYS");
-	sb_rjust(&sb, "SVID", 10u);
-	sb_rjust(&sb, "AZ", 16u);
-	sb_rjust(&sb, "EL", 22u);
-	sb_rjust(&sb, "C/N0", 29u);
-	sb_rjust(&sb, "USE", 35u);
-	(void)ui_surface_put(s, r, 1u, buf, UI_ATTR_DIM);
-
-	ntop = sky_top(h, top_idx, (uint8_t)UI_SKY_TOP_N);
-	for (i = 0u; i < ntop; i++) {
-		const ui_sv_t *sv = &h->sv[top_idx[i]];
-
-		r++;
-		if (r > last) {
-			break;
-		}
-		sb_init(&sb, buf, sizeof(buf));
-		sb_str(&sb, ui_gnss_sys_name(
-				    (sv->sys < (uint8_t)UI_GNSS__COUNT)
-					    ? sv->sys
-					    : (uint8_t)UI_GNSS_OTHER));
-		sb_rjust_i(&sb, sv->svid, 10u);
-		sb_rjust_i(&sb, sv->azim_deg, 16u);
-		sb_rjust_i(&sb, sv->elev_deg, 22u);
-		sb_rjust_i(&sb, sv->cno_dbhz, 29u);
-		sb_rjust(&sb, sv->used ? "YES" : "-", 35u);
-		(void)ui_surface_put(s, r, 1u, buf,
-				     sv->used ? UI_ATTR_OK : UI_ATTR_DIM);
-	}
-
-	if (ntop == 0u && (uint8_t)(r + 1u) <= last) {
-		(void)ui_surface_put(s, (uint8_t)(r + 1u), 1u,
-				     "(no satellite data)", UI_ATTR_DIM);
+	if (view == (uint8_t)UI_SKY_VIEW_TABLE) {
+		page_sky_table(h, s, r, last);
+	} else {
+		page_sky_plot(h, s, r, last, view);
 	}
 }
 
@@ -2367,7 +2466,7 @@ int ui_render(ui_ctx_t *ctx, const quality_block_t *q, const ui_health_t *h,
 		draw_pager(ctx, s);
 		break;
 	case UI_PAGE_SKYPLOT:
-		page_sky(q, h, s);
+		page_sky(q, h, s, ctx->sky_view);
 		break;
 	case UI_PAGE_CLOCKS:
 		page_clocks(q, h, s);

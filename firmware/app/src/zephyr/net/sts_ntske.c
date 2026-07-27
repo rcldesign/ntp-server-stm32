@@ -284,8 +284,8 @@ static int make_self_signed_cert(void)
 	int len;
 	int rc;
 
-	mbedtls_pk_init(&srv_key);
-	mbedtls_x509_crt_init(&srv_cert);
+	/* srv_key / srv_cert are initialised by tls_setup(), so tls_teardown()
+	 * can free them however early this fails. */
 	mbedtls_x509write_crt_init(&w);
 	mbedtls_mpi_init(&serial);
 
@@ -347,6 +347,24 @@ out:
 	return rc;
 }
 
+/**
+ * Release everything tls_setup() may have initialised.
+ *
+ * Every tls_setup() failure path used to return straight to sts_ntske_start()
+ * leaving the entropy source, the DRBG, the generated key and the certificate
+ * behind. One boot's worth is not a leak that grows, but it is ~2 KB of heap and
+ * a live entropy context held by a subsystem that then reports itself
+ * unavailable, and the key material outlives its only user (F13).
+ */
+static void tls_teardown(void)
+{
+	mbedtls_ssl_config_free(&tls_conf);
+	mbedtls_x509_crt_free(&srv_cert);
+	mbedtls_pk_free(&srv_key);
+	mbedtls_ctr_drbg_free(&drbg);
+	mbedtls_entropy_free(&entropy);
+}
+
 static int tls_setup(void)
 {
 	int rc;
@@ -354,25 +372,29 @@ static int tls_setup(void)
 	mbedtls_ssl_config_init(&tls_conf);
 	mbedtls_entropy_init(&entropy);
 	mbedtls_ctr_drbg_init(&drbg);
+	/* Initialised here too, so tls_teardown() is safe on every failure path
+	 * including one taken before make_self_signed_cert() runs. */
+	mbedtls_pk_init(&srv_key);
+	mbedtls_x509_crt_init(&srv_cert);
 
 	rc = mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
 				   (const uint8_t *)"sts1000-ntske", 13);
 	if (rc != 0) {
 		LOG_ERR("ctr_drbg_seed: -0x%04x", (unsigned int)-rc);
-		return -EIO;
+		goto fail;
 	}
 
 	rc = make_self_signed_cert();
 	if (rc != 0) {
 		LOG_ERR("cert generation: -0x%04x", (unsigned int)-rc);
-		return -EIO;
+		goto fail;
 	}
 
 	rc = mbedtls_ssl_config_defaults(&tls_conf, MBEDTLS_SSL_IS_SERVER,
 					 MBEDTLS_SSL_TRANSPORT_STREAM,
 					 MBEDTLS_SSL_PRESET_DEFAULT);
 	if (rc != 0) {
-		return -EIO;
+		goto fail;
 	}
 
 	mbedtls_ssl_conf_min_tls_version(&tls_conf, MBEDTLS_SSL_VERSION_TLS1_3);
@@ -383,13 +405,17 @@ static int tls_setup(void)
 	rc = mbedtls_ssl_conf_own_cert(&tls_conf, &srv_cert, &srv_key);
 	if (rc != 0) {
 		LOG_ERR("conf_own_cert: -0x%04x", (unsigned int)-rc);
-		return -EIO;
+		goto fail;
 	}
 	rc = mbedtls_ssl_conf_alpn_protocols(&tls_conf, alpn_list);
 	if (rc != 0) {
-		return -EIO;
+		goto fail;
 	}
 	return 0;
+
+fail:
+	tls_teardown();
+	return -EIO;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -634,9 +660,7 @@ static void ke_loop(void *a, void *b, void *c)
 		int rc = zsock_poll(&pfd, 1, 500);
 		int cfd;
 
-		if (live_id >= 0) {
-			sts_liveness_feed(live_id);
-		}
+		conn_alive();
 		if (rc <= 0 || (pfd.revents & ZSOCK_POLLIN) == 0) {
 			continue;
 		}
@@ -648,7 +672,12 @@ static void ke_loop(void *a, void *b, void *c)
 		K_SPINLOCK(&st_lock) {
 			st.accepted++;
 		}
+		/* Serialised by construction: exactly one handshake is ever in
+		 * flight, and handle_conn() feeds liveness from inside its own
+		 * loops so this thread's liveness no longer depends on the peer
+		 * making progress (F4). */
 		handle_conn(cfd);
+		k_yield();
 	}
 }
 
@@ -688,15 +717,19 @@ int sts_ntske_start(void)
 	rc = ntske_init(&ke, &cfg);
 	if (rc != 0) {
 		LOG_ERR("ntske_init: %d", rc);
+		tls_teardown();
 		return rc;
 	}
 
 	listen_fd = open_listener();
 	if (listen_fd < 0) {
 		LOG_ERR("NTS-KE listen on :%u failed: %d", ke_port, listen_fd);
+		tls_teardown();
 		return listen_fd;
 	}
 
+	/* Registered only now that the thread is about to exist: a registered
+	 * participant that never feeds withholds the watchdog kick. */
 	live_id = sts_liveness_register("ntske");
 	k_thread_create(&ke_thread, ke_stack, K_THREAD_STACK_SIZEOF(ke_stack),
 			ke_loop, NULL, NULL, NULL, NTSKE_PRIORITY, 0,

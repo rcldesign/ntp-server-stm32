@@ -43,6 +43,27 @@
  * carries PTP_ADDR_PDELAY for completeness; a descriptor naming it is dropped
  * here and counted, because emitting a Pdelay frame from an E2E-only engine
  * would be a bug worth seeing rather than a packet worth sending.
+ *
+ * ---------------------------------------------------------------------------
+ * Unicast replies, and the requester table
+ * ---------------------------------------------------------------------------
+ *
+ * The engine answers a unicast Delay_Req with PTP_ADDR_UNICAST_PEER and sets the
+ * unicastFlag, exactly as §13.3.1 requires. It cannot address the reply itself:
+ * ptp_tx_desc_t::peer is a PortIdentity (a clockIdentity plus a port number),
+ * not a network address, because core/ptp is transport-agnostic by design.
+ *
+ * So this file keeps `peers[]`: the network source address of each
+ * sourcePortIdentity that has recently sent us a Delay_Req, and honours the hint
+ * against it. Ignoring the hint and multicasting the reply — which is what this
+ * file used to do — was wrong twice over (F7): the requester never receives a
+ * reply it can use, every other node on the segment receives a unicast-flagged
+ * Delay_Resp it must discard, and N unicast requests per second become N
+ * multicast frames per second flooding the whole link.
+ *
+ * The same table enforces logMinDelayReqInterval per requester (§9.5.11 lets the
+ * responder ignore requests above the announced rate), so a single source cannot
+ * turn its own request rate into our transmit rate.
  */
 
 #include <errno.h>
@@ -73,10 +94,54 @@ LOG_MODULE_REGISTER(sts_ptp, CONFIG_STS1000_LOG_LEVEL);
  *  (7.8 ms); 5 ms keeps the scheduler honest at that rate. */
 #define PTP_STEP_MS 5
 
+/**
+ * PDUs handled per pass over one ready socket before returning to the loop.
+ *
+ * zsock_poll() returns immediately while data is queued and Zephyr does not
+ * timeslice across priorities, so an uncapped drain lets a PTP flood keep this
+ * priority-5 thread permanently runnable and starve `housekeeping` (14) — the
+ * only caller of the watchdog kick, whose starvation cold-cycles the board
+ * (F12). Small, because this thread is the highest-priority network service and
+ * the engine step wants to run every 5 ms regardless.
+ */
+#define PTP_RX_BUDGET 8U
+
+/** Requesters remembered for unicast replies and per-peer rate limiting. */
+#define PTP_PEERS_MAX 16U
+
+/* PTP common header offsets (IEEE 1588-2019 §13.3). */
+#define PTP_OFF_MSGTYPE 0U
+#define PTP_OFF_SRC_PORT_ID 20U
+#define PTP_SRC_PORT_ID_LEN 10U
+#define PTP_HDR_MIN_LEN 34U
+
 static ptp_port_ctx_t port;
 static ptp_cfg_t port_cfg;
 static bool running;
 static uint8_t transport;
+
+/**
+ * One recent Delay_Req source.
+ *
+ * `id` is the raw 10 octets of the on-wire sourcePortIdentity, compared as
+ * bytes: that avoids depending on ptp_port_id_t's in-memory padding and matches
+ * exactly what the engine hands back in ptp_tx_desc_t::peer once encoded.
+ */
+static struct {
+	uint8_t id[PTP_SRC_PORT_ID_LEN];
+	struct sockaddr_storage addr; /* UDP transports */
+	socklen_t addr_len;
+	uint8_t mac[6];               /* L2 transport */
+	uint64_t last_req_ms;         /* last request we *accepted* */
+	uint64_t last_seen_ms;        /* for eviction */
+	bool used;
+	bool have_mac;
+} peers[PTP_PEERS_MAX];
+static struct k_mutex peers_lock;
+
+/** Snapshot published by the PTP thread for the management threads to read. */
+static sts_ptp_stats_t pub_stats;
+static struct k_spinlock pub_lock;
 
 static int ev_fd = -1;  /* event: 319, hardware-timestamped */
 static int gen_fd = -1; /* general: 320 */
@@ -105,10 +170,160 @@ static int tai_ns_cb(void *ctx, uint64_t *out_ns)
 	return sts_time_tai_ns(out_ns);
 }
 
+/* ------------------------------------------------------------------------- */
+/* requester table                                                           */
+/* ------------------------------------------------------------------------- */
+
+/** Encode a ptp_port_id_t the way §13.3 puts it on the wire. */
+static void port_id_encode(const ptp_port_id_t *pid, uint8_t out[PTP_SRC_PORT_ID_LEN])
+{
+	memcpy(out, pid->clock_id.id, PTP_CLOCK_ID_LEN);
+	bytes_put_be16(&out[PTP_CLOCK_ID_LEN], pid->port_number);
+}
+
+/** Minimum spacing between Delay_Reqs we will answer, from logMinDelayReq. */
+static uint64_t delay_req_min_gap_ms(void)
+{
+	int8_t lg = port_cfg.log_min_delay_req_interval;
+
+	if (lg >= 0) {
+		if (lg > 10) {
+			lg = 10; /* 1024 s; beyond this the shift is pointless */
+		}
+		return UINT64_C(1000) << (unsigned int)lg;
+	}
+	if (lg < -10) {
+		lg = -10;
+	}
+	return UINT64_C(1000) >> (unsigned int)(-lg);
+}
+
+/** Find @p id, or claim a slot for it (evicting the least recently seen). */
+static size_t peer_slot(const uint8_t id[PTP_SRC_PORT_ID_LEN], uint64_t now_ms)
+{
+	size_t free_slot = PTP_PEERS_MAX;
+	size_t oldest = 0U;
+	uint64_t oldest_ms = UINT64_MAX;
+	size_t i;
+
+	for (i = 0U; i < PTP_PEERS_MAX; i++) {
+		if (peers[i].used &&
+		    memcmp(peers[i].id, id, PTP_SRC_PORT_ID_LEN) == 0) {
+			return i;
+		}
+		if (!peers[i].used) {
+			if (free_slot == PTP_PEERS_MAX) {
+				free_slot = i;
+			}
+		} else if (peers[i].last_seen_ms < oldest_ms) {
+			oldest_ms = peers[i].last_seen_ms;
+			oldest = i;
+		}
+	}
+
+	i = (free_slot != PTP_PEERS_MAX) ? free_slot : oldest;
+	memset(&peers[i], 0, sizeof(peers[i]));
+	memcpy(peers[i].id, id, PTP_SRC_PORT_ID_LEN);
+	peers[i].used = true;
+	/* Fresh entry: no accepted request yet, so the first one is allowed. */
+	peers[i].last_req_ms = 0U;
+	peers[i].last_seen_ms = now_ms;
+	return i;
+}
+
+/**
+ * Record a Delay_Req source and decide whether to answer it.
+ *
+ * @return true when the request is inside the announced rate and the engine
+ *         should see it.
+ */
+static bool peer_admit_delay_req(const uint8_t *pdu, size_t pdu_len,
+				 const struct sockaddr *sa, socklen_t sa_len,
+				 const uint8_t *src_mac, uint64_t now_ms)
+{
+	uint64_t gap = delay_req_min_gap_ms();
+	bool admit;
+	size_t i;
+
+	if (pdu_len < PTP_HDR_MIN_LEN) {
+		return false;
+	}
+
+	k_mutex_lock(&peers_lock, K_FOREVER);
+	i = peer_slot(&pdu[PTP_OFF_SRC_PORT_ID], now_ms);
+	peers[i].last_seen_ms = now_ms;
+
+	if (sa != NULL && sa_len > 0U && sa_len <= sizeof(peers[i].addr)) {
+		memcpy(&peers[i].addr, sa, sa_len);
+		peers[i].addr_len = sa_len;
+	}
+	if (src_mac != NULL) {
+		memcpy(peers[i].mac, src_mac, 6U);
+		peers[i].have_mac = true;
+	}
+
+	/*
+	 * §9.5.11: the responder may ignore a Delay_Req arriving faster than the
+	 * interval it announced. Without this a single source's request rate is
+	 * our transmit rate, which is a segment-wide amplifier when the reply is
+	 * multicast and a CPU amplifier even when it is not (F7).
+	 */
+	admit = (peers[i].last_req_ms == 0U) ||
+		((now_ms - peers[i].last_req_ms) >= gap);
+	if (admit) {
+		peers[i].last_req_ms = now_ms;
+	}
+	k_mutex_unlock(&peers_lock);
+
+	return admit;
+}
+
+/**
+ * Look up the network address last seen for @p pid.
+ *
+ * @retval 0        Found; @p out / @p out_len (or @p out_mac) are filled.
+ * @retval -ENOENT  We have never had a request from that port identity.
+ */
+static int peer_lookup(const ptp_port_id_t *pid, struct sockaddr_storage *out,
+		       socklen_t *out_len, uint8_t out_mac[6], bool *out_have_mac)
+{
+	uint8_t id[PTP_SRC_PORT_ID_LEN];
+	int rc = -ENOENT;
+	size_t i;
+
+	port_id_encode(pid, id);
+
+	k_mutex_lock(&peers_lock, K_FOREVER);
+	for (i = 0U; i < PTP_PEERS_MAX; i++) {
+		if (!peers[i].used ||
+		    memcmp(peers[i].id, id, PTP_SRC_PORT_ID_LEN) != 0) {
+			continue;
+		}
+		if (out != NULL && peers[i].addr_len > 0U) {
+			memcpy(out, &peers[i].addr, peers[i].addr_len);
+			*out_len = peers[i].addr_len;
+		}
+		if (out_mac != NULL) {
+			memcpy(out_mac, peers[i].mac, 6U);
+			*out_have_mac = peers[i].have_mac;
+		}
+		rc = 0;
+		break;
+	}
+	k_mutex_unlock(&peers_lock);
+	return rc;
+}
+
+/* ------------------------------------------------------------------------- */
+/* transmit                                                                  */
+/* ------------------------------------------------------------------------- */
+
 static int tx_udp(const ptp_tx_desc_t *d)
 {
 	struct sockaddr_in a4;
 	struct sockaddr_in6 a6;
+	struct sockaddr_storage uni;
+	socklen_t uni_len = 0U;
 	struct sockaddr *sa;
 	socklen_t slen;
 	uint16_t dport = (d->port_kind == PTP_PORT_EVENT) ? PTP_EVENT_PORT
@@ -117,6 +332,32 @@ static int tx_udp(const ptp_tx_desc_t *d)
 
 	if (fd < 0) {
 		return -ENOTCONN;
+	}
+
+	if (d->addr == PTP_ADDR_UNICAST_PEER) {
+		/*
+		 * The engine has set the unicastFlag; sending this to the
+		 * multicast group would hand every node on the segment a reply
+		 * addressed to somebody else and never reach the requester (F7).
+		 * If the requester is not in the table there is nowhere to send
+		 * it, and dropping is the only correct answer.
+		 */
+		if (peer_lookup(&d->peer, &uni, &uni_len, NULL, NULL) != 0 ||
+		    uni_len == 0U) {
+			LOG_WRN("no unicast address for the requesting port; "
+				"dropping a %s reply", "Delay_Resp");
+			return -EHOSTUNREACH;
+		}
+		if (uni.ss_family == AF_INET) {
+			((struct sockaddr_in *)&uni)->sin_port = htons(dport);
+		} else {
+			((struct sockaddr_in6 *)&uni)->sin6_port = htons(dport);
+		}
+		if (zsock_sendto(fd, d->buf, d->len, 0, (struct sockaddr *)&uni,
+				 uni_len) < 0) {
+			return -errno;
+		}
+		return 0;
 	}
 
 	if (transport == (uint8_t)PTP_TRANSPORT_UDP_IPV4) {
@@ -145,6 +386,9 @@ static int tx_l2(const ptp_tx_desc_t *d)
 {
 	struct sockaddr_ll dst;
 	const uint8_t *src = sts_net_mac();
+	uint8_t peer_mac[6];
+	bool have_mac = false;
+	const uint8_t *dst_mac = mc_l2;
 
 	if (l2_fd < 0) {
 		return -ENOTCONN;
@@ -153,7 +397,17 @@ static int tx_l2(const ptp_tx_desc_t *d)
 		return -EMSGSIZE;
 	}
 
-	memcpy(&l2frame[0], mc_l2, sizeof(mc_l2));
+	if (d->addr == PTP_ADDR_UNICAST_PEER) {
+		if (peer_lookup(&d->peer, NULL, NULL, peer_mac, &have_mac) != 0 ||
+		    !have_mac) {
+			LOG_WRN("no unicast MAC for the requesting port; "
+				"dropping a %s reply", "Delay_Resp");
+			return -EHOSTUNREACH;
+		}
+		dst_mac = peer_mac;
+	}
+
+	memcpy(&l2frame[0], dst_mac, 6U);
 	memcpy(&l2frame[6], src, 6U);
 	bytes_put_be16(&l2frame[12], NET_ETH_PTYPE_PTP);
 	memcpy(&l2frame[14], d->buf, d->len);
@@ -163,7 +417,7 @@ static int tx_l2(const ptp_tx_desc_t *d)
 	dst.sll_protocol = htons(NET_ETH_PTYPE_PTP);
 	dst.sll_ifindex = net_if_get_by_iface(sts_net_iface());
 	dst.sll_halen = 6U;
-	memcpy(dst.sll_addr, mc_l2, sizeof(mc_l2));
+	memcpy(dst.sll_addr, dst_mac, 6U);
 
 	if (zsock_sendto(l2_fd, l2frame, d->len + 14U, 0,
 			 (struct sockaddr *)&dst, sizeof(dst)) < 0) {
@@ -348,15 +602,18 @@ static uint64_t rx_stamp_from_msg(const struct msghdr *msg)
 	return 0U;
 }
 
-static void rx_one(int fd, bool event, bool l2)
+/** @return true when a PDU was read, false when the socket ran dry. */
+static bool rx_one(int fd, bool event, bool l2)
 {
 	struct sockaddr_storage peer;
 	struct iovec iov;
 	struct msghdr msg;
 	uint8_t cbuf[CMSG_SPACE(sizeof(struct net_ptp_time))];
 	const uint8_t *pdu;
+	const uint8_t *src_mac = NULL;
 	size_t pdu_len;
 	uint64_t rx_ts = 0U;
+	uint64_t now_ms;
 	ssize_t n;
 
 	memset(&msg, 0, sizeof(msg));
@@ -371,7 +628,7 @@ static void rx_one(int fd, bool event, bool l2)
 
 	n = zsock_recvmsg(fd, &msg, 0);
 	if (n <= 0) {
-		return;
+		return false;
 	}
 
 	pdu = rxbuf;
@@ -382,11 +639,12 @@ static void rx_one(int fd, bool event, bool l2)
 		 * our own multicast comes back too and core/ptp filters it by
 		 * sourcePortIdentity (counters.rx_self). */
 		if (pdu_len <= 14U) {
-			return;
+			return true;
 		}
 		if (bytes_get_be16(&rxbuf[12]) != NET_ETH_PTYPE_PTP) {
-			return;
+			return true;
 		}
+		src_mac = &rxbuf[6]; /* the frame's source address */
 		pdu += 14U;
 		pdu_len -= 14U;
 		/* On L2 the message class is in the PDU, not in a port number. */
@@ -394,6 +652,24 @@ static void rx_one(int fd, bool event, bool l2)
 			((pdu[0] & 0x0FU) == (uint8_t)PTP_MSG_DELAY_REQ) ||
 			((pdu[0] & 0x0FU) == (uint8_t)PTP_MSG_PDELAY_REQ) ||
 			((pdu[0] & 0x0FU) == (uint8_t)PTP_MSG_PDELAY_RESP);
+	}
+
+	now_ms = sts_mono_ms();
+
+	/*
+	 * A Delay_Req is the only message that makes us transmit on demand, so it
+	 * is the only one that needs an address remembered and a rate enforced.
+	 * Both happen before the engine sees the PDU: a request over the announced
+	 * rate is simply never presented (F7).
+	 */
+	if (pdu_len >= PTP_HDR_MIN_LEN &&
+	    (pdu[PTP_OFF_MSGTYPE] & 0x0FU) == (uint8_t)PTP_MSG_DELAY_REQ) {
+		if (!peer_admit_delay_req(pdu, pdu_len,
+					  l2 ? NULL : (struct sockaddr *)&peer,
+					  l2 ? 0U : msg.msg_namelen, src_mac,
+					  now_ms)) {
+			return true;
+		}
 	}
 
 	if (event) {
@@ -411,8 +687,9 @@ static void rx_one(int fd, bool event, bool l2)
 	}
 
 	k_mutex_lock(&engine_lock, K_FOREVER);
-	(void)ptp_port_rx(&port, pdu, pdu_len, rx_ts, sts_mono_ms());
+	(void)ptp_port_rx(&port, pdu, pdu_len, rx_ts, now_ms);
 	k_mutex_unlock(&engine_lock);
+	return true;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -435,9 +712,76 @@ static void refresh_quality(void)
 		return;
 	}
 
+	/*
+	 * The §3.8 block describes the discipline loop, which locks the
+	 * oscillator's *rate* to the PPS. It says nothing about whether the MAC
+	 * counter every Sync and Follow_Up timestamp is read from has been placed
+	 * on TAI, and those are separate mechanisms on this board. With the
+	 * counter unplaced the block still reports LOCKED, so this port announced
+	 * clockClass 6 with timeTraceable and currentUtcOffsetValid set while
+	 * emitting 1900-era originTimestamps — and, being class 6, won the BMCA
+	 * outright against every honest clock on the segment (F1).
+	 *
+	 * So an untraceable timescale is forced to the free-running rung and every
+	 * derived claim withdrawn: no traceability, no accuracy or variance
+	 * estimate (both describe a placed clock), and no leap announcement (a
+	 * clock that does not know the date cannot know when a leap falls).
+	 * currentUtcOffset is left as core computed it — TAI − UTC really is known
+	 * from GNSS independently of whether the counter was placed.
+	 */
+	if (!sts_ptpclk_traceable()) {
+		v.sync_state = PTP_SYNC_FREERUN;
+		v.time_traceable = false;
+		v.est_accuracy_ns = 0U;
+		v.adev_tau1_e18 = 0U;
+		v.leap61 = false;
+		v.leap59 = false;
+	}
+
 	k_mutex_lock(&engine_lock, K_FOREVER);
 	(void)ptp_port_set_quality(&port, &v);
 	k_mutex_unlock(&engine_lock);
+}
+
+/* ------------------------------------------------------------------------- */
+/* published statistics                                                      */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Copy the engine's counters and quality into pub_stats.
+ *
+ * Called from the PTP thread while it holds @ref engine_lock, which is what
+ * makes the copy consistent. The management threads then read the snapshot under
+ * a spinlock instead of taking engine_lock themselves — reading `port.quality`
+ * and the counter array unlocked was a torn read (F16), and taking the engine
+ * mutex from SNMP or MCP would violate the §1.2 rule that no management thread
+ * may hold a lock on timing state.
+ */
+static void publish_stats_locked(void)
+{
+	const ptp_counters_t *c = ptp_port_counters(&port);
+	ptp_clock_quality_t cq;
+	sts_ptp_stats_t s;
+
+	memset(&s, 0, sizeof(s));
+	s.running = true;
+	if (c != NULL) {
+		s.counters = *c;
+	}
+	s.port_state = (uint8_t)ptp_port_state(&port);
+	s.alarms = ptp_port_alarms(&port);
+	s.domain = port_cfg.domain;
+	s.transport = transport;
+
+	memset(&cq, 0, sizeof(cq));
+	if (ptp_clock_quality_from_view(&port_cfg, &port.quality, &cq) == 0) {
+		s.clock_class = cq.clock_class;
+		s.clock_accuracy = cq.clock_accuracy;
+	}
+
+	K_SPINLOCK(&pub_lock) {
+		pub_stats = s;
+	}
 }
 
 /* ------------------------------------------------------------------------- */
@@ -494,11 +838,19 @@ static void ptp_loop(void *a, void *b, void *c)
 			int i;
 
 			for (i = 0; i < nfds; i++) {
+				unsigned int n;
+
 				if ((fds[i].revents & ZSOCK_POLLIN) == 0) {
 					continue;
 				}
-				rx_one(fds[i].fd, fds[i].fd == ev_fd,
-				       fds[i].fd == l2_fd);
+				/* Bounded drain; see PTP_RX_BUDGET. */
+				for (n = 0U; n < PTP_RX_BUDGET; n++) {
+					if (!rx_one(fds[i].fd,
+						    fds[i].fd == ev_fd,
+						    fds[i].fd == l2_fd)) {
+						break;
+					}
+				}
 			}
 		}
 
@@ -510,11 +862,20 @@ static void ptp_loop(void *a, void *b, void *c)
 
 		k_mutex_lock(&engine_lock, K_FOREVER);
 		(void)ptp_port_step(&port, now);
+		publish_stats_locked();
 		k_mutex_unlock(&engine_lock);
 
 		if (live_id >= 0) {
 			sts_liveness_feed(live_id);
 		}
+
+		/*
+		 * This is the highest-priority network thread; without an explicit
+		 * yield a sustained PTP flood keeps it runnable and starves
+		 * `housekeeping`, whose starvation withholds the watchdog kick and
+		 * cold-cycles the board (F12).
+		 */
+		k_yield();
 	}
 }
 
@@ -524,31 +885,17 @@ static void ptp_loop(void *a, void *b, void *c)
 
 void sts_ptp_stats(sts_ptp_stats_t *out)
 {
-	const ptp_counters_t *c;
-	ptp_clock_quality_t cq;
-
 	if (out == NULL) {
 		return;
 	}
 	memset(out, 0, sizeof(*out));
-	out->running = running;
 	if (!running) {
 		return;
 	}
-
-	c = ptp_port_counters(&port);
-	if (c != NULL) {
-		out->counters = *c;
-	}
-	out->port_state = (uint8_t)ptp_port_state(&port);
-	out->alarms = ptp_port_alarms(&port);
-	out->domain = port_cfg.domain;
-	out->transport = transport;
-
-	memset(&cq, 0, sizeof(cq));
-	if (ptp_clock_quality_from_view(&port_cfg, &port.quality, &cq) == 0) {
-		out->clock_class = cq.clock_class;
-		out->clock_accuracy = cq.clock_accuracy;
+	/* The snapshot the PTP thread publishes under engine_lock; see
+	 * publish_stats_locked(). */
+	K_SPINLOCK(&pub_lock) {
+		*out = pub_stats;
 	}
 }
 
@@ -562,6 +909,7 @@ int sts_ptp_start(void)
 	}
 
 	k_mutex_init(&engine_lock);
+	k_mutex_init(&peers_lock);
 
 	ptp_cfg_defaults(&port_cfg);
 	port_cfg.domain = (uint8_t)sts_net_cfg_u64(CFG_ID_PTP_DOMAIN, 0U);

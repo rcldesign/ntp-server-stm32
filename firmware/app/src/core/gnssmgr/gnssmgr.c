@@ -1032,6 +1032,74 @@ int gnssmgr_start(gnssmgr_t *g, uint32_t mono_ms)
 	return begin_walk(g, (uint8_t)GNSSMGR_STEP_PORT, mono_ms);
 }
 
+/*
+ * Drop everything the receiver measured.
+ *
+ * Two things survive because they describe the world rather than the receiver:
+ * the stored position (a site constant) and the leap-second schedule
+ * (constellation truth, and dropping it would force NTP to advertise LI=UNSYNC
+ * for no reason). Shared by gnssmgr_notify_reset() and gnssmgr_fw_enter(),
+ * which need exactly the same invalidation for the same reason.
+ */
+static void invalidate_measurements(gnssmgr_t *g)
+{
+	g->status.time_locked = false;
+	g->status.valid = false;
+	g->pvt_seen = false;
+	g->itow_seen = false;
+	g->qerr.valid = false;
+	g->svin.valid_msg = false;
+	g->sats.valid = false;
+	(void)memset(&g->rf, 0, sizeof(g->rf));
+	g->svin_started = false;
+	alarm_set(g, GNSSMGR_ALARM_TIME_UNLOCKED, false);
+}
+
+int gnssmgr_fw_enter(gnssmgr_t *g)
+{
+	if (g == NULL) {
+		return -EINVAL;
+	}
+	if (g->state == (uint8_t)GNSSMGR_ST_FW_UPDATE) {
+		return -EBUSY;
+	}
+
+	invalidate_measurements(g);
+	/*
+	 * Drop any outstanding ACK wait. Without this, gnssmgr_step() would keep
+	 * counting down and eventually retry a VALSET into a receiver that is
+	 * sitting in a flash loader.
+	 */
+	g->awaiting_ack = false;
+	g->state = (uint8_t)GNSSMGR_ST_FW_UPDATE;
+	return 0;
+}
+
+int gnssmgr_fw_exit(gnssmgr_t *g, uint32_t mono_ms)
+{
+	if (g == NULL) {
+		return -EINVAL;
+	}
+	if (g->state != (uint8_t)GNSSMGR_ST_FW_UPDATE) {
+		return -EPERM;
+	}
+
+	/*
+	 * A firmware update clears the receiver's configuration, so the whole walk
+	 * has to run again — that is spec §8.5's "restores timing config
+	 * afterward". gnssmgr_start() re-sends every group and, because a stored
+	 * position is still known, goes to fixed-position mode rather than
+	 * re-surveying a site that has not moved.
+	 */
+	invalidate_measurements(g);
+	return gnssmgr_start(g, mono_ms);
+}
+
+bool gnssmgr_fw_active(const gnssmgr_t *g)
+{
+	return (g != NULL) && (g->state == (uint8_t)GNSSMGR_ST_FW_UPDATE);
+}
+
 int gnssmgr_notify_reset(gnssmgr_t *g, uint32_t mono_ms)
 {
 	if (g == NULL) {
@@ -1039,11 +1107,8 @@ int gnssmgr_notify_reset(gnssmgr_t *g, uint32_t mono_ms)
 	}
 
 	/*
-	 * Everything the receiver measured is about its previous life. Two
-	 * things survive because they describe the world rather than the
-	 * receiver: the stored position (a site constant) and the leap-second
-	 * schedule (constellation truth, and dropping it would force NTP to
-	 * advertise LI=UNSYNC for no reason).
+	 * Everything the receiver measured is about its previous life; see
+	 * invalidate_measurements() for what survives and why.
 	 */
 	g->status.time_locked = false;
 	g->status.valid = false;
@@ -1064,6 +1129,10 @@ int gnssmgr_step(gnssmgr_t *g, uint32_t mono_ms)
 	if (g == NULL) {
 		return -EINVAL;
 	}
+	if (g->state == (uint8_t)GNSSMGR_ST_FW_UPDATE) {
+		/* The receiver belongs to core/fwupd; emit nothing. */
+		return 0;
+	}
 	if (!g->awaiting_ack || (g->state != (uint8_t)GNSSMGR_ST_CONFIG)) {
 		return 0;
 	}
@@ -1079,6 +1148,14 @@ int gnssmgr_on_msg(gnssmgr_t *g, const ubx_msg_t *m, uint32_t mono_ms)
 {
 	if ((g == NULL) || (m == NULL)) {
 		return -EINVAL;
+	}
+	if (g->state == (uint8_t)GNSSMGR_ST_FW_UPDATE) {
+		/*
+		 * Whatever this is, it came from a receiver in safeboot or from one
+		 * that is rebooting into new firmware. Acting on it would mean
+		 * publishing a fix from a half-programmed receiver.
+		 */
+		return 0;
 	}
 
 	if (ubx_msg_is(m, UBX_CLASS_NAV, UBX_ID_NAV_PVT)) {

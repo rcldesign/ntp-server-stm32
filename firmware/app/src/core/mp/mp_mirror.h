@@ -135,8 +135,9 @@ typedef struct {
 	uint8_t cell_h;
 	bool have_prev;
 
-	/** Force a keyframe every N frames so a host that joined mid-stream
-	 *  converges without asking. 0 disables periodic keyframes. */
+	/** Force a keyframe after this many delta frames, so a host that joined
+	 *  mid-stream converges without asking. A keyframe therefore lands every
+	 *  `keyframe_every + 1` frames. 0 disables periodic keyframes. */
 	uint16_t keyframe_every;
 	uint16_t since_key;
 

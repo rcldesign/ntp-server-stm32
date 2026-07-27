@@ -371,11 +371,18 @@ int mp_mirror_encode(mp_mirror_ctx_t *c, const mp_mirror_in_t *in, uint32_t seq,
 	}
 
 	/*
-	 * The periodic keyframe counter only resets on a *complete* keyframe: a
-	 * truncated one has not given the host a full picture.
+	 * The periodic counter resets on any *attempted* keyframe, complete or
+	 * truncated.
+	 *
+	 * Leaving it set after a truncated keyframe would re-force a keyframe on
+	 * the next frame, and a keyframe's span list is ordered row 0 upwards —
+	 * so a buffer that can never hold a whole keyframe would send the same
+	 * leading rows forever and starve the tail. Resetting hands the
+	 * remaining rows to the delta path, which lists only what is still dirty
+	 * and therefore advances. MP_MIRROR_F_PARTIAL already told the host this
+	 * keyframe was incomplete.
 	 */
-	if (((flags & MP_MIRROR_F_KEYFRAME) != 0U) &&
-	    ((flags & MP_MIRROR_F_PARTIAL) == 0U)) {
+	if ((flags & MP_MIRROR_F_KEYFRAME) != 0U) {
 		c->since_key = 0U;
 	} else if (c->since_key < 0xFFFFU) {
 		c->since_key++;

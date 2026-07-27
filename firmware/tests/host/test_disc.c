@@ -162,6 +162,12 @@ static void env_defaults(disc_env_t *env, uint64_t ms)
 	env->anc.gnss_tacc_ns = 12u;
 	env->anc.utc_valid = true;
 	env->anc.leap_current_s = 37;
+	/*
+	 * The served timescale has an absolute epoch. Defaults FALSE in the struct,
+	 * because a caller that does not know must not claim traceability, so every
+	 * test that expects a primary stratum has to say so here.
+	 */
+	env->timebase_traceable = true;
 }
 
 /* One closed-loop second: measure the plant, tick, advance the plant. */
@@ -178,6 +184,26 @@ static disc_out_t loop_second(disc_ctx_t *ctx, struct osc *p, uint64_t *ms,
 	*expected += 1000000u;
 
 	TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(ctx, &in, NULL, &out));
+	osc_step(p, out.dac_code, 1.0);
+	return out;
+}
+
+/* As loop_second(), but publishing into @p qs so a test can assert on the block
+ * a client would actually see. */
+static disc_out_t loop_second_pub(disc_ctx_t *ctx, struct osc *p, uint64_t *ms,
+				  double sigma_ns, uint32_t *expected,
+				  quality_state_t *qs)
+{
+	disc_in_t in;
+	disc_out_t out;
+
+	*ms += 1000u;
+	env_defaults(&in.env, *ms);
+	in.env.osc_temp_mc = (int32_t)round_i64(p->temp_c * 1000.0);
+	pps_from_error(&in.pps, p->e_ns + noise(sigma_ns), 1.0, *expected);
+	*expected += 1000000u;
+
+	TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(ctx, &in, qs, &out));
 	osc_step(p, out.dac_code, 1.0);
 	return out;
 }
@@ -1295,7 +1321,10 @@ static void test_holdover_estimate_is_monotonic_across_a_sensor_dropout(void)
 	cfg.holdover.base_ns = 1000.0f;
 	cfg.holdover.drift_ns_per_s = 20.0f;
 	cfg.holdover.temp_ns_per_s_per_c = 30.0f;
-	cfg.demote_threshold_ns = 5.0e6f;
+	/* 10 us: the 200 s excursion below accumulates ~22 us, so the run really
+	 * does cross the demotion boundary and the stratum assertions below are
+	 * testing something. */
+	cfg.demote_threshold_ns = 1.0e4f;
 	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
 	noise_seed(44u);
 	osc_init(&p, 0.0, -30.0);
@@ -1327,8 +1356,582 @@ static void test_holdover_estimate_is_monotonic_across_a_sensor_dropout(void)
 			TEST_ASSERT_TRUE(b.root_disp_q16 >= disp_prev);
 			disp_prev = b.root_disp_q16;
 		}
+
+		/*
+		 * The repair the reviewer asked for. The original test never left
+		 * holdover and never asserted stratum, so it passed with the whole
+		 * of H2's residual present. Assert the demotion first, then LEAVE
+		 * and RE-ENTER holdover and require that neither the estimate nor
+		 * the published dispersion collapses and that the stratum does not
+		 * un-demote.
+		 */
+		TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+		TEST_ASSERT_EQUAL_UINT8(16u, b.stratum);
+		TEST_ASSERT_TRUE(out.holdover_est_err_ns >
+				 (int64_t)cfg.demote_threshold_ns);
+
+		{
+			int64_t est_at_exit = out.holdover_est_err_ns;
+			uint32_t disp_at_exit = disp_prev;
+			uint32_t elapsed_at_exit = b.holdover_elapsed_s;
+
+			/* One accepted pulse: HOLDOVER -> RECOVERING. */
+			ms += 1000u;
+			env_defaults(&in.env, ms);
+			in.env.osc_temp_mc = 45000 + (int32_t)(200u * 30u);
+			pps_from_error(&in.pps, p.e_ns, 1.0, expected);
+			expected += 1000000u;
+			TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, &qs, &out));
+			TEST_ASSERT_EQUAL_INT(DISC_STATE_RECOVERING, out.state);
+
+			TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+			TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+				16u, b.stratum,
+				"one pulse restored a primary stratum");
+			TEST_ASSERT_TRUE_MESSAGE(
+				b.root_disp_q16 >= disp_at_exit,
+				"dispersion collapsed on leaving holdover");
+			TEST_ASSERT_TRUE_MESSAGE(
+				b.holdover_elapsed_s >= elapsed_at_exit,
+				"the outage length reset and hid the episode");
+
+			/* And re-entering holdover resumes from the retained value,
+			 * not from the model's base error. */
+			for (i = 0u; i < 5u; i++) {
+				ms += 1000u;
+				env_defaults(&in.env, ms);
+				in.env.osc_temp_mc = 45000 + (int32_t)(200u * 30u);
+				TEST_ASSERT_EQUAL_INT(
+					0, disc_tick_no_pps(&ctx, &in.env, &qs, &out));
+			}
+			TEST_ASSERT_EQUAL_INT(DISC_STATE_HOLDOVER, out.state);
+			TEST_ASSERT_TRUE_MESSAGE(
+				out.holdover_est_err_ns >= est_at_exit,
+				"the holdover estimate was reseeded from the model");
+			TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+			TEST_ASSERT_EQUAL_UINT8(16u, b.stratum);
+			TEST_ASSERT_TRUE(b.root_disp_q16 >= disp_at_exit);
+		}
 	}
 }
+
+/* ------------------------------------- F3: the retained holdover estimate */
+
+/*
+ * Trigger (a): marginal GNSS delivering one accepted pulse every few seconds.
+ *
+ * Reproduces the residual of the earlier H2 fix. After a long holdover the loop
+ * is demoted with a large estimate; one accepted pulse moved it to RECOVERING,
+ * where the estimate was abandoned and the served dispersion collapsed to
+ * |last_e_ns| — so the box advertised stratum 1 with microsecond dispersion while
+ * still hundreds of microseconds out, because the recovery ramp is deliberately
+ * rate-limited and had corrected almost none of the phase.
+ */
+static void test_one_pulse_after_a_long_holdover_is_not_stratum_1(void)
+{
+	disc_ctx_t ctx;
+	disc_cfg_t cfg;
+	struct osc p;
+	uint64_t ms = 0u;
+	uint32_t expected = 0x81000000u;
+	unsigned int i;
+	disc_out_t out;
+	disc_in_t in;
+	quality_state_t qs;
+	quality_block_t b;
+	int64_t est;
+
+	(void)disc_cfg_defaults(&cfg);
+	cfg.holdover.base_ns = 1000.0f;
+	/* 4 us/s, so a 300 s outage accumulates ~1.2 ms and crosses the 1 ms
+	 * demotion budget — the reviewer's 16.7 h/1.2 ms scenario, compressed. */
+	cfg.holdover.drift_ns_per_s = 4000.0f;
+	cfg.demote_threshold_ns = 1.0e6f;      /* 1 ms */
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
+	TEST_ASSERT_EQUAL_INT(0, quality_state_init(&qs));
+	noise_seed(91u);
+	osc_init(&p, 0.0, -30.0);
+	(void)run_to_lock(&ctx, &p, &ms, 10.0, &expected, 1500u);
+
+	/* Long enough to blow well past the 1 ms demote threshold. */
+	for (i = 0u; i < 300u; i++) {
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		TEST_ASSERT_EQUAL_INT(0, disc_tick_no_pps(&ctx, &in.env, &qs, &out));
+	}
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_HOLDOVER, out.state);
+	est = out.holdover_est_err_ns;
+	TEST_ASSERT_TRUE(est > (int64_t)cfg.demote_threshold_ns);
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_UINT8(16u, b.stratum);
+
+	/*
+	 * Now the marginal-GNSS pattern: one accepted pulse, then more misses, over
+	 * and over. Neither the stratum nor the dispersion may recover while the
+	 * clock is still out — and the retained error is what enforces that.
+	 */
+	for (i = 0u; i < 5u; i++) {
+		unsigned int k;
+
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		pps_from_error(&in.pps, p.e_ns, 1.0, expected);
+		expected += 1000000u;
+		TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, &qs, &out));
+
+		TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+		TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+			16u, b.stratum, "a single pulse restored stratum 1");
+		/* The dispersion must still bound the error the loop is carrying. */
+		TEST_ASSERT_TRUE(disc_retained_error_ns(&ctx) >=
+				 (float)cfg.demote_threshold_ns);
+		TEST_ASSERT_TRUE(b.root_disp_q16 >=
+				 (uint32_t)quality_ntp_short_from_ns(
+					 (int64_t)cfg.demote_threshold_ns));
+		TEST_ASSERT_TRUE((b.flags & QUALITY_FLAG_DEMOTED) != 0u);
+
+		for (k = 0u; k < 4u; k++) {
+			ms += 1000u;
+			env_defaults(&in.env, ms);
+			TEST_ASSERT_EQUAL_INT(
+				0, disc_tick_no_pps(&ctx, &in.env, &qs, &out));
+		}
+		/* And the estimate never falls back to the model base. */
+		TEST_ASSERT_TRUE(out.holdover_est_err_ns >= est);
+	}
+}
+
+/*
+ * Trigger (b): any refsel mux handoff. clkmux.c parks and unparks
+ * unconditionally around every MUX_SEL flip, and disc_unpark() resumed in
+ * RECOVERING — which used to mean "clean slate". A park corrects nothing, so it
+ * must not be able to launder a demoted holdover into a primary stratum.
+ */
+static void test_a_park_unpark_cycle_does_not_launder_a_holdover(void)
+{
+	disc_ctx_t ctx;
+	disc_cfg_t cfg;
+	struct osc p;
+	uint64_t ms = 0u;
+	uint32_t expected = 0x82000000u;
+	unsigned int i;
+	disc_out_t out;
+	disc_in_t in;
+	quality_state_t qs;
+	quality_block_t b;
+	uint16_t code = 0u;
+	int64_t est;
+	uint32_t disp_before;
+
+	(void)disc_cfg_defaults(&cfg);
+	cfg.holdover.base_ns = 1000.0f;
+	cfg.holdover.drift_ns_per_s = 4000.0f;
+	cfg.demote_threshold_ns = 1.0e6f;
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
+	TEST_ASSERT_EQUAL_INT(0, quality_state_init(&qs));
+	noise_seed(92u);
+	osc_init(&p, 0.0, -30.0);
+	(void)run_to_lock(&ctx, &p, &ms, 10.0, &expected, 1500u);
+
+	for (i = 0u; i < 300u; i++) {
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		TEST_ASSERT_EQUAL_INT(0, disc_tick_no_pps(&ctx, &in.env, &qs, &out));
+	}
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_HOLDOVER, out.state);
+	est = out.holdover_est_err_ns;
+	TEST_ASSERT_TRUE(est > (int64_t)cfg.demote_threshold_ns);
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_UINT8(16u, b.stratum);
+	disp_before = b.root_disp_q16;
+
+	/* The refsel handoff bracket, exactly as sts_clkmux_execute() drives it. */
+	TEST_ASSERT_EQUAL_INT(0, disc_park(&ctx, &code));
+	TEST_ASSERT_TRUE(disc_retained_error_ns(&ctx) >= (float)est);
+	TEST_ASSERT_EQUAL_INT(0, disc_unpark(&ctx));
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_RECOVERING, disc_state(&ctx));
+
+	/* One tick after the handoff: still demoted, dispersion still bounding. */
+	ms += 1000u;
+	env_defaults(&in.env, ms);
+	pps_from_error(&in.pps, p.e_ns, 1.0, expected);
+	expected += 1000000u;
+	TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, &qs, &out));
+
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_UINT8_MESSAGE(16u, b.stratum,
+					"a mux handoff restored stratum 1");
+	TEST_ASSERT_TRUE_MESSAGE(b.root_disp_q16 >= disp_before,
+				 "a mux handoff collapsed the dispersion");
+	TEST_ASSERT_TRUE(disc_retained_error_ns(&ctx) >= (float)est);
+}
+
+static void test_the_retained_error_clears_only_on_a_real_relock(void)
+{
+	disc_ctx_t ctx;
+	disc_cfg_t cfg;
+	struct osc p;
+	uint64_t ms = 0u;
+	uint32_t expected = 0x83000000u;
+	unsigned int i;
+	disc_out_t out;
+	disc_in_t in;
+	quality_state_t qs;
+	quality_block_t b;
+
+	(void)disc_cfg_defaults(&cfg);
+	cfg.holdover.base_ns = 1000.0f;
+	cfg.holdover.drift_ns_per_s = 4000.0f;
+	cfg.demote_threshold_ns = 1.0e6f;
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
+	TEST_ASSERT_EQUAL_INT(0, quality_state_init(&qs));
+	noise_seed(93u);
+	osc_init(&p, 0.0, -30.0);
+	(void)run_to_lock(&ctx, &p, &ms, 10.0, &expected, 1500u);
+
+	for (i = 0u; i < 120u; i++) {
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		TEST_ASSERT_EQUAL_INT(0, disc_tick_no_pps(&ctx, &in.env, &qs, &out));
+	}
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_HOLDOVER, out.state);
+	TEST_ASSERT_TRUE(disc_retained_error_ns(&ctx) > 0.0f);
+
+	/*
+	 * A healthy reference returns and the loop genuinely re-converges. Reaching
+	 * LOCKED means lock_dwell_s consecutive seconds inside cfg.lock_phase_ns —
+	 * the phase really is back — so this is the one place the retained error may
+	 * be forgotten.
+	 */
+	for (i = 0u; i < 4000u; i++) {
+		out = loop_second_pub(&ctx, &p, &ms, 10.0, &expected, &qs);
+		if (out.state == DISC_STATE_LOCKED) {
+			break;
+		}
+	}
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_LOCKED, out.state);
+	TEST_ASSERT_EQUAL_FLOAT(0.0f, disc_retained_error_ns(&ctx));
+
+	/* Only now is a primary stratum honest again. */
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_UINT8(1u, b.stratum);
+	TEST_ASSERT_EQUAL_UINT32(0u, b.holdover_elapsed_s);
+	TEST_ASSERT_EQUAL_FLOAT(0.0f, disc_retained_error_ns(NULL));
+}
+
+/* ------------------------------------------------- traceability of the epoch */
+
+static void test_an_untraceable_timebase_is_never_a_primary_stratum(void)
+{
+	disc_ctx_t ctx;
+	struct osc p;
+	uint64_t ms = 0u;
+	uint32_t expected = 0x84000000u;
+	unsigned int i;
+	disc_out_t out;
+	disc_in_t in;
+	quality_state_t qs;
+	quality_block_t b;
+
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, NULL));
+	TEST_ASSERT_EQUAL_INT(0, quality_state_init(&qs));
+	noise_seed(94u);
+	osc_init(&p, 0.0, -30.0);
+	(void)run_to_lock(&ctx, &p, &ms, 10.0, &expected, 1500u);
+	/* One publishing tick, because loop_second() deliberately does not publish. */
+	out = loop_second_pub(&ctx, &p, &ms, 10.0, &expected, &qs);
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_LOCKED, out.state);
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_UINT8(1u, b.stratum);
+
+	/*
+	 * The servo loses its epoch — the PTP hardware clock was never set from
+	 * GNSS, or the net area reports it unsynchronised. The loop is still locked
+	 * and is still an excellent frequency source; it is not a time source, and a
+	 * confidently wrong timestamp at stratum 1 is worse than serving none.
+	 */
+	for (i = 0u; i < 5u; i++) {
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		in.env.timebase_traceable = false;
+		in.env.osc_temp_mc = (int32_t)round_i64(p.temp_c * 1000.0);
+		pps_from_error(&in.pps, p.e_ns, 1.0, expected);
+		expected += 1000000u;
+		TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, &qs, &out));
+		osc_step(&p, out.dac_code, 1.0);
+	}
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_LOCKED, out.state);
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+		16u, b.stratum, "stratum 1 served with no absolute epoch");
+
+	/* And it comes back when the epoch does, with no re-lock needed: the loop
+	 * never left LOCKED, only its right to advertise did. */
+	out = loop_second_pub(&ctx, &p, &ms, 10.0, &expected, &qs);
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_LOCKED, out.state);
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_UINT8(1u, b.stratum);
+
+	/* The no-PPS path applies the same rule. */
+	ms += 1000u;
+	env_defaults(&in.env, ms);
+	in.env.timebase_traceable = false;
+	TEST_ASSERT_EQUAL_INT(0, disc_tick_no_pps(&ctx, &in.env, &qs, &out));
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_UINT8(16u, b.stratum);
+}
+
+/* ------------------------------------------- F13: the engine is not inert */
+
+/*
+ * End-to-end, through exactly the decisions the discipline glue makes.
+ *
+ * disc_fill_env() left gnss_time_locked at zero, so disc_tick_pps() took the
+ * !gnss_time_locked branch and processed NO sample: the loop sat in ACQUIRING at
+ * stratum 16 with the DAC at its centre code forever, however good the pulses
+ * were. This drives a synthetic PPS + UBX-TIM-TP sequence through
+ * disc_pulse_tow_ms() and disc_qerr_matches_pulse() — the same two functions
+ * disc_thread.c uses to pair the sawtooth — and requires the loop to reach LOCKED
+ * at stratum 1 with the correction actually applied.
+ */
+static void test_a_synthetic_pps_and_tim_tp_sequence_drives_the_loop_to_locked(void)
+{
+	disc_ctx_t ctx;
+	disc_cfg_t cfg;
+	struct osc p;
+	uint64_t ms = 0u;
+	uint32_t expected = 0x85000000u;
+	unsigned int i;
+	unsigned int locked_at = 0u;
+	unsigned int applied = 0u;
+	disc_out_t out;
+	disc_in_t in;
+	quality_state_t qs;
+	quality_block_t b;
+	uint32_t pvt_itow_ms = 100000u;
+	uint64_t pvt_rx_mono_ms = 0u;
+
+	(void)disc_cfg_defaults(&cfg);
+	cfg.qerr_sign = 1;
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
+	TEST_ASSERT_EQUAL_INT(0, quality_state_init(&qs));
+	noise_seed(95u);
+	osc_init(&p, 0.0, -30.0);
+
+	for (i = 0u; i < 2000u; i++) {
+		disc_qerr_match_t match;
+		uint32_t pulse_tow = 0u;
+		/* A real ZED-F9T sawtooth: a few tens of ns, sign alternating. */
+		int32_t qerr_ps = ((i % 2u) == 0u) ? 22000 : -18000;
+
+		ms += 1000u;
+
+		/* The receiver's NAV-PVT for this epoch, and the TIM-TP that names
+		 * the *next* pulse — the ordering the F9T actually uses. */
+		pvt_itow_ms = (pvt_itow_ms + 1000u) % DISC_GPS_WEEK_MS;
+		pvt_rx_mono_ms = ms - 800u;
+
+		env_defaults(&in.env, ms);
+		in.env.osc_temp_mc = (int32_t)round_i64(p.temp_c * 1000.0);
+		/* The two inputs the glue used to leave zeroed. */
+		in.env.gnss_time_locked = true;
+		in.env.timebase_traceable = true;
+
+		pps_from_error(&in.pps, p.e_ns + noise(5.0) - ((double)qerr_ps * 0.001),
+			       1.0, expected);
+		expected += 1000000u;
+
+		/* Pair by GPS ToW, exactly as disc_thread.c does. */
+		memset(&match, 0, sizeof(match));
+		match.record_valid = true;
+		match.qerr_valid = true;
+		match.qerr_ps = qerr_ps;
+		match.record_rx_mono_ms = ms - 200u;
+		match.capture_mono_ms = ms;
+		if (disc_pulse_tow_ms(pvt_itow_ms, pvt_rx_mono_ms, ms, 2000u,
+				      &pulse_tow) == 0) {
+			match.pulse_tow_ms = pulse_tow;
+			match.pulse_tow_valid = true;
+			match.target_tow_ms = pulse_tow;
+		}
+		if (disc_qerr_matches_pulse(&match)) {
+			in.pps.qerr_ps = match.qerr_ps;
+			in.pps.qerr_valid = true;
+			applied++;
+		}
+
+		TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, &qs, &out));
+		osc_step(&p, out.dac_code, 1.0);
+
+		if ((out.state == DISC_STATE_LOCKED) && (locked_at == 0u)) {
+			locked_at = i + 1u;
+		}
+	}
+
+	/* The pairing fired every second — an unpaired run would mean the sawtooth
+	 * was silently dropped and the loop merely noisier, which is the failure
+	 * mode nobody notices. */
+	TEST_ASSERT_EQUAL_UINT32(2000u, applied);
+
+	TEST_ASSERT_TRUE_MESSAGE(locked_at > 0u, "the loop never left ACQUIRING");
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_LOCKED, out.state);
+
+	/* The DAC moved off centre, which is the observable proof that samples were
+	 * processed at all. */
+	TEST_ASSERT_TRUE(out.dac_code != cfg.dac_center_code);
+
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_UINT8(1u, b.stratum);
+	TEST_ASSERT_EQUAL_UINT8(QUALITY_LOCK_LOCKED, b.lock_state);
+	TEST_ASSERT_TRUE((b.flags & QUALITY_FLAG_GNSS_TIME_LOCKED) != 0u);
+	/* Sawtooth removed, so the residual is small despite a +-20 ns injection. */
+	TEST_ASSERT_TRUE(d_abs((double)out.phase_err_ns) < 100.0);
+}
+
+/* --------------------------------------- the phase-prediction accumulator */
+
+static void test_expected_advance_counts_whole_reference_seconds(void)
+{
+	/*
+	 * A no-PPS loop iteration takes DISC_PPS_TIMEOUT_MS (1200 ms) of real time,
+	 * so advancing the accumulator by exactly one second per iteration drifted
+	 * 200 ms every missed second: after three the prediction is more than half a
+	 * second out and forces a re-anchor that discards the first sample the
+	 * returning reference delivers.
+	 */
+	TEST_ASSERT_EQUAL_UINT32(1u, disc_expected_advance_s(0u, 1000u));
+	TEST_ASSERT_EQUAL_UINT32(1u, disc_expected_advance_s(0u, 1200u));
+	TEST_ASSERT_EQUAL_UINT32(2u, disc_expected_advance_s(0u, 2400u));
+	TEST_ASSERT_EQUAL_UINT32(4u, disc_expected_advance_s(0u, 3600u));
+
+	/* Rounding is to the NEAREST second, not truncation: the prediction has to
+	 * stay on the reference's grid, and feeding the loop's own scheduling jitter
+	 * into `expected` would inject that jitter straight into the phase error. */
+	TEST_ASSERT_EQUAL_UINT32(1u, disc_expected_advance_s(0u, 999u));
+	TEST_ASSERT_EQUAL_UINT32(1u, disc_expected_advance_s(0u, 1001u));
+	TEST_ASSERT_EQUAL_UINT32(1u, disc_expected_advance_s(0u, 1499u));
+	TEST_ASSERT_EQUAL_UINT32(2u, disc_expected_advance_s(0u, 1500u));
+
+	/* Never zero, even for a clock that did not move or went backwards: a
+	 * stalled prediction is not a valid answer. */
+	TEST_ASSERT_EQUAL_UINT32(1u, disc_expected_advance_s(1000u, 1000u));
+	TEST_ASSERT_EQUAL_UINT32(1u, disc_expected_advance_s(1000u, 900u));
+	TEST_ASSERT_EQUAL_UINT32(1u, disc_expected_advance_s(0u, 1u));
+
+	/*
+	 * The property that matters, over a run rather than a single call: the
+	 * caller re-anchors its reference to the grid (prev += secs * 1000), so
+	 * repeated 1200 ms iterations track real time to within half a second
+	 * forever. With the old "+1 s per iteration" the error grew by 200 ms every
+	 * iteration and passed the half-second re-anchor threshold on the third —
+	 * discarding the first sample the returning reference delivered.
+	 */
+	{
+		uint64_t grid = 0u;
+		uint64_t mono = 0u;
+		unsigned int i;
+
+		for (i = 0u; i < 100u; i++) {
+			uint32_t secs;
+
+			mono += 1200u; /* DISC_PPS_TIMEOUT_MS: a missed second */
+			secs = disc_expected_advance_s(grid, mono);
+			grid += (uint64_t)secs * 1000u;
+
+			TEST_ASSERT_TRUE_MESSAGE(
+				(grid > mono ? grid - mono : mono - grid) <= 500u,
+				"the prediction drifted past half a second");
+		}
+	}
+}
+
+/* ------------------------------------------------- sawtooth qErr pairing */
+
+static void test_pulse_tow_is_derived_from_the_last_nav_pvt(void)
+{
+	uint32_t tow = 0u;
+
+	/* The NAV-PVT for epoch N arrives just after it, so a capture 1 s later is
+	 * the next epoch. */
+	TEST_ASSERT_EQUAL_INT(0, disc_pulse_tow_ms(100000u, 5000u, 5000u, 2000u, &tow));
+	TEST_ASSERT_EQUAL_UINT32(100000u, tow);
+	TEST_ASSERT_EQUAL_INT(0, disc_pulse_tow_ms(100000u, 5000u, 6000u, 2000u, &tow));
+	TEST_ASSERT_EQUAL_UINT32(101000u, tow);
+	/* Rounded to the nearest epoch: 1080 ms of jitter is still one second. */
+	TEST_ASSERT_EQUAL_INT(0, disc_pulse_tow_ms(100000u, 5000u, 6080u, 2000u, &tow));
+	TEST_ASSERT_EQUAL_UINT32(101000u, tow);
+
+	/* Wraps the GPS week. */
+	TEST_ASSERT_EQUAL_INT(0, disc_pulse_tow_ms(DISC_GPS_WEEK_MS - 1000u, 0u,
+						   1000u, 2000u, &tow));
+	TEST_ASSERT_EQUAL_UINT32(0u, tow);
+
+	/* No honest answer: the capture predates the fix, or is too old to attribute. */
+	TEST_ASSERT_EQUAL_INT(-EAGAIN,
+			      disc_pulse_tow_ms(100000u, 5000u, 4000u, 2000u, &tow));
+	TEST_ASSERT_EQUAL_INT(-EAGAIN,
+			      disc_pulse_tow_ms(100000u, 5000u, 9000u, 2000u, &tow));
+
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      disc_pulse_tow_ms(100000u, 0u, 0u, 2000u, NULL));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      disc_pulse_tow_ms(DISC_GPS_WEEK_MS, 0u, 0u, 2000u, &tow));
+}
+
+static void test_qerr_is_only_applied_to_the_pulse_it_belongs_to(void)
+{
+	disc_qerr_match_t m;
+
+	/* The happy case: a record received in the second before the pulse it names. */
+	memset(&m, 0, sizeof(m));
+	m.record_valid = true;
+	m.qerr_valid = true;
+	m.qerr_ps = -12345;
+	m.target_tow_ms = 101000u;
+	m.pulse_tow_ms = 101000u;
+	m.pulse_tow_valid = true;
+	m.record_rx_mono_ms = 5400u;
+	m.capture_mono_ms = 6000u;
+	TEST_ASSERT_TRUE(disc_qerr_matches_pulse(&m));
+
+	/*
+	 * A ToW mismatch is the failure the pairing exists to catch. TIM-TP reports
+	 * its ToW on the pulse's own timebase, so with a UTC-aligned TIMEPULSE and
+	 * NAV-PVT's GPS iTOW the two differ by the leap offset — 18 s today. Applying
+	 * that record would ADD sawtooth instead of removing it.
+	 */
+	m.target_tow_ms = 101000u - 18000u;
+	TEST_ASSERT_FALSE(disc_qerr_matches_pulse(&m));
+	m.target_tow_ms = 101000u;
+	TEST_ASSERT_TRUE(disc_qerr_matches_pulse(&m));
+
+	/* Leap offset unknown, so gnssmgr could not normalise: no correction. */
+	m.qerr_valid = false;
+	TEST_ASSERT_FALSE(disc_qerr_matches_pulse(&m));
+	m.qerr_valid = true;
+
+	/* No record at all, and no idea which ToW was captured. */
+	m.record_valid = false;
+	TEST_ASSERT_FALSE(disc_qerr_matches_pulse(&m));
+	m.record_valid = true;
+	m.pulse_tow_valid = false;
+	TEST_ASSERT_FALSE(disc_qerr_matches_pulse(&m));
+	m.pulse_tow_valid = true;
+
+	/* A record that arrived AFTER the pulse cannot describe it. */
+	m.record_rx_mono_ms = 6001u;
+	TEST_ASSERT_FALSE(disc_qerr_matches_pulse(&m));
+
+	/* A record more than a second early with a matching ToW is an alias — a week
+	 * wrap, or a receiver that restarted onto the same second. */
+	m.record_rx_mono_ms = 4000u;
+	TEST_ASSERT_FALSE(disc_qerr_matches_pulse(&m));
+	m.record_rx_mono_ms = 5000u; /* exactly one second: still the right pulse */
+	TEST_ASSERT_TRUE(disc_qerr_matches_pulse(&m));
+
+	TEST_ASSERT_FALSE(disc_qerr_matches_pulse(NULL));
+}
+
 
 static void test_gnss_time_unlock_forces_holdover_even_with_pulses(void)
 {
@@ -2240,7 +2843,13 @@ static void test_publishes_the_quality_block(void)
 	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
 	TEST_ASSERT_EQUAL_UINT8(QUALITY_LOCK_RECOVERING, b.lock_state);
 	TEST_ASSERT_FALSE(b.holdover);
-	TEST_ASSERT_EQUAL_UINT32(0u, b.holdover_elapsed_s);
+	/*
+	 * The outage is still in progress as far as a client is concerned, so the
+	 * elapsed time is *retained* through RECOVERING rather than zeroed. Zeroing
+	 * it on the first returning pulse hid the whole episode from telemetry: an
+	 * operator saw a healthy clock and no record it had ever been in holdover.
+	 */
+	TEST_ASSERT_TRUE(b.holdover_elapsed_s > 0u);
 
 	/* And so does the park. */
 	TEST_ASSERT_EQUAL_INT(0, disc_park(&ctx, NULL));
@@ -2454,6 +3063,14 @@ int main(void)
 	RUN_TEST(test_holdover_demotes_when_the_budget_is_spent);
 	RUN_TEST(test_holdover_temperature_term_and_unreachable_budget);
 	RUN_TEST(test_holdover_estimate_is_monotonic_across_a_sensor_dropout);
+	RUN_TEST(test_one_pulse_after_a_long_holdover_is_not_stratum_1);
+	RUN_TEST(test_a_park_unpark_cycle_does_not_launder_a_holdover);
+	RUN_TEST(test_the_retained_error_clears_only_on_a_real_relock);
+	RUN_TEST(test_an_untraceable_timebase_is_never_a_primary_stratum);
+	RUN_TEST(test_a_synthetic_pps_and_tim_tp_sequence_drives_the_loop_to_locked);
+	RUN_TEST(test_expected_advance_counts_whole_reference_seconds);
+	RUN_TEST(test_pulse_tow_is_derived_from_the_last_nav_pvt);
+	RUN_TEST(test_qerr_is_only_applied_to_the_pulse_it_belongs_to);
 	RUN_TEST(test_gnss_time_unlock_forces_holdover_even_with_pulses);
 	RUN_TEST(test_recovery_is_rate_limited_and_never_steps);
 	RUN_TEST(test_large_post_holdover_excursion_stays_rate_limited);

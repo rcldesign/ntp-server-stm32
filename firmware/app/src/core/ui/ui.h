@@ -14,7 +14,8 @@
  *         state machine, including value edit and confirm dialogs;
  *   §6.2  the screen hierarchy Home / Skyplot / Clocks / Network / Power-Health
  *         / Alarms / Menu, with Left-Back popping and Right-Enter descending;
- *   §6.3  the sky view — rendered this phase as a numeric SV table (see below);
+ *   §6.3  the sky page: the polar plot's placement and the view toggle, with the
+ *         plot itself rendered by core/ui/skyplot.h (see below);
  *   §6.4  the touch/proximity wake policy and the backlight-duty-only sleep.
  *
  * What it does NOT own: the ST7796 command stream, the FT6336U registers, the
@@ -33,14 +34,14 @@
  * why a "factory reset" here is three enum values in a queue rather than a
  * flash erase.
  *
- * Skyplot, this phase. Spec §6.3 asks for a true-north-rotated polar plot fed
- * by the magnetometer and the WMM declination. That needs trigonometry, a
- * calibrated e-compass and a pixel canvas — none of which belong in a text-tile
- * surface. UI_PAGE_SKYPLOT therefore renders the same NAV-SAT data as a numeric
- * table (per-constellation used/visible counts plus the strongest satellites by
- * C/N0 with azimuth and elevation). The data path, the page slot and the
- * navigation are all final; only the rasterisation is deferred, so the polar
- * plot lands as a glue-side change plus a `UI_HINT_SKYPLOT` hint.
+ * Skyplot. Spec §6.3's true-north-rotated polar plot needs trigonometry, a
+ * calibrated e-compass and a pixel canvas, none of which belong in a text-tile
+ * surface — so it lives in its own module, `core/ui/skyplot.h`, which renders
+ * into an indexed-colour canvas and is therefore still host-testable against
+ * golden images. This module owns the *page*: UI_PAGE_SKYPLOT carries two views
+ * (ui_sky_view_t), cycled with FN, and emits UI_HINT_SKYPLOT with the plot's cell
+ * rectangle for the glue to fill from skyplot.h. The numeric per-SV table remains
+ * the second view.
  */
 
 #ifndef STS1000_CORE_UI_UI_H_
@@ -97,6 +98,18 @@ typedef enum {
 	UI_HINT_PROGRESS,
 	/** Horizontal rule across (row, col..col+len-1). */
 	UI_HINT_RULE,
+	/**
+	 * Draw the polar skyplot into the cell rectangle
+	 * (row..row+len-1, col..cols-1) — `len` is a ROW count here, not a column
+	 * count, because the plot is square and its extent is set by the taller of
+	 * the two axes.
+	 *
+	 * The page code leaves those cells blank. The glue renders with
+	 * core/ui/skyplot.h into its own indexed canvas, maps the palette to
+	 * RGB565 and blits. `value` carries the ui_sky_view_t currently selected so
+	 * the glue can label the plot.
+	 */
+	UI_HINT_SKYPLOT,
 	UI_HINT__COUNT
 } ui_hint_kind_t;
 
@@ -175,8 +188,17 @@ size_t ui_surface_fill(ui_surface_t *s, uint8_t row, uint8_t col, size_t len,
 /**
  * Append an overlay hint.
  *
+ * Unlike the text accessors, which clip, a hint is validated against the
+ * surface geometry and refused if it does not fit. The reason is the consumer:
+ * text lands in this module's own bounded arrays, while a hint is a rectangle
+ * the glue rasterises straight into the framebuffer, so an out-of-range hint
+ * accepted here becomes an out-of-bounds write there.
+ *
  * @retval 0        Appended.
  * @retval -EINVAL  @p s or @p h is NULL, or the hint kind is out of range.
+ * @retval -EDOM    The hint does not fit: `row` outside the grid, `col + len`
+ *                  past the right edge, a UI_HINT_BIGNUM whose second row is
+ *                  off-grid, or a UI_HINT_PROGRESS `value` above 1000 permille.
  * @retval -ENOSPC  The list is full; ui_surface_t::hint_dropped is bumped.
  */
 int ui_surface_hint(ui_surface_t *s, const ui_hint_t *h);
@@ -392,6 +414,23 @@ typedef struct {
 /** Satellites listed on the sky page, strongest C/N0 first. */
 #define UI_SKY_TOP_N 8u
 
+/**
+ * The sky page has two views, cycled with Right/Enter.
+ *
+ * §6.3 asks for the polar plot; the numeric table stays reachable because it is
+ * the view that answers "what exactly is SV 14 doing" and because it is the only
+ * one that works when the display is unavailable and the page is being read
+ * through the console dump.
+ */
+typedef enum {
+	UI_SKY_VIEW_PLOT = 0, /**< polar skyplot (the default) */
+	UI_SKY_VIEW_TABLE,    /**< numeric per-SV table */
+	UI_SKY_VIEW__COUNT
+} ui_sky_view_t;
+
+/** Name of a sky view, never NULL. */
+const char *ui_sky_view_name(uint8_t v);
+
 typedef enum {
 	UI_GNSS_GPS = 0,
 	UI_GNSS_GALILEO,
@@ -589,6 +628,9 @@ typedef struct {
 
 	/* value being edited on UI_PAGE_EDIT, committed on ENTER */
 	int32_t edit_val;
+
+	/** Selected view on UI_PAGE_SKYPLOT; ui_sky_view_t. */
+	uint8_t sky_view;
 
 	/*
 	 * Alarm ids as of the last render of UI_PAGE_ALARMS. ENTER on that page

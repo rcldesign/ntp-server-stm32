@@ -311,10 +311,10 @@ static void test_reopening_reverts_the_previous_sessions_overrides(void)
 static void test_g0_needs_nothing(void)
 {
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
-			      mp_ovr_guard(&g_c, MP_GUARD_G0, 0U, 0U, 0U, NULL,
+			      mp_ovr_guard(&g_c, MP_GUARD_G0, 0U, 0U, 0U, NULL, NULL,
 					   0U, 1000U, NULL));
 	TEST_ASSERT_EQUAL_INT(-EINVAL,
-			      mp_ovr_guard(NULL, MP_GUARD_G0, 0U, 0U, 0U, NULL,
+			      mp_ovr_guard(NULL, MP_GUARD_G0, 0U, 0U, 0U, NULL, NULL,
 					   0U, 1000U, NULL));
 }
 
@@ -324,22 +324,21 @@ static void test_g1_needs_a_fresh_session(void)
 
 	/* No session at all. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SESSION,
-			      mp_ovr_guard(&g_c, MP_GUARD_G1, 0U, 0U, 0U, NULL,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, 0U, 0U, 0U, NULL, NULL,
 					   0U, 1000U, NULL));
 	sid = open_session(1000U);
 
 	/* Wrong id. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SESSION,
-			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid + 1U, 0U, 0U,
-					   NULL, 0U, 1000U, NULL));
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid + 1U, 0U, 0U, NULL, NULL, 0U, 1000U, NULL));
 	/* Right id, fresh. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
-			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL, NULL,
 					   0U, 1000U, NULL));
 
 	/* Stale keepalive. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_STALE,
-			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL, NULL,
 					   0U,
 					   1000U + MP_KEEPALIVE_TTL_MS + 1U,
 					   NULL));
@@ -347,7 +346,7 @@ static void test_g1_needs_a_fresh_session(void)
 	/* Link down. */
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_set_link(&g_c, false, 1000U));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SESSION,
-			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL, NULL,
 					   0U, 1000U, NULL));
 }
 
@@ -357,7 +356,7 @@ static void test_a_successful_guard_refreshes_the_keepalive(void)
 
 	/* Issuing a command demonstrates the tool is alive (FMT §5.3). */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
-			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL, NULL,
 					   0U, 4000U, NULL));
 	TEST_ASSERT_TRUE(mp_ovr_session_valid(&g_c, sid, 8500U));
 }
@@ -367,37 +366,31 @@ static void test_g2_needs_the_typed_device_serial(void)
 	uint32_t sid = open_session(1000U);
 
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SERIAL,
-			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, NULL,
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, NULL, NULL,
 					   0U, 1000U, NULL));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SERIAL,
-			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, "",
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, "", NULL,
 					   0U, 1000U, NULL));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SERIAL,
-			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U,
-					   "wrong", 0U, 1000U, NULL));
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, "wrong", NULL, 0U, 1000U, NULL));
 	/* A prefix is not the serial. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SERIAL,
-			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U,
-					   "STS1000", 0U, 1000U, NULL));
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, "STS1000", NULL, 0U, 1000U, NULL));
 	/* Nor is the serial plus a suffix. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SERIAL,
-			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U,
-					   SERIAL "x", 0U, 1000U, NULL));
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, SERIAL "x", NULL, 0U, 1000U, NULL));
 	/* Case matters. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SERIAL,
-			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U,
-					   "sts1000-000042", 0U, 1000U, NULL));
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, "sts1000-000042", NULL, 0U, 1000U, NULL));
 
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
-			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U,
-					   SERIAL, 0U, 1000U, NULL));
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, SERIAL, NULL, 0U, 1000U, NULL));
 	TEST_ASSERT_TRUE(g_c.sess.serial_ok);
 
 	/* G2 still requires a session first: no session outranks a good serial. */
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_session_close(&g_c, sid, 2000U));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SESSION,
-			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U,
-					   SERIAL, 0U, 2000U, NULL));
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, SERIAL, NULL, 0U, 2000U, NULL));
 }
 
 static void test_g2_on_an_unprovisioned_board_always_refuses(void)
@@ -411,11 +404,10 @@ static void test_g2_on_an_unprovisioned_board_always_refuses(void)
 
 	/* An empty expected string must never match, including against "". */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SERIAL,
-			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, "",
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, "", NULL,
 					   0U, 1000U, NULL));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SERIAL,
-			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U,
-					   SERIAL, 0U, 1000U, NULL));
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, SERIAL, NULL, 0U, 1000U, NULL));
 }
 
 static void test_g3_arm_hold_and_complete(void)
@@ -428,16 +420,14 @@ static void test_g3_arm_hold_and_complete(void)
 
 	/* The phrase is required to arm; the serial alone is not enough. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SERIAL,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, NULL,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, NULL, NULL,
 					   0U, 1000U, &arm));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_PHRASE,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   SERIAL, 0U, 1000U, &arm));
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, NULL, 0U, 1000U, &arm));
 
 	/* Arming needs the phrase. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARMED,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   MP_G3_PHRASE_DEFAULT, 0U, 1000U,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, MP_G3_PHRASE_DEFAULT, 0U, 1000U,
 					   &arm));
 	TEST_ASSERT_NOT_EQUAL_UINT32(0U, arm.nonce);
 	TEST_ASSERT_EQUAL_UINT32(MP_G3_HOLD_MS, arm.hold_ms);
@@ -446,18 +436,15 @@ static void test_g3_arm_hold_and_complete(void)
 
 	/* Too early. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_HOLD,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   SERIAL, nonce,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, NULL, nonce,
 					   1000U + MP_G3_HOLD_MS - 1U, NULL));
 	/* Exactly at the hold: allowed. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   SERIAL, nonce, 1000U + MP_G3_HOLD_MS,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, NULL, nonce, 1000U + MP_G3_HOLD_MS,
 					   NULL));
 	/* The arm is consumed: a replay fails. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARM_MISMATCH,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   SERIAL, nonce, 1000U + MP_G3_HOLD_MS,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, NULL, nonce, 1000U + MP_G3_HOLD_MS,
 					   NULL));
 }
 
@@ -468,35 +455,29 @@ static void test_g3_nonce_is_bound_to_the_action(void)
 
 	memset(&arm, 0, sizeof(arm));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARMED,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 7U, 0U,
-					   MP_G3_PHRASE_DEFAULT, 0U, 1000U,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 7U, 0U, SERIAL, MP_G3_PHRASE_DEFAULT, 0U, 1000U,
 					   &arm));
 
 	/* Right nonce, wrong object: refused. This is what stops an arm for one
 	 * G3 action being completed as a different one. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARM_MISMATCH,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 8U, 0U,
-					   SERIAL, arm.nonce,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 8U, 0U, SERIAL, NULL, arm.nonce,
 					   1000U + MP_G3_HOLD_MS, NULL));
 	/* Wrong nonce, right object: refused. */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARM_MISMATCH,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 7U, 0U,
-					   SERIAL, arm.nonce ^ 1U,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 7U, 0U, SERIAL, NULL, arm.nonce ^ 1U,
 					   1000U + MP_G3_HOLD_MS, NULL));
 
 	/* And for a non-object action the tag binds it instead. */
 	memset(&arm, 0, sizeof(arm));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARMED,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 0U, 200U,
-					   MP_G3_PHRASE_DEFAULT, 0U, 2000U,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 0U, 200U, SERIAL, MP_G3_PHRASE_DEFAULT, 0U, 2000U,
 					   &arm));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARM_MISMATCH,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 0U, 201U,
-					   SERIAL, arm.nonce,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 0U, 201U, SERIAL, NULL, arm.nonce,
 					   2000U + MP_G3_HOLD_MS, NULL));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 0U, 200U,
-					   SERIAL, arm.nonce,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 0U, 200U, SERIAL, NULL, arm.nonce,
 					   2000U + MP_G3_HOLD_MS, NULL));
 }
 
@@ -507,8 +488,7 @@ static void test_g3_arm_expires(void)
 
 	memset(&arm, 0, sizeof(arm));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARMED,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   MP_G3_PHRASE_DEFAULT, 0U, 1000U,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, MP_G3_PHRASE_DEFAULT, 0U, 1000U,
 					   &arm));
 
 	/* Keep the session alive across the arm window. */
@@ -519,16 +499,14 @@ static void test_g3_arm_expires(void)
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_keepalive(&g_c, sid, 20000U));
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_keepalive(&g_c, sid, 24000U));
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_keepalive(&g_c, sid, 28000U));
-	TEST_ASSERT_EQUAL_INT(0, mp_ovr_keepalive(&g_c, sid, 31500U));
 
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARM_MISMATCH,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   SERIAL, arm.nonce,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, NULL, arm.nonce,
 					   1000U + MP_G3_WINDOW_MS + 1U, NULL));
 	/* And the arm has been cleared, so re-arming is required. */
+	TEST_ASSERT_EQUAL_INT(0, mp_ovr_keepalive(&g_c, sid, 31200U));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARM_MISMATCH,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   SERIAL, arm.nonce, 31600U, NULL));
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, NULL, arm.nonce, 31600U, NULL));
 }
 
 static void test_g3_arm_is_dropped_by_the_tick_after_its_window(void)
@@ -540,8 +518,7 @@ static void test_g3_arm_is_dropped_by_the_tick_after_its_window(void)
 	ilk_permissive(&st);
 	memset(&arm, 0, sizeof(arm));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARMED,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   MP_G3_PHRASE_DEFAULT, 0U, 1000U,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, MP_G3_PHRASE_DEFAULT, 0U, 1000U,
 					   &arm));
 	TEST_ASSERT_NOT_EQUAL_UINT32(0U, g_c.sess.arm_nonce);
 
@@ -555,7 +532,7 @@ static void test_g3_arm_is_dropped_by_the_tick_after_its_window(void)
 	{
 		uint32_t t;
 
-		for (t = 6000U; t <= 32000U; t += 4000U) {
+		for (t = 6000U; t <= 34000U; t += 4000U) {
 			TEST_ASSERT_EQUAL_INT(0,
 					      mp_ovr_keepalive(&g_c, sid, t));
 			TEST_ASSERT_TRUE(mp_ovr_tick(&g_c, &st, t) >= 0);
@@ -572,25 +549,21 @@ static void test_g3_phrase_is_replaceable(void)
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_set_phrase(&g_c, "DO IT"));
 	memset(&arm, 0, sizeof(arm));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_PHRASE,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   MP_G3_PHRASE_DEFAULT, 0U, 1000U,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, MP_G3_PHRASE_DEFAULT, 0U, 1000U,
 					   &arm));
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARMED,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   "DO IT", 0U, 1000U, &arm));
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, "DO IT", 0U, 1000U, &arm));
 
 	/* NULL and "" restore the default. */
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_set_phrase(&g_c, NULL));
 	mp_ovr_disarm(&g_c);
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARMED,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   MP_G3_PHRASE_DEFAULT, 0U, 1000U,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, MP_G3_PHRASE_DEFAULT, 0U, 1000U,
 					   &arm));
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_set_phrase(&g_c, ""));
 	mp_ovr_disarm(&g_c);
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_ARMED,
-			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U,
-					   MP_G3_PHRASE_DEFAULT, 0U, 1000U,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL, MP_G3_PHRASE_DEFAULT, 0U, 1000U,
 					   &arm));
 }
 
@@ -602,24 +575,37 @@ static void test_guard_escalation_matrix(void)
 		bool session;
 		bool fresh;
 		const char *confirm;
+		const char *phrase;
 		int expect;
 	} m[] = {
-		{ MP_GUARD_G0, false, false, NULL, MP_GC_OK },
-		{ MP_GUARD_G0, false, false, "junk", MP_GC_OK },
-		{ MP_GUARD_G1, false, false, NULL, MP_GC_NEED_SESSION },
-		{ MP_GUARD_G1, true, true, NULL, MP_GC_OK },
-		{ MP_GUARD_G1, true, false, NULL, MP_GC_STALE },
-		{ MP_GUARD_G2, false, false, SERIAL, MP_GC_NEED_SESSION },
-		{ MP_GUARD_G2, true, false, SERIAL, MP_GC_STALE },
-		{ MP_GUARD_G2, true, true, NULL, MP_GC_NEED_SERIAL },
-		{ MP_GUARD_G2, true, true, "nope", MP_GC_NEED_SERIAL },
-		{ MP_GUARD_G2, true, true, SERIAL, MP_GC_OK },
-		{ MP_GUARD_G3, false, false, MP_G3_PHRASE_DEFAULT,
+		/* G0 ignores everything else. */
+		{ MP_GUARD_G0, false, false, NULL, NULL, MP_GC_OK },
+		{ MP_GUARD_G0, false, false, "junk", "junk", MP_GC_OK },
+		/* G1: a session, fresh. */
+		{ MP_GUARD_G1, false, false, NULL, NULL, MP_GC_NEED_SESSION },
+		{ MP_GUARD_G1, true, true, NULL, NULL, MP_GC_OK },
+		{ MP_GUARD_G1, true, false, NULL, NULL, MP_GC_STALE },
+		/* G2: G1 plus the typed serial; the session check comes first. */
+		{ MP_GUARD_G2, false, false, SERIAL, NULL,
 		  MP_GC_NEED_SESSION },
-		{ MP_GUARD_G3, true, false, MP_G3_PHRASE_DEFAULT, MP_GC_STALE },
-		{ MP_GUARD_G3, true, true, NULL, MP_GC_NEED_SERIAL },
-		{ MP_GUARD_G3, true, true, SERIAL, MP_GC_NEED_PHRASE },
-		{ MP_GUARD_G3, true, true, MP_G3_PHRASE_DEFAULT, MP_GC_ARMED },
+		{ MP_GUARD_G2, true, false, SERIAL, NULL, MP_GC_STALE },
+		{ MP_GUARD_G2, true, true, NULL, NULL, MP_GC_NEED_SERIAL },
+		{ MP_GUARD_G2, true, true, "nope", NULL, MP_GC_NEED_SERIAL },
+		{ MP_GUARD_G2, true, true, SERIAL, NULL, MP_GC_OK },
+		/* G3: G2 plus the typed phrase; both are required to arm. */
+		{ MP_GUARD_G3, false, false, SERIAL, MP_G3_PHRASE_DEFAULT,
+		  MP_GC_NEED_SESSION },
+		{ MP_GUARD_G3, true, false, SERIAL, MP_G3_PHRASE_DEFAULT,
+		  MP_GC_STALE },
+		{ MP_GUARD_G3, true, true, NULL, MP_G3_PHRASE_DEFAULT,
+		  MP_GC_NEED_SERIAL },
+		{ MP_GUARD_G3, true, true, SERIAL, NULL, MP_GC_NEED_PHRASE },
+		{ MP_GUARD_G3, true, true, SERIAL, "wrong",
+		  MP_GC_NEED_PHRASE },
+		{ MP_GUARD_G3, true, true, MP_G3_PHRASE_DEFAULT, SERIAL,
+		  MP_GC_NEED_SERIAL },
+		{ MP_GUARD_G3, true, true, SERIAL, MP_G3_PHRASE_DEFAULT,
+		  MP_GC_ARMED },
 	};
 	size_t i;
 
@@ -646,7 +632,8 @@ static void test_guard_escalation_matrix(void)
 		TEST_ASSERT_EQUAL_INT_MESSAGE(m[i].expect,
 					      mp_ovr_guard(&g_c, m[i].guard,
 							   sid, 3U, 0U,
-							   m[i].confirm, 0U,
+							   m[i].confirm,
+							   m[i].phrase, 0U,
 							   now, &arm),
 					      msg);
 	}
@@ -1111,15 +1098,14 @@ static void test_lease_table_full(void)
 	ilk_permissive(&st);
 	sid = open_session(1000U);
 
-	/* Fill the table with distinct overridable objects. */
+	/* Fill the table with distinct overridable objects, granting each its
+	 * own minimum so no interlock refuses (the permissive state passes the
+	 * clamping ones and every refusing one is satisfied at value 0). */
 	for (i = 0U; (i < mp_obj_count()) && (granted < MP_LEASE_MAX); i++) {
 		const mp_obj_t *o = mp_obj_at(i);
 
 		if ((o->flags & MP_OF_OVERRIDE) == 0U) {
 			continue;
-		}
-		if (o->ilk != 0U) {
-			continue; /* keep the interlocks out of this test */
 		}
 		if (mp_ovr_grant(&g_c, i, o->min, 0U, sid, &st, 1000U, NULL) ==
 		    0) {
@@ -1133,16 +1119,30 @@ static void test_lease_table_full(void)
 	for (; i < mp_obj_count(); i++) {
 		const mp_obj_t *o = mp_obj_at(i);
 
-		if (((o->flags & MP_OF_OVERRIDE) != 0U) && (o->ilk == 0U)) {
-			TEST_ASSERT_EQUAL_INT(-ENOSPC,
-					      mp_ovr_grant(&g_c, i, o->min, 0U,
-							   sid, &st, 1000U,
-							   NULL));
+		if ((o->flags & MP_OF_OVERRIDE) != 0U) {
+			TEST_ASSERT_EQUAL_INT_MESSAGE(
+				-ENOSPC,
+				mp_ovr_grant(&g_c, i, o->min, 0U, sid, &st,
+					     1000U, NULL),
+				o->id);
 			break;
 		}
 	}
 	TEST_ASSERT_TRUE_MESSAGE(i < mp_obj_count(),
 				 "manifest has no spare overridable object");
+
+	/* Re-granting one that is already leased still works: it replaces. */
+	{
+		size_t bl = obj_of("ui.disp.bl");
+
+		if (mp_ovr_lease(&g_c, bl) != NULL) {
+			TEST_ASSERT_EQUAL_INT(0,
+					      mp_ovr_grant(&g_c, bl, 33, 0U, sid,
+							   &st, 1000U, NULL));
+			TEST_ASSERT_EQUAL_size_t(MP_LEASE_MAX,
+						 mp_ovr_active(&g_c));
+		}
+	}
 }
 
 static void test_apply_refusal_is_a_veto_and_leaves_no_lease(void)

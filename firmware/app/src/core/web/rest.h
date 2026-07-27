@@ -51,6 +51,17 @@ extern "C" {
 #define REST_SAT_MAX 32U
 /** Log records returned by one GET /logs page. */
 #define REST_LOG_PAGE_MAX 32U
+/**
+ * Config keys emitted by GET /config when the caller asks for no `group`,
+ * `start` or `max`.
+ *
+ * The whole schema does not fit one response buffer on this part, and a 500 on
+ * the most obvious request in the API would be a bad answer, so an unqualified
+ * listing pages: it returns this many keys and a non-zero `next_id` for the
+ * client to continue from. A caller that names a `group` (which is what a UI
+ * page actually wants) gets that group whole.
+ */
+#define REST_CONFIG_PAGE_DEFAULT 32U
 /** Longest extra-header block a response may carry (Set-Cookie etc.). */
 #define REST_EXTRA_MAX 256U
 /** Longest ETag value, including quotes and NUL. */

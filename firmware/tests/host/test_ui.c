@@ -1536,11 +1536,160 @@ static void test_status_line_flags_an_unsynchronised_clock(void)
 	TEST_ASSERT_EQUAL_UINT8(UI_ATTR_OK, surf.attr[COLS + 0u]);
 }
 
-static void test_sky_page(void)
+/*
+ * Put UI_PAGE_SKYPLOT on top and select @p view.
+ *
+ * The page's default view is the polar plot (spec §6.3); the numeric table is
+ * the second view, reached with Right/Enter. Tests that assert table rows select
+ * it explicitly.
+ */
+static void goto_sky(uint8_t view)
 {
 	ctx.depth = 2u;
 	memset(&ctx.stack[1], 0, sizeof(ctx.stack[1]));
 	ctx.stack[1].page = (uint8_t)UI_PAGE_SKYPLOT;
+	ctx.sky_view = view;
+}
+
+/* The default view is the plot, and it claims the body with a UI_HINT_SKYPLOT. */
+/*
+ * A hint is a rectangle the glue rasterises straight into the framebuffer, so
+ * unlike the text accessors — which clip — it must be validated here. An
+ * out-of-range hint accepted at this seam becomes an out-of-bounds write a long
+ * way away in src/zephyr/ui/ui_display.c.
+ */
+static void test_surface_hint_validates_geometry(void)
+{
+	ui_surface_t s2;
+	char ch[4u * 8u];
+	uint8_t at[4u * 8u];
+	ui_hint_t h;
+
+	TEST_ASSERT_EQUAL_INT(0, ui_surface_init(&s2, 4u, 8u, ch, at, sizeof(ch)));
+
+	/* In-bounds: the whole row, and a single cell at the far corner. */
+	memset(&h, 0, sizeof(h));
+	h.kind = (uint8_t)UI_HINT_RULE;
+	h.row = 3u;
+	h.col = 0u;
+	h.len = 8u;
+	TEST_ASSERT_EQUAL_INT(0, ui_surface_hint(&s2, &h));
+	h.col = 7u;
+	h.len = 1u;
+	TEST_ASSERT_EQUAL_INT(0, ui_surface_hint(&s2, &h));
+
+	/* One past the right edge. */
+	h.col = 7u;
+	h.len = 2u;
+	TEST_ASSERT_EQUAL_INT(-EDOM, ui_surface_hint(&s2, &h));
+	h.col = 0u;
+	h.len = 9u;
+	TEST_ASSERT_EQUAL_INT(-EDOM, ui_surface_hint(&s2, &h));
+	h.col = 8u;
+	h.len = 0u;
+	TEST_ASSERT_EQUAL_INT(-EDOM, ui_surface_hint(&s2, &h));
+
+	/* Off-grid row, including the 8-bit wrap a naive check would miss. */
+	h.col = 0u;
+	h.len = 1u;
+	h.row = 4u;
+	TEST_ASSERT_EQUAL_INT(-EDOM, ui_surface_hint(&s2, &h));
+	h.row = 255u;
+	TEST_ASSERT_EQUAL_INT(-EDOM, ui_surface_hint(&s2, &h));
+
+	/* BIGNUM needs its second row on-grid too. */
+	h.kind = (uint8_t)UI_HINT_BIGNUM;
+	h.row = 3u;
+	TEST_ASSERT_EQUAL_INT(-EDOM, ui_surface_hint(&s2, &h));
+	h.row = 2u;
+	TEST_ASSERT_EQUAL_INT(0, ui_surface_hint(&s2, &h));
+
+	/* PROGRESS permille is bounded, so the glue cannot be asked to fill 6553%. */
+	h.kind = (uint8_t)UI_HINT_PROGRESS;
+	h.row = 0u;
+	h.value = 1000u;
+	TEST_ASSERT_EQUAL_INT(0, ui_surface_hint(&s2, &h));
+	h.value = 1001u;
+	TEST_ASSERT_EQUAL_INT(-EDOM, ui_surface_hint(&s2, &h));
+	h.value = 65535u;
+	TEST_ASSERT_EQUAL_INT(-EDOM, ui_surface_hint(&s2, &h));
+
+	/* A refused hint must not consume a slot or bump the dropped counter. */
+	TEST_ASSERT_EQUAL_UINT8(4u, s2.hint_count);
+	TEST_ASSERT_EQUAL_UINT32(0u, s2.hint_dropped);
+
+	/* The pre-existing argument checks still apply. */
+	h.value = 0u;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ui_surface_hint(NULL, &h));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ui_surface_hint(&s2, NULL));
+	h.kind = (uint8_t)UI_HINT_NONE;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ui_surface_hint(&s2, &h));
+	h.kind = (uint8_t)UI_HINT__COUNT;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ui_surface_hint(&s2, &h));
+
+	/* And a full list still reports -ENOSPC, counted. */
+	h.kind = (uint8_t)UI_HINT_RULE;
+	h.row = 0u;
+	h.col = 0u;
+	h.len = 1u;
+	while (s2.hint_count < (uint8_t)UI_SURF_MAX_HINTS) {
+		TEST_ASSERT_EQUAL_INT(0, ui_surface_hint(&s2, &h));
+	}
+	TEST_ASSERT_EQUAL_INT(-ENOSPC, ui_surface_hint(&s2, &h));
+	TEST_ASSERT_EQUAL_UINT32(1u, s2.hint_dropped);
+}
+
+static void test_sky_page_plot_view(void)
+{
+	uint8_t i;
+	const ui_hint_t *sky = NULL;
+
+	goto_sky((uint8_t)UI_SKY_VIEW_PLOT);
+	render(&hp);
+
+	/* The summary lines are shared by both views. */
+	TEST_ASSERT_EQUAL_STRING(" GPS 2/3  GAL 2/3  GLO 2/2  BDS 1/2",
+				 row(2u));
+	TEST_ASSERT_EQUAL_STRING(" Antenna OK", row(3u));
+
+	for (i = 0u; i < surf.hint_count; i++) {
+		if (surf.hint[i].kind == (uint8_t)UI_HINT_SKYPLOT) {
+			sky = &surf.hint[i];
+		}
+	}
+	TEST_ASSERT_NOT_NULL(sky);
+	/* `len` is a row count for this hint kind, and the plot starts below the
+	 * rule at row 4. */
+	TEST_ASSERT_EQUAL_UINT8(5u, sky->row);
+	TEST_ASSERT_EQUAL_UINT8(0u, sky->col);
+	TEST_ASSERT_TRUE(sky->len > 0u);
+	TEST_ASSERT_EQUAL_UINT16((uint16_t)UI_SKY_VIEW_PLOT, sky->value);
+	/* The body is left blank for the glue to draw over. */
+	TEST_ASSERT_EQUAL_STRING("", row(6u));
+
+	/* Right/Enter cycles to the table and back. */
+	TEST_ASSERT_EQUAL_INT(0, ui_input(&ctx, &(ui_input_t){
+		.kind = (uint8_t)UI_IN_ENTER }));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)UI_SKY_VIEW_TABLE, ctx.sky_view);
+	TEST_ASSERT_EQUAL_INT(0, ui_input(&ctx, &(ui_input_t){
+		.kind = (uint8_t)UI_IN_ENTER }));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)UI_SKY_VIEW_PLOT, ctx.sky_view);
+
+	/* FN still opens the menu from the sky page, unchanged. */
+	TEST_ASSERT_EQUAL_INT(0, ui_input(&ctx, &(ui_input_t){
+		.kind = (uint8_t)UI_IN_FN }));
+	TEST_ASSERT_EQUAL_INT(UI_PAGE_MENU, ui_page(&ctx));
+
+	TEST_ASSERT_EQUAL_STRING("PLOT", ui_sky_view_name(
+					(uint8_t)UI_SKY_VIEW_PLOT));
+	TEST_ASSERT_EQUAL_STRING("TABLE", ui_sky_view_name(
+					(uint8_t)UI_SKY_VIEW_TABLE));
+	TEST_ASSERT_EQUAL_STRING("?", ui_sky_view_name(99u));
+}
+
+static void test_sky_page(void)
+{
+	goto_sky((uint8_t)UI_SKY_VIEW_TABLE);
 
 	render(&hp);
 	TEST_ASSERT_EQUAL_STRING(" GPS 2/3  GAL 2/3  GLO 2/2  BDS 1/2",
@@ -1559,9 +1708,7 @@ static void test_sky_page(void)
 
 static void test_sky_page_with_no_satellites(void)
 {
-	ctx.depth = 2u;
-	memset(&ctx.stack[1], 0, sizeof(ctx.stack[1]));
-	ctx.stack[1].page = (uint8_t)UI_PAGE_SKYPLOT;
+	goto_sky((uint8_t)UI_SKY_VIEW_TABLE);
 
 	/* Genuinely nothing: no SV table and the quality block agrees. */
 	qb.gnss_sv_used = 0u;
@@ -1595,9 +1742,7 @@ static void test_sky_page_falls_back_to_the_quality_counts(void)
 
 static void test_sky_page_survey_and_odd_constellations(void)
 {
-	ctx.depth = 2u;
-	memset(&ctx.stack[1], 0, sizeof(ctx.stack[1]));
-	ctx.stack[1].page = (uint8_t)UI_PAGE_SKYPLOT;
+	goto_sky((uint8_t)UI_SKY_VIEW_TABLE);
 
 	/* Oversized count and an out-of-range constellation id both have to
 	 * be absorbed, not indexed with. */
@@ -2263,6 +2408,8 @@ int main(void)
 	RUN_TEST(test_home_without_a_time_or_a_fix);
 	RUN_TEST(test_home_in_holdover);
 	RUN_TEST(test_status_line_flags_an_unsynchronised_clock);
+	RUN_TEST(test_surface_hint_validates_geometry);
+	RUN_TEST(test_sky_page_plot_view);
 	RUN_TEST(test_sky_page);
 	RUN_TEST(test_sky_page_with_no_satellites);
 	RUN_TEST(test_sky_page_falls_back_to_the_quality_counts);

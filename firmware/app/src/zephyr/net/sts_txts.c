@@ -197,19 +197,30 @@ static frame_kind_t classify(const uint8_t *buf, size_t len, size_t *off)
 	dport = bytes_get_be16(&buf[p + 2U]);
 	p += 8U;
 
-	if (sport == PTP_EVENT_PORT || dport == PTP_EVENT_PORT) {
-		if (len < p + PTP_HDR_MIN) {
-			return FRAME_BAD;
-		}
-		*off = p;
-		return FRAME_PTP_EVENT;
-	}
+	/*
+	 * Order matters, and it is keyed on OUR source port because every frame
+	 * here is one this appliance transmitted: NTP responses leave port 123 and
+	 * PTP event messages leave port 319.
+	 *
+	 * Testing 319 first — either direction — misclassified our own NTP
+	 * response to any client that happened to source its request from UDP/319,
+	 * because the response's *destination* was then 319. The frame was handed
+	 * to the PTP consumer, the NTP consumer never saw the egress stamp, and
+	 * that client silently lost interleave pairing for every exchange (F14).
+	 */
 	if (sport == NTP_PORT) {
 		if (len < p + NTP_HDR_MIN) {
 			return FRAME_BAD;
 		}
 		*off = p;
 		return FRAME_NTP;
+	}
+	if (sport == PTP_EVENT_PORT || dport == PTP_EVENT_PORT) {
+		if (len < p + PTP_HDR_MIN) {
+			return FRAME_BAD;
+		}
+		*off = p;
+		return FRAME_PTP_EVENT;
 	}
 
 	return FRAME_OTHER;
