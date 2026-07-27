@@ -35,7 +35,6 @@
 #include <zephyr/net/net_mgmt.h>
 
 #include "cfg/cfg.h"
-#include "fault/fault.h"
 #include "net/sts_net.h"
 #include "zephyr/sts_app.h"
 
@@ -184,9 +183,15 @@ static void note_link(bool up)
 		sts_log(LOGR_SUB_NET, up ? LOGR_NOTICE : LOGR_WARN,
 			"link %s", up ? "up" : "down");
 	}
-	/* Carrier loss is a network-service alarm; the fault aggregator owns
-	 * the RGB/relay/trap policy that follows from it. */
-	(void)sts_alarm_set(FAULT_ALARM_GNSS_LOST, false); /* no-op guard */
+	/*
+	 * core/fault's alarm table (fault.h) has no network-carrier id — the
+	 * §5 fault tree is scoped to timing, power and thermal faults, where a
+	 * link drop is an operational event, not a box fault, and is surfaced
+	 * through the NET status group and the log rather than the RGB/relay
+	 * policy. A dedicated FAULT_ALARM_NETWORK would be the place to hook an
+	 * SNMP linkDown trap; that is a core/fault change, out of this area's
+	 * boundary. TODO(fault): add it if link state should drive an alarm.
+	 */
 }
 
 static void on_l2(struct net_mgmt_event_callback *cb, uint64_t ev,

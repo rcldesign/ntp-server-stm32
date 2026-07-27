@@ -1563,11 +1563,34 @@ static void test_sky_page_with_no_satellites(void)
 	memset(&ctx.stack[1], 0, sizeof(ctx.stack[1]));
 	ctx.stack[1].page = (uint8_t)UI_PAGE_SKYPLOT;
 
+	/* Genuinely nothing: no SV table and the quality block agrees. */
+	qb.gnss_sv_used = 0u;
+	qb.gnss_sv_visible = 0u;
 	he.ant_state = (uint8_t)UI_ANT_OPEN;
 	render(&he);
 	TEST_ASSERT_EQUAL_STRING(" no satellites tracked", row(2u));
 	TEST_ASSERT_EQUAL_STRING(" Antenna OPEN", row(3u));
 	TEST_ASSERT_EQUAL_STRING(" (no satellite data)", row(6u));
+}
+
+static void test_sky_page_falls_back_to_the_quality_counts(void)
+{
+	/*
+	 * The glue can have a locked receiver (used/visible in the quality
+	 * block) without a NAV-SAT snapshot to build the table from. The page
+	 * must report the counts it does have rather than an empty sky.
+	 */
+	ctx.depth = 2u;
+	memset(&ctx.stack[1], 0, sizeof(ctx.stack[1]));
+	ctx.stack[1].page = (uint8_t)UI_PAGE_SKYPLOT;
+
+	he.ant_state = (uint8_t)UI_ANT_OK;
+	qb.gnss_sv_used = 11u;
+	qb.gnss_sv_visible = 16u;
+	render(&he); /* he has sv_count == 0 */
+	TEST_ASSERT_EQUAL_STRING(" SV detail unavailable -- 11 of 16 in "
+				 "solution",
+				 row(2u));
 }
 
 static void test_sky_page_survey_and_odd_constellations(void)
@@ -2242,6 +2265,7 @@ int main(void)
 	RUN_TEST(test_status_line_flags_an_unsynchronised_clock);
 	RUN_TEST(test_sky_page);
 	RUN_TEST(test_sky_page_with_no_satellites);
+	RUN_TEST(test_sky_page_falls_back_to_the_quality_counts);
 	RUN_TEST(test_sky_page_survey_and_odd_constellations);
 	RUN_TEST(test_clocks_page);
 	RUN_TEST(test_clocks_page_degraded);

@@ -240,6 +240,11 @@ static int idx_of_from(const model_t *m, pwrseq_action_t a, size_t start)
 	return -1;
 }
 
+static int idx_of(const model_t *m, pwrseq_action_t a)
+{
+	return idx_of_from(m, a, 0U);
+}
+
 /* Advance 1 ms per step until @p a has been emitted; fail if it does not appear
  * within @p budget_ms. Robust to the glue's per-step response roundtrips. */
 static void advance_until(model_t *m, pwrseq_action_t a, uint32_t budget_ms)
@@ -251,11 +256,6 @@ static void advance_until(model_t *m, pwrseq_action_t a, uint32_t budget_ms)
 					 pwrseq_action_name(a));
 		advance(m, 1U);
 	}
-}
-
-static int idx_of(const model_t *m, pwrseq_action_t a)
-{
-	return idx_of_from(m, a, 0U);
 }
 
 static unsigned int count_of(const model_t *m, pwrseq_action_t a)
@@ -2187,11 +2187,188 @@ static void test_names_are_present_for_every_action_and_alarm(void)
 				 pwrseq_alarm_name((pwrseq_alarm_t)-1));
 }
 
+/* ---------------------------------------- BLOCKER-1 / HIGH-1 / HIGH-2 / L1 */
+
+static void test_init_bounds_the_digipot_codes_by_voltage(void)
+{
+	pwrseq_cfg_t cfg;
+	pwrseq_ctx_t ctx;
+
+	/*
+	 * BLOCKER-1: a digipot code whose commanded rail would exceed the FE
+	 * ceiling is rejected at boot, so the config never runs — the fix's
+	 * front line. Code 1000 is ~24 V against the 15 V default ceiling.
+	 */
+	pwrseq_cfg_default(&cfg);
+	cfg.digipot_operating_code = 1000U;
+	TEST_ASSERT_TRUE(pwrseq_rb_expected_mv(&cfg.rb_xfer, 1000U) >
+			 (int32_t)cfg.rb_vmax_mv);
+	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_init(&ctx, &cfg));
+
+	/* A "safe" code that is not actually low is a config error too. */
+	pwrseq_cfg_default(&cfg);
+	cfg.digipot_safe_code = 900U; /* ~22 V */
+	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_init(&ctx, &cfg));
+
+	/* Out-of-range codes (>= steps) are rejected outright. */
+	pwrseq_cfg_default(&cfg);
+	cfg.digipot_operating_code = 2000U;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_init(&ctx, &cfg));
+	pwrseq_cfg_default(&cfg);
+	cfg.digipot_safe_code = 1024U;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_init(&ctx, &cfg));
+
+	/* A zero ceiling can never be satisfied. */
+	pwrseq_cfg_default(&cfg);
+	cfg.rb_vmax_mv = 0U;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_init(&ctx, &cfg));
+
+	/* Raising the ceiling admits the documented 15 V nominal (code 539). */
+	pwrseq_cfg_default(&cfg);
+	cfg.digipot_operating_code = 539U;
+	cfg.rb_vmax_mv = 15500U;
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_init(&ctx, &cfg));
+
+	/* L4: nonsense tolerances are rejected. */
+	pwrseq_cfg_default(&cfg);
+	cfg.rail_tol_pct = 101U;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_init(&ctx, &cfg));
+	pwrseq_cfg_default(&cfg);
+	cfg.rb_vbus_tol_pct = 101U;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_init(&ctx, &cfg));
+}
+
+static void test_withdrawing_rb_wanted_mid_stage_8_shuts_down(void)
+{
+	model_t m;
+	size_t base;
+
+	/*
+	 * HIGH-1: rb_wanted going false after RB_PWR_EN used to guard-skip the
+	 * remaining stage-8 rows and leave the buck enabled forever, because the
+	 * old window branch required rb_gated. Hold gated at the lock wait, then
+	 * withdraw intent: the supervisor drops both enables even though nothing
+	 * is faulted.
+	 */
+	model_init(&m, NULL);
+	m.hold_no_lock = true;
+	run_out(&m, 100U, 40U);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
+	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+	base = m.log_len;
+
+	m.in.rb_wanted = false;
+	advance(&m, 100U);
+
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
+	TEST_ASSERT_FALSE(m.ctx.rb_gated);
+	/* Deliberate withdrawal, so NOT a fault. */
+	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
+	TEST_ASSERT_EQUAL_UINT32(0U,
+				 pwrseq_alarms(&m.ctx) & PWRSEQ_ALARM_RB_MASK);
+	TEST_ASSERT_TRUE(idx_of_from(&m, PWRSEQ_ACT_RB_VCC_GATE_DIS, base) >= 0);
+	TEST_ASSERT_TRUE(idx_of_from(&m, PWRSEQ_ACT_RB_PWR_DIS, base) >= 0);
+
+	/* Bring-up still completes on the OCXO. */
+	run_out(&m, 100U, 40U);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
+	TEST_ASSERT_TRUE(m.ctx.relay_eligible);
+}
+
+static void test_withdrawing_rb_wanted_before_the_gate_shuts_down(void)
+{
+	model_t m;
+
+	/*
+	 * The narrow HIGH-1 window that was the actual hole: intent withdrawn
+	 * while powered but NOT yet gated. Catch it during the 500 ms
+	 * soft-start, where the step machine is merely waiting — the old code
+	 * would skip the rest of the stage and strand RB_PWR_EN high.
+	 */
+	model_init(&m, NULL);
+	advance_until(&m, PWRSEQ_ACT_RB_PWR_EN, 5000U);
+	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
+	TEST_ASSERT_FALSE(m.ctx.rb_gated);
+
+	m.in.rb_wanted = false;
+	advance(&m, 10U); /* still inside soft-start */
+
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
+	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
+	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
+}
+
+static void test_halted_board_refuses_rb_retry_and_shed_restore(void)
+{
+	model_t m;
+
+	/*
+	 * HIGH-2: a board halted on a hard fault (a 3V3 rail-verify failure)
+	 * must not be resurrected by a routine rubidium retry or a
+	 * thermal/PoE shed-restore — both funnel through restart_stage, which
+	 * clears the halt and jumps into stage 8 with RB_PWR_EN and
+	 * RB_VCC_GATE. Only an explicit pwrseq_restart_stage() may clear a halt.
+	 */
+	model_init(&m, NULL);
+	m.in.ina_vbus_mv[INA228_RAIL_3V3_MAIN] = 2000; /* rail verify fails */
+	run_out(&m, 250U, 40U);
+	TEST_ASSERT_TRUE(m.ctx.halted);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_3_RAILS, pwrseq_stage(&m.ctx));
+
+	TEST_ASSERT_EQUAL_INT(-EPERM, pwrseq_rb_retry(&m.ctx, 5000U));
+	TEST_ASSERT_EQUAL_INT(-EPERM, pwrseq_shed_restore(&m.ctx, 5000U));
+
+	/* Still halted, still at stage 3, nothing energised, relay down. */
+	TEST_ASSERT_TRUE(m.ctx.halted);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_3_RAILS, pwrseq_stage(&m.ctx));
+	expect_absent(&m, PWRSEQ_ACT_RB_PWR_EN);
+	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
+	TEST_ASSERT_FALSE(m.ctx.relay_eligible);
+
+	/* The explicit recovery path is the only thing that clears the halt. */
+	m.in.ina_vbus_mv[INA228_RAIL_3V3_MAIN] = 3300;
+	TEST_ASSERT_EQUAL_INT(
+		0, pwrseq_restart_stage(&m.ctx, PWRSEQ_STAGE_3_RAILS, 6000U));
+	TEST_ASSERT_FALSE(m.ctx.halted);
+}
+
+static void test_ov_clear_also_clears_the_rb_fault_umbrella(void)
+{
+	model_t m;
+
+	/*
+	 * L1: an over-voltage sets both RB_OV and the RB_FAULT umbrella. Once
+	 * the operator clears the latch with the cause gone, pwrseq_rb_fault()
+	 * must return false — otherwise a cleared, acknowledged fault leaves the
+	 * board reading permanently Rb-faulted.
+	 */
+	model_init(&m, NULL);
+	run_out(&m, 100U, 100U);
+	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
+
+	m.in.rb_ov_det = true;
+	advance(&m, 100U);
+	TEST_ASSERT_TRUE(pwrseq_rb_fault(&m.ctx));
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_OV)) != 0U);
+
+	m.in.rb_ov_det = false;
+	advance(&m, 10U); /* the latch input reads low again */
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_ov_clear(&m.ctx, m.in.mono_ms));
+
+	TEST_ASSERT_FALSE(pwrseq_ov_latched(&m.ctx));
+	TEST_ASSERT_EQUAL_UINT32(
+		0U, pwrseq_alarms(&m.ctx) & PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_OV));
+	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
 
 	RUN_TEST(test_init_defaults_and_validation);
+	RUN_TEST(test_init_bounds_the_digipot_codes_by_voltage);
 	RUN_TEST(test_wdt_cadence_outside_the_window_is_rejected);
 
 	RUN_TEST(test_digipot_transfer_matches_the_documented_table);
@@ -2210,11 +2387,14 @@ int main(void)
 	RUN_TEST(test_a_digipot_that_reads_back_the_wrong_code_is_rejected);
 	RUN_TEST(test_rb_never_gates_before_the_rail_window_is_proven);
 	RUN_TEST(test_a_rail_just_outside_the_window_is_still_rejected);
+	RUN_TEST(test_rb_measured_over_vmax_is_refused_even_inside_the_window);
 	RUN_TEST(test_a_stale_vcc_rb_reading_is_not_a_pass);
 	RUN_TEST(test_lock_timeout_drops_the_rubidium);
 	RUN_TEST(test_an_out_of_band_external_reference_is_not_a_lock);
 	RUN_TEST(test_a_rail_excursion_after_gating_drops_the_rubidium);
 	RUN_TEST(test_an_over_voltage_latch_drops_the_rubidium_at_any_stage);
+	RUN_TEST(test_withdrawing_rb_wanted_mid_stage_8_shuts_down);
+	RUN_TEST(test_withdrawing_rb_wanted_before_the_gate_shuts_down);
 
 	RUN_TEST(test_an_inadequate_poe_budget_defers_the_rubidium);
 	RUN_TEST(test_a_budget_exactly_at_the_cold_start_figure_is_enough);
@@ -2243,11 +2423,14 @@ int main(void)
 	RUN_TEST(test_shed_ladder_order_and_exhaustion);
 	RUN_TEST(test_restoring_the_rubidium_re_runs_the_guarded_sequence);
 	RUN_TEST(test_a_shed_load_is_not_re_enabled_by_a_stage_replay);
+	RUN_TEST(test_halted_board_refuses_rb_retry_and_shed_restore);
 
 	RUN_TEST(test_ov_clear_is_guarded);
+	RUN_TEST(test_ov_clear_also_clears_the_rb_fault_umbrella);
 
 	RUN_TEST(test_pfi_emits_the_park_list_in_priority_order);
-	RUN_TEST(test_pfi_without_a_running_rubidium_omits_the_shutdown);
+	RUN_TEST(test_pfi_shuts_down_the_rubidium_unconditionally);
+	RUN_TEST(test_pfi_shutdown_survives_an_undrained_supervisor_shutdown);
 	RUN_TEST(test_a_commanded_kill_makes_the_following_pfi_expected);
 
 	RUN_TEST(test_wdt_kick_requires_arming_liveness_and_cadence);

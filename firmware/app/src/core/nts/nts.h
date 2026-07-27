@@ -283,6 +283,13 @@ int nts_cookie_unseal(const nts_keyring_t *r, const uint8_t *cookie, size_t len,
  */
 #define NTS_REQ_PLAINTEXT_MAX 256U
 
+/**
+ * Largest authenticator nonce accepted in a request. RFC 8915's AES-SIV-CMAC
+ * nonce is 16 octets; the cap is generous but keeps a malformed length field
+ * from being taken at face value.
+ */
+#define NTS_REQ_NONCE_MAX 64U
+
 /** What nts_process_request() decided. Non-negative return values. */
 typedef enum {
 	NTS_ACT_NONE = 0, /**< No NTS extension fields: an ordinary NTP request. */
@@ -391,7 +398,10 @@ int nts_process_request(nts_ctx_t *ctx, const uint8_t *pkt, size_t len,
  * @retval 0        Appended.
  * @retval -EINVAL  NULL argument, uninitialised context, or a request that was
  *                  never authenticated.
- * @retval -ENOSPC  @p cap cannot hold even the echo and an empty authenticator.
+ * @retval -ENOSPC  @p cap cannot hold the echo, the authenticator, and at
+ *                  least one fresh cookie. A cookieless response would starve
+ *                  the client of the cookie its next request needs, so it is
+ *                  refused rather than sent (L12).
  * @retval -EIO     The entropy source or the AES port failed.
  */
 int nts_append_response(nts_ctx_t *ctx, const nts_req_t *req, uint8_t *pkt,

@@ -573,6 +573,14 @@ int nts_process_request(nts_ctx_t *ctx, const uint8_t *pkt, size_t len,
 	}
 	nonce_len = bytes_get_be16(auth);
 	ct_len = bytes_get_be16(&auth[2]);
+	/* RFC 8915 §5.6 requires a client-generated nonce; bound it so a
+	 * degenerate or absurd length is refused up front (L10). The AES-SIV-
+	 * CMAC-256 nonce is 16 octets in practice, but a small range keeps
+	 * interop room without letting the length run wild. */
+	if (nonce_len == 0U || nonce_len > NTS_REQ_NONCE_MAX) {
+		ctx->stats.dropped++;
+		return NTS_ACT_DROP;
+	}
 	if (AUTH_LEN_FIELDS + pad4(nonce_len) + pad4(ct_len) > auth_len) {
 		ctx->stats.dropped++;
 		return NTS_ACT_DROP;
@@ -668,7 +676,16 @@ int nts_append_response(nts_ctx_t *ctx, const nts_req_t *req, uint8_t *pkt,
 	}
 	after = *len;
 
-	if ((cap - after) < AUTH_FIXED_LEN) {
+	/*
+	 * There must be room for the authenticator envelope AND at least one
+	 * cookie (L12). A response carrying zero fresh cookies would leave the
+	 * client unable to make its next request — it spends a cookie per
+	 * exchange — so that is -ENOSPC, not a valid response. The anti-
+	 * amplification budget always allows it: a request is at least header +
+	 * unique-id + one cookie + authenticator, and the matching response is
+	 * header + unique-id + authenticator + one cookie, the same size.
+	 */
+	if ((cap - after) < AUTH_FIXED_LEN + NTS_COOKIE_EF_LEN) {
 		return -ENOSPC;
 	}
 	room = cap - after - AUTH_FIXED_LEN;

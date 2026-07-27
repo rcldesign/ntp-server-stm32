@@ -975,17 +975,25 @@ static void test_response_trims_to_capacity(void)
 	TEST_ASSERT_EQUAL_UINT(2U, check_response(rsp, len, &keys, uniq,
 						  sizeof(uniq)));
 
-	/* Enough for the envelope but no cookies: still a valid, authenticated
-	 * response — RFC 8915 §5.7 requires the authenticator, not the cookies. */
+	/* Exactly one cookie fits. */
 	len = NTS_NTP_HDR_LEN;
-	TEST_ASSERT_EQUAL_INT(0, nts_append_response(&g_nts, &req, rsp, &len, base));
-	TEST_ASSERT_EQUAL_UINT(0U, check_response(rsp, len, &keys, uniq,
+	TEST_ASSERT_EQUAL_INT(0, nts_append_response(&g_nts, &req, rsp, &len,
+						     base + NTS_COOKIE_EF_LEN));
+	TEST_ASSERT_EQUAL_UINT(1U, check_response(rsp, len, &keys, uniq,
 						  sizeof(uniq)));
 
-	/* One octet less and there is no valid response to build. */
+	/*
+	 * Room for the authenticator but not a single cookie is -ENOSPC (L12): a
+	 * cookieless response would starve the client, so it is refused rather
+	 * than sent. One octet short of a cookie is the boundary.
+	 */
 	len = NTS_NTP_HDR_LEN;
 	TEST_ASSERT_EQUAL_INT(-ENOSPC,
-			      nts_append_response(&g_nts, &req, rsp, &len, base - 1U));
+			      nts_append_response(&g_nts, &req, rsp, &len,
+						  base + NTS_COOKIE_EF_LEN - 1U));
+	len = NTS_NTP_HDR_LEN;
+	TEST_ASSERT_EQUAL_INT(-ENOSPC,
+			      nts_append_response(&g_nts, &req, rsp, &len, base));
 	len = NTS_NTP_HDR_LEN;
 	TEST_ASSERT_EQUAL_INT(-ENOSPC,
 			      nts_append_response(&g_nts, &req, rsp, &len,

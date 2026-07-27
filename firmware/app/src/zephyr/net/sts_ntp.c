@@ -230,14 +230,12 @@ static uint32_t client_id_of(const struct sockaddr *sa)
 	if (sa->sa_family == AF_INET) {
 		const struct sockaddr_in *s4 = (const struct sockaddr_in *)sa;
 
-		return crc32_ieee((const uint8_t *)&s4->sin_addr,
-				  sizeof(s4->sin_addr));
+		return sts_crc32_ieee(&s4->sin_addr, sizeof(s4->sin_addr));
 	}
 	if (sa->sa_family == AF_INET6) {
 		const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)sa;
 
-		return crc32_ieee((const uint8_t *)&s6->sin6_addr,
-				  sizeof(s6->sin6_addr));
+		return sts_crc32_ieee(&s6->sin6_addr, sizeof(s6->sin6_addr));
 	}
 	return 0U;
 }
