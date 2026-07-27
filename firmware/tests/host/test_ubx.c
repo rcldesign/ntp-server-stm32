@@ -1036,6 +1036,109 @@ static void test_parser_leading_garbage(void)
 	}
 }
 
+/*
+ * LOW-9. A begin() that rejects the frame must not leave the iterator armed.
+ * next() only checks that rec is non-NULL, so a caller who ignored the return
+ * code would otherwise walk records the length field says are not there —
+ * reading past the payload the parser actually received.
+ */
+static void test_iterators_are_not_armed_by_a_failed_begin(void)
+{
+	ubx_nav_sat_iter_t sit;
+	ubx_mon_rf_iter_t mit;
+	ubx_nav_sat_sv_t sv;
+	ubx_mon_rf_block_t blk;
+	ubx_msg_t m;
+
+	/* NAV-SAT claiming three SVs in a frame sized for two. */
+	(void)memset(&sit, 0, sizeof(sit));
+	make_msg(&m, UBX_CLASS_NAV, UBX_ID_NAV_SAT, k_nav_sat,
+		 UBX_NAV_SAT_HDR_LEN + (2U * UBX_NAV_SAT_SV_LEN));
+	TEST_ASSERT_EQUAL_INT(-EBADMSG, ubx_nav_sat_begin(&m, &sit));
+	TEST_ASSERT_NULL(sit.rec);
+	TEST_ASSERT_EQUAL_UINT8(0U, sit.num_svs);
+	/* Ignoring the error and iterating anyway yields nothing, not garbage. */
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ubx_nav_sat_next(&sit, &sv));
+
+	/* Same for a MON-RF whose nBlocks overruns its length. */
+	(void)memset(&mit, 0, sizeof(mit));
+	make_msg(&m, UBX_CLASS_MON, UBX_ID_MON_RF, k_mon_rf,
+		 UBX_MON_RF_HDR_LEN + UBX_MON_RF_BLK_LEN);
+	TEST_ASSERT_EQUAL_INT(-EBADMSG, ubx_mon_rf_begin(&m, &mit));
+	TEST_ASSERT_NULL(mit.rec);
+	TEST_ASSERT_EQUAL_UINT8(0U, mit.n_blocks);
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ubx_mon_rf_next(&mit, &blk));
+
+	/* A short frame leaves it alone too. */
+	(void)memset(&sit, 0, sizeof(sit));
+	make_msg(&m, UBX_CLASS_NAV, UBX_ID_NAV_SAT, k_nav_sat, 4U);
+	TEST_ASSERT_EQUAL_INT(-EBADMSG, ubx_nav_sat_begin(&m, &sit));
+	TEST_ASSERT_NULL(sit.rec);
+}
+
+/*
+ * hunt_bytes accounting, pinned across every shape of junk.
+ *
+ * The counter is incremented in two places and it is not obvious by reading
+ * that the total comes out right: the SYNC2 branch charges for the 0xB5 that
+ * has just been proved not to be a sync pair, and the re-dispatch then charges
+ * for the current byte only if it too is junk. Those two rules compose to
+ * exactly "one count per byte discarded" — including "B5 B5", where the second
+ * 0xB5 is not discarded at all but becomes the real sync1.
+ */
+static void test_parser_hunt_bytes_counts_each_discarded_byte_once(void)
+{
+	static const uint8_t good[] = {0xB5, 0x62, 0x05, 0x01, 0x02, 0x00,
+				       0x06, 0x8A, 0x98, 0xC1};
+	static const uint8_t junk_41[] = {0x41};
+	static const uint8_t junk_62[] = {0x62, 0x62};
+	static const uint8_t junk_b5[] = {0xB5};
+	static const uint8_t junk_b5_41[] = {0xB5, 0x41};
+	static const uint8_t junk_b5b5[] = {0xB5, 0xB5};
+	static const uint8_t junk_b5b5b5[] = {0xB5, 0xB5, 0xB5};
+	static const uint8_t junk_mix[] = {0x41, 0xB5, 0x41};
+	static const struct {
+		const char *name;
+		const uint8_t *junk;
+		size_t len;
+	} cases[] = {
+		{"41", junk_41, sizeof(junk_41)},
+		{"62 62", junk_62, sizeof(junk_62)},
+		{"B5", junk_b5, sizeof(junk_b5)},
+		{"B5 41", junk_b5_41, sizeof(junk_b5_41)},
+		{"B5 B5", junk_b5b5, sizeof(junk_b5b5)},
+		{"B5 B5 B5", junk_b5b5b5, sizeof(junk_b5b5b5)},
+		{"41 B5 41", junk_mix, sizeof(junk_mix)},
+	};
+	size_t i;
+
+	for (i = 0U; i < ARRAY_LEN(cases); i++) {
+		ubx_stats_t st;
+
+		parser_fresh(UBX_PAYLOAD_CAP_DEFAULT);
+		(void)feed_any(cases[i].junk, cases[i].len);
+		TEST_ASSERT_EQUAL_UINT(1U, feed_any(good, sizeof(good)));
+		TEST_ASSERT_EQUAL_INT(0, ubx_parser_stats(&g_parser, &st));
+		/* Every prefix byte is discarded: the frame starts at `good`. */
+		TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)cases[i].len,
+						 st.hunt_bytes, cases[i].name);
+		TEST_ASSERT_EQUAL_UINT32(1U, st.frames);
+	}
+
+	/* The one case where a 0xB5 is NOT discarded: it becomes the sync1 of
+	 * the frame that follows, so only the first is charged for. */
+	{
+		static const uint8_t stream[] = {0xB5, 0xB5, 0x62, 0x0A, 0x04,
+						 0x00, 0x00, 0x0E, 0x34};
+		ubx_stats_t st;
+
+		parser_fresh(UBX_PAYLOAD_CAP_DEFAULT);
+		TEST_ASSERT_EQUAL_UINT(1U, feed_any(stream, sizeof(stream)));
+		TEST_ASSERT_EQUAL_INT(0, ubx_parser_stats(&g_parser, &st));
+		TEST_ASSERT_EQUAL_UINT32(1U, st.hunt_bytes);
+	}
+}
+
 /* --------------------------------------------------------- CFG-VALSET -- */
 
 static void test_cfg_key_decoders(void)
@@ -1374,6 +1477,8 @@ int main(void)
 	RUN_TEST(test_mon_rf_iteration);
 	RUN_TEST(test_mon_rf_rejects);
 	RUN_TEST(test_ack_vector);
+	RUN_TEST(test_iterators_are_not_armed_by_a_failed_begin);
+	RUN_TEST(test_parser_hunt_bytes_counts_each_discarded_byte_once);
 
 	RUN_TEST(test_cfg_key_decoders);
 	RUN_TEST(test_cfg_key_table_encoding);

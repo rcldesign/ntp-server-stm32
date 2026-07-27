@@ -107,7 +107,9 @@ typedef struct {
 	uint16_t    cap;
 	uint16_t    count;    /* records currently retained (<= cap) */
 	uint32_t    head_seq; /* sequence number the next record will take */
-	uint32_t    dropped;  /* records overwritten before every reader saw them */
+	uint32_t    dropped;  /* records evicted by wrap while the ring was full
+			       * (the ring tracks no readers; a slow cursor learns
+			       * of the loss as a gap, see logr_tail) */
 	uint32_t    filtered; /* records rejected by the per-subsystem level */
 	uint8_t     min_level[LOGR_SUB_COUNT];
 } logr_t;

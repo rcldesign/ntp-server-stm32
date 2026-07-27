@@ -253,6 +253,8 @@ int mcp_wire_build(uint8_t type, uint8_t cmd, uint8_t flags, uint16_t seq,
  * AUTH 0x08
  *   REQ: u8 password[1..64] (raw bytes, no NUL)
  *   RSP: u8 authed, u16 session_seconds
+ *        A brute-force backoff (mcp.h) answers MCP_ERR_BUSY, without testing
+ *        the password, while a lockout window is armed.
  *
  * CFG_LIST 0x10
  *   REQ: u16 start_id, u8 max_entries
@@ -269,7 +271,14 @@ int mcp_wire_build(uint8_t type, uint8_t cmd, uint8_t flags, uint16_t seq,
  *
  * CFG_COMMIT 0x13
  *   REQ: (empty)
- *   RSP: u16 applied, u16 reboot_keys, u32 reboot_groups (bit per config group)
+ *   RSP: u16 applied, u16 reboot_keys, u32 reboot_groups (bit per config group),
+ *        u16 persist_errors
+ *        status is MCP_OK when the staged set validated and was applied to the
+ *        live tree. persist_errors > 0 means that many applied keys could not
+ *        be written to non-volatile storage: the change is live now but will
+ *        not survive a reboot, so the tool must warn rather than report clean
+ *        success. A validation/cross-field failure instead returns a bare
+ *        error status and leaves the staged set intact.
  *
  * CFG_REVERT 0x14
  *   REQ: (empty)

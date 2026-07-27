@@ -880,6 +880,11 @@ int cfg_set_bytes(cfg_ctx_t *c, uint16_t id, const uint8_t *v, size_t len)
 
 static bool export_includes(const cfg_key_t *k, bool secrets)
 {
+	if ((k->flags & CFG_F_NOEXPORT) != 0U) {
+		/* Write-only over any channel: never exported, even with the
+		 * secrets flag. The credential is provisioned out-of-band. */
+		return false;
+	}
 	return secrets || ((k->flags & CFG_F_SECRET) == 0U);
 }
 

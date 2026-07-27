@@ -110,6 +110,11 @@ typedef enum {
 #define QUALITY_FLAG_TEMPCO           (1u << 9)  /**< tempco feed-forward live */
 #define QUALITY_FLAG_PARKED           (1u << 10) /**< PFI park latched */
 #define QUALITY_FLAG_DEMOTED          (1u << 11) /**< holdover past policy */
+/* Validity of the fields whose zero is otherwise ambiguous (0 mV / 0 m°C are
+ * legal readings). A consumer must treat vc_sense_mv / osc_temp_mc as unknown
+ * unless the corresponding flag is set. */
+#define QUALITY_FLAG_VC_SENSE_VALID   (1u << 12) /**< vc_sense_mv is a reading */
+#define QUALITY_FLAG_OSC_TEMP_VALID   (1u << 13) /**< osc_temp_mc is a reading */
 
 /**
  * The one authoritative view of clock quality (spec §3.8, metrics §10.5).
@@ -196,9 +201,12 @@ typedef void (*quality_race_hook_t)(void *hook_ctx);
  * All fields are private; use the quality_* functions.
  */
 typedef struct {
-	/** Even = stable, odd = write in progress. Volatile so the two reads in
-	 *  quality_snapshot() cannot be folded into one. */
-	volatile uint32_t seq;
+	/** Even = stable, odd = write in progress. C11 atomic so concurrent
+	 *  access from the writer and any reader is a well-defined operation
+	 *  rather than a data race, and so the two reads in quality_snapshot()
+	 *  cannot be folded into one. Accessed relaxed under the release/acquire
+	 *  fences in quality.c. */
+	_Atomic uint32_t seq;
 	quality_race_hook_t race_hook;
 	void *hook_ctx;
 	quality_block_t blk;

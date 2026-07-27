@@ -308,6 +308,8 @@ int cfg_val_encode(const cfg_val_t *v, uint8_t *out, size_t cap);
  * Every schema key is exported, defaults included, so an export is a complete
  * restorable image rather than a diff. CFG_F_SECRET keys are omitted unless
  * the caller asks for them (MCP does so only for an authenticated session).
+ * CFG_F_NOEXPORT keys (the admin credential) are omitted unconditionally —
+ * they are provisioned out-of-band and must never appear on the wire.
  */
 
 /** Bytes of the fixed export header. */

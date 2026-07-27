@@ -88,6 +88,44 @@ extern "C" {
 #define MCP_DFU_ERASE_GRAN 8192U
 #endif
 
+/**
+ * Flash write-block size, in bytes. Every non-final FW_DATA chunk must be a
+ * multiple of this so the port never has to buffer a partial block except the
+ * final short one (port_image_t::staging_write buffers only that one). The
+ * default is the STM32H5 128-bit programming quadword; the glue overrides it
+ * with the real flash write-block-size via mcp_wiring_t::dfu_write_block, and
+ * the value is echoed to the tool in the FW_BEGIN/FW_INFO responses.
+ */
+#ifndef MCP_DFU_WRITE_BLOCK
+#define MCP_DFU_WRITE_BLOCK 16U
+#endif
+
+/*
+ * AUTH brute-force throttle (spec §9.4). Failed password attempts are counted
+ * per engine instance (state survives a link drop — resetting it on reconnect
+ * would let an attacker toggle DTR to erase the counter). The first
+ * MCP_AUTH_FREE_TRIES mismatches answer immediately; after that each further
+ * mismatch arms a backoff window during which AUTH returns ERR_BUSY without
+ * testing the password, doubling from MCP_AUTH_THROTTLE_MS up to
+ * MCP_AUTH_THROTTLE_MAX_MS; reaching MCP_AUTH_LOCK_TRIES arms the longer
+ * MCP_AUTH_LOCKOUT_MS window. A correct password (or a reboot) clears it.
+ */
+#ifndef MCP_AUTH_FREE_TRIES
+#define MCP_AUTH_FREE_TRIES 3U
+#endif
+#ifndef MCP_AUTH_LOCK_TRIES
+#define MCP_AUTH_LOCK_TRIES 8U
+#endif
+#ifndef MCP_AUTH_THROTTLE_MS
+#define MCP_AUTH_THROTTLE_MS 2000U
+#endif
+#ifndef MCP_AUTH_THROTTLE_MAX_MS
+#define MCP_AUTH_THROTTLE_MAX_MS 30000U
+#endif
+#ifndef MCP_AUTH_LOCKOUT_MS
+#define MCP_AUTH_LOCKOUT_MS 60000U
+#endif
+
 /** Chunk size used when streaming the staged image back for SHA-256 verify. */
 #ifndef MCP_DFU_VERIFY_CHUNK
 #define MCP_DFU_VERIFY_CHUNK 256U
@@ -169,6 +207,8 @@ typedef struct {
 
 	/** Erase granularity override for the staging slot; 0 = default. */
 	uint32_t dfu_erase_gran;
+	/** Flash write-block override; 0 = MCP_DFU_WRITE_BLOCK. */
+	uint32_t dfu_write_block;
 } mcp_wiring_t;
 
 /* -------------------------------------------------------------- state */
@@ -198,6 +238,7 @@ typedef struct {
 	uint32_t written;     /* next expected offset */
 	uint32_t erased;      /* end of the erased region, exclusive */
 	uint32_t erase_gran;
+	uint32_t write_block; /* non-final chunks must be a multiple of this */
 	uint8_t  sha[32];
 	uint64_t last_ms;     /* last FW_BEGIN/FW_DATA, for the idle timeout */
 	uint32_t chunks;      /* FW_DATA writes performed */
@@ -220,6 +261,7 @@ typedef struct {
 	uint32_t auth_ok;
 	uint32_t auth_fail;
 	uint32_t auth_denied;   /* mutating command refused for lack of a session */
+	uint32_t auth_throttled;/* AUTH refused by the brute-force backoff window */
 	uint32_t session_expired;
 } mcp_stats_t;
 
@@ -242,6 +284,10 @@ typedef struct {
 	uint64_t last_activity_ms;
 	uint16_t evt_seq;
 
+	/* AUTH brute-force throttle. */
+	uint32_t auth_fails;        /* consecutive password mismatches */
+	uint64_t auth_lock_until_ms;/* AUTH refused until this instant */
+
 	/* Telemetry subscription. */
 	uint8_t  telem_mask;
 	uint8_t  telem_rate;
@@ -252,11 +298,24 @@ typedef struct {
 	uint32_t      log_cursor;
 	logr_filter_t log_filter;
 
-	/* CFG_EXPORT / CFG_IMPORT streaming state. */
+	/* CFG_EXPORT / CFG_IMPORT streaming state. Each keeps enough history to
+	 * absorb a retransmit of the previous chunk (see the retry contract in
+	 * mcp_wire.h): export snapshots its cursor so it can re-emit, import
+	 * remembers the last chunk's start offset so it can re-ack the frontier
+	 * without re-applying, and a completed import caches its result so a
+	 * repeat of the final chunk returns the same answer. */
 	cfg_export_t exp;
 	bool         exp_active;
+	cfg_export_t exp_prev;      /* cursor at the start of the last chunk */
+	bool         exp_prev_valid;
+
 	cfg_import_t imp;
 	bool         imp_active;
+	uint32_t     imp_prev_off;  /* start offset of the last accepted chunk */
+	bool         imp_prev_valid;
+	bool         imp_done;      /* final chunk committed */
+	uint32_t     imp_done_off;  /* start offset of the committed final chunk */
+	cfg_commit_res_t imp_res;   /* cached commit result for a final repeat */
 
 	/* Deferred reboot. */
 	bool     reboot_pending;

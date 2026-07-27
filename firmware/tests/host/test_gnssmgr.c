@@ -494,6 +494,13 @@ static void test_init_config_validation(void)
 	ASSERT_CFG_REJECTED(c_.survey_acc_limit_0p1mm = 0U, "zero survey limit");
 	ASSERT_CFG_REJECTED(c_.ant_debounce = 0U, "zero antenna debounce");
 	ASSERT_CFG_REJECTED(c_.itow_backstep_ms = 0U, "zero iTOW backstep");
+	/*
+	 * `attempt` is a uint8_t. At 255 retries it wraps past the comparison
+	 * that ends the walk and the same step is retried for ever, so the
+	 * receiver never reaches CONFIG_FAILED and nobody is told anything.
+	 */
+	ASSERT_CFG_REJECTED(c_.ack_retries = 251U, "ack_retries past the u8 margin");
+	ASSERT_CFG_REJECTED(c_.ack_retries = 255U, "ack_retries at u8 max");
 	/* Past half a week the guard cannot tell a restart from a rollover. */
 	ASSERT_CFG_REJECTED(c_.itow_backstep_ms = 302400001UL,
 			    "iTOW backstep over half a week");
@@ -522,6 +529,7 @@ static void test_init_config_validation(void)
 		TEST_ASSERT_EQUAL_INT(0, gnssmgr_cfg_default(&c));
 		c.min_elev_deg = -90;
 		c.tacc_unlock_ns = c.tacc_lock_ns; /* equal is legal */
+		c.ack_retries = 250U;              /* the top of the range is */
 		TEST_ASSERT_EQUAL_INT(0, gnssmgr_init(&g_mgr, &c, &k_cb));
 	}
 }
@@ -534,6 +542,7 @@ static void test_init_leaves_manager_idle(void)
 	gnssmgr_svin_t sv;
 	gnssmgr_sats_t sat;
 	gnssmgr_ecef_t pos;
+	gnssmgr_rf_t rf;
 
 	setup_mgr(NULL);
 	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_IDLE, gnssmgr_get_state(&g_mgr));
@@ -549,7 +558,14 @@ static void test_init_leaves_manager_idle(void)
 	TEST_ASSERT_EQUAL_INT(-EAGAIN, gnssmgr_svin(&g_mgr, &sv));
 	TEST_ASSERT_EQUAL_INT(-EAGAIN, gnssmgr_sats(&g_mgr, &sat));
 	TEST_ASSERT_EQUAL_INT(-EAGAIN, gnssmgr_position(&g_mgr, &pos));
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, gnssmgr_rf(&g_mgr, &rf));
 	TEST_ASSERT_EQUAL_INT(GNSSMGR_LI_UNSYNC, gnssmgr_leap_indicator(&g_mgr));
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_STEP_PORT, gnssmgr_failed_step(&g_mgr));
+	TEST_ASSERT_EQUAL_STRING("PORT", gnssmgr_step_name(GNSSMGR_STEP_PORT));
+	TEST_ASSERT_EQUAL_STRING("MSGOUT", gnssmgr_step_name(GNSSMGR_STEP_MSGOUT));
+	TEST_ASSERT_EQUAL_STRING("SIGNAL", gnssmgr_step_name(GNSSMGR_STEP_SIGNAL));
+	TEST_ASSERT_EQUAL_STRING("TP1", gnssmgr_step_name(GNSSMGR_STEP_TP1));
+	TEST_ASSERT_EQUAL_STRING("TP2", gnssmgr_step_name(GNSSMGR_STEP_TP2));
 }
 
 static void test_null_arguments(void)
@@ -579,6 +595,8 @@ static void test_null_arguments(void)
 	TEST_ASSERT_EQUAL_INT(-EINVAL, gnssmgr_qerr_for_pps(&g_mgr, NULL));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, gnssmgr_svin(&g_mgr, NULL));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, gnssmgr_sats(&g_mgr, NULL));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, gnssmgr_rf(NULL, NULL));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, gnssmgr_rf(&g_mgr, NULL));
 
 	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_IDLE, gnssmgr_get_state(NULL));
 	TEST_ASSERT_EQUAL_UINT32(0U, gnssmgr_alarms(NULL));
@@ -2375,44 +2393,99 @@ static void test_notify_reset_reruns_config(void)
 }
 
 /*
- * Secondary detector: an iTOW that jumps backwards by more than the configured
- * threshold means the receiver restarted without telling anyone. The weekly
- * rollover is a backwards jump too and must not trigger it.
+ * LOW-7. iTOW is modular — it counts to the end of the GPS week and returns to
+ * zero — so a smaller value than last time proves nothing on its own. The
+ * question is how far time moved *forwards*, the long way round the week. The
+ * old form compared the raw backwards difference, which made every Saturday
+ * midnight look like a 604 800 s jump.
+ *
+ * @param prev,next  consecutive iTOW values.
+ * @param backstep   the configured threshold.
+ * @return           true if the manager re-ran the configuration walk.
  */
+static bool itow_pair_restarts(uint32_t prev, uint32_t next, uint32_t backstep)
+{
+	gnssmgr_cfg_t c;
+	uint32_t t;
+	unsigned int base;
+
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_cfg_default(&c));
+	c.itow_backstep_ms = backstep;
+	setup_mgr(&c);
+	t = walk_config(1000U);
+
+	t += 1000U;
+	send_pvt(prev, UBX_FIX_3D, true, 20U, true, 14U, t);
+	base = g_fake.sends;
+	t += 1000U;
+	send_pvt(next, UBX_FIX_3D, true, 20U, true, 14U, t);
+	return g_fake.sends != base;
+}
+
+static void test_itow_rollover_is_not_a_restart(void)
+{
+	/* An ordinary 1 Hz epoch across the week boundary: 1 s forward. */
+	TEST_ASSERT_FALSE(itow_pair_restarts(604799000UL, 0U, 60000U));
+	TEST_ASSERT_FALSE(itow_pair_restarts(604799500UL, 500U, 60000U));
+	/* The very last millisecond of the week. */
+	TEST_ASSERT_FALSE(itow_pair_restarts(604799999UL, 0U, 60000U));
+
+	/*
+	 * A 100 s gap that happens to straddle the rollover is judged on the
+	 * same forward distance as a 100 s gap anywhere else in the week — that
+	 * consistency is the property. Under the 60 s default it exceeds the
+	 * threshold; widen the threshold past it and it does not.
+	 */
+	TEST_ASSERT_TRUE(itow_pair_restarts(604750000UL, 50000U, 60000U));
+	TEST_ASSERT_FALSE(itow_pair_restarts(604750000UL, 50000U, 120000U));
+	/* The same 100 s gap mid-week, for comparison — but forwards, so the
+	 * detector is not even consulted. */
+	TEST_ASSERT_FALSE(itow_pair_restarts(300000000UL, 300100000UL, 60000U));
+}
+
 static void test_itow_backstep_detection(void)
 {
 	uint32_t t;
 	unsigned int base;
 
+	/*
+	 * A receiver that restarted mid-week re-acquires at a small iTOW. The
+	 * implied forward distance is most of a week, far past any threshold.
+	 */
+	TEST_ASSERT_TRUE(itow_pair_restarts(500000U, 1000U, 60000U));
+	/*
+	 * Even a small backwards step means the same thing: a monotonic
+	 * time-of-week does not go back except at the rollover, so the implied
+	 * forward jump is ~604 790 s and the walk is re-run.
+	 */
+	TEST_ASSERT_TRUE(itow_pair_restarts(500000U, 490000U, 60000U));
+	/* Forward motion never trips it, however large. */
+	TEST_ASSERT_FALSE(itow_pair_restarts(1000U, 500000U, 60000U));
+	/* Nor does a repeated epoch. */
+	TEST_ASSERT_FALSE(itow_pair_restarts(500000U, 500000U, 60000U));
+
+	/* A detected restart re-runs the walk from the first step. */
 	setup_mgr(NULL);
 	t = walk_config(1000U);
-
 	t += 1000U;
 	send_pvt(500000U, UBX_FIX_3D, true, 20U, true, 14U, t);
 	base = g_fake.sends;
-
-	/* A small backwards step is jitter, not a restart. */
-	t += 1000U;
-	send_pvt(490000U, UBX_FIX_3D, true, 20U, true, 14U, t);
-	TEST_ASSERT_EQUAL_UINT(base, g_fake.sends);
-	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_SURVEY_IN, gnssmgr_get_state(&g_mgr));
-
-	/* A large one re-runs the configuration. */
 	t += 1000U;
 	send_pvt(1000U, UBX_FIX_3D, true, 20U, true, 14U, t);
 	TEST_ASSERT_EQUAL_UINT(base + 1U, g_fake.sends);
 	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_CONFIG, gnssmgr_get_state(&g_mgr));
+	TEST_ASSERT_FALSE(gnssmgr_txready_trusted(&g_mgr));
 
-	/* The week rollover: 604799000 -> 500 must be left alone. */
+	/* An out-of-range iTOW is garbage, not evidence: acting on it would
+	 * re-run the walk on every corrupt message. */
 	setup_mgr(NULL);
 	t = walk_config(1000U);
 	t += 1000U;
-	send_pvt(604799000UL, UBX_FIX_3D, true, 20U, true, 14U, t);
+	send_pvt(700000000UL, UBX_FIX_3D, true, 20U, true, 14U, t);
 	base = g_fake.sends;
 	t += 1000U;
-	send_pvt(500U, UBX_FIX_3D, true, 20U, true, 14U, t);
+	send_pvt(1000U, UBX_FIX_3D, true, 20U, true, 14U, t);
 	TEST_ASSERT_EQUAL_UINT(base, g_fake.sends);
-	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_SURVEY_IN, gnssmgr_get_state(&g_mgr));
 
 	/* An idle manager never emits, however the iTOW behaves. */
 	setup_mgr(NULL);
@@ -2517,9 +2590,19 @@ int main(void)
 	RUN_TEST(test_nak_retries_immediately);
 	RUN_TEST(test_foreign_ack_ignored);
 	RUN_TEST(test_send_failure_is_reported_and_retried);
+	RUN_TEST(test_duplicate_ack_after_retry_is_not_misattributed);
+	RUN_TEST(test_txready_nak_never_sets_trusted);
+	RUN_TEST(test_nak_after_retry_retries_the_right_step);
+	RUN_TEST(test_final_step_nak_is_not_discarded);
+	RUN_TEST(test_unsolicited_ack_ignored);
+	RUN_TEST(test_txready_nak_degrades_and_walk_completes);
+	RUN_TEST(test_txready_timeout_degrades);
+	RUN_TEST(test_essential_step_nak_fails_and_names_step);
 	RUN_TEST(test_ack_deadline_survives_clock_wrap);
 
 	RUN_TEST(test_survey_in_progress_then_fixed);
+	RUN_TEST(test_survey_result_must_meet_its_own_limits);
+	RUN_TEST(test_stale_svin_cannot_abort_a_requested_resurvey);
 	RUN_TEST(test_request_survey_is_explicit_only);
 	RUN_TEST(test_request_survey_mid_walk_does_not_skip_steps);
 	RUN_TEST(test_request_survey_reissues_outstanding_tmode);
@@ -2531,6 +2614,8 @@ int main(void)
 
 	RUN_TEST(test_leap_tracking_and_indicator);
 	RUN_TEST(test_qerr_pairing);
+	RUN_TEST(test_qerr_timescale_normalisation);
+	RUN_TEST(test_qerr_tow_matches_nav_pvt_itow);
 	RUN_TEST(test_nav_sat_summary);
 	RUN_TEST(test_malformed_known_messages);
 
@@ -2542,8 +2627,11 @@ int main(void)
 	RUN_TEST(test_antenna_short_outranks_open_and_ok);
 	RUN_TEST(test_antenna_debounce_needs_consecutive_samples);
 	RUN_TEST(test_antenna_debounce_of_one_is_immediate);
+	RUN_TEST(test_mon_rf_open_block_cannot_hide_a_short_block);
+	RUN_TEST(test_mon_rf_ant_power_off_masks_faults);
 
 	RUN_TEST(test_notify_reset_reruns_config);
+	RUN_TEST(test_itow_rollover_is_not_a_restart);
 	RUN_TEST(test_itow_backstep_detection);
 	RUN_TEST(test_optional_callbacks_may_be_null);
 	RUN_TEST(test_every_step_fits_the_scratch_buffer);

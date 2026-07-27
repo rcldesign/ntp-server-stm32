@@ -81,6 +81,14 @@ typedef enum {
 #define CFG_F_SECRET          0x04U
 /** Calibration constant: produced by a bench procedure, not an operator guess. */
 #define CFG_F_CAL             0x08U
+/**
+ * Write-only over any external channel: never included in a TLV export (even
+ * one that asks for secrets) and never returned by a read-back. Used for the
+ * admin credential, which is provisioned out-of-band (local UI / ACM0 shell)
+ * and must never appear on the MCP wire — not merely gated behind auth, since
+ * a box with auth disabled would otherwise leak it. Implies CFG_F_SECRET.
+ */
+#define CFG_F_NOEXPORT        0x10U
 
 /* ----------------------------------------------------------------- groups */
 
@@ -248,8 +256,8 @@ typedef enum {
 	/* -- 0x0A security ------------------------------------------------------------- */  \
 	U(SEC_AUTH_REQUIRED, 0x0A01, "sec.auth.req",    BOOL, CFG_F_RUNTIME_APPLY,             \
 	  1, 0, 1)                                                                             \
-	B(SEC_ADMIN_PW,      0x0A02, "sec.admin.pw",          CFG_F_RUNTIME_APPLY|CFG_F_SECRET,\
-	  48)                                                                                  \
+	B(SEC_ADMIN_PW,      0x0A02, "sec.admin.pw",                                          \
+	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 48)                                \
 	U(SEC_SESSION_S,     0x0A03, "sec.session.s",   U16,  CFG_F_RUNTIME_APPLY,             \
 	  600, 30, 3600)                                                                       \
 	U(SEC_CONSOLE_RO,    0x0A04, "sec.console.ro",  BOOL, CFG_F_RUNTIME_APPLY,             \

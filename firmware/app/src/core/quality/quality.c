@@ -62,10 +62,13 @@ int quality_publish(quality_state_t *qs, const quality_block_t *blk)
 		return -EINVAL;
 	}
 
-	seq = qs->seq;
+	seq = atomic_load_explicit(&qs->seq, memory_order_relaxed);
 
-	/* Odd sequence: a reader that sees this discards whatever it copied. */
-	qs->seq = seq + 1u;
+	/* Odd sequence: a reader that sees this discards whatever it copied.
+	 * The release fence keeps the payload writes below from being hoisted
+	 * above this store; the single-writer contract makes the load/store of
+	 * seq itself race-free without stronger ordering. */
+	atomic_store_explicit(&qs->seq, seq + 1u, memory_order_relaxed);
 	atomic_thread_fence(memory_order_release);
 
 	memcpy(&qs->blk, blk, sizeof(*blk));
@@ -79,8 +82,9 @@ int quality_publish(quality_state_t *qs, const quality_block_t *blk)
 	qs->blk.size = (uint16_t)sizeof(*blk);
 	qs->blk.tick = (seq / 2u) + 1u;
 
-	atomic_thread_fence(memory_order_release);
-	qs->seq = seq + 2u;
+	/* Release so a reader that observes this even value also observes every
+	 * payload write above it. */
+	atomic_store_explicit(&qs->seq, seq + 2u, memory_order_release);
 
 	return 0;
 }
@@ -94,7 +98,9 @@ int quality_snapshot(const quality_state_t *qs, quality_block_t *out)
 	}
 
 	for (attempt = 0u; attempt < QUALITY_SNAPSHOT_RETRIES; attempt++) {
-		uint32_t s1 = qs->seq;
+		/* Acquire so the payload read below observes the writer's
+		 * release store from a completed publication. */
+		uint32_t s1 = atomic_load_explicit(&qs->seq, memory_order_acquire);
 		uint32_t s2;
 
 		if ((s1 & 1u) != 0u) {
@@ -102,15 +108,18 @@ int quality_snapshot(const quality_state_t *qs, quality_block_t *out)
 			continue;
 		}
 
-		atomic_thread_fence(memory_order_acquire);
 		memcpy(out, &qs->blk, sizeof(*out));
+
+		/* Acquire fence keeps the payload read above from sinking past
+		 * the second sequence load, so a write that started during the
+		 * copy is always detected. */
 		atomic_thread_fence(memory_order_acquire);
 
 		if (qs->race_hook != NULL) {
 			qs->race_hook(qs->hook_ctx);
 		}
 
-		s2 = qs->seq;
+		s2 = atomic_load_explicit(&qs->seq, memory_order_relaxed);
 		if (s1 == s2) {
 			return 0;
 		}
