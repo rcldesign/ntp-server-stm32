@@ -277,20 +277,48 @@ static const port_store_t sts_ram_store_port = {
 static cfg_ctx_t sts_cfg_ctx;
 static bool sts_cfg_persistent;
 
-/* Appliers, one slot per config group (ARCHITECTURE.md §8: 0x01..0x0C). */
+/* Config groups (ARCHITECTURE.md §8: 0x01..0x0C). */
 #define STS_CFG_GROUP_MAX 0x10
+
+/*
+ * Subscribers per group.
+ *
+ * A chain, not one slot, because groups are genuinely shared: 0x09 (log) is
+ * claimed by BOTH the console area (log.level -> the ring's severity floor) and
+ * the net area (the syslog sender's reload). With one slot the console started
+ * first and net's registration overwrote it, so log.level was honoured exactly
+ * once at store-registration and was inert at runtime thereafter — field debug
+ * escalation silently did nothing, and the caller's `rc != 0` warning could
+ * never fire because the overwrite reported success.
+ *
+ * Four is sized from the current claims (log has two, everything else one) plus
+ * headroom; a fifth returns -ENOSPC loudly rather than displacing anyone.
+ */
+#define STS_CFG_GROUP_SUBS_MAX 4
 
 struct sts_cfg_applier {
 	sts_cfg_apply_fn fn;
 	void *ctx;
 };
 
-static struct sts_cfg_applier sts_cfg_appliers[STS_CFG_GROUP_MAX];
+static struct sts_cfg_applier
+	sts_cfg_appliers[STS_CFG_GROUP_MAX][STS_CFG_GROUP_SUBS_MAX];
+
 static struct k_mutex sts_cfg_mutex;
 
 cfg_ctx_t *sts_cfg(void)
 {
 	return &sts_cfg_ctx;
+}
+
+void sts_cfg_lock(void)
+{
+	k_mutex_lock(&sts_cfg_mutex, K_FOREVER);
+}
+
+void sts_cfg_unlock(void)
+{
+	k_mutex_unlock(&sts_cfg_mutex);
 }
 
 bool sts_cfg_is_persistent(void)
@@ -300,26 +328,46 @@ bool sts_cfg_is_persistent(void)
 
 int sts_cfg_register_applier(uint8_t group, sts_cfg_apply_fn fn, void *ctx)
 {
+	struct sts_cfg_applier *chain;
+	size_t i;
+
 	if (group >= STS_CFG_GROUP_MAX || fn == NULL) {
 		return -EINVAL;
 	}
 
-	sts_cfg_appliers[group].ctx = ctx;
-	sts_cfg_appliers[group].fn = fn;
-	return 0;
+	chain = sts_cfg_appliers[group];
+
+	for (i = 0; i < STS_CFG_GROUP_SUBS_MAX; i++) {
+		if (chain[i].fn == fn && chain[i].ctx == ctx) {
+			return 0; /* idempotent re-registration */
+		}
+		if (chain[i].fn == NULL) {
+			chain[i].ctx = ctx;
+			chain[i].fn = fn;
+			return 0;
+		}
+	}
+
+	return -ENOSPC;
 }
 
 static void sts_cfg_apply_group(uint8_t group)
 {
-	sts_cfg_apply_fn fn;
+	size_t i;
 
 	if (group >= STS_CFG_GROUP_MAX) {
 		return;
 	}
 
-	fn = sts_cfg_appliers[group].fn;
-	if (fn != NULL) {
-		fn(sts_cfg_appliers[group].ctx, group);
+	/* Registration order: every subscriber is called, and one that ignores
+	 * the group is expected to return quickly rather than be filtered here. */
+	for (i = 0; i < STS_CFG_GROUP_SUBS_MAX; i++) {
+		sts_cfg_apply_fn fn = sts_cfg_appliers[group][i].fn;
+
+		if (fn == NULL) {
+			break;
+		}
+		fn(sts_cfg_appliers[group][i].ctx, group);
 	}
 }
 

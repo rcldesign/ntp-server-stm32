@@ -184,6 +184,14 @@ int ptp_tlv_iter_next(ptp_tlv_iter_t *it, uint16_t *type, const uint8_t **value,
 #define PTP_CLASS_USE_DEGRADATION 0U
 
 /**
+ * IEEE 1588-2019 Table 4 "default" clockClass: not traceable to any reference.
+ *
+ * The honest answer for a clock that has never been disciplined since boot. See
+ * the never-locked gate in ptp_port.c.
+ */
+#define PTP_CLASS_DEFAULT_NOT_TRACEABLE 248U
+
+/**
  * Which frequency-source category is behind a holdover interval.
  *
  * G.8275.1 grades holdover by the quality of the frequency source the clock is

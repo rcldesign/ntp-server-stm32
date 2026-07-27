@@ -1524,16 +1524,161 @@ int pwrseq_start(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 
 /* ------------------------------------------------------------------- step */
 
+/* ------------------------------------------------------------ shed policy */
+
+pwrseq_shed_level_t pwrseq_shed_target(const pwrseq_ctx_t *ctx,
+				       const pwrseq_in_t *in)
+{
+	uint8_t poe = ctx->shed;
+	uint8_t want;
+
+	/*
+	 * PoE: the dwell accumulators (maintained in shed_policy()) decide when a
+	 * rung moves; this function only reads which way they have tipped.
+	 */
+	if (ctx->poe_pressure_ms >= ctx->cfg.poe_shed_dwell_ms) {
+		if (poe < (uint8_t)PWRSEQ_SHED_RB) {
+			poe++;
+		}
+	} else if (ctx->poe_relief_ms >= ctx->cfg.poe_restore_dwell_ms) {
+		if (poe > (uint8_t)PWRSEQ_SHED_NONE) {
+			poe--;
+		}
+	}
+
+	/* Thermal rung 2 is an absolute floor of PWRSEQ_SHED_RB. */
+	want = in->thermal_shed_rb ? (uint8_t)PWRSEQ_SHED_RB : poe;
+	if (poe > want) {
+		want = poe;
+	}
+
+	return (pwrseq_shed_level_t)want;
+}
+
+int pwrseq_shed_track(pwrseq_ctx_t *ctx, pwrseq_shed_level_t target,
+		      bool ui_wanted, uint32_t mono_ms)
+{
+	if (ctx == NULL) {
+		return -EINVAL;
+	}
+
+	ctx->now_ms = mono_ms;
+
+	if ((uint8_t)target > ctx->shed) {
+		return pwrseq_shed_step(ctx, mono_ms);
+	}
+	if ((uint8_t)target == ctx->shed) {
+		return -EALREADY;
+	}
+
+	/*
+	 * Restoring down the ladder. On a headless unit the display and panel-LED
+	 * rungs have nothing to re-enable — emitting DISP_EN there would turn on a
+	 * rail stage 6 deliberately skipped — so unwind those levels silently.
+	 */
+	if (!ui_wanted && (ctx->shed <= (uint8_t)PWRSEQ_SHED_PANEL_LED)) {
+		ctx->shed--;
+		return 0;
+	}
+
+	return pwrseq_shed_restore(ctx, mono_ms);
+}
+
+/*
+ * Maintain the PoE dwell accumulators and move the ladder one rung per tick
+ * toward whatever the aggregate demand is. Also confirms core/thermal's rung-3
+ * cold-cycle request over its own dwell before commanding POE_KILL.
+ */
+static void shed_policy(pwrseq_ctx_t *ctx, const pwrseq_in_t *in, uint32_t dt_ms,
+			uint32_t ms)
+{
+	uint32_t headroom = pwrseq_poe_headroom_mw(in);
+	pwrseq_shed_level_t target;
+
+	if (headroom == 0U) {
+		ctx->poe_pressure_ms += dt_ms;
+		ctx->poe_relief_ms = 0U;
+	} else if (headroom >= ctx->cfg.poe_relief_mw) {
+		ctx->poe_relief_ms += dt_ms;
+		ctx->poe_pressure_ms = 0U;
+	} else {
+		/* Between the two thresholds: hold both dwells, so a rail sitting
+		 * on the boundary neither escalates nor releases. */
+		ctx->poe_pressure_ms = 0U;
+		ctx->poe_relief_ms = 0U;
+	}
+
+	target = pwrseq_shed_target(ctx, in);
+	if ((uint8_t)target != ctx->shed) {
+		if (pwrseq_shed_track(ctx, target, in->ui_wanted, ms) == 0) {
+			/* One rung moved: restart both dwells so the next rung
+			 * needs its own full dwell rather than riding this one. */
+			ctx->poe_pressure_ms = 0U;
+			ctx->poe_relief_ms = 0U;
+			if ((uint8_t)target >= (uint8_t)PWRSEQ_SHED_RB) {
+				raise_alarm(ctx,
+					    (uint8_t)PWRSEQ_ALARM_POE_BUDGET);
+			}
+		}
+	}
+
+	/* Thermal rung 3: the cold cycle. Confirmed over a dwell because the
+	 * consequence is a full power cycle with PSE-driven recovery. */
+	if (in->thermal_poe_kill) {
+		ctx->kill_confirm_ms += dt_ms;
+		if ((ctx->kill_confirm_ms >= ctx->cfg.poe_kill_confirm_ms) &&
+		    !ctx->kill_armed && (act_free(ctx) >= 1U)) {
+			(void)emit(ctx, PWRSEQ_ACT_POE_KILL);
+		}
+	} else {
+		ctx->kill_confirm_ms = 0U;
+	}
+}
+
+/*
+ * Bounded automatic re-attempt of the whole guarded rubidium sequence.
+ *
+ * A single failed window used to end the rubidium for the life of the boot:
+ * abandon_stage() moved on and pwrseq_rb_retry() had no caller anywhere in the
+ * firmware. The budget is deliberately small (cfg.rb_auto_retry_max) — a rail
+ * that is genuinely wrong must not be retried forever into an FE — and each
+ * attempt waits out cfg.rb_auto_retry_delay_ms first.
+ */
+static void rb_retry_policy(pwrseq_ctx_t *ctx, const pwrseq_in_t *in, uint32_t ms)
+{
+	if (!ctx->rb_retry_pending || ctx->halted) {
+		return;
+	}
+	if (!in->rb_wanted || (ctx->shed >= (uint8_t)PWRSEQ_SHED_RB)) {
+		return; /* nobody wants it back yet */
+	}
+	if (ctx->stage < (uint8_t)PWRSEQ_STAGE_9_ARM) {
+		return; /* let bring-up finish first; the watchdog matters more */
+	}
+	if ((int32_t)(ms - ctx->rb_retry_at_ms) < 0) {
+		return;
+	}
+
+	if (pwrseq_rb_retry(ctx, ms) != 0) {
+		return; /* no queue room; try again next tick */
+	}
+
+	ctx->rb_auto_retries++;
+	ctx->rb_retry_pending = false;
+}
+
 int pwrseq_step(pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 {
 	unsigned int iter;
 	uint32_t ms;
+	uint32_t dt_ms;
 
 	if ((ctx == NULL) || (in == NULL)) {
 		return -EINVAL;
 	}
 
 	ms = in->mono_ms;
+	dt_ms = ms - ctx->now_ms;
 	ctx->now_ms = ms;
 	(void)pwrseq_ov_observe(ctx, in->rb_ov_det, ms);
 
@@ -1585,14 +1730,21 @@ int pwrseq_step(pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 			}
 		}
 
-		if (drop) {
-			rb_shutdown(ctx);
+		if (drop && (rb_shutdown(ctx) == 0)) {
 			raise_alarm(ctx, alarm);
 			if (ctx->stage == (uint8_t)PWRSEQ_STAGE_8_RB) {
+				if (alarm != (uint8_t)PWRSEQ_ALARM_NONE) {
+					arm_rb_retry(ctx, ms);
+				}
 				abandon_stage(ctx, ms);
 			}
 		}
 	}
+
+	/* Load shedding and the thermal cold-cycle request, both independent of
+	 * the stage walk: an over-temperature at hour 300 has to act. */
+	shed_policy(ctx, in, dt_ms, ms);
+	rb_retry_policy(ctx, in, ms);
 
 	for (iter = 0U; iter < (unsigned int)PWRSEQ_MAX_STEPS_PER_CALL; iter++) {
 		const pwrseq_step_def_t *def;
@@ -1613,11 +1765,33 @@ int pwrseq_step(pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 				advance_step(ctx, ms);
 				continue;
 			}
-			if (def->action != (uint8_t)PWRSEQ_ACT_NONE) {
-				emit(ctx, (pwrseq_action_t)def->action);
+			if ((def->action != (uint8_t)PWRSEQ_ACT_NONE) &&
+			    (emit(ctx, (pwrseq_action_t)def->action) != 0)) {
+				break; /* no room: re-arm next tick, nothing lost */
 			}
 			ctx->step_entered_ms = ms;
+			ctx->step_stall_ms = 0U;
 			ctx->step_armed = true;
+		}
+
+		/*
+		 * The evidence this row needs is missing. Hold its clock — advance
+		 * step_entered_ms by the same amount time advanced — so the timeout
+		 * measures "the condition never arrived", not "I could not tell".
+		 * Only the first loop iteration of a call can land here (it breaks),
+		 * so dt_ms is charged at most once per tick.
+		 */
+		if ((def->evidence != NULL) && !def->evidence(ctx, in)) {
+			ctx->step_entered_ms += dt_ms;
+			ctx->step_stall_ms += dt_ms;
+
+			if (ctx->step_stall_ms >= ctx->cfg.rb_stale_stall_ms) {
+				if (!handle_stall(ctx, ms)) {
+					break;
+				}
+				continue;
+			}
+			break;
 		}
 
 		elapsed = ms - ctx->step_entered_ms;
@@ -1635,7 +1809,9 @@ int pwrseq_step(pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 		}
 		if ((def->timeout != NULL) &&
 		    (elapsed >= def->timeout(&ctx->cfg))) {
-			handle_failure(ctx, def, ms);
+			if (!handle_failure(ctx, def, ms)) {
+				break; /* drain, then apply the failure policy */
+			}
 			continue;
 		}
 		break; /* waiting on the exit condition */
@@ -1644,6 +1820,12 @@ int pwrseq_step(pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 	/* Derived, so it is never stale: the rubidium counts as locked only
 	 * while it is actually gated on and both guards hold. */
 	ctx->rb_locked = ctx->rb_gated && in->rb_lock && in->extref_in_band;
+
+	/* A rubidium that reached lock has spent no retry budget. */
+	if (ctx->rb_locked) {
+		ctx->rb_auto_retries = 0U;
+		ctx->rb_retry_pending = false;
+	}
 
 	return 0;
 }
@@ -1677,8 +1859,14 @@ int pwrseq_status(const pwrseq_ctx_t *ctx, pwrseq_status_t *out)
 	out->pfi_seen = ctx->pfi_seen;
 	out->pfi_expected = ctx->pfi_expected;
 	out->shed = (pwrseq_shed_level_t)ctx->shed;
+	out->rb_auto_retries = ctx->rb_auto_retries;
 	out->alarms = ctx->alarms;
 	return 0;
+}
+
+uint8_t pwrseq_rb_auto_retries(const pwrseq_ctx_t *ctx)
+{
+	return (ctx != NULL) ? ctx->rb_auto_retries : 0U;
 }
 
 pwrseq_stage_t pwrseq_stage(const pwrseq_ctx_t *ctx)
@@ -1694,6 +1882,24 @@ int pwrseq_restart_stage(pwrseq_ctx_t *ctx, pwrseq_stage_t stage,
 	}
 
 	ctx->now_ms = mono_ms;
+
+	/*
+	 * MEDIUM-2: any stage at or below 8 re-traverses the guarded rubidium
+	 * sequence, which begins by commanding the rail back to the safe-low
+	 * precharge point (~4.5 V). Doing that with the FE still gated browns it
+	 * out — it loses lock and needs a full re-warm — and, with real telemetry
+	 * latency, the precharge window then fails against a rail on its way down
+	 * and raises a spurious RB_WINDOW hard fault. So drop the load first, in
+	 * the documented order (gate, then supply), and clear the flags before
+	 * re-entering.
+	 */
+	if (((uint8_t)stage <= (uint8_t)PWRSEQ_STAGE_8_RB) &&
+	    (ctx->rb_enabled || ctx->rb_gated)) {
+		if (rb_shutdown(ctx) != 0) {
+			return -EAGAIN;
+		}
+	}
+
 	ctx->halted = false;
 	enter_stage(ctx, (uint8_t)stage, mono_ms);
 	return 0;
@@ -1714,6 +1920,12 @@ int pwrseq_rb_retry(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 	 */
 	if (ctx->halted) {
 		return -EPERM;
+	}
+
+	/* Reserve the shutdown pair before clearing anything, so a queue-full
+	 * refusal leaves the caller's view of the sequencer untouched. */
+	if ((ctx->rb_enabled || ctx->rb_gated) && (act_free(ctx) < 2U)) {
+		return -EAGAIN;
 	}
 
 	ctx->rb_deferred = false;
@@ -1740,15 +1952,21 @@ int pwrseq_shed_step(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 
 	switch ((pwrseq_shed_level_t)ctx->shed) {
 	case PWRSEQ_SHED_NONE:
-		emit(ctx, PWRSEQ_ACT_DISP_DIS);
+		if (emit(ctx, PWRSEQ_ACT_DISP_DIS) != 0) {
+			return -EAGAIN;
+		}
 		ctx->shed = (uint8_t)PWRSEQ_SHED_DISPLAY;
 		return 0;
 	case PWRSEQ_SHED_DISPLAY:
-		emit(ctx, PWRSEQ_ACT_PANEL_LED_DIS);
+		if (emit(ctx, PWRSEQ_ACT_PANEL_LED_DIS) != 0) {
+			return -EAGAIN;
+		}
 		ctx->shed = (uint8_t)PWRSEQ_SHED_PANEL_LED;
 		return 0;
 	case PWRSEQ_SHED_PANEL_LED:
-		rb_shutdown(ctx);
+		if (rb_shutdown(ctx) != 0) {
+			return -EAGAIN;
+		}
 		ctx->shed = (uint8_t)PWRSEQ_SHED_RB;
 		return 0;
 	case PWRSEQ_SHED_RB:
@@ -1776,24 +1994,39 @@ int pwrseq_shed_restore(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 	ctx->now_ms = mono_ms;
 
 	switch ((pwrseq_shed_level_t)ctx->shed) {
-	case PWRSEQ_SHED_RB:
+	case PWRSEQ_SHED_RB: {
 		/*
 		 * Never a bare RB_PWR_EN. Re-entering stage 8 runs the digipot
 		 * write, the readback verify and the rail-window check again,
 		 * which is the interlock ARCHITECTURE.md invariant 3 exists to
 		 * keep — a shed-and-restore cycle must not become a back door
 		 * around it.
+		 *
+		 * The level is lowered only on success: a queue-full refusal must
+		 * not leave the ladder claiming a rung it never restored.
 		 */
+		int rc;
+
 		ctx->shed = (uint8_t)PWRSEQ_SHED_PANEL_LED;
-		return pwrseq_rb_retry(ctx, mono_ms);
+		rc = pwrseq_rb_retry(ctx, mono_ms);
+		if (rc != 0) {
+			ctx->shed = (uint8_t)PWRSEQ_SHED_RB;
+		}
+		return rc;
+	}
 	case PWRSEQ_SHED_PANEL_LED:
+		if (act_free(ctx) < 2U) {
+			return -EAGAIN;
+		}
 		ctx->shed = (uint8_t)PWRSEQ_SHED_DISPLAY;
-		emit(ctx, PWRSEQ_ACT_PANEL_LED_EN);
-		emit(ctx, PWRSEQ_ACT_PANEL_LED_PWM);
+		(void)emit(ctx, PWRSEQ_ACT_PANEL_LED_EN);
+		(void)emit(ctx, PWRSEQ_ACT_PANEL_LED_PWM);
 		return 0;
 	case PWRSEQ_SHED_DISPLAY:
+		if (emit(ctx, PWRSEQ_ACT_DISP_EN) != 0) {
+			return -EAGAIN;
+		}
 		ctx->shed = (uint8_t)PWRSEQ_SHED_NONE;
-		emit(ctx, PWRSEQ_ACT_DISP_EN);
 		return 0;
 	case PWRSEQ_SHED_NONE:
 	default:
@@ -1836,7 +2069,9 @@ int pwrseq_ov_clear(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 	}
 
 	ctx->now_ms = mono_ms;
-	emit(ctx, PWRSEQ_ACT_RB_OV_RESET_PULSE);
+	if (emit(ctx, PWRSEQ_ACT_RB_OV_RESET_PULSE) != 0) {
+		return -EAGAIN;
+	}
 	ctx->ov_latched = false;
 	ctx->alarms &= ~PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_OV);
 	/*
@@ -1864,14 +2099,20 @@ int pwrseq_pfi(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 	ctx->pfi_seen = true;
 	ctx->pfi_expected = ctx->kill_armed;
 
-	/* Whatever the sequencer wanted next is irrelevant with ~4.8 ms of
-	 * hold-up left; make room for the park list instead. */
+	/*
+	 * Whatever the sequencer wanted next is irrelevant with ~4.8 ms of
+	 * hold-up left; make room for the park list instead.
+	 *
+	 * q_dropped is NOT reset. It is the only evidence that the glue stopped
+	 * draining — i.e. that this module's belief about the board diverged from
+	 * the pins — and a power fail is exactly the moment that evidence becomes
+	 * worth keeping for the next boot's post-mortem (L2).
+	 */
 	ctx->q_head = 0U;
 	ctx->q_len = 0U;
-	ctx->q_dropped = 0U;
 
-	emit(ctx, PWRSEQ_ACT_PARK_DAC);
-	emit(ctx, PWRSEQ_ACT_PERSIST_STATE);
+	(void)emit(ctx, PWRSEQ_ACT_PARK_DAC);
+	(void)emit(ctx, PWRSEQ_ACT_PERSIST_STATE);
 	/*
 	 * MEDIUM-3: quiesce the rubidium unconditionally, not gated on
 	 * rb_enabled. The supervisor may already have queued RB_VCC_GATE_DIS /
@@ -1881,8 +2122,8 @@ int pwrseq_pfi(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 	 * pin writes are idempotent (drive to the safe-off level), so
 	 * re-emitting them always is correct and cheap.
 	 */
-	rb_shutdown(ctx);
-	emit(ctx, PWRSEQ_ACT_SET_SHUTDOWN_FLAG);
+	(void)rb_shutdown(ctx);
+	(void)emit(ctx, PWRSEQ_ACT_SET_SHUTDOWN_FLAG);
 	return 0;
 }
 

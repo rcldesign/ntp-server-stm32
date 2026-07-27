@@ -239,6 +239,58 @@ static void emit_evt(mcp_ctx_t *c, uint8_t cmd, uint8_t sub, uint16_t len)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Config access: locking and commits                                        */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * mcp.h "Config locking": the glue's critical section over the shared
+ * cfg_ctx_t. Taken per REQUEST rather than per call, so a multi-step operation
+ * (feed a CFG_IMPORT chunk, then commit it) is atomic against the shell and the
+ * local UI. Never nested by the engine.
+ */
+static void cfg_enter(mcp_ctx_t *c)
+{
+	if (c->w.cfg_lock != NULL) {
+		c->w.cfg_lock(c->w.cfg_lock_user);
+	}
+}
+
+static void cfg_leave(mcp_ctx_t *c)
+{
+	if (c->w.cfg_unlock != NULL) {
+		c->w.cfg_unlock(c->w.cfg_lock_user);
+	}
+}
+
+/*
+ * mcp.h "Config commits": the ONE place the engine commits. Routed to the glue
+ * so the per-group appliers run — a wire commit that skipped them would answer
+ * "applied, no reboot needed" while nothing in the running system had changed.
+ *
+ * @p locked says whether the caller holds the cfg critical section; the callback
+ * is always invoked without it, because it takes the config mutex itself and
+ * then dispatches appliers that may block.
+ */
+static int cfg_commit_through_glue(mcp_ctx_t *c, cfg_commit_res_t *res,
+				   bool locked)
+{
+	int rc;
+
+	if (c->w.cfg_commit_cb == NULL) {
+		return cfg_commit(c->w.cfg, res);
+	}
+
+	if (locked) {
+		cfg_leave(c);
+	}
+	rc = c->w.cfg_commit_cb(c->w.cfg_commit_user, res);
+	if (locked) {
+		cfg_enter(c);
+	}
+	return rc;
+}
+
+/* ------------------------------------------------------------------------- */
 /* Session / policy                                                          */
 /* ------------------------------------------------------------------------- */
 
@@ -453,12 +505,25 @@ static int h_auth(mcp_ctx_t *c, const mcp_frame_t *f)
 					 (uint8_t)MCP_ERR_INTERNAL);
 	}
 	if (blob_len != MCP_PW_BLOB_LEN) {
-		/* No credential provisioned. Refusing here rather than falling
-		 * open is the whole point: a box with auth required and no
-		 * password is locked, not wide open. */
-		mcp__log(c, (uint8_t)LOGR_WARN, "auth: no credential set");
+		/*
+		 * No credential provisioned. Refusing rather than falling open
+		 * is the whole point: a box with auth required and no password
+		 * is locked, not wide open.
+		 *
+		 * The answer is deliberately indistinguishable from a wrong
+		 * password, and carries the same penalty. A distinct status here
+		 * told an unauthenticated peer whether the box had ever been
+		 * commissioned, and — because it returned before auth_penalise()
+		 * — did so as fast as the link allowed. Provisioning state is
+		 * reported to the local shell (`sts sec`) and to an
+		 * authenticated session, not to the world.
+		 */
+		c->stats.auth_fail++;
+		auth_penalise(c);
+		mcp__log(c, (uint8_t)LOGR_WARN,
+			 "auth: rejected (no credential provisioned)");
 		return mcp__reply_status(c, f->cmd, f->seq,
-					 (uint8_t)MCP_ERR_STATE);
+					 (uint8_t)MCP_ERR_AUTH);
 	}
 
 	if (c->w.crypto->hmac_sha256(c->w.crypto->ctx, blob, MCP_PW_SALT_LEN,
@@ -706,7 +771,7 @@ static int h_cfg_commit(mcp_ctx_t *c, const mcp_frame_t *f)
 					 (uint8_t)MCP_ERR_ARG);
 	}
 
-	rc = cfg_commit(c->w.cfg, &res);
+	rc = cfg_commit_through_glue(c, &res, true);
 	/*
 	 * -EIO means the staged set validated and was applied to the live tree
 	 * but some keys did not reach non-volatile storage. Reporting that as a
@@ -786,11 +851,19 @@ static int h_cfg_export(mcp_ctx_t *c, const mcp_frame_t *f)
 		c->exp_prev_valid = false;
 	} else if (c->exp_active && (off == c->exp.offset)) {
 		/* Normal forward advance. */
-	} else if (c->exp_active && c->exp_prev_valid &&
-		   (off == c->exp_prev.offset)) {
-		/* Retransmit of the previous request after a lost response:
+	} else if (c->exp_prev_valid && (off == c->exp_prev.offset)) {
+		/*
+		 * Retransmit of the last emitted chunk after a lost response:
 		 * rewind the cursor to the start of that chunk and re-emit the
-		 * identical bytes (the CRC state is part of the snapshot). */
+		 * identical bytes (the CRC state is part of the snapshot).
+		 *
+		 * Deliberately NOT gated on exp_active. The final chunk clears
+		 * exp_active, and the final chunk is exactly the one whose
+		 * response the tool is most likely to lose; refusing its repeat
+		 * with ERR_OFFSET aborted an export that had in fact succeeded.
+		 * CFG_IMPORT has always handled its own final chunk this way
+		 * (imp_done / imp_done_off) — this is the same rule.
+		 */
 		c->exp = c->exp_prev;
 	} else {
 		return mcp__reply_status(c, f->cmd, f->seq,
@@ -898,7 +971,14 @@ static int h_cfg_import(mcp_ctx_t *c, const mcp_frame_t *f)
 			return mcp__reply_status(c, f->cmd, f->seq,
 						 (uint8_t)MCP_ERR_STATE);
 		}
-		rc = cfg_import_finish(c->w.cfg, &c->imp, &res);
+		/*
+		 * cfg_import_finish() is a completeness check plus cfg_commit(),
+		 * and the feed above already answered the completeness half with
+		 * rc == 1 (the short-stream case returned MCP_ERR_STATE). Commit
+		 * through the same glue path CFG_COMMIT uses so an imported tree
+		 * runs exactly the same appliers as an individually-set key.
+		 */
+		rc = cfg_commit_through_glue(c, &res, true);
 		c->imp_active = false;
 		/* As in CFG_COMMIT, -EIO means live-but-not-persisted; report
 		 * it through persist_errors, not as a failure. */
@@ -1235,6 +1315,35 @@ static bool wiring_missing(const mcp_ctx_t *c, uint8_t cmd)
 	}
 }
 
+/*
+ * Commands whose handler reaches into the cfg_ctx_t. handle_frame() runs these
+ * inside the glue's cfg critical section (mcp.h "Config locking"); everything
+ * else runs outside it, so a FW_DATA flash write or a telemetry encode never
+ * blocks the shell or the UI on the config mutex.
+ *
+ * AUTH is on the list because it reads the stored credential and the session
+ * policy. CFG_LIST only walks the static schema table, but it is listed anyway:
+ * "every CFG_* command holds the section" is a rule that survives someone later
+ * making CFG_LIST report live values.
+ */
+static bool cmd_touches_cfg(uint8_t cmd)
+{
+	switch (cmd) {
+	case MCP_CMD_AUTH:
+	case MCP_CMD_CFG_LIST:
+	case MCP_CMD_CFG_GET:
+	case MCP_CMD_CFG_SET:
+	case MCP_CMD_CFG_COMMIT:
+	case MCP_CMD_CFG_REVERT:
+	case MCP_CMD_CFG_EXPORT:
+	case MCP_CMD_CFG_IMPORT:
+	case MCP_CMD_FACTORY_RESET:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static int dispatch(mcp_ctx_t *c, const mcp_frame_t *f)
 {
 	if (wiring_missing(c, f->cmd)) {
@@ -1324,18 +1433,36 @@ static void handle_frame(mcp_ctx_t *c, const uint8_t *buf, size_t n)
 		return;
 	}
 
-	if (cmd_mutating(f.cmd) && !session_ok(c)) {
-		/* Refused before the activity timer is touched: an
-		 * unauthenticated peer spamming mutating commands must not keep
-		 * a lapsed session's idle timer alive. */
-		c->stats.auth_denied++;
-		(void)mcp__reply_status(c, f.cmd, f.seq,
-					(uint8_t)MCP_ERR_AUTH);
-		return;
+	if (cmd_mutating(f.cmd)) {
+		bool ok;
+
+		/* session_ok() reads the auth policy out of the shared tree, so
+		 * it needs the section too — briefly, and never nested with the
+		 * per-handler scope below. */
+		cfg_enter(c);
+		ok = session_ok(c);
+		cfg_leave(c);
+
+		if (!ok) {
+			/* Refused before the activity timer is touched: an
+			 * unauthenticated peer spamming mutating commands must
+			 * not keep a lapsed session's idle timer alive. */
+			c->stats.auth_denied++;
+			(void)mcp__reply_status(c, f.cmd, f.seq,
+						(uint8_t)MCP_ERR_AUTH);
+			return;
+		}
 	}
 
 	c->last_activity_ms = c->now_ms;
-	(void)dispatch(c, &f);
+
+	if (cmd_touches_cfg(f.cmd)) {
+		cfg_enter(c);
+		(void)dispatch(c, &f);
+		cfg_leave(c);
+	} else {
+		(void)dispatch(c, &f);
+	}
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1414,6 +1541,11 @@ int mcp_init(mcp_ctx_t *c, const mcp_wiring_t *w)
 	if ((c == NULL) || (w == NULL) || (w->tx == NULL)) {
 		return -EINVAL;
 	}
+	/* Half a critical section is worse than none: it would look guarded and
+	 * silently deadlock or never release. Reject the asymmetric wiring. */
+	if ((w->cfg_lock == NULL) != (w->cfg_unlock == NULL)) {
+		return -EINVAL;
+	}
 
 	memset(c, 0, sizeof(*c));
 	c->w = *w;
@@ -1470,7 +1602,9 @@ void mcp_reset_session(mcp_ctx_t *c)
 	cobs_dec_reset(&c->dec);
 
 	if (c->w.cfg != NULL) {
+		cfg_enter(c);
 		(void)cfg_revert(c->w.cfg);
+		cfg_leave(c);
 	}
 	/* The DFU session deliberately survives: a link drop in the middle of
 	 * an upload is exactly the case FW_BEGIN resume exists for. */
@@ -1527,7 +1661,12 @@ int mcp_tick(mcp_ctx_t *c, uint64_t now_ms)
 	(void)mcp_poll_tx(c);
 
 	if (c->authed) {
-		uint64_t limit = (uint64_t)session_seconds(c) * 1000ULL;
+		uint64_t limit;
+
+		/* session_seconds() reads the shared tree. */
+		cfg_enter(c);
+		limit = (uint64_t)session_seconds(c) * 1000ULL;
+		cfg_leave(c);
 
 		if ((now_ms - c->last_activity_ms) >= limit) {
 			c->authed = false;

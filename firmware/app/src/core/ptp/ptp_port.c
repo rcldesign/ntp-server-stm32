@@ -943,6 +943,32 @@ static bool check_announce_timeout(ptp_port_ctx_t *c, uint64_t now_ms)
 	return true;
 }
 
+/*
+ * Whether a "defer" recommendation is executed, per ptp_cfg_t::never_yield.
+ *
+ * The BMCA has already run and already reported: the recommended state, the
+ * counters and PTP_ALARM_NOT_BEST_MASTER / PTP_ALARM_DISPLACED_WHILE_LOCKED are
+ * all set from the true outcome. This decides only whether the port acts on it.
+ */
+static bool yield_allowed(const ptp_port_ctx_t *c)
+{
+	switch (c->cfg.never_yield) {
+	case (uint8_t)PTP_NEVER_YIELD_ALWAYS:
+		return false;
+	case (uint8_t)PTP_NEVER_YIELD_WHEN_LOCKED:
+		/*
+		 * A disciplined primary reference holds the role. An Announce is
+		 * unauthenticated unless Annex P is armed, so on an unprotected
+		 * segment "a peer claims to be better" is not evidence that it
+		 * is — while our own GNSS lock is evidence about us.
+		 */
+		return c->quality.sync_state != PTP_SYNC_LOCKED;
+	case (uint8_t)PTP_NEVER_YIELD_OFF:
+	default:
+		return true;
+	}
+}
+
 static void apply_recommended(ptp_port_ctx_t *c, ptp_recommended_t rec,
 			      uint64_t now_ms)
 {
@@ -965,7 +991,20 @@ static void apply_recommended(ptp_port_ctx_t *c, ptp_recommended_t rec,
 		 * it defers and raises PTP_ALARM_NOT_BEST_MASTER instead. See the
 		 * scope note in ptp.h.
 		 */
-		next = PTP_PS_PASSIVE;
+		if (yield_allowed(c)) {
+			next = PTP_PS_PASSIVE;
+		} else if (c->state == PTP_PS_LISTENING) {
+			/*
+			 * Refusing to yield out of LISTENING means taking the
+			 * role rather than sitting silent: a configuration that
+			 * says "never give up mastering" cannot leave the port
+			 * mute because the first thing it heard claimed to be
+			 * better.
+			 */
+			next = PTP_PS_MASTER;
+		} else {
+			/* Already MASTER (or FAULTY/INITIALIZING): stay put. */
+		}
 		break;
 	case PTP_REC_COUNT:
 	default:
@@ -1021,9 +1060,21 @@ static void run_bmca(ptp_port_ctx_t *c, uint64_t now_ms)
 	case PTP_REC_P2:
 	case PTP_REC_S1:
 		c->alarms |= PTP_ALARM_NOT_BEST_MASTER;
+		/*
+		 * Broken out from NOT_BEST_MASTER because the two need different
+		 * operator responses. Being outranked while degraded is the
+		 * system working. Being outranked while *locked to GNSS* means
+		 * either a genuinely better primary reference appeared on the
+		 * segment, or somebody is spoofing Announces — and the operator
+		 * cannot tell which from an alarm that fires in both cases.
+		 */
+		if (c->quality.sync_state == PTP_SYNC_LOCKED) {
+			c->alarms |= PTP_ALARM_DISPLACED_WHILE_LOCKED;
+		}
 		break;
 	default:
 		c->alarms &= ~PTP_ALARM_NOT_BEST_MASTER;
+		c->alarms &= ~PTP_ALARM_DISPLACED_WHILE_LOCKED;
 		break;
 	}
 
@@ -1234,6 +1285,7 @@ int ptp_port_init(ptp_port_ctx_t *c, const ptp_cfg_t *cfg, const uint8_t *mac,
 
 	c->policy.receipt_timeout = cfg->announce_receipt_timeout;
 	c->policy.default_interval_ms = c->announce_ms;
+	c->policy.cap_interval_ms = cfg->foreign_interval_cap_ms;
 
 	ptp_foreign_init(&c->foreign);
 
@@ -1290,6 +1342,19 @@ int ptp_port_set_quality(ptp_port_ctx_t *c, const ptp_quality_view_t *q)
 		return -EINVAL;
 	}
 	c->quality = *q;
+
+	/*
+	 * Latch "has ever been disciplined". Any state other than free-run
+	 * implies it: holdover only exists as the continuation of a lock, and a
+	 * caller that says so directly is believed. Once true it never goes
+	 * false — losing GNSS does not un-calibrate the OCXO, and the class the
+	 * latch unlocks (52/187, "was disciplined, has drifted") stays the honest
+	 * description for the rest of the unit's uptime.
+	 */
+	if (q->ever_locked || (q->sync_state != PTP_SYNC_FREERUN)) {
+		c->ever_locked = true;
+	}
+	c->quality.ever_locked = c->ever_locked;
 	return 0;
 }
 
@@ -1340,6 +1405,7 @@ int ptp_port_fault(ptp_port_ctx_t *c, uint64_t now_ms)
 	ptp_icv_reset_peers(c->icv);
 	c->alarms |= PTP_ALARM_FAULTY;
 	c->alarms &= ~PTP_ALARM_NOT_BEST_MASTER;
+	c->alarms &= ~PTP_ALARM_DISPLACED_WHILE_LOCKED;
 	c->alarms &= ~PTP_ALARM_ICV_FAILED;
 	c->last_rec = PTP_REC_LISTENING;
 	enter_state(c, PTP_PS_FAULTY, now_ms);

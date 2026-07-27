@@ -60,8 +60,24 @@ uint64_t sts_mono_ms(void);
 
 /* ---- config ------------------------------------------------------------- */
 /* The single live cfg context (loaded before any area starts). Never NULL
- * once sts_platform_init() has returned. */
+ * once sts_platform_init() has returned.
+ *
+ * MUTEX-GUARDED. A cfg_ctx_t is not internally locked (cfg.h) and this one is
+ * shared by the MCP engine, the Zephyr shell backend and the ui_local thread.
+ * Every cfg_set/cfg_revert/cfg_import_*/cfg_factory_reset call on it, and every
+ * read that must not see a half-applied commit, MUST be bracketed by
+ * sts_cfg_lock()/sts_cfg_unlock(). sts_cfg_commit() takes the lock itself. */
 cfg_ctx_t *sts_cfg(void);
+
+/* Enter/leave mutual exclusion over sts_cfg(). Recursive: the same thread may
+ * nest these (Zephyr k_mutex counts ownership), which is what lets a caller
+ * hold the section across a multi-step operation and still call
+ * sts_cfg_commit(). Callable from any thread, not from an ISR.
+ *
+ * Do NOT hold this across a long operation an unrelated thread would notice —
+ * the shell, the UI and the MCP channel all contend for it. */
+void sts_cfg_lock(void);
+void sts_cfg_unlock(void);
 
 /* The console area owns persistence (Zephyr settings/NVS). It registers its
  * store here during sts_console_start(); until then the platform area runs
@@ -80,13 +96,33 @@ bool sts_cfg_is_persistent(void);
 
 /* Areas register appliers invoked after a successful cfg commit for the
  * groups they own (group = high byte of key id). Called from the committing
- * thread; must be quick or defer to the area's own thread. */
+ * thread with sts_cfg_mutex released; must be quick or defer to the area's own
+ * thread.
+ *
+ * A group may have SEVERAL subscribers and every one of them is called, in
+ * registration order. That is not a convenience: group 0x09 (log) is genuinely
+ * shared — the console area pushes log.level into the ring and the net area
+ * reloads the syslog sender — and a one-slot-per-group registry silently let
+ * whichever area started second delete the other's applier.
+ *
+ * Registering the same (fn, ctx) pair twice for a group is idempotent and
+ * returns 0.
+ *
+ * @retval 0        Registered (or already present).
+ * @retval -EINVAL  fn is NULL, or group is out of range.
+ * @retval -ENOSPC  That group already has STS_CFG_GROUP_SUBS_MAX subscribers. */
 typedef void (*sts_cfg_apply_fn)(void *ctx, uint8_t group);
 int sts_cfg_register_applier(uint8_t group, sts_cfg_apply_fn fn, void *ctx);
 
 /* Commit the staged config set and run the appliers for every group touched.
  * Areas must use this rather than calling cfg_commit() directly, so the
- * appliers actually run. Returns cfg_commit()'s result. */
+ * appliers actually run. Takes sts_cfg_mutex for the commit and releases it
+ * before dispatching appliers.
+ *
+ * Returns cfg_commit()'s result. -EIO means "applied to the live tree, but N
+ * keys did not reach the store" (res->persist_errors) — the appliers still run,
+ * because the running system really did change. Only a validation or
+ * cross-field rejection (nothing applied) skips them. */
 int sts_cfg_commit(cfg_commit_res_t *res);
 
 /* ---- logging ------------------------------------------------------------ */

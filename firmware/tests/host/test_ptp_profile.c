@@ -1085,6 +1085,427 @@ static void test_c37238_find_reports_a_mangled_own_tlv(void)
 }
 
 /* ===================================================================== *
+ *  6. Segment-hostility hardening
+ *
+ *  An Announce is unauthenticated unless Annex P is armed, so both of these
+ *  are about what a clock does when the segment lies to it.
+ * ===================================================================== */
+
+/* Encode an Announce from a synthetic peer. Returns the length. */
+static size_t peer_announce(uint8_t *buf, size_t cap, const uint8_t *mac,
+			    uint8_t domain, uint8_t clock_class, uint8_t priority1,
+			    int8_t log_interval, uint16_t seq)
+{
+	ptp_hdr_t h;
+	ptp_announce_t a;
+	ptp_port_id_t src;
+	size_t len = 0U;
+
+	(void)memset(&src, 0, sizeof(src));
+	TEST_ASSERT_EQUAL_INT(0, ptp_clock_id_from_mac(&src.clock_id, mac));
+	src.port_number = 1U;
+
+	(void)memset(&a, 0, sizeof(a));
+	a.gm_priority1 = priority1;
+	a.gm_priority2 = 128U;
+	a.gm_quality.clock_class = clock_class;
+	a.gm_quality.clock_accuracy = 0x21U; /* 100 ns */
+	a.gm_quality.offset_scaled_log_variance = PTP_OSLV_DEFAULT_LOCKED;
+	a.gm_identity = src.clock_id;
+	a.steps_removed = 0U;
+	a.time_source = (uint8_t)PTP_TIME_SRC_GNSS;
+
+	(void)memset(&h, 0, sizeof(h));
+	h.msg_type = (uint8_t)PTP_MSG_ANNOUNCE;
+	h.version = PTP_VERSION;
+	h.minor_version = PTP_MINOR_VERSION_2019;
+	h.domain = domain;
+	h.source_port = src;
+	h.seq_id = seq;
+	h.control = ptp_msg_control_field((uint8_t)PTP_MSG_ANNOUNCE);
+	/* The attacker-chosen field: how long we are told to wait for the next one. */
+	h.log_msg_interval = log_interval;
+
+	TEST_ASSERT_EQUAL_INT(0, ptp_announce_encode(buf, cap, &h, &a, &len));
+	return len;
+}
+
+/*
+ * (a) Two spoofed Announces advertising logMessageInterval = +7 (128 s) must not
+ *     be able to hold this port out of MASTER for minutes.
+ *
+ * Both halves are asserted, because a test that only shows the fixed behaviour
+ * does not show that the fix is what produced it: with the cap disabled
+ * (foreign_interval_cap_ms = 0, the literal §9.3.2.4.5 derivation) the port is
+ * still PASSIVE well beyond the honest timeout, and with the cap at its default
+ * it has recovered.
+ */
+static void run_slow_announce_attack(uint32_t cap_ms, uint64_t probe_at_ms,
+				     ptp_port_state_t expect)
+{
+	ptp_port_ctx_t c;
+	ptp_cfg_t cfg;
+	ptp_port_ops_t ops;
+	fake_t f;
+	ptp_quality_view_t q;
+	static const uint8_t atk_mac[6] = { 0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE };
+	uint8_t buf[PTP_MSG_MAX_LEN];
+	size_t len;
+	uint64_t t = 1000U;
+
+	fake_init(&f);
+	ops_from(&ops, &f);
+	ptp_cfg_defaults(&cfg);
+	cfg.foreign_interval_cap_ms = cap_ms;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
+
+	/*
+	 * We are free-running but have been disciplined before, so class 52 —
+	 * above the 127 boundary, which is what makes deferring possible at all.
+	 */
+	quality_locked(&q, (uint8_t)PTP_TIME_SRC_GNSS);
+	q.sync_state = PTP_SYNC_FREERUN;
+	q.ever_locked = true;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_set_quality(&c, &q));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_enable(&c, t));
+
+	/* Two packets, one qualification threshold, class 6 and priority1 0. */
+	len = peer_announce(buf, sizeof(buf), atk_mac, cfg.domain, 6U, 0U, 7, 0U);
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&c, buf, len, 0U, t));
+	t += 100U;
+	len = peer_announce(buf, sizeof(buf), atk_mac, cfg.domain, 6U, 0U, 7, 1U);
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&c, buf, len, 0U, t));
+
+	/* The spoof works, briefly: that part is ordinary 1588. */
+	TEST_ASSERT_EQUAL_INT(PTP_PS_PASSIVE, ptp_port_state(&c));
+
+	/* Then let time pass without another packet from the attacker. */
+	while (t < probe_at_ms) {
+		t += 250U;
+		TEST_ASSERT_EQUAL_INT(0, ptp_port_step(&c, t));
+	}
+	TEST_ASSERT_EQUAL_INT(expect, ptp_port_state(&c));
+}
+
+static void test_slow_announce_dos_is_bounded(void)
+{
+	/*
+	 * Capped (default 2 s): prune timeout is announceReceiptTimeout x 2 s =
+	 * 6 s, so by 10 s the port is serving again. The attacker must now spend
+	 * a packet every few seconds instead of every few minutes, and at that
+	 * rate they are simply a competing master, which is the BMCA's job.
+	 */
+	run_slow_announce_attack(PTP_FOREIGN_INTERVAL_CAP_MS_DEFAULT, 11000U,
+				 PTP_PS_MASTER);
+
+	/*
+	 * Uncapped: the peer's own 128 s interval governs, so the timeout is
+	 * 3 x 128 s = 384 s and the port is still silent at 370 s — two packets
+	 * bought over six minutes of denial. This is the behaviour the cap
+	 * exists to remove; if this assertion ever flips to MASTER, the cap is
+	 * no longer what is doing the work and the other half of this test has
+	 * stopped proving anything.
+	 */
+	run_slow_announce_attack(0U, 370000U, PTP_PS_PASSIVE);
+}
+
+/* The cap must never punish an honest peer slower than our own cadence. */
+static void test_interval_cap_floors_at_our_own_interval(void)
+{
+	ptp_foreign_tbl_t t;
+	ptp_foreign_policy_t pol;
+	ptp_port_id_t src;
+	ptp_announce_t a;
+	static const uint8_t mac[6] = { 0x02, 1, 2, 3, 4, 5 };
+
+	(void)memset(&a, 0, sizeof(a));
+	(void)memset(&src, 0, sizeof(src));
+	TEST_ASSERT_EQUAL_INT(0, ptp_clock_id_from_mac(&src.clock_id, mac));
+	src.port_number = 1U;
+
+	/*
+	 * Our own Announce interval is 8 s — slower than the 2 s cap. A peer at
+	 * 8 s must still get 8 s, or a profile configured to announce slowly
+	 * would prune every peer it has.
+	 */
+	pol.receipt_timeout = 3U;
+	pol.default_interval_ms = 8000U;
+	pol.cap_interval_ms = PTP_FOREIGN_INTERVAL_CAP_MS_DEFAULT;
+
+	ptp_foreign_init(&t);
+	TEST_ASSERT_NOT_NULL(ptp_foreign_update(&t, &pol, &src, &a, 0U, 3, 0U));
+	TEST_ASSERT_NOT_NULL(ptp_foreign_update(&t, &pol, &src, &a, 0U, 3, 8000U));
+	TEST_ASSERT_TRUE(t.rec[0].qualified);
+
+	/* 3 x 8 s = 24 s: alive at 23 s, pruned at 24 s. */
+	TEST_ASSERT_EQUAL_UINT32(0U, ptp_foreign_prune(&t, &pol, 8000U + 23000U));
+	TEST_ASSERT_EQUAL_UINT32(1U, ptp_foreign_prune(&t, &pol, 8000U + 24000U));
+}
+
+/*
+ * (b) A unit that has never been disciplined must advertise clockClass 248, not
+ *     a degradation class, and must therefore lose the election to any peer that
+ *     has something real to offer.
+ */
+static void test_never_locked_advertises_default_class(void)
+{
+	ptp_cfg_t cfg;
+	ptp_quality_view_t q;
+	ptp_clock_quality_t out;
+
+	(void)memset(&q, 0, sizeof(q));
+	q.sync_state = PTP_SYNC_FREERUN;
+	q.time_source = (uint8_t)PTP_TIME_SRC_INTERNAL_OSC;
+	q.ever_locked = false;
+
+	/* Both degradation alternatives, and every profile: 248 either way. */
+	{
+		unsigned int p;
+
+		for (p = 0U; p < (unsigned int)PTP_PROFILE_COUNT; p++) {
+			ptp_cfg_defaults(&cfg);
+			TEST_ASSERT_EQUAL_INT(0,
+				ptp_cfg_apply_profile(&cfg, (uint8_t)p));
+			cfg.degradation = PTP_DEGRADE_ALT_A;
+			TEST_ASSERT_EQUAL_INT(0,
+				ptp_clock_quality_from_view(&cfg, &q, &out));
+			TEST_ASSERT_EQUAL_UINT8(248U, out.clock_class);
+
+			cfg.degradation = PTP_DEGRADE_ALT_B;
+			TEST_ASSERT_EQUAL_INT(0,
+				ptp_clock_quality_from_view(&cfg, &q, &out));
+			TEST_ASSERT_EQUAL_UINT8(248U, out.clock_class);
+		}
+	}
+
+	/*
+	 * Reversion check: flipping only ever_locked restores the old answer, so
+	 * the gate — and nothing else — is what produces 248.
+	 */
+	ptp_cfg_defaults(&cfg);
+	q.ever_locked = true;
+	cfg.degradation = PTP_DEGRADE_ALT_A;
+	TEST_ASSERT_EQUAL_INT(0, ptp_clock_quality_from_view(&cfg, &q, &out));
+	TEST_ASSERT_EQUAL_UINT8(52U, out.clock_class);
+	cfg.degradation = PTP_DEGRADE_ALT_B;
+	TEST_ASSERT_EQUAL_INT(0, ptp_clock_quality_from_view(&cfg, &q, &out));
+	TEST_ASSERT_EQUAL_UINT8(187U, out.clock_class);
+}
+
+static void test_ever_locked_latches_and_never_clears(void)
+{
+	ptp_port_ctx_t c;
+	ptp_cfg_t cfg;
+	ptp_port_ops_t ops;
+	fake_t f;
+	ptp_quality_view_t q;
+	ptp_dataset_t ds;
+
+	fake_init(&f);
+	ops_from(&ops, &f);
+	ptp_cfg_defaults(&cfg);
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
+
+	/* Cold boot, no antenna: 248. */
+	(void)memset(&q, 0, sizeof(q));
+	q.sync_state = PTP_SYNC_FREERUN;
+	q.time_source = (uint8_t)PTP_TIME_SRC_INTERNAL_OSC;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_set_quality(&c, &q));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_dataset(&c, &ds));
+	TEST_ASSERT_EQUAL_UINT8(248U, ds.quality.clock_class);
+
+	/* Lock once. */
+	quality_locked(&q, (uint8_t)PTP_TIME_SRC_GNSS);
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_set_quality(&c, &q));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_dataset(&c, &ds));
+	TEST_ASSERT_EQUAL_UINT8(6U, ds.quality.clock_class);
+
+	/*
+	 * Lose it entirely — the caller does not even set ever_locked. The latch
+	 * remembers, because the OCXO really has been calibrated.
+	 */
+	(void)memset(&q, 0, sizeof(q));
+	q.sync_state = PTP_SYNC_FREERUN;
+	q.time_source = (uint8_t)PTP_TIME_SRC_INTERNAL_OSC;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_set_quality(&c, &q));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_dataset(&c, &ds));
+	TEST_ASSERT_EQUAL_UINT8(52U, ds.quality.clock_class);
+
+	/* A fault does not un-calibrate it either. */
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_fault(&c, 1000U));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_dataset(&c, &ds));
+	TEST_ASSERT_EQUAL_UINT8(52U, ds.quality.clock_class);
+
+	/* Holdover alone is enough to set the latch on a fresh context. */
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
+	(void)memset(&q, 0, sizeof(q));
+	q.sync_state = PTP_SYNC_HOLDOVER;
+	q.time_source = (uint8_t)PTP_TIME_SRC_ATOMIC_CLOCK;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_set_quality(&c, &q));
+	q.sync_state = PTP_SYNC_FREERUN;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_set_quality(&c, &q));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_dataset(&c, &ds));
+	TEST_ASSERT_EQUAL_UINT8(52U, ds.quality.clock_class);
+}
+
+/*
+ * The election outcomes the gate exists to change. A never-locked unit must lose
+ * to an honestly-degraded class-187 peer and to a default-class-248 peer whose
+ * identity is lower — the two matchups where class 52 used to win.
+ */
+static void run_never_locked_matchup(uint8_t peer_class, const uint8_t *peer_mac,
+				     bool ever_locked, ptp_port_state_t expect)
+{
+	ptp_port_ctx_t c;
+	ptp_cfg_t cfg;
+	ptp_port_ops_t ops;
+	fake_t f;
+	ptp_quality_view_t q;
+	uint8_t buf[PTP_MSG_MAX_LEN];
+	size_t len;
+	uint64_t t = 1000U;
+	unsigned int i;
+
+	fake_init(&f);
+	ops_from(&ops, &f);
+	ptp_cfg_defaults(&cfg);
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
+
+	(void)memset(&q, 0, sizeof(q));
+	q.sync_state = PTP_SYNC_FREERUN;
+	q.time_source = (uint8_t)PTP_TIME_SRC_INTERNAL_OSC;
+	q.ever_locked = ever_locked;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_set_quality(&c, &q));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_enable(&c, t));
+
+	for (i = 0U; i < 3U; i++) {
+		len = peer_announce(buf, sizeof(buf), peer_mac, cfg.domain,
+				    peer_class, 128U, 1, (uint16_t)i);
+		TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&c, buf, len, 0U, t));
+		t += 500U;
+	}
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_step(&c, t));
+	TEST_ASSERT_EQUAL_INT(expect, ptp_port_state(&c));
+}
+
+static void test_never_locked_loses_the_election(void)
+{
+	/* Higher first octet than self_mac's 0x02, so the peer's identity loses
+	 * any tiebreak: only clockClass can decide these. */
+	static const uint8_t hi_mac[6] = { 0x0A, 0x11, 0x22, 0x33, 0x44, 0x55 };
+
+	/* Never locked (248) vs an honestly-degraded peer (187): the peer wins. */
+	run_never_locked_matchup(187U, hi_mac, false, PTP_PS_PASSIVE);
+	/* Never locked (248) vs a default-class peer (248): tie on class, and the
+	 * peer's identity is higher, so we keep it — but only by the tiebreak. */
+	run_never_locked_matchup(248U, hi_mac, false, PTP_PS_MASTER);
+
+	/*
+	 * Reversion check on both: with the latch set we advertise 52 and win
+	 * outright, which is exactly the wrong answer the gate removes.
+	 */
+	run_never_locked_matchup(187U, hi_mac, true, PTP_PS_MASTER);
+	run_never_locked_matchup(248U, hi_mac, true, PTP_PS_MASTER);
+}
+
+static void test_never_yield_modes(void)
+{
+	static const uint8_t hi_mac[6] = { 0x0A, 0x11, 0x22, 0x33, 0x44, 0x55 };
+	ptp_port_ctx_t c;
+	ptp_cfg_t cfg;
+	ptp_port_ops_t ops;
+	fake_t f;
+	ptp_quality_view_t q;
+	uint8_t buf[PTP_MSG_MAX_LEN];
+	size_t len;
+	uint64_t t = 1000U;
+	unsigned int i;
+
+	fake_init(&f);
+	ops_from(&ops, &f);
+	ptp_cfg_defaults(&cfg);
+	cfg.never_yield = (uint8_t)PTP_NEVER_YIELD_WHEN_LOCKED;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
+
+	/* Locked: class 6, so a class-5 peer outranks us on paper. */
+	quality_locked(&q, (uint8_t)PTP_TIME_SRC_GNSS);
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_set_quality(&c, &q));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_enable(&c, t));
+
+	for (i = 0U; i < 3U; i++) {
+		len = peer_announce(buf, sizeof(buf), hi_mac, cfg.domain, 5U, 0U,
+				    1, (uint16_t)i);
+		TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&c, buf, len, 0U, t));
+		t += 500U;
+	}
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_step(&c, t));
+
+	/*
+	 * The role is held, and the operator is told both that the BMCA wanted
+	 * otherwise and that it happened while we were locked.
+	 */
+	TEST_ASSERT_EQUAL_INT(PTP_PS_MASTER, ptp_port_state(&c));
+	TEST_ASSERT_TRUE((ptp_port_alarms(&c) & PTP_ALARM_NOT_BEST_MASTER) != 0U);
+	TEST_ASSERT_TRUE((ptp_port_alarms(&c) &
+			  PTP_ALARM_DISPLACED_WHILE_LOCKED) != 0U);
+
+	/* WHEN_LOCKED yields once discipline is gone. */
+	(void)memset(&q, 0, sizeof(q));
+	q.sync_state = PTP_SYNC_FREERUN;
+	q.ever_locked = true;
+	q.time_source = (uint8_t)PTP_TIME_SRC_INTERNAL_OSC;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_set_quality(&c, &q));
+	t += 500U;
+	len = peer_announce(buf, sizeof(buf), hi_mac, cfg.domain, 5U, 0U, 1, 9U);
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&c, buf, len, 0U, t));
+	TEST_ASSERT_EQUAL_INT(PTP_PS_PASSIVE, ptp_port_state(&c));
+	/* Not locked any more, so the locked-displacement alarm is not asserted. */
+	TEST_ASSERT_TRUE((ptp_port_alarms(&c) &
+			  PTP_ALARM_DISPLACED_WHILE_LOCKED) == 0U);
+
+	/* OFF is the default and yields while locked. */
+	fake_init(&f);
+	ptp_cfg_defaults(&cfg);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)PTP_NEVER_YIELD_OFF, cfg.never_yield);
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
+	quality_locked(&q, (uint8_t)PTP_TIME_SRC_GNSS);
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_set_quality(&c, &q));
+	t = 1000U;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_enable(&c, t));
+	for (i = 0U; i < 3U; i++) {
+		len = peer_announce(buf, sizeof(buf), hi_mac, cfg.domain, 5U, 0U,
+				    1, (uint16_t)i);
+		TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&c, buf, len, 0U, t));
+		t += 500U;
+	}
+	TEST_ASSERT_EQUAL_INT(PTP_PS_PASSIVE, ptp_port_state(&c));
+
+	/* ALWAYS holds the role even free-running, and takes it out of LISTENING. */
+	fake_init(&f);
+	ptp_cfg_defaults(&cfg);
+	cfg.never_yield = (uint8_t)PTP_NEVER_YIELD_ALWAYS;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
+	(void)memset(&q, 0, sizeof(q));
+	q.sync_state = PTP_SYNC_FREERUN;
+	q.time_source = (uint8_t)PTP_TIME_SRC_INTERNAL_OSC;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_set_quality(&c, &q));
+	t = 1000U;
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_enable(&c, t));
+	for (i = 0U; i < 3U; i++) {
+		len = peer_announce(buf, sizeof(buf), hi_mac, cfg.domain, 6U, 0U,
+				    1, (uint16_t)i);
+		TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&c, buf, len, 0U, t));
+		t += 500U;
+	}
+	TEST_ASSERT_EQUAL_INT(PTP_PS_MASTER, ptp_port_state(&c));
+
+	/* An out-of-range mode is rejected rather than silently treated as OFF. */
+	ptp_cfg_defaults(&cfg);
+	cfg.never_yield = (uint8_t)PTP_NEVER_YIELD_COUNT;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ptp_cfg_validate(&cfg));
+}
+
+/* ===================================================================== *
  *  Runner
  * ===================================================================== */
 
@@ -1113,6 +1534,14 @@ int main(void)
 	RUN_TEST(test_freq_cat_classification);
 	RUN_TEST(test_ladder_null_and_bounds);
 	RUN_TEST(test_local_priority_decides_the_election);
+
+	/* Segment-hostility hardening (the two adversarial HIGHs). */
+	RUN_TEST(test_slow_announce_dos_is_bounded);
+	RUN_TEST(test_interval_cap_floors_at_our_own_interval);
+	RUN_TEST(test_never_locked_advertises_default_class);
+	RUN_TEST(test_ever_locked_latches_and_never_clears);
+	RUN_TEST(test_never_locked_loses_the_election);
+	RUN_TEST(test_never_yield_modes);
 
 	/* C37.238 TLV. */
 	RUN_TEST(test_c37238_value_layout_2011);

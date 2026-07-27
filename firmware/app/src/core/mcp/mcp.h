@@ -214,6 +214,29 @@ typedef int (*mcp_status_fn)(void *user, uint8_t group, uint8_t *buf,
  */
 typedef int (*mcp_diag_fn)(void *user, uint8_t sub, uint8_t *buf, size_t cap);
 
+/**
+ * Enter / leave the glue's mutual exclusion over the wired cfg_ctx_t.
+ *
+ * Never called nested by the engine, and never held across the commit callback
+ * (see "Config locking" above). Must not fail.
+ */
+typedef void (*mcp_cfg_lock_fn)(void *user);
+
+/**
+ * Commit the staged config set and notify whoever consumes those groups.
+ *
+ * The glue's implementation is expected to be exactly the path its own local
+ * shell uses, so a key applied over the wire behaves identically to the same key
+ * applied over the console. Same return codes as cfg_commit():
+ *
+ * @retval 0     Applied.
+ * @retval -EIO  Applied to the live tree, but at least one key was not
+ *               persisted; @p res->persist_errors says how many. Appliers MUST
+ *               still have run — the running system did change.
+ * @retval <0    Rejected; nothing applied and the staged set is intact.
+ */
+typedef int (*mcp_cfg_commit_fn)(void *user, cfg_commit_res_t *res);
+
 /* ------------------------------------------------------------- wiring */
 
 /** Device identity reported by HELLO. */
@@ -235,6 +258,23 @@ typedef struct {
 	void         *status_user;
 	mcp_diag_fn   diag_cb;
 	void         *diag_user;
+
+	/**
+	 * Mutual exclusion over @ref cfg. Optional as a pair — supply both or
+	 * neither; one alone is rejected by mcp_init(). NULL means the caller
+	 * guarantees single-threaded access.
+	 */
+	mcp_cfg_lock_fn cfg_lock;
+	mcp_cfg_lock_fn cfg_unlock;
+	void           *cfg_lock_user;
+
+	/**
+	 * Commit delegate. Optional; NULL falls back to a bare cfg_commit(),
+	 * which does NOT run the glue's config appliers and is therefore only
+	 * appropriate where there are none.
+	 */
+	mcp_cfg_commit_fn cfg_commit_cb;
+	void             *cfg_commit_user;
 
 	mcp_tx_fn tx;       /* required */
 	void     *tx_user;
@@ -339,7 +379,13 @@ typedef struct {
 	 * mcp_wire.h): export snapshots its cursor so it can re-emit, import
 	 * remembers the last chunk's start offset so it can re-ack the frontier
 	 * without re-applying, and a completed import caches its result so a
-	 * repeat of the final chunk returns the same answer. */
+	 * repeat of the final chunk returns the same answer.
+	 *
+	 * exp_prev_valid deliberately OUTLIVES exp_active. Completing an export
+	 * clears exp_active, but the FINAL chunk is the one most likely to be
+	 * lost (it is the last thing on the wire), so its offset has to stay
+	 * re-emittable. Only a fresh CFG_EXPORT at offset 0 or a session reset
+	 * invalidates the snapshot. */
 	cfg_export_t exp;
 	bool         exp_active;
 	cfg_export_t exp_prev;      /* cursor at the start of the last chunk */
@@ -368,7 +414,8 @@ typedef struct {
  * Initialise the engine.
  *
  * @retval 0        Ready.
- * @retval -EINVAL  @p c or @p w is NULL, or no tx callback was supplied.
+ * @retval -EINVAL  @p c or @p w is NULL, no tx callback was supplied, or
+ *                  exactly one of cfg_lock/cfg_unlock was supplied.
  */
 int mcp_init(mcp_ctx_t *c, const mcp_wiring_t *w);
 
