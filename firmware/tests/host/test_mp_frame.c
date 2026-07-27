@@ -322,6 +322,46 @@ static void feed_raw_frame(uint8_t ch, uint8_t flags, const uint8_t *payload,
 	(void)mp_frame_rx_input(&g_rx, enc, enc_len);
 }
 
+/*
+ * An over-long reassembly must discard the WHOLE message, including its
+ * terminating fragment.
+ *
+ * The slot used to be released on overflow, so the remaining fragments re-claimed
+ * one and the final fragment was delivered on its own — handing the consumer
+ * exactly the truncated message the overflow check exists to prevent. Run at a
+ * slot size close to what the firmware actually ships (mp_glue.c uses
+ * MP_REASM_BYTES/2 = 1536), not the 4096 the rest of this suite uses, because
+ * the branch only exists at the shipping size.
+ */
+static void test_an_overlong_reassembly_drops_its_own_tail(void)
+{
+	static uint8_t small_buf[2][96];
+	static mp_reasm_t small[2];
+	uint8_t chunk[64];
+	unsigned int i;
+
+	for (i = 0U; i < 2U; i++) {
+		small[i].buf = small_buf[i];
+		small[i].cap = sizeof(small_buf[i]);
+	}
+	TEST_ASSERT_EQUAL_INT(0, mp_frame_rx_init(&g_rx, small, 2U, on_msg, NULL));
+	g_msg_count = 0U;
+	memset(chunk, 0x5A, sizeof(chunk));
+
+	/* 64 + 64 = 128 > 96: the second fragment overflows the slot. */
+	feed_raw_frame(MP_CH_CONTROL, MP_FLAG_MORE, chunk, sizeof(chunk));
+	feed_raw_frame(MP_CH_CONTROL, MP_FLAG_MORE, chunk, sizeof(chunk));
+	/* The terminating fragment must be dropped, not delivered alone. */
+	feed_raw_frame(MP_CH_CONTROL, 0U, chunk, 8U);
+
+	TEST_ASSERT_EQUAL_UINT(0U, g_msg_count);
+
+	/* And the channel recovers: the next whole message still arrives. */
+	feed_raw_frame(MP_CH_CONTROL, 0U, chunk, 8U);
+	TEST_ASSERT_EQUAL_UINT(1U, g_msg_count);
+	TEST_ASSERT_EQUAL_UINT(8U, g_msg_len);
+}
+
 static void test_channel_above_the_space_is_rejected(void)
 {
 	uint8_t p[4] = { 1U, 2U, 3U, 4U };
@@ -513,10 +553,21 @@ static void test_third_fragmented_channel_is_dropped_whole(void)
 	round_trip(MP_CH_LOG, MP_FLAG_MORE, p, sizeof(p));
 	TEST_ASSERT_EQUAL_UINT32(1U, g_rx.reasm_drops);
 
-	/* Its final fragment must not be delivered as a short message either —
-	 * it arrives with no slot, so it is treated as unfragmented. That is the
-	 * documented behaviour: the host sees a truncated message on a channel
-	 * it over-committed, and the drop counter records why. */
+	/*
+	 * Its final fragment must not be delivered as a short message either.
+	 *
+	 * This assertion used to expect the opposite — and directly contradicted
+	 * the sentence above it, which already said the fragment must not be
+	 * delivered. The old behaviour handed the consumer a well-formed message
+	 * on a channel it had no way to know was truncated; "the drop counter
+	 * records why" does not help a consumer that never sees the counter. The
+	 * frame layer now remembers the channel (mp_frame_rx_t::reasm_lost_ch)
+	 * and swallows the tail.
+	 */
+	round_trip(MP_CH_LOG, 0U, p, sizeof(p));
+	TEST_ASSERT_EQUAL_UINT(0U, g_msg_count);
+
+	/* The channel recovers: the next whole message arrives normally. */
 	round_trip(MP_CH_LOG, 0U, p, sizeof(p));
 	TEST_ASSERT_EQUAL_UINT(1U, g_msg_count);
 	TEST_ASSERT_EQUAL_UINT8(MP_CH_LOG, g_msg_ch);
@@ -772,6 +823,7 @@ int main(void)
 
 	RUN_TEST(test_argument_validation);
 	RUN_TEST(test_fuzz_hostile_stream);
+	RUN_TEST(test_an_overlong_reassembly_drops_its_own_tail);
 	RUN_TEST(test_fuzz_single_byte_mutations);
 
 	return UNITY_END();

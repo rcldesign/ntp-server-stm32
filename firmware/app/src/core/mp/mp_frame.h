@@ -188,6 +188,19 @@ typedef struct {
 	size_t len;
 	uint8_t ch;
 	bool busy;
+	/**
+	 * The message overflowed `cap` (or arrived with no slot free) and is
+	 * being discarded, but the slot stays claimed so the REST of that
+	 * message is discarded with it.
+	 *
+	 * Releasing the slot instead would let the remaining fragments re-claim
+	 * one and the terminating fragment be delivered on its own — handing the
+	 * consumer exactly the truncated message the overflow check exists to
+	 * prevent. Demonstrated at the shipping 1536 B slot size: MORE(1000),
+	 * MORE(1000) overflows, then a 10 B final fragment was delivered as a
+	 * complete message.
+	 */
+	bool poisoned;
 } mp_reasm_t;
 
 /**
@@ -223,6 +236,17 @@ typedef struct {
 	uint32_t bad_channel;  /**< channel id above MP_CH_MAX */
 	uint32_t bad_flags;    /**< undefined flag bits set */
 	uint32_t reasm_drops;  /**< fragments dropped: no slot, or slot overflow */
+	/**
+	 * Channels whose in-flight message is being discarded but which hold no
+	 * slot, one bit per channel id (MP_CH_COUNT is 32, so a word covers it).
+	 *
+	 * Needed for the case a poisoned slot cannot cover: when every slot is
+	 * busy, a third channel's fragments have nowhere to accumulate, so there
+	 * is nothing to mark. Without this the terminating fragment would arrive
+	 * to find no slot and be delivered on its own as a complete message --
+	 * the same truncation the slot poison prevents, by a different route.
+	 */
+	uint32_t reasm_lost_ch;
 	uint32_t sink_errors;  /**< on_msg() returned negative */
 } mp_frame_rx_t;
 

@@ -175,9 +175,11 @@ void mp_frame_rx_reset(mp_frame_rx_t *rx)
 		return;
 	}
 	cobs_dec_reset(&rx->dec);
+	rx->reasm_lost_ch = 0U;
 	for (i = 0U; i < rx->reasm_n; i++) {
 		rx->reasm[i].len = 0U;
 		rx->reasm[i].busy = false;
+		rx->reasm[i].poisoned = false;
 	}
 }
 
@@ -202,6 +204,7 @@ static mp_reasm_t *reasm_claim(mp_frame_rx_t *rx, uint8_t ch)
 	for (i = 0U; i < rx->reasm_n; i++) {
 		if (!rx->reasm[i].busy) {
 			rx->reasm[i].busy = true;
+			rx->reasm[i].poisoned = false;
 			rx->reasm[i].ch = ch;
 			rx->reasm[i].len = 0U;
 			return &rx->reasm[i];
@@ -213,6 +216,21 @@ static mp_reasm_t *reasm_claim(mp_frame_rx_t *rx, uint8_t ch)
 static void reasm_release(mp_reasm_t *slot)
 {
 	slot->busy = false;
+	slot->poisoned = false;
+	slot->len = 0U;
+}
+
+/**
+ * Discard the rest of an over-long message without freeing its slot.
+ *
+ * Holding the slot is the whole point: the terminating fragment must find it
+ * still claimed so it can be dropped too. Freeing here would let the remaining
+ * fragments start a fresh accumulation and the final one be delivered alone.
+ */
+static void reasm_poison(mp_frame_rx_t *rx, mp_reasm_t *slot)
+{
+	rx->reasm_drops++;
+	slot->poisoned = true;
 	slot->len = 0U;
 }
 
@@ -266,16 +284,22 @@ static int handle_frame(mp_frame_rx_t *rx, const uint8_t *body, size_t body_len)
 		if (slot == NULL) {
 			slot = reasm_claim(rx, ch);
 			if (slot == NULL) {
+				/* No slot free: remember the channel so this
+				 * message's terminating fragment is dropped too
+				 * rather than delivered alone. */
 				rx->reasm_drops++;
+				rx->reasm_lost_ch |= (uint32_t)1U << (ch & 0x1FU);
 				return 0;
 			}
+		}
+		if (slot->poisoned) {
+			return 0; /* already discarding this message */
 		}
 		if ((slot->len + plen) > slot->cap) {
 			/* Over-long message: abandon the whole thing, not just
 			 * the overflowing fragment, or the consumer would be
 			 * handed a truncated message it cannot detect. */
-			rx->reasm_drops++;
-			reasm_release(slot);
+			reasm_poison(rx, slot);
 			return 0;
 		}
 		if (plen != 0U) {
@@ -286,8 +310,23 @@ static int handle_frame(mp_frame_rx_t *rx, const uint8_t *body, size_t body_len)
 	}
 
 	if (slot == NULL) {
+		uint32_t bit = (uint32_t)1U << (ch & 0x1FU);
+
+		if ((rx->reasm_lost_ch & bit) != 0U) {
+			/* Tail of a message we could never accumulate. Dropping
+			 * it is the point: delivering it would hand the consumer
+			 * a fragment dressed as a whole message. */
+			rx->reasm_lost_ch &= ~bit;
+			return 0;
+		}
 		/* Unfragmented: the common case, delivered without a copy. */
 		return deliver(rx, ch, payload, plen);
+	}
+
+	if (slot->poisoned) {
+		/* The terminating fragment of a message we already gave up on. */
+		reasm_release(slot);
+		return 0;
 	}
 
 	if ((slot->len + plen) > slot->cap) {
