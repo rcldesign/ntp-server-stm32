@@ -1,14 +1,25 @@
 # STS1000 "Meridian" — Maintenance Protocol tunables (console area).
 # SPDX-License-Identifier: Apache-2.0
 #
-# NOT sourced by app/Kconfig yet: adding the `rsource` line is a one-line edit to
-# a file this change does not own. Every symbol below has an #if defined()
-# fallback in mp_glue.c, so the area builds correctly without it — except
-# STS1000_MP itself, which is a bool defaulting to y and therefore cannot be
-# defaulted by the preprocessor. Until app/Kconfig sources this file, define
-# CONFIG_STS1000_MP through conf/mp.conf or the command line.
+# Sourced by app/Kconfig:
 #
 #     rsource "src/zephyr/console/Kconfig.mp"
+#
+# STS1000_MP is a switch, not documentation. app/CMakeLists.txt drops
+# src/zephyr/console/mp_glue.c and mp_tunnel.c from the build when it is n, and
+# src/zephyr/platform/sts_area_weak.c carries a __weak no-op for every function
+# console/mp_glue.h declares, so the image still links: sts_console.c calls
+# sts_mp_start()/sts_mp_tick() unconditionally and platform/gnss.c calls the
+# byte tees from the USART3 receive path.
+#
+# It exists because MP is a physical-access surface that answers at role `none`
+# before any credential is presented (FMT §5.3), so an operator deploying a
+# board where the USB port is not physically controlled has to be able to take
+# it out of the image rather than merely leave it unused.
+#
+# The tunables keep their #if defined() fallbacks in mp_glue.c/mp_tunnel.c — the
+# console-area convention — and every fallback equals the default here, so
+# sourcing this file changes no value.
 
 if STS1000_CONSOLE
 
@@ -18,7 +29,13 @@ config STS1000_MP
 	help
 	  Builds src/zephyr/console/mp_glue.c and mp_tunnel.c and registers the
 	  `mp` shell command. The protocol itself is core/mp, which is always
-	  compiled; this switch only controls whether anything drives it.
+	  compiled; this switch only controls whether anything drives it — and
+	  with nothing driving it --gc-sections discards core/mp from the image.
+
+	  Say n to remove the maintenance surface: `mp enter` disappears, the
+	  GNSS/rubidium passthrough tunnels cannot be opened, and the NMEA/UBX
+	  tees stop being fed (their call sites resolve to the __weak no-ops in
+	  src/zephyr/platform/sts_area_weak.c).
 
 if STS1000_MP
 
@@ -43,6 +60,27 @@ config STS1000_MP_REASM
 	  Fragmented inbound messages are reassembled here, two channels at a
 	  time. A cfg.import chunk and a full JSON-RPC request both fit in half
 	  of the default.
+
+config STS1000_MP_TEE_RING
+	int "MP passthrough tee staging ring (bytes, power of two)"
+	default 1024
+	range 256 8192
+	help
+	  Bytes buffered between the byte producers and the drain on
+	  sts_mp_tick(). The producers are the GNSS thread (priority 6, on the
+	  timing path's critical route) and the UART7 receive ISR, neither of
+	  which may take the engine mutex or push a COBS frame down the console
+	  UART; they do a bounded copy into this ring and the console supervisor
+	  frames it 250 ms later.
+
+	  Size it for one drain period of the fastest producer. The as-built
+	  UBX message set is a few hundred bytes per second and the FE-5680A
+	  link is 9600 8N1 (240 B per period), so the default holds roughly four
+	  periods of both together. Overflow drops the newest bytes and counts
+	  them in `mp status`; a tee is best-effort passthrough by nature.
+
+	  Must be a power of two (core/util ring_init()); a build assertion
+	  enforces it.
 
 endif # STS1000_MP
 

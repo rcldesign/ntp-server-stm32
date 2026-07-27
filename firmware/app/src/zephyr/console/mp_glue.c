@@ -58,6 +58,15 @@
  * answer MP_E_NOTSUP only before the first render, and `mp status` prints the
  * mirror as "wired" once one has landed.
  *
+ * Byte tees: WIRED, and on a ring rather than on this thread. platform/gnss.c
+ * splits the USART3 receive stream onto channels 0x02/0x03 (or feeds 0x07 whole
+ * while the tunnel owns the port) and platform/rb_serial.c's ISR feeds 0x08
+ * through the sink mp_tunnel.c registers with rb_serial_tunnel_open(). Both
+ * producers only stage; sts_mp_tick() frames what they staged, before it takes
+ * this lock. The engine publishes an armed bitmask (mp_armed_refresh() below) so
+ * neither producer has to ask the engine — under the lock — whether anyone is
+ * listening.
+ *
  * Still missing, and not silent:
  *
  * 1. Autobaud entry magic. sts_mp_shell_tap() implements it, but something has
@@ -79,7 +88,7 @@
 
 #include <zephyr/kernel.h>
 
-#ifdef CONFIG_STS1000_CONSOLE
+#if defined(CONFIG_STS1000_CONSOLE) && defined(CONFIG_STS1000_MP)
 
 #include <errno.h>
 #include <stdio.h>
@@ -91,6 +100,7 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #include "console/mp_glue.h"
@@ -218,6 +228,68 @@ static void mp_engine_lock(void)
 static void mp_engine_unlock(void)
 {
 	(void)k_mutex_unlock(&mp_lock);
+}
+
+/* ---------------------------------------------------------- armed channels */
+
+/*
+ * Which passthrough channels currently have a consumer, as a bitmask of MP_CH_*
+ * indices — the lock-free projection of engine state that the byte tees test.
+ *
+ * The producers are the priority-6 GNSS thread and the UART7 receive ISR. Asking
+ * the engine directly would mean a mutex on both, which is the priority
+ * inversion this area exists to prevent (and is illegal outright in the ISR), so
+ * the engine publishes the answer instead: mp_armed_refresh() is called from
+ * every locked section that can change a subscription or leave MP mode. A
+ * producer then pays one atomic read to find out that nobody is watching.
+ *
+ * Staleness is bounded by the tick period, and both directions are harmless: a
+ * stale "armed" stages one chunk the drain discards with -ENOENT, a stale "not
+ * armed" costs one tick of tee data at subscribe time.
+ */
+static atomic_t mp_ch_armed;
+
+BUILD_ASSERT(MP_CH_COUNT <= 32, "the armed mask is one 32-bit atomic word");
+
+/** Recompute the armed mask. **Call with mp_lock held.** */
+static void mp_armed_refresh(void)
+{
+	atomic_val_t m = 0;
+
+	if (mp_mode(&mp) == (uint8_t)MP_MODE_MP) {
+		static const uint8_t ch[] = {
+			(uint8_t)MP_CH_NMEA,
+			(uint8_t)MP_CH_UBX,
+			(uint8_t)MP_CH_GNSS_PASS,
+			(uint8_t)MP_CH_RB_PASS,
+		};
+		size_t i;
+
+		for (i = 0U; i < ARRAY_SIZE(ch); i++) {
+			if (mp_stream_is_sub(&mp.st, ch[i])) {
+				m |= (atomic_val_t)BIT(ch[i]);
+			}
+		}
+	}
+
+	atomic_set(&mp_ch_armed, m);
+}
+
+bool sts_mp_ch_armed(uint8_t ch)
+{
+	if (ch >= 32U) {
+		return false;
+	}
+	return (atomic_get(&mp_ch_armed) & (atomic_val_t)BIT(ch)) != 0;
+}
+
+bool sts_mp_gnss_tee_armed(void)
+{
+	static const atomic_val_t gnss_mask =
+		(atomic_val_t)(BIT(MP_CH_NMEA) | BIT(MP_CH_UBX) |
+			       BIT(MP_CH_GNSS_PASS));
+
+	return (atomic_get(&mp_ch_armed) & gnss_mask) != 0;
 }
 
 /* ------------------------------------------------------------------ ports */
@@ -927,6 +999,9 @@ static void mp_bypass(const struct shell *sh, uint8_t *data, size_t len)
 	}
 
 	left = (mp_mode(&mp) != (uint8_t)MP_MODE_MP);
+	/* A `stream.sub` arrives on this path, so the tees learn about it here
+	 * rather than up to a tick later. */
+	mp_armed_refresh();
 	mp_engine_unlock();
 
 	if (left) {
@@ -958,6 +1033,7 @@ bool sts_mp_shell_tap(uint8_t b)
 	}
 	mp_engine_lock();
 	entered = (mp_shell_byte(&mp, b) == 1);
+	mp_armed_refresh();
 	mp_engine_unlock();
 
 	if (entered) {
@@ -986,6 +1062,7 @@ void sts_mp_notify_link(bool up)
 	} else {
 		(void)mp_set_link(&mp, up);
 	}
+	mp_armed_refresh();
 	mp_engine_unlock();
 
 	if (!up && (mp_shell != NULL)) {
@@ -1006,6 +1083,7 @@ void sts_mp_notify_break(void)
 	} else {
 		(void)mp_mode_exit(&mp);
 	}
+	mp_armed_refresh();
 	mp_engine_unlock();
 
 	if (mp_shell != NULL) {
@@ -1038,6 +1116,19 @@ void sts_mp_tick(void)
 	if (!mp_started) {
 		return;
 	}
+
+	/*
+	 * Passthrough bytes first, and deliberately *outside* the engine lock.
+	 *
+	 * The producers — platform/gnss.c on the priority-6 GNSS thread and the
+	 * UART7 receive ISR — may not take a mutex, so they only stage into
+	 * mp_tunnel.c's ring; this is the thread that frames the result. Doing it
+	 * before the lock attempt means a contended engine costs a deferred drain
+	 * and not a dropped one, and it keeps the tee out of the tick's own
+	 * timeout budget: sts_mp_tunnel_drain() bounds itself by record count and
+	 * ends the pass on the first -EBUSY.
+	 */
+	sts_mp_tunnel_drain();
 
 	/*
 	 * Bounded, and a miss is tolerated. An unbounded wait here would let a
@@ -1077,6 +1168,13 @@ void sts_mp_tick(void)
 
 	mp_tick_miss_run = 0U;
 	(void)mp_tick(&mp);
+	/*
+	 * The unconditional republication of the armed mask. Every other call
+	 * site is an event; this one is what bounds how stale the mask can get
+	 * when the host stops sending — a lease that expires here, or a dead-man
+	 * that drops the session, silences the tees within one tick.
+	 */
+	mp_armed_refresh();
 	(void)k_mutex_unlock(&mp_lock);
 }
 
@@ -1099,6 +1197,7 @@ static int cmd_mp_enter(const struct shell *sh, size_t argc, char **argv)
 	(void)mp_set_link(&mp, true);
 	(void)mp_mode_enter(&mp);
 	hash = mp_manifest_hash_cached(&mp);
+	mp_armed_refresh();
 	mp_engine_unlock();
 
 	shell_print(sh, "MP mode: proto %u, manifest %u objects, hash 0x%08x",
@@ -1119,6 +1218,7 @@ static int cmd_mp_exit(const struct shell *sh, size_t argc, char **argv)
 	}
 	mp_engine_lock();
 	(void)mp_mode_exit(&mp);
+	mp_armed_refresh();
 	mp_engine_unlock();
 
 	shell_set_bypass(sh, NULL);
@@ -1210,10 +1310,24 @@ static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 		uint32_t dropped = 0U;
 
 		sts_mp_tunnel_stats(&gnss, &rb, &nmea, &ubx, &dropped);
+		/*
+		 * Bytes staged per channel, and bytes that never made it —
+		 * either the staging ring was full when a producer offered them
+		 * or the frame could not be sent. Both are the tee being
+		 * best-effort on purpose; see mp_tunnel.c.
+		 */
 		shell_print(sh,
-			    "tees         gnss %u, rb %u, nmea %u, ubx %u "
-			    "(dropped %u)",
+			    "tees         gnss %u B, rb %u B, nmea %u B, ubx %u B "
+			    "(dropped %u B)",
 			    gnss, rb, nmea, ubx, dropped);
+		shell_print(sh, "tee armed    nmea %u, ubx %u, gnss %u, rb %u",
+			    sts_mp_ch_armed((uint8_t)MP_CH_NMEA) ? 1U : 0U,
+			    sts_mp_ch_armed((uint8_t)MP_CH_UBX) ? 1U : 0U,
+			    sts_mp_ch_armed((uint8_t)MP_CH_GNSS_PASS) ? 1U : 0U,
+			    sts_mp_ch_armed((uint8_t)MP_CH_RB_PASS) ? 1U : 0U);
+		shell_print(sh, "tunnels      gnss %s, rb %s",
+			    sts_mp_tunnel_gnss_open() ? "OPEN (suspect)" : "closed",
+			    sts_mp_tunnel_rb_open() ? "OPEN (suspect)" : "closed");
 	}
 	return 0;
 }
@@ -1270,6 +1384,13 @@ int sts_mp_start(void)
 
 	fill_serial();
 
+	/*
+	 * The tee staging ring, before anything can be armed: the producers gate
+	 * on sts_mp_ch_armed(), which stays 0 until mp_armed_refresh() runs under
+	 * the lock below, so binding it here cannot race a producer.
+	 */
+	sts_mp_tunnel_init();
+
 	for (i = 0U; i < 2U; i++) {
 		mp_reasm[i].buf = mp_reasm_buf[i];
 		mp_reasm[i].cap = sizeof(mp_reasm_buf[i]);
@@ -1316,6 +1437,9 @@ int sts_mp_start(void)
 	mp_engine_lock();
 	rc = mp_init(&mp, &w);
 	hash = (rc == 0) ? mp_manifest_hash_cached(&mp) : 0U;
+	if (rc == 0) {
+		mp_armed_refresh();
+	}
 	mp_engine_unlock();
 	if (rc != 0) {
 		LOG_ERR("mp_init failed (%d)", rc);
@@ -1328,4 +1452,4 @@ int sts_mp_start(void)
 	return 0;
 }
 
-#endif /* CONFIG_STS1000_CONSOLE */
+#endif /* CONFIG_STS1000_CONSOLE && CONFIG_STS1000_MP */

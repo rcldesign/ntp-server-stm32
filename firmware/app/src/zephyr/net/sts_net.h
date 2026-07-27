@@ -151,6 +151,21 @@ uint64_t sts_ptpclk_ts_to_tai_ns(uint64_t seconds, uint32_t nanoseconds);
  */
 bool sts_ptpclk_traceable(void);
 
+/**
+ * Which reference the servo is tracking.
+ *
+ * Not cosmetic: it is the difference between served time that is absolutely
+ * accurate to a few hundred nanoseconds and served time that is accurate to
+ * tens of milliseconds. Both are equally *stable*, so nothing else the appliance
+ * publishes distinguishes them.
+ */
+typedef enum {
+	STS_PTPCLK_REF_NONE = 0, /* no usable absolute reference */
+	STS_PTPCLK_REF_PPS,      /* the GPS PPS edge, correlated with the counter */
+	STS_PTPCLK_REF_GNSS,     /* the receiver's civil time over USART3 */
+	STS_PTPCLK_REF_REALTIME, /* Zephyr's realtime clock + the §3.8 leap offset */
+} sts_ptpclk_ref_t;
+
 /** Servo telemetry, for the NET/PTP status groups and the SNMP MIB. */
 typedef struct {
 	bool clock_ok;        /* the device exists and answers */
@@ -163,6 +178,17 @@ typedef struct {
 	uint32_t slews;       /* fine ptp_clock_adjust() events */
 	uint32_t updates;     /* servo iterations that had a reference */
 	uint32_t no_ref;      /* servo iterations with no usable reference */
+
+	/* The correlated PPS reference (net/sts_ppscorr.h). Everything below is
+	 * from the most recent attempt, whether it succeeded or not — a refused
+	 * correlation is exactly when these numbers are wanted. */
+	uint8_t  ref_src;      /* sts_ptpclk_ref_t: which reference last answered */
+	uint32_t pps_ok;       /* correlations accepted */
+	uint32_t pps_reject;   /* correlations refused */
+	uint8_t  pps_last_rc;  /* sts_ppscorr_rc_t of the last attempt */
+	uint32_t pps_skew_ns;  /* measured span of the last paired {TIM2, PTP} read */
+	int64_t  pps_age_ns;   /* capture age at that read, on TIM2 */
+	int64_t  pps_coarse_resid_ns; /* civil time - correlated reference */
 } sts_ptpclk_stats_t;
 
 void sts_ptpclk_stats(sts_ptpclk_stats_t *out);

@@ -57,6 +57,7 @@
 #include <zephyr/toolchain.h>
 
 #include "console/sts_console.h"
+#include "console/sts_rollback.h"
 #include "fwupd/fwupd.h"
 #include "fwupd/rb_fwupd.h"
 #include "fwupd/ubx_fwupd.h"
@@ -210,6 +211,25 @@ static int stm_verify(void *user, char *out, size_t cap)
 		return -EBADMSG;
 	}
 
+	/*
+	 * Anti-rollback, checked HERE rather than left to the bootloader.
+	 *
+	 * MCUboot compares the staged image's IMAGE_TLV_SEC_CNT against the
+	 * running one and, when the staged value is lower or missing, erases
+	 * slot 1 and boots the primary unchanged
+	 * (loader.c check_downgrade_prevention()). That happens at the next
+	 * boot, in a bootloader built with CONFIG_MCUBOOT_LOG_LEVEL_OFF, so
+	 * without this the operator gets "verified, pending", reboots, and finds
+	 * the same version running with nothing anywhere saying why.
+	 *
+	 * Refusing before mark_pending() also leaves slot 1 unmarked, so the
+	 * restore path below is not needed to unwind a doomed swap.
+	 */
+	rc = sts_rollback_check_staged();
+	if (rc != 0) {
+		return rc;
+	}
+
 	rc = img->mark_pending(img->ctx);
 	if (rc != 0) {
 		return rc;
@@ -217,9 +237,10 @@ static int stm_verify(void *user, char *out, size_t cap)
 
 	/*
 	 * The staged version, not the running one: the swap happens on the next
-	 * boot, and MCUboot's own signature and anti-rollback checks are what
-	 * decide whether it sticks. Reporting the running version here would tell
-	 * the operator the update had not taken.
+	 * boot, and MCUboot's own signature check is what decides whether it
+	 * sticks — the anti-rollback half of that decision has already been
+	 * reproduced above. Reporting the running version here would tell the
+	 * operator the update had not taken.
 	 */
 	(void)snprintk(out, cap, "%u.%u.%u+%u (pending)",
 		       (unsigned int)info.version[0],

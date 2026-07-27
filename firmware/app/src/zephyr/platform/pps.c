@@ -63,6 +63,25 @@
  * fails that gate by construction: 250e6 mod 65536 = 45696 counts, and the
  * OCXO would have to be ~52 ppm off for that to alias into the accepted
  * window — two orders of magnitude outside its +-0.4 ppm pull range.
+ *
+ * ---------------------------------------------------------------------------
+ * Two consumers, one capture
+ * ---------------------------------------------------------------------------
+ * The discipline thread consumes captures through sts_pps_wait(), which blocks
+ * on the semaphore the ISR gives. The net area needs the SAME capture for a
+ * different purpose — correlating it against the ETH PTP counter so the served
+ * timescale has an absolute epoch good to nanoseconds instead of the tens of
+ * milliseconds the receiver's civil time can offer (sts_app.h "PPS capture
+ * seam", net/sts_ppscorr.h).
+ *
+ * It gets it through sts_pps_epoch_get(), which copies the latched capture
+ * WITHOUT taking the semaphore, so a second reader can never cost core/disc a
+ * PPS tick. Nothing was added to the ISR for it: everything the correlation
+ * needs is already latched there, and the ISR's budget is microseconds
+ * (firmware/CLAUDE.md thread table). The receiver-side naming of the pulse — its
+ * GPS week/ToW and the UBX-TIM-TP sawtooth — is resolved in the *caller's*
+ * context, against the same gnssmgr snapshot and with the same positive ToW
+ * match that the discipline thread uses.
  */
 
 #include <errno.h>
@@ -78,6 +97,9 @@
 #include <stm32_ll_tim.h>
 
 #include "zephyr/platform/platform.h"
+#include "zephyr/sts_app.h"
+
+#include "disc/disc.h"
 
 LOG_MODULE_REGISTER(sts_pps, CONFIG_STS1000_LOG_LEVEL);
 
@@ -291,4 +313,113 @@ void sts_pps_counters(uint32_t *captures, uint32_t *lost)
 	}
 
 	irq_unlock(key);
+}
+
+uint32_t sts_pps_counter_now(void)
+{
+	/*
+	 * Deliberately unguarded. This is called from inside an irq_lock() that
+	 * also holds an ETH PTP register read, and the whole point of the pairing
+	 * is that the two timebases are sampled as close together as the CPU
+	 * allows — a `pps.started` load and branch here would widen exactly the
+	 * interval being measured. pwm_stm32_init() has enabled the TIM2 clock
+	 * long before any thread runs, so the read cannot fault; before
+	 * sts_pps_init() the value is simply not on a known timebase, which the
+	 * caller detects from sts_pps_epoch_get() reporting no capture.
+	 */
+	return LL_TIM_GetCounter(pps_tim2);
+}
+
+/*
+ * Name the pulse a capture belongs to, and the sawtooth that belongs to it.
+ *
+ * This is the same positive-match rule the discipline thread applies before it
+ * corrects a phase sample (disc_apply_qerr in disc_thread.c), for the same
+ * reason and with the same slack: UBX-TIM-TP is emitted in the second BEFORE the
+ * pulse it describes, so "the newest record" is one second early, and a qErr
+ * applied to the wrong second injects the sawtooth instead of removing it.
+ * gnssmgr has already normalised the record's ToW onto the GPS timescale and
+ * cleared qerr_valid when it could not; what is left is to work out which ToW
+ * was captured and insist on an exact match.
+ *
+ * The consequence here is stronger than a mis-corrected phase sample, which is
+ * why nothing is assumed: gnssmgr_qerr_t::week + ::target_tow_ms is what names
+ * the ABSOLUTE second the served timescale is placed on. Matching the wrong
+ * record is a one-second error in every timestamp this appliance emits.
+ */
+static void pps_name_pulse(sts_pps_epoch_t *out, const sts_pps_capture_t *cap)
+{
+	sts_gnss_snap_t g;
+	disc_qerr_match_t m;
+	uint32_t pulse_tow = 0;
+
+	if (sts_gnss_snapshot(&g) != 0) {
+		return;
+	}
+	if (!g.qerr.valid || !g.have_status) {
+		return;
+	}
+
+	memset(&m, 0, sizeof(m));
+	m.record_valid = g.qerr.valid;
+	m.qerr_valid = g.qerr.qerr_valid;
+	m.qerr_ps = g.qerr.qerr_ps;
+	m.target_tow_ms = g.qerr.target_tow_ms;
+	m.record_rx_mono_ms = g.qerr.rx_mono_ms;
+	m.capture_mono_ms = cap->mono_ms;
+
+	/* Two navigation epochs of slack, matching disc_thread.c: the capture may
+	 * land either side of the NAV-PVT that names its own second. */
+	if (disc_pulse_tow_ms(g.pvt_itow_ms, g.pvt_rx_mono_ms, cap->mono_ms, 2000U,
+			      &pulse_tow) != 0) {
+		return;
+	}
+	m.pulse_tow_ms = pulse_tow;
+	m.pulse_tow_valid = true;
+
+	if (!disc_qerr_matches_pulse(&m)) {
+		return;
+	}
+
+	out->gps_week = g.qerr.week;
+	out->gps_tow_ms = g.qerr.target_tow_ms;
+	out->qerr_ps = g.qerr.qerr_ps;
+	out->epoch_valid = true;
+}
+
+int sts_pps_epoch_get(sts_pps_epoch_t *out)
+{
+	sts_pps_capture_t cap;
+	unsigned int key;
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	memset(out, 0, sizeof(*out));
+
+	if (!pps.started) {
+		return -ENODEV;
+	}
+
+	/*
+	 * The ISR writes pps.cap field by field, so the copy has to exclude it —
+	 * exactly as sts_pps_wait() does. This one does NOT take the semaphore:
+	 * the discipline thread is the semaphore's owner and must keep every tick
+	 * it is given.
+	 */
+	key = irq_lock();
+	cap = pps.cap;
+	irq_unlock(key);
+
+	out->seq = cap.seq;
+	out->tim2_cnt = cap.tim2_cnt;
+	out->timer_hz = pps.timer_hz;
+	out->mono_ms = cap.mono_ms;
+	out->overcapture = cap.tim2_overcapture;
+
+	if (cap.seq != 0U) {
+		pps_name_pulse(out, &cap);
+	}
+
+	return 0;
 }

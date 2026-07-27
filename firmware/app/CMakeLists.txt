@@ -45,6 +45,62 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sts1000_meridian LANGUAGES C)
 
 # ---------------------------------------------------------------------------
+# Anti-rollback: the SIGNED security counter must equal the COMPILED-IN epoch
+#
+# Two symbols carry one number (app/conf/rollback.conf explains why Kconfig
+# cannot express it as one):
+#
+#   CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS  reaches imgtool and lands in the image's
+#                                      protected TLV area, which is what
+#                                      MCUboot compares.
+#   CONFIG_STS1000_SECURITY_EPOCH      reaches the C code, which uses it to
+#                                      refuse a staged downgrade and to step
+#                                      the ATECC608B witness counter.
+#
+# Letting those drift is the interesting failure: the image would be gated on
+# one number and the firmware would reason about another, and both halves would
+# look fine in isolation. So this is a hard error, not a warning. It also
+# catches the case the whole feature is silently absent — a fragment that got
+# dropped, or an -DEXTRA_CONF_FILE that replaced rather than extended the set —
+# because then the imgtool argument is empty and no counter is signed at all.
+#
+# Only meaningful for an image that MCUboot chain-loads and that is actually
+# signed; a raw or unsigned build has no TLV area to put a counter in.
+# ---------------------------------------------------------------------------
+if(CONFIG_BOOTLOADER_MCUBOOT AND NOT CONFIG_MCUBOOT_GENERATE_UNSIGNED_IMAGE)
+  if(NOT CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS MATCHES "--security-counter[ \t]+([0-9]+|0[xX][0-9a-fA-F]+)")
+    message(FATAL_ERROR
+      "anti-rollback: CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS carries no "
+      "'--security-counter <n>', so this image would be signed without an "
+      "IMAGE_TLV_SEC_CNT and could never be installed on a unit that has "
+      "already confirmed a counter-bearing image. Restore app/conf/rollback.conf.\n"
+      "  CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS = '${CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS}'")
+  endif()
+  set(sts1000_signed_epoch "${CMAKE_MATCH_1}")
+
+  if(NOT DEFINED CONFIG_STS1000_SECURITY_EPOCH)
+    message(FATAL_ERROR
+      "anti-rollback: CONFIG_STS1000_SECURITY_EPOCH is not defined, but the "
+      "image is being signed with --security-counter ${sts1000_signed_epoch}. "
+      "The firmware would have no idea what epoch it is running.")
+  endif()
+
+  # EQUAL, not STREQUAL: 0x2 and 2 are the same epoch, and imgtool accepts both.
+  if(NOT sts1000_signed_epoch EQUAL CONFIG_STS1000_SECURITY_EPOCH)
+    message(FATAL_ERROR
+      "anti-rollback: the epoch signed into the image and the epoch compiled "
+      "into it disagree. Both live in app/conf/rollback.conf and must be the "
+      "same number.\n"
+      "  signed   (--security-counter)      = ${sts1000_signed_epoch}\n"
+      "  compiled (CONFIG_STS1000_SECURITY_EPOCH) = ${CONFIG_STS1000_SECURITY_EPOCH}")
+  endif()
+
+  message(STATUS
+    "sts1000 anti-rollback: security epoch ${CONFIG_STS1000_SECURITY_EPOCH} "
+    "(signed into IMAGE_TLV_SEC_CNT and compiled in)")
+endif()
+
+# ---------------------------------------------------------------------------
 # Sources
 #
 # ARCHITECTURE.md §4 splits the application in two:
@@ -98,6 +154,18 @@ if(CONFIG_STS1000_CONSOLE)
   file(GLOB_RECURSE sts1000_glue_console CONFIGURE_DEPENDS
        ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/console/*.c
        ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/storage/*.c)
+  # The Maintenance Protocol is the one sub-area with a switch of its own
+  # (src/zephyr/console/Kconfig.mp). It is an unauthenticated-to-role-`none`
+  # physical-access surface, so CONFIG_STS1000_MP=n has to actually remove it
+  # from the image rather than leave it compiled and merely unused — which
+  # means naming its two files here, because the area glob above would
+  # otherwise pull them back in. Their call sites resolve to the __weak no-ops
+  # in src/zephyr/platform/sts_area_weak.c.
+  if(NOT CONFIG_STS1000_MP)
+    list(REMOVE_ITEM sts1000_glue_console
+         ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/console/mp_glue.c
+         ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/console/mp_tunnel.c)
+  endif()
   list(APPEND sts1000_glue_sources ${sts1000_glue_console})
 endif()
 

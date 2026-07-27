@@ -4,9 +4,27 @@
  * Copyright (c) 2026 RCL Design
  * SPDX-License-Identifier: Apache-2.0
  *
- * PRIVATE to src/zephyr/console/, like sts_console.h. `core/mp` is the protocol;
- * this file is the wire under it, the shell hand-off, and the provider callbacks
- * that turn platform snapshots into the structs core consumes.
+ * `core/mp` is the protocol; this file is the wire under it, the shell hand-off,
+ * and the provider callbacks that turn platform snapshots into the structs core
+ * consumes.
+ *
+ * Mostly private to src/zephyr/console/, like sts_console.h — with one
+ * deliberate exception, stated here so it is a contract rather than a leak. The
+ * **byte tees and their arming predicates** (`sts_mp_tee_*`,
+ * `sts_mp_gnss_tee_armed`, `sts_mp_ch_armed`, `sts_mp_tunnel_*_open`) are called
+ * from the platform area, because that is where the bytes are:
+ * platform/gnss.c owns the USART3 receive path and platform/rb_serial.c owns
+ * UART7. sts_mp_mirror_publish() crosses the same seam in the other direction
+ * and is declared in sts_app.h instead; these are not, because sts_app.h is not
+ * this change's to extend. The dependency is made safe two ways:
+ *
+ *   - src/zephyr/platform/sts_area_weak.c carries a __weak no-op for **every**
+ *     function declared below, so CONFIG_STS1000_MP=n (which drops mp_glue.c
+ *     and mp_tunnel.c from the build, app/CMakeLists.txt) still links;
+ *   - every one of them is safe to call from a hot loop or an ISR: the tees do
+ *     a bounded copy into a staging ring behind a spinlock and nothing else,
+ *     and the predicates are one atomic read. Nothing on this path takes the
+ *     engine mutex or touches the console UART.
  *
  * Mode entry (FMT §2.3). MP shares the human console on CDC-ACM #0 rather than
  * taking a third endpoint, so entering it means taking the port away from the
@@ -174,20 +192,49 @@ int sts_mp_stream_raw(uint8_t ch, const uint8_t *data, size_t len);
 /**
  * Tee bytes from a peripheral port onto its MP channel (mp_tunnel.c).
  *
- * The GNSS and Rb readers call these with every byte they receive; nothing is
- * sent unless the channel is subscribed or its tunnel object is overridden.
+ * The GNSS and Rb readers call these with the bytes they move; nothing is
+ * staged unless the channel is subscribed *and*, for the two passthrough
+ * channels, its tunnel object is overridden open.
  *
- * **Thread context, not ISR context.** These reach mp_stream_raw() and the
- * console UART through the engine mutex, and Zephyr forbids k_mutex_lock() in an
- * ISR outright. A byte sink invoked from a UART ISR (rb_serial.c's is) must ring
- * the octets and drain them from a thread — see mp_tunnel.c. The ISR case is
- * detected and counted as a drop rather than left to an assertion that a release
- * build compiles out.
+ * **Safe from an ISR and from the priority-6 GNSS thread**, which is the whole
+ * point of them: a call is an arming test (one atomic read), then a bounded
+ * memcpy into the staging ring under a k_spinlock, then return. It never takes
+ * the engine mutex, never touches the console UART and never blocks — the
+ * framing happens later, on the console supervisor, out of sts_mp_tick().
+ * Anything that does not fit is dropped and counted, because a passthrough tee
+ * is best-effort by nature and a peripheral reader that stalls is not.
+ *
+ * Cost, since one of these sits next to the timing path: ~15 instructions per
+ * byte staged by the caller plus ~350 cycles per chunk handed over here (see
+ * the accounting in mp_tunnel.c's tee_enqueue()).
  */
 void sts_mp_tee_gnss(const uint8_t *data, size_t len);
 void sts_mp_tee_rb(const uint8_t *data, size_t len);
 void sts_mp_tee_nmea(const uint8_t *data, size_t len);
 void sts_mp_tee_ubx(const uint8_t *data, size_t len);
+
+/**
+ * True when @p ch has a consumer: MP mode is up and the host is subscribed.
+ *
+ * Lock-free — a single atomic read of a bitmask the engine republishes under
+ * its own lock on every sts_mp_tick() and after every input batch, so it lags a
+ * subscription change by at most one tick. A stale "armed" costs one staged
+ * chunk that the drain then discards; a stale "not armed" costs one tick of
+ * missing tee data. Neither is worth a lock on a producer this hot.
+ *
+ * @p ch is an MP_CH_* value; anything above 31 reads as not armed.
+ */
+bool sts_mp_ch_armed(uint8_t ch);
+
+/**
+ * True when any GNSS-side tee has a consumer — 0x02 NMEA, 0x03 UBX or the 0x07
+ * passthrough.
+ *
+ * The one predicate platform/gnss.c evaluates per drain pass to decide whether
+ * the receive path pays for the copy at all. Same lock-free single atomic read
+ * as sts_mp_ch_armed().
+ */
+bool sts_mp_gnss_tee_armed(void);
 
 /**
  * True while the host holds a tunnel open on that port, in which case firmware
@@ -217,6 +264,25 @@ int sts_mp_tunnel_set_rb(bool open);
 /** Tee byte counts, for `mp status` and the support bundle. */
 void sts_mp_tunnel_stats(uint32_t *gnss, uint32_t *rb, uint32_t *nmea,
 			 uint32_t *ubx, uint32_t *dropped);
+
+/**
+ * Empty the tee staging ring onto the wire.
+ *
+ * Console-internal: sts_mp_tick() calls it once per pass, **before** it takes
+ * the engine lock, so a contended engine costs a deferred drain and not a
+ * deferred tick. Each record is framed through sts_mp_stream_raw(), which takes
+ * the lock itself; the first -EBUSY ends the pass and leaves the rest queued.
+ *
+ * Thread context only, and only from one thread: the ring's consumer side is
+ * single-consumer by construction.
+ */
+void sts_mp_tunnel_drain(void);
+
+/**
+ * Bind the tee staging ring. Console-internal; sts_mp_start() calls it before
+ * it publishes the engine, i.e. before any producer can be armed.
+ */
+void sts_mp_tunnel_init(void);
 
 #ifdef __cplusplus
 }

@@ -81,6 +81,71 @@ uint64_t sts_mono_ms(void);
  * platform adds this when publishing. Not a leap second and never changes. */
 #define STS_TAI_MINUS_GPS_S 19
 
+/* ---- PPS capture seam (platform publishes, net correlates) -------------- */
+/*
+ * The path that makes the served time absolutely accurate rather than merely
+ * stable (spec §2.3/§15).
+ *
+ * The ETH MAC's 1588 counter is what actually stamps NTP and PTP packets, and
+ * it is syntonized to the disciplined reference in hardware — but its absolute
+ * offset has to be set by something. Placing it from the receiver's civil time
+ * over USART3 is good to tens of milliseconds and no better: NAV-PVT describes a
+ * second that has already passed and the decode-to-publish latency is neither
+ * constant nor measured.
+ *
+ * TIM2 already latches the PPS edge in hardware, to one count. Pairing that
+ * capture with a PTP-counter read taken back-to-back with interrupts locked
+ * places the counter to a few hundred nanoseconds instead. This seam is what
+ * lets the net area do that: the platform area owns TIM2 and the receiver, so it
+ * publishes the capture together with the GPS week/ToW naming the pulse and the
+ * UBX-TIM-TP sawtooth belonging to it; the net area supplies the PTP counter and
+ * does the arithmetic (src/zephyr/net/sts_ppscorr.h).
+ *
+ * Nothing is computed in the capture ISR. The ISR latches, and both entry points
+ * below are read paths.
+ */
+typedef struct {
+	uint32_t seq;         /* capture sequence; 0 = nothing captured yet */
+	uint32_t tim2_cnt;    /* TIM2_CCR1 latch of the PA0 rising edge */
+	uint32_t timer_hz;    /* TIM2 count rate, from the live RCC tree */
+	uint64_t mono_ms;     /* sts_mono_ms() latched in the capture ISR */
+	uint16_t gps_week;    /* GPS week of the pulse; valid iff epoch_valid */
+	uint32_t gps_tow_ms;  /* GPS time-of-week of the pulse, ms */
+	int32_t  qerr_ps;     /* sawtooth quantisation error of THIS pulse */
+	bool     epoch_valid; /* a UBX-TIM-TP was positively paired with this edge */
+	bool     overcapture; /* an earlier edge was lost before this one */
+} sts_pps_epoch_t;
+
+/* Copy the latest PPS capture, with the receiver's naming of that pulse.
+ *
+ * Non-consuming: it does not touch the discipline thread's capture semaphore,
+ * so calling it never costs core/disc a second. @p out is always fully written.
+ *
+ * epoch_valid is false — leaving gps_week/gps_tow_ms/qerr_ps zero — whenever the
+ * UBX-TIM-TP record cannot be proved to describe this edge. It is not a
+ * best-effort field: applying a sawtooth to the wrong second injects the
+ * sawtooth instead of removing it, and naming the wrong second is a one-second
+ * error in the served time.
+ *
+ * Takes the GNSS snapshot mutex for a struct copy. Callable from any
+ * cooperative thread; NOT from an ISR.
+ *
+ * @retval 0        @p out written (check ::seq and ::epoch_valid).
+ * @retval -EINVAL  @p out is NULL.
+ * @retval -ENODEV  PPS capture has not been initialised.
+ */
+int sts_pps_epoch_get(sts_pps_epoch_t *out);
+
+/* The free-running TIM2 counter, right now.
+ *
+ * One register read and nothing else — it exists to be called immediately
+ * either side of a PTP-counter read inside a single irq_lock(), so that the two
+ * timebases are sampled as close together as the CPU allows. Anything more in
+ * here would widen the very interval it is measuring.
+ *
+ * ISR-safe. Meaningless before sts_pps_epoch_get() reports a capture. */
+uint32_t sts_pps_counter_now(void);
+
 /* ---- reference-selection override (operator intent) --------------------- */
 /*
  * The operator's standing request to core/refsel, read by the discipline

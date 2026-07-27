@@ -5,10 +5,11 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * The four glue areas (platform, net, console, ui) are developed in parallel
- * and are individually switchable via CONFIG_STS1000_{NET,CONSOLE,UI}. Every
- * cross-area entry point declared in sts_app.h that is *not* implemented by
- * the platform area gets a weak no-op here, so the image links whether or not
- * the owning area exists yet.
+ * and are individually switchable via CONFIG_STS1000_{NET,CONSOLE,UI} — plus
+ * CONFIG_STS1000_MP, which switches one sub-area of console on its own. Every
+ * cross-area entry point declared in sts_app.h, storage/sts_store.h or
+ * console/mp_glue.h that is *not* implemented by the platform area gets a weak
+ * no-op here, so the image links whether or not the owning area is in the build.
  *
  * Overriding works because Zephyr links every zephyr_library — `app` included
  * — inside --whole-archive (zephyr/cmake/linker/ld/target.cmake), so a strong
@@ -29,6 +30,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/toolchain.h>
 
+#include "console/mp_glue.h"
 #include "zephyr/sts_app.h"
 #include "storage/sts_store.h"
 
@@ -107,4 +109,159 @@ __weak void sts_store_note_leap(int16_t current, int16_t pending, bool valid)
 __weak void sts_store_note_log_cursor(uint32_t cursor)
 {
 	ARG_UNUSED(cursor);
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * Maintenance Protocol (console/mp_glue.h)
+ * ---------------------------------------------------------------------------
+ *
+ * MP has a switch of its own inside the console area — CONFIG_STS1000_MP,
+ * src/zephyr/console/Kconfig.mp — because it is a physical-access surface that
+ * answers at role `none` before any credential is presented, and an operator has
+ * to be able to take it out of the image. app/CMakeLists.txt drops mp_glue.c and
+ * mp_tunnel.c when it is n, which leaves callers in two always-compiled places:
+ *
+ *   src/zephyr/console/sts_console.c   sts_mp_start(), sts_mp_tick()
+ *   src/zephyr/platform/gnss.c         the byte tees and their arming predicates
+ *
+ * Same completeness rule as the storage set above, and the same reason: the set
+ * below is complete against **every** function console/mp_glue.h declares, not
+ * merely against today's call sites, so adding a call somewhere cannot break a
+ * CONFIG_STS1000_MP=n link that nothing else in CI builds. The one omission is
+ * deliberate and is not an omission: sts_mp_mirror_publish() is declared in
+ * sts_app.h rather than mp_glue.h and already has its __weak fallback in
+ * src/zephyr/sts_app.c — defining it a second time here would be two weak
+ * definitions of one symbol.
+ *
+ * Every stub is a *safe* no-op in the sense the file header requires. Note in
+ * particular what the three predicates do NOT do: they report "nothing is
+ * listening", so the GNSS receive path's tee call sites collapse to a predicted
+ * branch and stage nothing, and the tunnel setters report -ENOTSUP rather than
+ * success, because reporting that a port was diverted when no engine exists to
+ * divert it is exactly the lie the header warns about.
+ */
+__weak int sts_mp_start(void)
+{
+	return 0;
+}
+
+__weak void sts_mp_tick(void)
+{
+}
+
+__weak bool sts_mp_active(void)
+{
+	return false;
+}
+
+__weak void sts_mp_notify_link(bool up)
+{
+	ARG_UNUSED(up);
+}
+
+__weak void sts_mp_notify_break(void)
+{
+}
+
+/* False = "the entry magic did not complete", so the caller keeps handing the
+ * byte to the shell — which is the whole behaviour of a build without MP. */
+__weak bool sts_mp_shell_tap(uint8_t b)
+{
+	ARG_UNUSED(b);
+	return false;
+}
+
+/* mp_glue.h's own name for "the engine has not started". */
+__weak int sts_mp_stream_raw(uint8_t ch, const uint8_t *data, size_t len)
+{
+	ARG_UNUSED(ch);
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+	return -ENODEV;
+}
+
+__weak void sts_mp_tee_gnss(const uint8_t *data, size_t len)
+{
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+}
+
+__weak void sts_mp_tee_rb(const uint8_t *data, size_t len)
+{
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+}
+
+__weak void sts_mp_tee_nmea(const uint8_t *data, size_t len)
+{
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+}
+
+__weak void sts_mp_tee_ubx(const uint8_t *data, size_t len)
+{
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+}
+
+__weak bool sts_mp_ch_armed(uint8_t ch)
+{
+	ARG_UNUSED(ch);
+	return false;
+}
+
+__weak bool sts_mp_gnss_tee_armed(void)
+{
+	return false;
+}
+
+__weak bool sts_mp_tunnel_gnss_open(void)
+{
+	return false;
+}
+
+__weak bool sts_mp_tunnel_rb_open(void)
+{
+	return false;
+}
+
+__weak int sts_mp_tunnel_set_gnss(bool open)
+{
+	ARG_UNUSED(open);
+	return -ENOTSUP;
+}
+
+__weak int sts_mp_tunnel_set_rb(bool open)
+{
+	ARG_UNUSED(open);
+	return -ENOTSUP;
+}
+
+__weak void sts_mp_tunnel_stats(uint32_t *gnss, uint32_t *rb, uint32_t *nmea,
+				uint32_t *ubx, uint32_t *dropped)
+{
+	if (gnss != NULL) {
+		*gnss = 0U;
+	}
+	if (rb != NULL) {
+		*rb = 0U;
+	}
+	if (nmea != NULL) {
+		*nmea = 0U;
+	}
+	if (ubx != NULL) {
+		*ubx = 0U;
+	}
+	if (dropped != NULL) {
+		*dropped = 0U;
+	}
+}
+
+__weak void sts_mp_tunnel_drain(void)
+{
+}
+
+__weak void sts_mp_tunnel_init(void)
+{
 }

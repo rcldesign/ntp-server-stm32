@@ -16,11 +16,18 @@
  *   sts_cfg_applier.h   — who is told about a config change. A registry that
  *                         drops a subscriber and reports success makes every
  *                         later config apply a no-op with no diagnostic.
+ *   sts_rollback.h      — whether a staged image is a downgrade, and how far to
+ *                         step a ONE-WAY hardware counter. The decode is of a
+ *                         byte layout owned by another project, and the action
+ *                         it drives cannot be undone on the part.
  *
  * Each header is deliberately free of Zephyr and MCUboot dependencies so it can
  * be compiled here. The staging tests model MCUboot's swap-using-move accept/
  * reject decision independently, from the bootloader sources, rather than
- * comparing the header against itself.
+ * comparing the header against itself; the anti-rollback tests do the same for
+ * check_downgrade_prevention(), and additionally rebuild imgtool's output byte
+ * for byte so the decoder is checked against the producer's format and not
+ * against its own idea of it.
  */
 
 #include <errno.h>
@@ -29,6 +36,7 @@
 #include "unity.h"
 
 #include "zephyr/console/sts_confirm_gate.h"
+#include "zephyr/console/sts_rollback.h"
 #include "zephyr/console/sts_stage_geom.h"
 #include "zephyr/sts_cfg_applier.h"
 
@@ -505,6 +513,403 @@ static void test_commit_applied_includes_the_persist_failure(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* anti-rollback (sts_rollback.h)                                            */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * The constants restated in sts_rollback.h, quoted here from
+ * bootloader/mcuboot/boot/bootutil/include/bootutil/image.h so the two are
+ * compared rather than assumed. A silent drift in any of these makes every
+ * image look like it carries no security counter, which reads as "downgrade
+ * prevention is off" and is exactly the failure the feature exists to stop.
+ */
+static void test_mcuboot_image_constants_match_the_bootloader(void)
+{
+	TEST_ASSERT_EQUAL_HEX32(0x96f3b83dU, STS_ROLLBACK_IMAGE_MAGIC); /* IMAGE_MAGIC */
+	TEST_ASSERT_EQUAL_UINT32(32U, STS_ROLLBACK_HDR_LEN);   /* IMAGE_HEADER_SIZE */
+	TEST_ASSERT_EQUAL_HEX16(0x6908U, STS_ROLLBACK_TLV_PROT_MAGIC);
+	TEST_ASSERT_EQUAL_HEX16(0x6907U, STS_ROLLBACK_TLV_INFO_MAGIC);
+	TEST_ASSERT_EQUAL_HEX16(0x50U, STS_ROLLBACK_TLV_SEC_CNT);
+	/* sizeof(struct image_tlv_info) == sizeof(struct image_tlv) == 4 */
+	TEST_ASSERT_EQUAL_UINT32(4U, STS_ROLLBACK_TLV_HDR_LEN);
+
+	/* ATECC608B datasheet §4.2: the monotonic counters stop at 2^21 - 1. */
+	TEST_ASSERT_EQUAL_UINT32(2097151U, STS_ROLLBACK_COUNTER_MAX);
+	TEST_ASSERT_EQUAL_UINT32((1U << 21) - 1U, STS_ROLLBACK_COUNTER_MAX);
+}
+
+/* --- little helpers that emit exactly what imgtool writes ---------------- */
+
+static void put16(uint8_t *p, uint16_t v)
+{
+	p[0] = (uint8_t)(v & 0xFFU);
+	p[1] = (uint8_t)(v >> 8);
+}
+
+static void put32(uint8_t *p, uint32_t v)
+{
+	p[0] = (uint8_t)(v & 0xFFU);
+	p[1] = (uint8_t)((v >> 8) & 0xFFU);
+	p[2] = (uint8_t)((v >> 16) & 0xFFU);
+	p[3] = (uint8_t)((v >> 24) & 0xFFU);
+}
+
+/* struct image_header, the geometry this project actually signs: header size
+ * 0x400 (CONFIG_ROM_START_OFFSET), version 0.1.0+0. */
+static void make_hdr(uint8_t buf[32], uint16_t prot_tlv_size, uint32_t img_size)
+{
+	memset(buf, 0, 32);
+	put32(&buf[0], STS_ROLLBACK_IMAGE_MAGIC); /* ih_magic */
+	put32(&buf[4], 0U);                       /* ih_load_addr */
+	put16(&buf[8], 0x400U);                   /* ih_hdr_size */
+	put16(&buf[10], prot_tlv_size);           /* ih_protect_tlv_size */
+	put32(&buf[12], img_size);                /* ih_img_size */
+	put32(&buf[16], 0U);                      /* ih_flags */
+	buf[20] = 0U;                             /* iv_major */
+	buf[21] = 1U;                             /* iv_minor */
+	put16(&buf[22], 0U);                      /* iv_revision */
+	put32(&buf[24], 0U);                      /* iv_build_num */
+}
+
+/*
+ * The exact protected TLV area imgtool emits for `--security-counter N` with no
+ * boot record and no dependencies: a 4-octet info header declaring 12, then one
+ * 4-octet TLV header, then the counter as a little-endian uint32
+ * (imgtool/image.py: `prot_tlv.add('SEC_CNT', struct.pack(e + 'I', ...))`, and
+ * `protected_tlv_size += TLV_SIZE + 4` then `+= TLV_INFO_SIZE`).
+ */
+static size_t make_prot_area(uint8_t *buf, uint32_t counter)
+{
+	put16(&buf[0], STS_ROLLBACK_TLV_PROT_MAGIC);
+	put16(&buf[2], 12U); /* it_tlv_tot, INCLUDING this info header */
+	put16(&buf[4], STS_ROLLBACK_TLV_SEC_CNT);
+	put16(&buf[6], 4U);
+	put32(&buf[8], counter);
+	return 12U;
+}
+
+static void test_image_header_decode(void)
+{
+	sts_rollback_hdr_t h;
+	uint8_t buf[32];
+
+	make_hdr(buf, 12U, 0xA3F2CU); /* the real img_size of the 0.1.0 build */
+	TEST_ASSERT_EQUAL_INT(0, sts_rollback_hdr_parse(buf, sizeof(buf), &h));
+	TEST_ASSERT_EQUAL_UINT16(0x400U, h.hdr_size);
+	TEST_ASSERT_EQUAL_UINT16(12U, h.prot_tlv_size);
+	TEST_ASSERT_EQUAL_UINT32(0xA3F2CU, h.img_size);
+	TEST_ASSERT_EQUAL_UINT32(0U, h.version[0]);
+	TEST_ASSERT_EQUAL_UINT32(1U, h.version[1]);
+	/* BOOT_TLV_OFF(hdr) = ih_hdr_size + ih_img_size */
+	TEST_ASSERT_EQUAL_UINT64(0x400U + 0xA3F2CULL,
+				 sts_rollback_prot_tlv_off(&h));
+
+	/* An image with no protected TLVs at all — every build before this
+	 * change. Decodes fine; the absence is reported by the walk, not here. */
+	make_hdr(buf, 0U, 0x1000U);
+	TEST_ASSERT_EQUAL_INT(0, sts_rollback_hdr_parse(buf, sizeof(buf), &h));
+	TEST_ASSERT_EQUAL_UINT16(0U, h.prot_tlv_size);
+
+	/* Erased flash, an unsigned image, or anything else that is not one. */
+	memset(buf, 0xFF, sizeof(buf));
+	TEST_ASSERT_EQUAL_INT(-EILSEQ, sts_rollback_hdr_parse(buf, sizeof(buf), &h));
+	make_hdr(buf, 12U, 0x1000U);
+	put32(&buf[0], 0x96f3b83cU); /* IMAGE_MAGIC_V1 — not what we accept */
+	TEST_ASSERT_EQUAL_INT(-EILSEQ, sts_rollback_hdr_parse(buf, sizeof(buf), &h));
+
+	/* Impossible geometry: a header smaller than the header. */
+	make_hdr(buf, 12U, 0x1000U);
+	put16(&buf[8], 31U);
+	TEST_ASSERT_EQUAL_INT(-EILSEQ, sts_rollback_hdr_parse(buf, sizeof(buf), &h));
+
+	/* A protected area too small to hold even its own info header would
+	 * underflow the walk. */
+	make_hdr(buf, 3U, 0x1000U);
+	TEST_ASSERT_EQUAL_INT(-EILSEQ, sts_rollback_hdr_parse(buf, sizeof(buf), &h));
+
+	/* Arguments. */
+	make_hdr(buf, 12U, 0x1000U);
+	TEST_ASSERT_EQUAL_INT(-EINVAL, sts_rollback_hdr_parse(buf, 31U, &h));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, sts_rollback_hdr_parse(NULL, 32U, &h));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, sts_rollback_hdr_parse(buf, 32U, NULL));
+}
+
+static void test_sec_cnt_found_in_imgtools_layout(void)
+{
+	uint8_t area[64];
+	uint32_t v = 0xDEADU;
+	size_t n;
+
+	memset(area, 0, sizeof(area));
+	n = make_prot_area(area, 1U);
+	TEST_ASSERT_EQUAL_size_t(12U, n);
+	TEST_ASSERT_EQUAL_INT(0, sts_rollback_sec_cnt_find(area, n, &v));
+	TEST_ASSERT_EQUAL_UINT32(1U, v);
+
+	/* A large epoch, to prove the four octets are read little-endian and
+	 * whole. 2097151 is the witness ceiling. */
+	n = make_prot_area(area, 2097151U);
+	TEST_ASSERT_EQUAL_INT(0, sts_rollback_sec_cnt_find(area, n, &v));
+	TEST_ASSERT_EQUAL_UINT32(2097151U, v);
+	TEST_ASSERT_EQUAL_HEX8(0xFF, area[8]);
+	TEST_ASSERT_EQUAL_HEX8(0xFF, area[9]);
+	TEST_ASSERT_EQUAL_HEX8(0x1F, area[10]);
+	TEST_ASSERT_EQUAL_HEX8(0x00, area[11]);
+}
+
+static void test_sec_cnt_absent_is_not_malformed(void)
+{
+	uint8_t area[64];
+	uint32_t v = 0xDEADU;
+
+	/* An image signed without --security-counter has NO protected area at
+	 * all: prot_tlv_size is 0. That is -ENOENT, and the caller turns it into
+	 * "refuse this staged image", not into "the image is corrupt". */
+	TEST_ASSERT_EQUAL_INT(-ENOENT, sts_rollback_sec_cnt_find(NULL, 0U, &v));
+
+	/* A protected area holding only a BOOT_RECORD (0x60), which is what
+	 * --boot-record produces without --security-counter. Well-formed, and
+	 * still no counter. */
+	memset(area, 0, sizeof(area));
+	put16(&area[0], STS_ROLLBACK_TLV_PROT_MAGIC);
+	put16(&area[2], 12U);
+	put16(&area[4], 0x60U);
+	put16(&area[6], 4U);
+	put32(&area[8], 0x11223344U);
+	TEST_ASSERT_EQUAL_INT(-ENOENT, sts_rollback_sec_cnt_find(area, 12U, &v));
+	TEST_ASSERT_EQUAL_UINT32(0xDEADU, v); /* untouched */
+
+	/* SEC_CNT after another protected TLV: the walk must not stop early. */
+	memset(area, 0, sizeof(area));
+	put16(&area[0], STS_ROLLBACK_TLV_PROT_MAGIC);
+	put16(&area[2], 20U);
+	put16(&area[4], 0x60U);   /* BOOT_RECORD */
+	put16(&area[6], 4U);
+	put32(&area[8], 0x11223344U);
+	put16(&area[12], STS_ROLLBACK_TLV_SEC_CNT);
+	put16(&area[14], 4U);
+	put32(&area[16], 7U);
+	TEST_ASSERT_EQUAL_INT(0, sts_rollback_sec_cnt_find(area, 20U, &v));
+	TEST_ASSERT_EQUAL_UINT32(7U, v);
+}
+
+static void test_sec_cnt_rejects_a_malformed_area(void)
+{
+	uint8_t area[64];
+	uint32_t v = 0xDEADU;
+
+	/* Unprotected magic where the protected one belongs: reading the
+	 * unprotected area would find TLVs nothing signed. */
+	make_prot_area(area, 1U);
+	put16(&area[0], STS_ROLLBACK_TLV_INFO_MAGIC);
+	TEST_ASSERT_EQUAL_INT(-EILSEQ, sts_rollback_sec_cnt_find(area, 12U, &v));
+
+	/* it_tlv_tot disagreeing with ih_protect_tlv_size — the same
+	 * cross-check MCUboot's bootutil_tlv_iter_begin() makes before it will
+	 * walk anything. */
+	make_prot_area(area, 1U);
+	put16(&area[2], 16U);
+	TEST_ASSERT_EQUAL_INT(-EILSEQ, sts_rollback_sec_cnt_find(area, 12U, &v));
+
+	/* A TLV whose length runs past the declared area. */
+	make_prot_area(area, 1U);
+	put16(&area[6], 5U);
+	TEST_ASSERT_EQUAL_INT(-EILSEQ, sts_rollback_sec_cnt_find(area, 12U, &v));
+
+	/* A SEC_CNT that is not a uint32. Reading four octets anyway would
+	 * fabricate a counter out of neighbouring bytes. */
+	memset(area, 0, sizeof(area));
+	put16(&area[0], STS_ROLLBACK_TLV_PROT_MAGIC);
+	put16(&area[2], 10U);
+	put16(&area[4], STS_ROLLBACK_TLV_SEC_CNT);
+	put16(&area[6], 2U);
+	put16(&area[8], 1U);
+	TEST_ASSERT_EQUAL_INT(-EILSEQ, sts_rollback_sec_cnt_find(area, 10U, &v));
+
+	/* Truncated below even an info header. */
+	make_prot_area(area, 1U);
+	TEST_ASSERT_EQUAL_INT(-EILSEQ, sts_rollback_sec_cnt_find(area, 3U, &v));
+
+	TEST_ASSERT_EQUAL_UINT32(0xDEADU, v); /* nothing wrote through */
+	TEST_ASSERT_EQUAL_INT(-EINVAL, sts_rollback_sec_cnt_find(area, 12U, NULL));
+}
+
+/*
+ * An independent model of MCUboot's check_downgrade_prevention()
+ * (boot/bootutil/src/loader.c) for the security-counter variant, written from
+ * the bootloader source rather than from sts_rollback.h. The point is to catch
+ * the two implementations disagreeing, so it deliberately does not share code.
+ */
+static int mcuboot_would_swap_epoch(int slot0_rc, uint32_t slot0_cnt, int slot1_rc,
+			      uint32_t slot1_cnt)
+{
+	if (slot0_rc != 0) {
+		return 1; /* "If there was no security counter in slot 0, allow swap" */
+	}
+	if (slot1_rc != 0) {
+		return 0;
+	}
+	return (slot0_cnt > slot1_cnt) ? 0 : 1;
+}
+
+static void test_staged_verdict_matches_the_bootloader(void)
+{
+	/* Equal counters swap: that is the whole reason for the counter variant
+	 * over plain version comparison — routine releases keep the epoch, and a
+	 * 0.1.0 -> 0.1.1 patch has to be installable. */
+	TEST_ASSERT_EQUAL_INT(STS_ROLLBACK_STAGED_OK,
+			      sts_rollback_staged_verdict(0, 3U, 3U));
+	TEST_ASSERT_EQUAL_INT(1, mcuboot_would_swap_epoch(0, 3U, 0, 3U));
+
+	/* Higher swaps. */
+	TEST_ASSERT_EQUAL_INT(STS_ROLLBACK_STAGED_OK,
+			      sts_rollback_staged_verdict(0, 4U, 3U));
+	TEST_ASSERT_EQUAL_INT(1, mcuboot_would_swap_epoch(0, 3U, 0, 4U));
+
+	/* Lower is the attack: a correctly-signed older image. */
+	TEST_ASSERT_EQUAL_INT(STS_ROLLBACK_STAGED_OLDER,
+			      sts_rollback_staged_verdict(0, 2U, 3U));
+	TEST_ASSERT_EQUAL_INT(0, mcuboot_would_swap_epoch(0, 3U, 0, 2U));
+
+	/* No counter in the staged image: refused, because the running one has
+	 * one. */
+	TEST_ASSERT_EQUAL_INT(STS_ROLLBACK_STAGED_NO_COUNTER,
+			      sts_rollback_staged_verdict(-ENOENT, 0U, 3U));
+	TEST_ASSERT_EQUAL_INT(0, mcuboot_would_swap_epoch(0, 3U, -1, 0U));
+
+	/* A malformed area is refused too, and reported as its own thing. */
+	TEST_ASSERT_EQUAL_INT(STS_ROLLBACK_STAGED_MALFORMED,
+			      sts_rollback_staged_verdict(-EILSEQ, 0U, 3U));
+
+	/* Sweep the boundary at the epoch this product ships with. */
+	for (uint32_t staged = 0U; staged <= 4U; staged++) {
+		sts_rollback_staged_t v =
+			sts_rollback_staged_verdict(0, staged, 2U);
+		int mb = mcuboot_would_swap_epoch(0, 2U, 0, staged);
+
+		TEST_ASSERT_EQUAL_INT(mb, (v == STS_ROLLBACK_STAGED_OK) ? 1 : 0);
+	}
+
+	/* Every verdict has a distinct string; "unknown" is reserved for a
+	 * value that is not one. */
+	TEST_ASSERT_EQUAL_STRING("acceptable",
+				 sts_rollback_staged_str(STS_ROLLBACK_STAGED_OK));
+	TEST_ASSERT_EQUAL_STRING("older security epoch",
+		sts_rollback_staged_str(STS_ROLLBACK_STAGED_OLDER));
+	TEST_ASSERT_EQUAL_STRING("signed without a security counter",
+		sts_rollback_staged_str(STS_ROLLBACK_STAGED_NO_COUNTER));
+	TEST_ASSERT_EQUAL_STRING("malformed protected TLV area",
+		sts_rollback_staged_str(STS_ROLLBACK_STAGED_MALFORMED));
+	TEST_ASSERT_EQUAL_STRING("unknown",
+		sts_rollback_staged_str((sts_rollback_staged_t)99));
+}
+
+/*
+ * The one-way part. Every increment is irreversible on the part, so the step
+ * count is the number that matters most in this file.
+ */
+static void test_witness_steps_are_bounded_and_one_way(void)
+{
+	const uint32_t cap = STS_ROLLBACK_MAX_STEPS;
+
+	/* The steady state, and the reason this may hang off a confirmation:
+	 * once the counter has reached the epoch, every later boot, every later
+	 * confirmation and every `sts fw confirm` costs zero steps. */
+	TEST_ASSERT_EQUAL_UINT32(0U, sts_rollback_witness_steps(1U, 1U, cap));
+	TEST_ASSERT_EQUAL_UINT32(0U, sts_rollback_witness_steps(5U, 5U, cap));
+
+	/* A factory-fresh part meeting the shipping epoch. */
+	TEST_ASSERT_EQUAL_UINT32(1U, sts_rollback_witness_steps(1U, 0U, cap));
+
+	/* One security epoch advanced: exactly one step. */
+	TEST_ASSERT_EQUAL_UINT32(1U, sts_rollback_witness_steps(4U, 3U, cap));
+
+	/* A unit that sat out several epochs catches up in one confirmation. */
+	TEST_ASSERT_EQUAL_UINT32(4U, sts_rollback_witness_steps(7U, 3U, cap));
+
+	/* Never backwards, and never past the epoch. A part that arrives
+	 * pre-incremented is not a fault. */
+	TEST_ASSERT_EQUAL_UINT32(0U, sts_rollback_witness_steps(1U, 900U, cap));
+	TEST_ASSERT_EQUAL_UINT32(0U, sts_rollback_witness_steps(0U, 0U, cap));
+
+	/* An implausible epoch cannot burn the counter: bounded, not obeyed. */
+	TEST_ASSERT_EQUAL_UINT32(cap, sts_rollback_witness_steps(1000000U, 0U, cap));
+	TEST_ASSERT_EQUAL_UINT32(cap,
+		sts_rollback_witness_steps(STS_ROLLBACK_COUNTER_MAX, 0U, cap));
+
+	/* Saturates at the part's ceiling rather than wrapping. */
+	TEST_ASSERT_EQUAL_UINT32(0U,
+		sts_rollback_witness_steps(UINT32_MAX, STS_ROLLBACK_COUNTER_MAX,
+					   cap));
+	TEST_ASSERT_EQUAL_UINT32(1U,
+		sts_rollback_witness_steps(UINT32_MAX,
+					   STS_ROLLBACK_COUNTER_MAX - 1U, cap));
+
+	/* The cap is a real bound, not decoration. */
+	TEST_ASSERT_TRUE(STS_ROLLBACK_MAX_STEPS > 0U);
+	TEST_ASSERT_TRUE(STS_ROLLBACK_MAX_STEPS < STS_ROLLBACK_COUNTER_MAX);
+}
+
+/*
+ * Applying the steps must reach a fixed point. This is the arithmetic behind
+ * "a confirm that happens twice for the same image does not increment twice":
+ * even with every runtime guard removed, the second pass asks for nothing.
+ */
+static void test_witness_converges_and_never_double_counts(void)
+{
+	uint32_t counter = 0U;
+	uint32_t epoch = 3U;
+	uint32_t steps;
+	unsigned int rounds = 0U;
+
+	steps = sts_rollback_witness_steps(epoch, counter, STS_ROLLBACK_MAX_STEPS);
+	TEST_ASSERT_EQUAL_UINT32(3U, steps);
+	counter += steps;
+	TEST_ASSERT_EQUAL_UINT32(3U, counter);
+
+	/* Re-running the whole witness — twice, ten times, on every boot for a
+	 * decade — adds nothing. */
+	for (unsigned int i = 0U; i < 10U; i++) {
+		TEST_ASSERT_EQUAL_UINT32(0U,
+			sts_rollback_witness_steps(epoch, counter,
+						   STS_ROLLBACK_MAX_STEPS));
+	}
+	TEST_ASSERT_EQUAL_UINT32(3U, counter);
+
+	/* A capped gap closes over successive confirmed upgrades instead of
+	 * being abandoned; it must terminate. */
+	counter = 0U;
+	epoch = STS_ROLLBACK_MAX_STEPS * 3U;
+	while ((steps = sts_rollback_witness_steps(epoch, counter,
+						   STS_ROLLBACK_MAX_STEPS)) != 0U) {
+		counter += steps;
+		rounds++;
+		TEST_ASSERT_TRUE_MESSAGE(rounds < 100U,
+					 "witness stepping must terminate");
+	}
+	TEST_ASSERT_EQUAL_UINT32(epoch, counter);
+	TEST_ASSERT_EQUAL_UINT32(3U, rounds);
+}
+
+/*
+ * The budget claim in sts_rollback.h and app/conf/rollback.conf, asserted so it
+ * cannot rot: at one increment per security epoch the part outlives the
+ * product, and at one per boot it does not.
+ */
+static void test_witness_budget_arithmetic(void)
+{
+	const uint32_t budget = STS_ROLLBACK_COUNTER_MAX;
+
+	/* Four security-relevant releases a year. */
+	TEST_ASSERT_TRUE((budget / 4U) > 500000U);
+	/* Twelve confirmed updates a year, if it were ever moved to per-update. */
+	TEST_ASSERT_TRUE((budget / 12U) > 100000U);
+	/* And the case sts_atecc.h forbids: a 10 s reboot loop, 8640 a day,
+	 * exhausts a one-way counter inside a year. */
+	TEST_ASSERT_TRUE((budget / 8640U) < 365U);
+}
+
+/* ------------------------------------------------------------------------- */
 
 int main(void)
 {
@@ -524,6 +929,16 @@ int main(void)
 	RUN_TEST(test_applier_groups_are_independent);
 	RUN_TEST(test_applier_registration_contract);
 	RUN_TEST(test_commit_applied_includes_the_persist_failure);
+
+	RUN_TEST(test_mcuboot_image_constants_match_the_bootloader);
+	RUN_TEST(test_image_header_decode);
+	RUN_TEST(test_sec_cnt_found_in_imgtools_layout);
+	RUN_TEST(test_sec_cnt_absent_is_not_malformed);
+	RUN_TEST(test_sec_cnt_rejects_a_malformed_area);
+	RUN_TEST(test_staged_verdict_matches_the_bootloader);
+	RUN_TEST(test_witness_steps_are_bounded_and_one_way);
+	RUN_TEST(test_witness_converges_and_never_double_counts);
+	RUN_TEST(test_witness_budget_arithmetic);
 
 	return UNITY_END();
 }

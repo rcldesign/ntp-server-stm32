@@ -10,7 +10,10 @@
  *   1. Move bytes. The receive ISR pushes into a ring; this thread drains it
  *      through core/ubx's streaming parser and hands each validated frame to
  *      gnssmgr_on_msg(). Transmission is gnssmgr's send_ubx callback, called only
- *      from this thread.
+ *      from this thread. The same drain feeds the maintenance tool's raw views
+ *      when one is subscribed — see "maintenance-tool byte tees" below; it is a
+ *      copy into a ring somebody else drains, never a call that can block this
+ *      thread.
  *   2. Pump gnssmgr. gnssmgr_step() at the thread's own wake rate for ACK
  *      timeouts and configuration retries; gnssmgr_tick_1hz() once a second for
  *      the antenna supervisor and NAV-PVT staleness.
@@ -51,6 +54,17 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
 
+/*
+ * console/mp_glue.h is a cross-area include, and a deliberate one. The
+ * maintenance tool's NMEA/UBX views and its USART3 passthrough are tees of this
+ * file's byte stream, and there is no second place the bytes exist. mp_glue.h
+ * states the contract on its side; what matters here is that every function it
+ * offers this file is a bounded copy or a single atomic read — nothing on the
+ * receive path takes the MP engine mutex or touches the console UART — and that
+ * src/zephyr/platform/sts_area_weak.c carries a __weak no-op for each of them,
+ * so CONFIG_STS1000_MP=n and CONFIG_STS1000_CONSOLE=n both still link.
+ */
+#include "console/mp_glue.h"
 #include "zephyr/platform/platform.h"
 #include "zephyr/sts_app.h"
 
@@ -204,6 +218,22 @@ static int gnss_send_ubx(void *user, const uint8_t *frame, size_t len)
 	for (size_t i = 0; i < len; i++) {
 		uart_poll_out(gnss_uart, frame[i]);
 	}
+
+	/*
+	 * The UBX view (channel 0x03) carries BOTH directions, after the fact.
+	 * A capture that shows only what the receiver said cannot answer the
+	 * question the channel exists for — "which VALSET did configuration fail
+	 * on" — and every frame this function sends is a well-formed UBX message,
+	 * so a decoder reading the capture handles it exactly as u-center handles
+	 * a two-way log. The passthrough channel (0x07) deliberately does not get
+	 * this: there, host->device bytes came FROM the host, and echoing them
+	 * back up the same channel would corrupt its view of the receiver.
+	 *
+	 * Cost is nil in the steady state: this runs at boot and on configuration
+	 * retries, not per epoch, and the tee returns after one atomic read when
+	 * nobody is subscribed.
+	 */
+	sts_mp_tee_ubx(frame, len);
 
 	return 0;
 }
@@ -404,19 +434,148 @@ bool sts_gnss_cfg_ack(void)
 /* receive path                                                              */
 /* ========================================================================= */
 
+/* ---- maintenance-tool byte tees ----------------------------------------- */
+/*
+ * Splitting the raw USART3 stream onto the FMT's two read-only views (§7.3/7.4,
+ * "raw tees, capturable to .nmea / .ubx") without paying for a second parser.
+ *
+ * The UBX parser this file already runs over every byte publishes exactly the
+ * one fact the split needs: `parser.state == UBX_PS_SYNC1` means it is hunting
+ * for B5 62, i.e. the byte about to be consumed is NOT inside a frame. A '$'
+ * there starts an NMEA sentence and everything up to and including the LF is
+ * NMEA; everything else is UBX. Sampling the state BEFORE ubx_parse_byte()
+ * consumes the byte is what makes that true, so the tee call sits above it.
+ *
+ * The rule is honest about its one blind spot: a '$' that arrives while the
+ * parser is one byte into a false sync (state SYNC2, after a stray 0xB5) is
+ * classified UBX. That is a byte of line noise landing in the raw UBX capture,
+ * which is where line noise belongs.
+ *
+ * The as-built receiver is configured UBX-only (spec §3.7), so channel 0x02
+ * normally stays silent — but a receiver that has just been reset to factory
+ * defaults, which is precisely when a technician opens the NMEA view, talks
+ * NMEA until the configuration walk lands.
+ *
+ * Bytes are staged into a 64-byte run and handed over a run at a time. Per byte
+ * that is a call, two compares and a store — order 15 instructions, ~60 ns at
+ * 250 MHz; per run it is one sts_mp_tee_*() (an atomic read plus a memcpy under
+ * a spinlock, ~350 cycles). ~82 ns/byte all in, and only when a channel is
+ * armed: with nobody subscribed `tee_on` below is false and the whole thing
+ * costs one atomic read per drain pass plus one predicted branch per byte.
+ */
+#define GNSS_TEE_STAGE 64U
+
+static struct {
+	uint8_t ch;   /**< MP_CH_NMEA or MP_CH_UBX; meaningful only while len > 0 */
+	uint8_t len;
+	bool in_nmea; /**< inside a '$'..LF sentence */
+	uint8_t buf[GNSS_TEE_STAGE];
+} gtee;
+
+static void gnss_tee_flush(void)
+{
+	if (gtee.len == 0U) {
+		return;
+	}
+	if (gtee.ch == (uint8_t)MP_CH_NMEA) {
+		sts_mp_tee_nmea(gtee.buf, gtee.len);
+	} else {
+		sts_mp_tee_ubx(gtee.buf, gtee.len);
+	}
+	gtee.len = 0U;
+}
+
+/** Drop whatever is staged. Used wherever the byte stream loses continuity. */
+static void gnss_tee_reset(void)
+{
+	gtee.len = 0U;
+	gtee.in_nmea = false;
+}
+
+static void gnss_tee_byte(uint8_t b, bool hunting)
+{
+	uint8_t ch;
+
+	if (gtee.in_nmea) {
+		ch = (uint8_t)MP_CH_NMEA;
+		if (b == (uint8_t)'\n') {
+			gtee.in_nmea = false;
+		}
+	} else if (hunting && (b == (uint8_t)'$')) {
+		gtee.in_nmea = true;
+		ch = (uint8_t)MP_CH_NMEA;
+	} else {
+		ch = (uint8_t)MP_CH_UBX;
+	}
+
+	/* A run belongs to one channel: close the old one before switching. */
+	if ((gtee.len != 0U) && (gtee.ch != ch)) {
+		gnss_tee_flush();
+	}
+	gtee.ch = ch;
+	gtee.buf[gtee.len] = b;
+	gtee.len++;
+	if (gtee.len >= (uint8_t)GNSS_TEE_STAGE) {
+		gnss_tee_flush();
+	}
+}
+
+/**
+ * Drain the receive ring straight onto the passthrough channel.
+ *
+ * The counterpart of gnss_drain_rx() for a suspended port. Only the MP tunnel
+ * gets this: a receiver *firmware* session also sets gs.fw_mode, and its bytes
+ * belong to sts_gnss_uart_raw_rx(), so draining them here would starve the
+ * loader transport. Nothing classifies or parses — the host asked for the port,
+ * not for an interpretation of it.
+ *
+ * Bounded by the ring's own capacity rather than by "until empty", so a receiver
+ * babbling at line rate cannot hold this thread past its liveness feed.
+ */
+static void gnss_drain_tunnel(void)
+{
+	uint8_t buf[GNSS_TEE_STAGE];
+	unsigned int pass;
+
+	for (pass = 0U; pass <= (GNSS_RX_RING_SZ / GNSS_TEE_STAGE); pass++) {
+		size_t n = ring_get(&rx_ring, buf, sizeof(buf));
+
+		if (n == 0U) {
+			return;
+		}
+		sts_mp_tee_gnss(buf, n);
+	}
+}
+
 static void gnss_drain_rx(uint32_t now_ms)
 {
+	bool tee_on;
 	uint8_t b;
 
 	/* A flash session owns the ring; sts_gnss_uart_raw_rx() drains it. Feeding
 	 * loader bytes to the UBX parser would at best desync the loader and at
-	 * worst hand gnssmgr a frame from a receiver that is not running firmware. */
+	 * worst hand gnssmgr a frame from a receiver that is not running firmware.
+	 *
+	 * The one exception is the maintenance tunnel, which suspends the receiver
+	 * through the same flag but has no other drain of its own. */
 	if (gs.fw_mode) {
+		if (sts_mp_tunnel_gnss_open()) {
+			gnss_drain_tunnel();
+		}
 		return;
 	}
 
+	/* Hoisted: one atomic read per pass, not per byte. */
+	tee_on = sts_mp_gnss_tee_armed();
+
 	while (ring_getc(&rx_ring, &b) == 0) {
 		ubx_msg_t m;
+
+		if (tee_on) {
+			/* Before the parser consumes it — the classifier needs the
+			 * state the byte is about to change. */
+			gnss_tee_byte(b, parser.state == (uint8_t)UBX_PS_SYNC1);
+		}
 
 		if (ubx_parse_byte(&parser, b) != 1) {
 			continue;
@@ -442,6 +601,14 @@ static void gnss_drain_rx(uint32_t now_ms)
 
 		(void)gnssmgr_on_msg(&mgr, &m, now_ms);
 	}
+
+	/*
+	 * Unconditional, not behind tee_on: a channel that was un-armed part way
+	 * through the pass must not leave a run staged for the next one to prefix.
+	 * It costs a compare when nothing is staged, and when something is the
+	 * tee's own arming test drops it.
+	 */
+	gnss_tee_flush();
 }
 
 /* ========================================================================= */
@@ -670,9 +837,11 @@ int sts_gnss_notify_reset(uint32_t now_ms)
 	}
 
 	/* Everything the receiver told us describes a session that no longer
-	 * exists; the parser may also be mid-frame across the reset. */
+	 * exists; the parser may also be mid-frame across the reset, and so may
+	 * the tee's sentence/frame classifier. */
 	ubx_parser_reset(&parser);
 	ring_reset(&rx_ring);
+	gnss_tee_reset();
 	gs.have_pvt = false;
 
 	return gnssmgr_notify_reset(&mgr, now_ms);
@@ -899,6 +1068,7 @@ int sts_gnss_uart_suspend(void)
 	gs.fw_mode = true;
 	ubx_parser_reset(&parser);
 	ring_reset(&rx_ring);
+	gnss_tee_reset();
 	gs.have_pvt = false;
 
 	return gnssmgr_fw_enter(&mgr);
@@ -916,6 +1086,7 @@ int sts_gnss_uart_resume(void)
 	/* Anything in flight belongs to the loader session, not to UBX. */
 	ubx_parser_reset(&parser);
 	ring_reset(&rx_ring);
+	gnss_tee_reset();
 	gs.have_pvt = false;
 	gs.fw_mode = false;
 

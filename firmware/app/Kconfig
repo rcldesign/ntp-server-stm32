@@ -43,6 +43,7 @@ config STS1000_UI
 # the build is correct even if these rsource lines are dropped. The net area
 # has no Kconfig of its own yet.
 rsource "src/zephyr/console/Kconfig"
+rsource "src/zephyr/console/Kconfig.mp"
 rsource "src/zephyr/ui/Kconfig"
 
 endmenu
@@ -207,6 +208,69 @@ config STS1000_PANEL_LED_PWM_HZ
 	  above the flicker threshold and far above the reciprocal of the
 	  INA228 0x4C averaging window, or the panel current reading beats
 	  against the duty cycle (interface ref §4.1).
+
+endmenu
+
+menu "STS1000 Meridian secure boot / anti-rollback"
+
+config STS1000_SECURITY_EPOCH
+	int "Image security epoch (MCUboot anti-rollback counter)"
+	default 1
+	range 1 2097151
+	help
+	  The value signed into this image's IMAGE_TLV_SEC_CNT (0x50) and the
+	  value MCUboot compares when deciding whether a staged image may
+	  replace the running one (sysbuild/mcuboot.conf
+	  CONFIG_MCUBOOT_DOWNGRADE_PREVENTION_SECURITY_COUNTER: the staged
+	  counter must be >= the running one).
+
+	  IT IS A SECURITY EPOCH, NOT A BUILD NUMBER. Do not tie it to
+	  app/VERSION, do not increment it per release, and never let a script
+	  bump it. Advance it by exactly one when a release fixes a vulnerability
+	  that must not be reachable again by re-installing an older signed
+	  image; leave it alone for every other release. Advancing it makes every
+	  earlier image permanently un-installable on a unit that has confirmed
+	  this one, including as a downgrade you might later want.
+
+	  This symbol does not reach imgtool by itself: the argument is passed
+	  through CONFIG_MCUBOOT_EXTRA_IMGTOOL_ARGS in app/conf/rollback.conf,
+	  and app/CMakeLists.txt fails the build if the two disagree. Both live
+	  in that one fragment so they are edited together.
+
+	  The 2097151 ceiling is the ATECC608B monotonic counter's, not
+	  MCUboot's: the on-device witness below mirrors this value into that
+	  counter, and a value it cannot represent would break the mirror.
+
+config STS1000_ROLLBACK_WITNESS
+	bool "Mirror the security epoch into an ATECC608B monotonic counter"
+	default y
+	help
+	  On the one path that confirms a freshly-staged image (spec §8.3,
+	  src/zephyr/console/sts_selfconfirm.c), step the secure element's
+	  monotonic counter up to STS1000_SECURITY_EPOCH.
+
+	  This is ATTESTATION EVIDENCE, not the boot gate — MCUboot's TLV
+	  comparison is what actually refuses a downgrade. The counter is
+	  one-way in hardware, so it is a witness that cannot be rewound by
+	  anything with write access to flash: a remote verifier that sees a
+	  counter above the epoch an image claims knows the unit has run
+	  something newer than what it is being told is running.
+
+	  Costs nothing when the part is absent, unprovisioned or disabled by
+	  cfg key sec.atecc.en — every sts_atecc_*() entry point answers -ENODEV
+	  there, which means "use the software path" and never blocks a
+	  confirmation or a boot.
+
+config STS1000_ROLLBACK_ATECC_COUNTER
+	int "ATECC608B monotonic counter index used as the witness"
+	default 0
+	range 0 1
+	depends on STS1000_ROLLBACK_WITNESS
+	help
+	  Which of the part's two monotonic counters carries the witness.
+	  Changing it on a deployed unit restarts the witness from that
+	  counter's current value and abandons the old one — the counters cannot
+	  be reset, so this is a provisioning-time decision.
 
 endmenu
 

@@ -46,9 +46,19 @@
  *   rb_serial_tunnel_close()          resume normal use, flush the parser
  *   rb_serial_tunnel_active()         true while a tunnel holds the port
  *
+ * As built, the caller is src/zephyr/console/mp_tunnel.c and the sink it
+ * registers stages octets into a ring the console supervisor drains — which is
+ * what makes an ISR-context callback usable at all. Nothing here knows that; the
+ * only requirement this file imposes is the one stated above, that `cb` runs in
+ * ISR context and must behave accordingly.
+ *
  * While a tunnel is open, rb_serial_ops() still works but its transmit path
- * returns -EBUSY: two writers on one UART is not a thing, and failing loudly is
- * better than interleaving frames.
+ * returns -EBUSY and its receive path yields nothing (the ISR routes to `cb`
+ * instead of the ring): two writers on one UART is not a thing, and failing
+ * loudly is better than interleaving frames. Opening a tunnel underneath a live
+ * core/fwupd rubidium session is therefore refused only by that session failing
+ * its next exchange — this file has no visibility of one, and inventing an
+ * interlock here would put fwupd state in the wrong area.
  */
 
 #include <errno.h>
@@ -96,9 +106,16 @@ static struct {
 	volatile uint16_t tail;
 	volatile uint32_t overruns;
 
-	/* tunnel */
-	rb_serial_tunnel_cb_t tunnel_cb;
-	void *tunnel_user;
+	/*
+	 * Tunnel hand-over. Both are read from the UART7 ISR and written from a
+	 * thread, so they are volatile: without it the compiler is free to cache
+	 * `tunnel_cb` across the ISR's loop, or to sink the `tunnel_user` store
+	 * past the `tunnel_cb` store that publishes it. A single-core Cortex-M
+	 * needs no more than that — the ISR runs on the same PE, so program order
+	 * plus a compiler barrier is the whole ordering requirement.
+	 */
+	rb_serial_tunnel_cb_t volatile tunnel_cb;
+	void *volatile tunnel_user;
 
 	uint32_t tx_bytes;
 	uint32_t rx_bytes;
@@ -369,7 +386,13 @@ int rb_serial_tunnel_open(rb_serial_tunnel_cb_t cb, void *user)
 	rb.head = 0U;
 	rb.tail = 0U;
 	rb.tunnel_user = user;
-	/* Published last, so the ISR never sees a callback with a stale user. */
+	/*
+	 * Published last, and behind a barrier, so the ISR can never observe the
+	 * callback paired with a stale user pointer. The volatile qualifiers stop
+	 * the compiler caching either across the ISR's loop; this stops it moving
+	 * the two stores past one another.
+	 */
+	compiler_barrier();
 	rb.tunnel_cb = cb;
 
 	LOG_WRN("rb: raw tunnel opened, normal UART7 use suspended");
@@ -407,7 +430,10 @@ int rb_serial_tunnel_close(void)
 		return 0;
 	}
 
+	/* Retracted first, so the ISR stops routing before the user pointer it
+	 * would have been handed goes away. */
 	rb.tunnel_cb = NULL;
+	compiler_barrier();
 	rb.tunnel_user = NULL;
 	rb.head = 0U;
 	rb.tail = 0U;

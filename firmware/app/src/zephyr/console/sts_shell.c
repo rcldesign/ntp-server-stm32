@@ -45,10 +45,12 @@
 
 #include "cfg/cfg.h"
 #include "console/sts_console.h"
+#include "console/sts_rollback.h"
 #include "fault/fault.h"
 #include "logring/logring.h"
 #include "mcp/mcp.h"
 #include "quality/quality.h"
+#include "storage/sts_atecc.h"
 #include "storage/sts_store.h"
 #include "zephyr/sts_app.h"
 
@@ -966,6 +968,93 @@ static int cmd_sec_passwd(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/*
+ * `sts sec attest` — the spec §9.1/§9.6 attestation report, plus the
+ * anti-rollback state that gives the secure element's monotonic counters their
+ * meaning. Read-only, so it is deliberately outside the mutating gate: an
+ * operator diagnosing a refused update needs it before they have a credential.
+ */
+static int cmd_sec_attest(const struct shell *sh, size_t argc, char **argv)
+{
+	sts_rollback_status_t rb;
+	atecc_attest_t at;
+	char sn[19];
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	sts_rollback_status(&rb);
+
+	shell_print(sh, "security epoch  %u (compiled in)",
+		    (unsigned int)rb.epoch);
+	if (rb.signed_epoch_valid) {
+		shell_print(sh, "  signed image  %u  %s",
+			    (unsigned int)rb.signed_epoch,
+			    rb.corroborated ? "(matches)" : "*** MISMATCH ***");
+	} else {
+		shell_warn(sh, "  signed image  NO IMAGE_TLV_SEC_CNT in slot 0 "
+				"- MCUboot is enforcing no downgrade gate");
+	}
+	if (rb.witness_enabled) {
+		if (rb.witness_valid) {
+			shell_print(sh, "  witness       ATECC counter %u = %u"
+					"%s%s",
+				    (unsigned int)rb.witness_index,
+				    (unsigned int)rb.witness_counter,
+				    (rb.witness_steps > 0U) ? ", stepped this "
+							      "boot" : "",
+				    rb.witnessed ? "" : " (not yet recorded)");
+		} else {
+			shell_print(sh, "  witness       unavailable (no secure "
+					"element)");
+		}
+	} else {
+		shell_print(sh, "  witness       disabled by configuration");
+	}
+
+	/* --- the secure element itself ------------------------------------ */
+	rc = sts_atecc_attest(&at);
+	if (rc != 0) {
+		/* -ENODEV is "use the software path", not a failure (sts_atecc.h). */
+		shell_warn(sh, "ATECC608B: %s",
+			   (rc == -ENODEV) ? "absent, unprovisioned or disabled "
+					     "by sec.atecc.en"
+					   : "attestation read failed");
+		return (rc == -ENODEV) ? 0 : rc;
+	}
+
+	if (sts_atecc_serial_string(sn, sizeof(sn)) > 0) {
+		shell_print(sh, "serial          %s", sn);
+	}
+	shell_print(sh, "revision        %02x %02x %02x %02x", at.revision[0],
+		    at.revision[1], at.revision[2], at.revision[3]);
+	shell_print(sh, "zones           config %s, data %s%s",
+		    at.config_locked ? "LOCKED" : "unlocked",
+		    at.data_locked ? "LOCKED" : "unlocked",
+		    at.lock_valid ? "" : " (lock bytes unreadable)");
+	for (unsigned int i = 0U; i < ATECC_COUNTER_COUNT; i++) {
+		if (at.counter_valid[i]) {
+			shell_print(sh, "counter %u       %u%s", i,
+				    (unsigned int)at.counter[i],
+				    (rb.witness_enabled &&
+				     (i == rb.witness_index))
+					    ? "  <- anti-rollback witness"
+					    : "");
+		} else {
+			shell_print(sh, "counter %u       unreadable", i);
+		}
+	}
+	if (at.selftest_valid) {
+		shell_print(sh, "selftest        %s (0x%02x)",
+			    (at.selftest_result == 0U) ? "pass" : "FAIL",
+			    at.selftest_result);
+	}
+	shell_print(sh, "device key      %s",
+		    at.pubkey_valid ? "readable" : "unreadable");
+	return 0;
+}
+
 /* ------------------------------------------------------------------------- */
 /* fw                                                                        */
 /* ------------------------------------------------------------------------- */
@@ -1039,6 +1128,17 @@ static int cmd_fw_confirm(const struct shell *sh, size_t argc, char **argv)
 		return rc;
 	}
 	shell_print(sh, "running image confirmed");
+
+	/*
+	 * The second — and only other — path that accepts an image, so it owes
+	 * the same one-way anti-rollback witness the §8.3 supervisor gate does
+	 * (sts_selfconfirm.c). Not fatal: the image is confirmed either way, and
+	 * a board with no secure element answers -ENODEV.
+	 */
+	if (sts_rollback_witness() != 0) {
+		shell_warn(sh, "anti-rollback: the running image's security "
+				"epoch could not be corroborated; see the log");
+	}
 	return 0;
 }
 
@@ -1269,6 +1369,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	sub_sts_sec,
 	SHELL_CMD_ARG(passwd, NULL, "passwd <password> - set the admin credential",
 		      cmd_sec_passwd, 2, 0),
+	SHELL_CMD_ARG(attest, NULL, "secure-element report and anti-rollback state",
+		      cmd_sec_attest, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(

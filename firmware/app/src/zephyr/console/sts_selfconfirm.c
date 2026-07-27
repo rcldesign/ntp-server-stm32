@@ -36,6 +36,24 @@
  * the intent of §8.2, not a regression. The deliberate override is
  * `sts fw confirm` on the local shell — a human decision, made with the box in
  * front of them.
+ *
+ * Anti-rollback rides on this decision, not on boot
+ * -------------------------------------------------
+ * A confirmed image is the point at which this build becomes the one the unit
+ * accepts, so it is also the point at which the ATECC608B monotonic counter is
+ * stepped up to the image's security epoch (console/sts_rollback.c). That
+ * counter is one-way and finite, which is exactly why it hangs off THIS event
+ * and not off boot, off staging or off a periodic sweep: a confirmation happens
+ * once per accepted image, and after the first one at a given epoch the step
+ * count is zero for the rest of the unit's life. sts_atecc.h states the same
+ * rule from the other end ("never anything that runs on every boot").
+ *
+ * The witness is evidence and never a gate. It is called AFTER
+ * boot_write_img_confirmed() has succeeded and its result is not propagated: an
+ * absent, unprovisioned or disabled secure element answers -ENODEV, and a
+ * healthy image that has passed the §8.3 gate must not be reverted over the
+ * state of a part it does not need. MCUboot's own IMAGE_TLV_SEC_CNT comparison
+ * is what actually refuses a downgrade.
  */
 
 #include <zephyr/kernel.h>
@@ -55,6 +73,7 @@
 #include "cfg/cfg.h"
 #include "console/sts_confirm_gate.h"
 #include "console/sts_console.h"
+#include "console/sts_rollback.h"
 #include "quality/quality.h"
 #include "storage/sts_store.h"
 #include "zephyr/sts_app.h"
@@ -200,6 +219,7 @@ bool sts_update_pending_confirm(void)
 int sts_update_self_confirm(void)
 {
 	sts_confirm_gate_t g;
+	bool confirmed_now = false;
 	int rc;
 
 	k_mutex_lock(&sc_lock, K_FOREVER);
@@ -223,6 +243,7 @@ int sts_update_self_confirm(void)
 	}
 
 	sc_done = true;
+	confirmed_now = true;
 	LOG_INF("self-confirm: image confirmed at %u s uptime (cfg loaded, NVS "
 		"mounted, management link up, clock LOCKED and serving stratum 1)",
 		g.uptime_s);
@@ -231,6 +252,18 @@ int sts_update_self_confirm(void)
 
 out:
 	k_mutex_unlock(&sc_lock);
+
+	/*
+	 * Outside sc_lock deliberately: the witness reads flash and then talks
+	 * to the ATECC608B over I²C, and sc_lock is taken by the 5 s reporter
+	 * poll. Its own once-per-boot guard makes the placement safe, and the
+	 * `confirmed_now` gate means a supervisor that calls this every second
+	 * still only reaches it on the one transition. The return value is
+	 * swallowed: the image is confirmed either way (see the file header).
+	 */
+	if (confirmed_now) {
+		(void)sts_rollback_witness();
+	}
 	return rc;
 }
 

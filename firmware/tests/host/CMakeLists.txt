@@ -126,6 +126,15 @@ module_deps(mcp_dfu  mcp util cfg logring quality)
 # tested here. It compiles no core module, hence the empty dependency list.
 module_deps(glue_policy)
 
+# `ppscorr` is the same idea for the PPS <-> ETH-PTP correlation
+# (app/src/zephyr/net/sts_ppscorr.h): the arithmetic that places the served
+# timescale on TAI to a few hundred nanoseconds instead of tens of milliseconds.
+# Every defect it can carry — a sign slip, a 19-second timescale error, a
+# mishandled 32-bit TIM2 wrap — is silent at runtime and ships a grandmaster
+# that is stable and wrong, which is exactly why it is Zephyr-free and tested
+# here. It compiles no core module, hence the empty dependency list.
+module_deps(ppscorr)
+
 # `ntp_keys` is the same idea for the net area's key reconciliation
 # (app/src/zephyr/net/sts_ntp_keys.h): Zephyr-free by construction so the
 # revocation decision can be tested here. It drives core/ntp's real key table
