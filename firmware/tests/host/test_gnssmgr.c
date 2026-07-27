@@ -288,9 +288,12 @@ static void send_timels(int8_t curr_ls, int8_t change, int32_t to_event,
 	deliver(UBX_CLASS_NAV, UBX_ID_NAV_TIMELS, p, sizeof(p), t);
 }
 
-/** TIM-TP. */
-static void send_tim_tp(uint32_t tow_ms, int32_t qerr_ps, bool qerr_invalid,
-			uint32_t t)
+/**
+ * TIM-TP. @p utc_base selects the timeBase flag: true = the pulse is UTC
+ * aligned (this board's default time grid), false = GNSS/GPS aligned.
+ */
+static void send_tim_tp_base(uint32_t tow_ms, int32_t qerr_ps, bool qerr_invalid,
+			     bool utc_base, uint16_t week, uint32_t t)
 {
 	uint8_t p[UBX_LEN_TIM_TP];
 
@@ -298,11 +301,18 @@ static void send_tim_tp(uint32_t tow_ms, int32_t qerr_ps, bool qerr_invalid,
 	put_le32(&p[0], tow_ms);
 	put_le32(&p[4], 0x40000000UL);
 	put_le32(&p[8], (uint32_t)qerr_ps);
-	put_le16(&p[12], 2500U);
-	p[14] = (uint8_t)(0x03U | (qerr_invalid ? 0x10U : 0x00U));
+	put_le16(&p[12], week);
+	p[14] = (uint8_t)((utc_base ? 0x03U : 0x02U) |
+			  (qerr_invalid ? 0x10U : 0x00U));
 	p[15] = 0x50U;
 
 	deliver(UBX_CLASS_TIM, UBX_ID_TIM_TP, p, sizeof(p), t);
+}
+
+static void send_tim_tp(uint32_t tow_ms, int32_t qerr_ps, bool qerr_invalid,
+			uint32_t t)
+{
+	send_tim_tp_base(tow_ms, qerr_ps, qerr_invalid, true, 2500U, t);
 }
 
 /** MON-RF with one block. */
@@ -317,6 +327,33 @@ static void send_mon_rf(uint8_t ant_status, uint8_t ant_power, uint32_t t)
 	p[5] = (uint8_t)UBX_JAMMING_OK;
 	p[6] = ant_status;
 	p[7] = ant_power;
+
+	deliver(UBX_CLASS_MON, UBX_ID_MON_RF, p, sizeof(p), t);
+}
+
+/** MON-RF with two blocks that may disagree about the antenna. */
+static void send_mon_rf2(uint8_t ant_status0, uint8_t ant_status1,
+			 uint8_t jam0, uint8_t jam1, uint8_t ant_power,
+			 uint32_t t)
+{
+	uint8_t p[UBX_MON_RF_HDR_LEN + (2U * UBX_MON_RF_BLK_LEN)];
+	uint8_t *b;
+
+	(void)memset(p, 0, sizeof(p));
+	p[0] = 0U;
+	p[1] = 2U;
+
+	b = &p[UBX_MON_RF_HDR_LEN];
+	b[0] = 0U;
+	b[1] = jam0;
+	b[2] = ant_status0;
+	b[3] = ant_power;
+
+	b = &p[UBX_MON_RF_HDR_LEN + UBX_MON_RF_BLK_LEN];
+	b[0] = 1U;
+	b[1] = jam1;
+	b[2] = ant_status1;
+	b[3] = ant_power;
 
 	deliver(UBX_CLASS_MON, UBX_ID_MON_RF, p, sizeof(p), t);
 }
@@ -877,6 +914,285 @@ static void test_send_failure_is_reported_and_retried(void)
 	TEST_ASSERT_EQUAL_UINT(3U, g_fake.sends);
 }
 
+/*
+ * HIGH-1. UBX acknowledgements carry no sequence number, so once a step has
+ * been retried there are two identical copies outstanding and two identical
+ * acks come back. Attributing the second one to the step that followed shifts
+ * the whole walk one response early.
+ *
+ * The sharpest consequence: CFG-TXREADY gets NAKed, but the walk has already
+ * moved on, so the NAK lands on TMODE and the stale ACK that was really for
+ * TXREADY marks txready_acked — ARCHITECTURE.md §10 invariant 8 says PD5 may be
+ * trusted only after the remap is accepted, and it plainly was not.
+ */
+static void test_duplicate_ack_after_retry_is_not_misattributed(void)
+{
+	uint32_t t = 1000U;
+
+	setup_mgr(NULL);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_start(&g_mgr, t));
+	TEST_ASSERT_EQUAL_UINT(1U, g_fake.sends);
+
+	/* The first copy goes unanswered long enough to be retried. */
+	t += 1500U;
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_step(&g_mgr, t));
+	TEST_ASSERT_EQUAL_UINT(2U, g_fake.sends);
+
+	/* Now the receiver answers both copies of step 1. */
+	t += 10U;
+	send_ack(true, t);
+	/* The first is superseded: consumed, ignored, no step emitted. */
+	TEST_ASSERT_EQUAL_UINT(2U, g_fake.sends);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_CONFIG, gnssmgr_get_state(&g_mgr));
+
+	t += 10U;
+	send_ack(true, t);
+	/* The second advances exactly one step. */
+	TEST_ASSERT_EQUAL_UINT(3U, g_fake.sends);
+
+	/* The rest of the walk stays in step with the responses. */
+	{
+		unsigned int i;
+
+		for (i = 3U; i < WALK_STEPS; i++) {
+			t += 10U;
+			send_ack(true, t);
+			TEST_ASSERT_EQUAL_UINT(i + 1U, g_fake.sends);
+		}
+	}
+	TEST_ASSERT_EQUAL_UINT64(UBX_TMODE_SURVEY_IN,
+				 valset_must_get(&g_fake, UBX_CFG_TMODE_MODE));
+	t += 10U;
+	send_ack(true, t);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_SURVEY_IN, gnssmgr_get_state(&g_mgr));
+}
+
+/* The invariant-8 case, end to end: a NAKed TX_READY must never be "trusted". */
+static void test_txready_nak_never_sets_trusted(void)
+{
+	uint32_t t = 1000U;
+	unsigned int i;
+
+	setup_mgr(NULL);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_start(&g_mgr, t));
+	for (i = 1U; i < TXREADY_SEND; i++) {
+		t += 10U;
+		send_ack(true, t);
+	}
+	TEST_ASSERT_EQUAL_UINT(TXREADY_SEND, g_fake.sends);
+	TEST_ASSERT_EQUAL_UINT64(1U, valset_must_get(&g_fake, UBX_CFG_TXREADY_ENABLED));
+
+	/* Retry it once so two copies are outstanding, then refuse both. */
+	t += 1500U;
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_step(&g_mgr, t));
+	TEST_ASSERT_EQUAL_UINT(TXREADY_SEND + 1U, g_fake.sends);
+
+	t += 10U;
+	send_ack(false, t); /* superseded copy: consumed silently */
+	TEST_ASSERT_EQUAL_UINT(TXREADY_SEND + 1U, g_fake.sends);
+	TEST_ASSERT_FALSE(gnssmgr_txready_trusted(&g_mgr));
+
+	t += 10U;
+	send_ack(false, t); /* the real answer */
+	TEST_ASSERT_FALSE(gnssmgr_txready_trusted(&g_mgr));
+}
+
+/* A NAK must retry the step it belongs to, not one further along. */
+static void test_nak_after_retry_retries_the_right_step(void)
+{
+	uint32_t t = 1000U;
+	uint64_t v;
+
+	setup_mgr(NULL);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_start(&g_mgr, t));
+	t += 10U;
+	send_ack(true, t); /* -> step 2, MSGOUT */
+	TEST_ASSERT_EQUAL_UINT(2U, g_fake.sends);
+	TEST_ASSERT_TRUE(valset_get(&g_fake, UBX_CFG_MSGOUT_NAV_PVT_UART1, &v));
+
+	/* Retry MSGOUT, then answer the stale copy with a NAK. */
+	t += 1500U;
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_step(&g_mgr, t));
+	TEST_ASSERT_EQUAL_UINT(3U, g_fake.sends);
+	t += 10U;
+	send_ack(false, t);
+	TEST_ASSERT_EQUAL_UINT(3U, g_fake.sends); /* superseded: ignored */
+
+	/* The real NAK retries MSGOUT — it must not have moved to RATE. */
+	t += 10U;
+	send_ack(false, t);
+	TEST_ASSERT_EQUAL_UINT(4U, g_fake.sends);
+	TEST_ASSERT_TRUE(valset_get(&g_fake, UBX_CFG_MSGOUT_NAV_PVT_UART1, &v));
+	TEST_ASSERT_FALSE(valset_get(&g_fake, UBX_CFG_RATE_MEAS, &v));
+}
+
+/* A NAK of the last step must be acted on, not dropped on the way out. */
+static void test_final_step_nak_is_not_discarded(void)
+{
+	uint32_t t = 1000U;
+	unsigned int i;
+
+	setup_mgr(NULL);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_start(&g_mgr, t));
+	for (i = 1U; i < WALK_STEPS; i++) {
+		t += 10U;
+		send_ack(true, t);
+	}
+	TEST_ASSERT_EQUAL_UINT(WALK_STEPS, g_fake.sends);
+
+	/* Retry TMODE so two copies are outstanding. */
+	t += 1500U;
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_step(&g_mgr, t));
+	TEST_ASSERT_EQUAL_UINT(WALK_STEPS + 1U, g_fake.sends);
+
+	t += 10U;
+	send_ack(true, t); /* stale ACK for the superseded copy */
+	/* Must NOT have declared the walk complete on a superseded response. */
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_CONFIG, gnssmgr_get_state(&g_mgr));
+
+	t += 10U;
+	send_ack(false, t); /* the real answer: TMODE refused */
+	/* TMODE is essential, so this retries rather than silently succeeding. */
+	TEST_ASSERT_EQUAL_UINT(WALK_STEPS + 2U, g_fake.sends);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_CONFIG, gnssmgr_get_state(&g_mgr));
+
+	/* Refused to the end: CONFIG_FAILED, naming TMODE. */
+	t += 10U;
+	send_ack(false, t);
+	t += 10U;
+	send_ack(false, t);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_CONFIG_FAILED, gnssmgr_get_state(&g_mgr));
+	TEST_ASSERT_TRUE(g_fake.alarm_state[GNSSMGR_ALARM_CONFIG_FAILED]);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_STEP_TMODE, gnssmgr_failed_step(&g_mgr));
+	TEST_ASSERT_EQUAL_STRING("TMODE",
+				 gnssmgr_step_name(gnssmgr_failed_step(&g_mgr)));
+}
+
+/* An acknowledgement arriving with nothing outstanding must do nothing. */
+static void test_unsolicited_ack_ignored(void)
+{
+	uint32_t t = 1000U;
+
+	setup_mgr(NULL);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_start(&g_mgr, t));
+	t += 10U;
+	send_ack(true, t);
+	TEST_ASSERT_EQUAL_UINT(2U, g_fake.sends);
+
+	/* Two extra acks for a single outstanding copy: the first is taken, the
+	 * second finds nothing in flight and is dropped. */
+	t += 10U;
+	send_ack(true, t);
+	TEST_ASSERT_EQUAL_UINT(3U, g_fake.sends);
+	t += 10U;
+	send_ack(true, t);
+	TEST_ASSERT_EQUAL_UINT(4U, g_fake.sends);
+}
+
+/*
+ * MEDIUM-2. CFG-TXREADY carries a PIO number this project has not been able to
+ * verify against the ICD. Letting the receiver's refusal of that one advisory
+ * key abort the walk would leave TMODE unsent and the grandmaster useless —
+ * a wrong constant in a lookup table must not be able to stop the clock.
+ */
+static void test_txready_nak_degrades_and_walk_completes(void)
+{
+	uint32_t t = 1000U;
+	unsigned int i;
+
+	setup_mgr(NULL);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_start(&g_mgr, t));
+	for (i = 1U; i < TXREADY_SEND; i++) {
+		t += 10U;
+		send_ack(true, t);
+	}
+	TEST_ASSERT_EQUAL_UINT(TXREADY_SEND, g_fake.sends);
+
+	/* Refused once — and a considered refusal is not retried. */
+	t += 10U;
+	send_ack(false, t);
+	TEST_ASSERT_EQUAL_UINT(TXREADY_SEND + 1U, g_fake.sends);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_CONFIG, gnssmgr_get_state(&g_mgr));
+
+	/* Degraded, not failed, and it says which feature was lost. */
+	TEST_ASSERT_TRUE(g_fake.alarm_state[GNSSMGR_ALARM_CONFIG_DEGRADED]);
+	TEST_ASSERT_FALSE(g_fake.alarm_state[GNSSMGR_ALARM_CONFIG_FAILED]);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_STEP_TXREADY, gnssmgr_failed_step(&g_mgr));
+	TEST_ASSERT_EQUAL_STRING("TXREADY",
+				 gnssmgr_step_name(gnssmgr_failed_step(&g_mgr)));
+	TEST_ASSERT_FALSE(gnssmgr_txready_trusted(&g_mgr));
+
+	/* The walk carried straight on to TMODE. */
+	TEST_ASSERT_EQUAL_UINT64(UBX_TMODE_SURVEY_IN,
+				 valset_must_get(&g_fake, UBX_CFG_TMODE_MODE));
+	t += 10U;
+	send_ack(true, t);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_SURVEY_IN, gnssmgr_get_state(&g_mgr));
+	TEST_ASSERT_FALSE(gnssmgr_txready_trusted(&g_mgr));
+
+	/* A restart clears the degraded flag and tries the remap again. */
+	t += 1000U;
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_start(&g_mgr, t));
+	TEST_ASSERT_FALSE(g_fake.alarm_state[GNSSMGR_ALARM_CONFIG_DEGRADED]);
+}
+
+/* An advisory step that is never answered also degrades rather than failing. */
+static void test_txready_timeout_degrades(void)
+{
+	uint32_t t = 1000U;
+	unsigned int i;
+
+	setup_mgr(NULL);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_start(&g_mgr, t));
+	for (i = 1U; i < TXREADY_SEND; i++) {
+		t += 10U;
+		send_ack(true, t);
+	}
+	TEST_ASSERT_EQUAL_UINT(TXREADY_SEND, g_fake.sends);
+
+	/* Silence: four attempts, then move on. Unlike a NAK, a timeout may be
+	 * a lost frame, so the retries are still worth spending. */
+	for (i = 0U; i < 3U; i++) {
+		t += 1500U;
+		TEST_ASSERT_EQUAL_INT(0, gnssmgr_step(&g_mgr, t));
+		TEST_ASSERT_EQUAL_UINT(TXREADY_SEND + i + 1U, g_fake.sends);
+	}
+	t += 1500U;
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_step(&g_mgr, t));
+
+	TEST_ASSERT_TRUE(g_fake.alarm_state[GNSSMGR_ALARM_CONFIG_DEGRADED]);
+	TEST_ASSERT_FALSE(g_fake.alarm_state[GNSSMGR_ALARM_CONFIG_FAILED]);
+	TEST_ASSERT_FALSE(gnssmgr_txready_trusted(&g_mgr));
+	TEST_ASSERT_EQUAL_UINT64(UBX_TMODE_SURVEY_IN,
+				 valset_must_get(&g_fake, UBX_CFG_TMODE_MODE));
+}
+
+/* Essential steps still fail loudly, and the alarm names the right one. */
+static void test_essential_step_nak_fails_and_names_step(void)
+{
+	uint32_t t = 1000U;
+	unsigned int i;
+
+	setup_mgr(NULL);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_start(&g_mgr, t));
+	t += 10U;
+	send_ack(true, t); /* -> MSGOUT */
+	t += 10U;
+	send_ack(true, t); /* -> RATE */
+	TEST_ASSERT_EQUAL_UINT(3U, g_fake.sends);
+
+	for (i = 0U; i < 4U; i++) {
+		t += 10U;
+		send_ack(false, t);
+	}
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_CONFIG_FAILED, gnssmgr_get_state(&g_mgr));
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_STEP_RATE, gnssmgr_failed_step(&g_mgr));
+	TEST_ASSERT_EQUAL_STRING("RATE",
+				 gnssmgr_step_name(gnssmgr_failed_step(&g_mgr)));
+	TEST_ASSERT_EQUAL_STRING("?", gnssmgr_step_name((gnssmgr_step_id_t)99));
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_STEP_PORT, gnssmgr_failed_step(NULL));
+}
+
 /* Deadlines are computed wrap-safely over the uint32 millisecond clock. */
 static void test_ack_deadline_survives_clock_wrap(void)
 {
@@ -972,6 +1288,7 @@ static void test_request_survey_is_explicit_only(void)
 
 	t = walk_config(1000U);
 	t += 100U;
+	send_svin(600U, 10L, 20L, 30L, 5000U, false, true, t);
 	send_svin(3600U, 10L, 20L, 30L, 900U, true, false, t);
 	t += 10U;
 	send_ack(true, t);
@@ -1099,6 +1416,96 @@ static void test_reset_keeps_leap_schedule(void)
 	TEST_ASSERT_EQUAL_INT(0, gnssmgr_leap(&g_mgr, &ls));
 	TEST_ASSERT_EQUAL_INT8(18, ls.current_ls);
 	TEST_ASSERT_EQUAL_INT(GNSSMGR_LI_INSERT, gnssmgr_leap_indicator(&g_mgr));
+}
+
+/*
+ * MEDIUM-4. The surveyed position becomes a stored calibration constant that
+ * every served timestamp leans on, so the result is checked against the same
+ * limits the receiver was given rather than taken on trust.
+ */
+static void test_survey_result_must_meet_its_own_limits(void)
+{
+	gnssmgr_ecef_t pos;
+	uint32_t t;
+
+	setup_mgr(NULL);
+	t = walk_config(1000U);
+	t += 1000U;
+	send_svin(600U, 1L, 2L, 3L, 50000U, false, true, t);
+
+	/* Converged early and says so: too short to be believed. */
+	t += 1000U;
+	send_svin(3599U, 10L, 20L, 30L, 900U, true, false, t);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_SURVEY_IN, gnssmgr_get_state(&g_mgr));
+	TEST_ASSERT_EQUAL_UINT(0U, g_fake.store_calls);
+	TEST_ASSERT_TRUE(g_fake.alarm_state[GNSSMGR_ALARM_SURVEY_REJECTED]);
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, gnssmgr_position(&g_mgr, &pos));
+
+	/* Long enough, but wider than the accuracy limit. */
+	t += 1000U;
+	send_svin(7200U, 10L, 20L, 30L, 10001U, true, false, t);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_SURVEY_IN, gnssmgr_get_state(&g_mgr));
+	TEST_ASSERT_EQUAL_UINT(0U, g_fake.store_calls);
+
+	/* Exactly on both limits is acceptable. */
+	t += 1000U;
+	send_svin(3600U, 11L, 22L, 33L, 10000U, true, false, t);
+	TEST_ASSERT_EQUAL_UINT(1U, g_fake.store_calls);
+	TEST_ASSERT_FALSE(g_fake.alarm_state[GNSSMGR_ALARM_SURVEY_REJECTED]);
+	TEST_ASSERT_EQUAL_INT32(11L, g_fake.store_last.x_cm);
+	t += 10U;
+	send_ack(true, t);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_FIXED, gnssmgr_get_state(&g_mgr));
+}
+
+/*
+ * MEDIUM-4, second half. Right after an operator asks for a re-survey the
+ * receiver is still reporting the *old* completed survey — valid, finished, and
+ * exactly the result they asked to throw away. Accepting it would abandon the
+ * re-survey a second after it was requested, with no sign anything went wrong.
+ */
+static void test_stale_svin_cannot_abort_a_requested_resurvey(void)
+{
+	gnssmgr_ecef_t pos;
+	uint32_t t;
+
+	setup_mgr(NULL);
+	t = walk_config(1000U);
+	t += 1000U;
+	send_svin(600U, 1L, 2L, 3L, 5000U, false, true, t);
+	t += 1000U;
+	send_svin(3600U, 100L, 200L, 300L, 900U, true, false, t);
+	t += 10U;
+	send_ack(true, t);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_FIXED, gnssmgr_get_state(&g_mgr));
+	TEST_ASSERT_EQUAL_UINT(1U, g_fake.store_calls);
+
+	/* The operator asks for a fresh survey. */
+	t += 1000U;
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_request_survey(&g_mgr, t));
+	t += 10U;
+	send_ack(true, t);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_SURVEY_IN, gnssmgr_get_state(&g_mgr));
+
+	/* In-flight NAV-SVIN describing the survey that just got discarded. */
+	t += 1000U;
+	send_svin(3600U, 100L, 200L, 300L, 900U, true, false, t);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_SURVEY_IN, gnssmgr_get_state(&g_mgr));
+	TEST_ASSERT_EQUAL_UINT(1U, g_fake.store_calls); /* not re-stored */
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, gnssmgr_position(&g_mgr, &pos));
+
+	/* Only once the new survey is observably running can it complete. */
+	t += 1000U;
+	send_svin(60U, 7L, 8L, 9L, 40000U, false, true, t);
+	t += 1000U;
+	send_svin(3600U, 7L, 8L, 9L, 800U, true, false, t);
+	TEST_ASSERT_EQUAL_UINT(2U, g_fake.store_calls);
+	TEST_ASSERT_EQUAL_INT32(7L, g_fake.store_last.x_cm);
+	t += 10U;
+	send_ack(true, t);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_FIXED, gnssmgr_get_state(&g_mgr));
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_position(&g_mgr, &pos));
+	TEST_ASSERT_EQUAL_INT32(7L, pos.x_cm);
 }
 
 /* ------------------------------------------------------------- fix/lock -- */
@@ -1302,12 +1709,14 @@ static void test_qerr_pairing(void)
 
 	setup_mgr(NULL);
 	t = walk_config(1000U);
+	/* The default time grid is UTC, so the conversion needs a leap offset. */
+	send_timels(18, 0, 0, 0x03U, t);
 
 	/*
 	 * TIM-TP received during second N describes the pulse at the start of
 	 * second N+1, and its towMS already names that pulse. The record must
-	 * therefore be tagged with towMS verbatim — a manager that "corrected"
-	 * it by a second would hand the discipline loop the wrong pairing.
+	 * therefore be tagged with that pulse — a manager that "corrected" it by
+	 * a second would hand the discipline loop the wrong pairing.
 	 */
 	t += 1000U;
 	send_tim_tp(259201000UL, -1750, false, t);
@@ -1315,7 +1724,10 @@ static void test_qerr_pairing(void)
 	TEST_ASSERT_TRUE(q.valid);
 	TEST_ASSERT_TRUE(q.qerr_valid);
 	TEST_ASSERT_EQUAL_INT32(-1750, q.qerr_ps);
-	TEST_ASSERT_EQUAL_UINT32(259201000UL, q.target_tow_ms);
+	TEST_ASSERT_EQUAL_UINT32(259201000UL, q.raw_tow_ms);
+	/* UTC ToW + 18 s of leap = GPS ToW. */
+	TEST_ASSERT_EQUAL_UINT32(259219000UL, q.target_tow_ms);
+	TEST_ASSERT_TRUE(q.tow_from_utc);
 	TEST_ASSERT_EQUAL_HEX32(0x40000000UL, q.target_tow_sub_ms);
 	TEST_ASSERT_EQUAL_UINT16(2500U, q.week);
 	TEST_ASSERT_TRUE(q.time_base_utc);
@@ -1327,7 +1739,7 @@ static void test_qerr_pairing(void)
 	send_tim_tp(259202000UL, 2500, false, t);
 	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
 	TEST_ASSERT_EQUAL_INT32(2500, q.qerr_ps);
-	TEST_ASSERT_EQUAL_UINT32(259202000UL, q.target_tow_ms);
+	TEST_ASSERT_EQUAL_UINT32(259220000UL, q.target_tow_ms);
 
 	/* qErrInvalid: the record still arrives, flagged not to be applied. */
 	t += 1000U;
@@ -1335,7 +1747,112 @@ static void test_qerr_pairing(void)
 	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
 	TEST_ASSERT_TRUE(q.valid);
 	TEST_ASSERT_FALSE(q.qerr_valid);
-	TEST_ASSERT_EQUAL_UINT32(259203000UL, q.target_tow_ms);
+	TEST_ASSERT_EQUAL_UINT32(259221000UL, q.target_tow_ms);
+}
+
+/*
+ * MEDIUM-3. TIM-TP reports its towMS on the timebase the pulse is aligned to.
+ * With the default UTC time grid that is UTC, while NAV-PVT iTOW is GPS — 18 s
+ * apart today. Left unconverted, glue pairing a captured edge by ToW would
+ * never find a match and the sawtooth correction would vanish silently, which
+ * is the worst kind of failure: the loop keeps running, just worse.
+ */
+static void test_qerr_timescale_normalisation(void)
+{
+	gnssmgr_qerr_t q;
+	gnssmgr_cfg_t c;
+	uint32_t t;
+
+	/* --- UTC-aligned pulse, leap known: converted to GPS. --- */
+	setup_mgr(NULL);
+	t = walk_config(1000U);
+	send_timels(18, 0, 0, 0x03U, t);
+	t += 1000U;
+	send_tim_tp_base(100000UL, -500, false, true, 2500U, t);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
+	TEST_ASSERT_EQUAL_UINT32(118000UL, q.target_tow_ms);
+	TEST_ASSERT_EQUAL_UINT32(100000UL, q.raw_tow_ms);
+	TEST_ASSERT_EQUAL_UINT16(2500U, q.week);
+	TEST_ASSERT_TRUE(q.tow_from_utc);
+	TEST_ASSERT_TRUE(q.qerr_valid);
+
+	/* A pulse near the end of the week carries into the next one. */
+	t += 1000U;
+	send_tim_tp_base(604795000UL, 0, false, true, 2500U, t);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
+	TEST_ASSERT_EQUAL_UINT32(13000UL, q.target_tow_ms); /* 604795+18-604800 */
+	TEST_ASSERT_EQUAL_UINT16(2501U, q.week);
+
+	/* --- Leap offset unknown: the record cannot be placed in time. --- */
+	setup_mgr(NULL);
+	t = walk_config(1000U);
+	t += 1000U;
+	send_tim_tp_base(100000UL, -500, false, true, 2500U, t);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
+	TEST_ASSERT_TRUE(q.valid);       /* still worth reporting... */
+	TEST_ASSERT_FALSE(q.qerr_valid); /* ...but not worth applying */
+	TEST_ASSERT_FALSE(q.tow_from_utc);
+	TEST_ASSERT_EQUAL_UINT32(100000UL, q.target_tow_ms);
+
+	/* currLs present but flagged invalid is the same as absent. */
+	send_timels(18, 0, 0, 0x00U, t);
+	t += 1000U;
+	send_tim_tp_base(100000UL, -500, false, true, 2500U, t);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
+	TEST_ASSERT_FALSE(q.qerr_valid);
+
+	/* --- GPS-aligned pulse: already on the right scale, no conversion. --- */
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_cfg_default(&c));
+	c.tp_utc_timegrid = false;
+	setup_mgr(&c);
+	t = walk_config(1000U);
+	send_timels(18, 0, 0, 0x03U, t);
+	t += 1000U;
+	send_tim_tp_base(100000UL, -500, false, false, 2500U, t);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
+	TEST_ASSERT_EQUAL_UINT32(100000UL, q.target_tow_ms);
+	TEST_ASSERT_EQUAL_UINT32(100000UL, q.raw_tow_ms);
+	TEST_ASSERT_FALSE(q.tow_from_utc);
+	TEST_ASSERT_FALSE(q.time_base_utc);
+	TEST_ASSERT_TRUE(q.qerr_valid);
+
+	/* A GPS-aligned pulse needs no leap offset at all. */
+	setup_mgr(&c);
+	t = walk_config(1000U);
+	t += 1000U;
+	send_tim_tp_base(100000UL, -500, false, false, 2500U, t);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
+	TEST_ASSERT_TRUE(q.qerr_valid);
+	TEST_ASSERT_EQUAL_UINT32(100000UL, q.target_tow_ms);
+}
+
+/*
+ * The pairing the whole convention exists for: the ToW the manager reports for
+ * the next pulse must equal the ToW a NAV-PVT reports one second later, so glue
+ * can match them. Both are GPS after normalisation.
+ */
+static void test_qerr_tow_matches_nav_pvt_itow(void)
+{
+	gnssmgr_qerr_t q;
+	gnssmgr_status_t st;
+	uint32_t t;
+
+	setup_mgr(NULL);
+	t = walk_config(1000U);
+	send_timels(18, 0, 0, 0x03U, t);
+
+	/* Second N: NAV-PVT for this epoch, TIM-TP for the pulse at N+1. */
+	t += 1000U;
+	send_pvt(259218000UL, UBX_FIX_3D, true, 20U, true, 14U, t);
+	send_tim_tp_base(259201000UL, -900, false, true, 2500U, t);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
+
+	/* Second N+1: the epoch the qErr record was pointing at. */
+	t += 1000U;
+	send_pvt(259219000UL, UBX_FIX_3D, true, 20U, true, 14U, t);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_status(&g_mgr, &st));
+
+	TEST_ASSERT_EQUAL_UINT32(st.itow_ms, q.target_tow_ms);
 }
 
 /* -------------------------------------------------------------- NAV-SAT -- */
@@ -1729,6 +2246,83 @@ static void test_antenna_debounce_of_one_is_immediate(void)
 	TEST_ASSERT_EQUAL_INT(GNSSMGR_ANT_SHORT, gnssmgr_ant_get_state(&g_mgr));
 }
 
+/*
+ * LOW-5. MON-RF antStatus is an enum ordered INIT < DONTKNOW < OK < SHORT <
+ * OPEN. Reducing several blocks with a numeric maximum therefore lets a block
+ * reporting OPEN hide a block reporting SHORT — and SHORT is the one verdict
+ * that cuts the antenna bias. Each claim has to be collected on its own.
+ */
+static void test_mon_rf_open_block_cannot_hide_a_short_block(void)
+{
+	gnssmgr_ant_input_t in = ant_ok_input();
+	gnssmgr_rf_t rf;
+	uint32_t t;
+
+	setup_mgr(NULL);
+	t = walk_config(1000U);
+
+	/* Block 0 SHORT, block 1 OPEN — the numerically larger of the two. */
+	in.current_valid = false;
+	send_mon_rf2(UBX_ANT_STATUS_SHORT, UBX_ANT_STATUS_OPEN,
+		     UBX_JAMMING_OK, UBX_JAMMING_WARNING, UBX_ANT_POWER_ON, t);
+
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_rf(&g_mgr, &rf));
+	TEST_ASSERT_TRUE(rf.valid);
+	TEST_ASSERT_TRUE(rf.ant_short);
+	TEST_ASSERT_TRUE(rf.ant_open);
+	/* Jamming is genuinely worst-case across blocks. */
+	TEST_ASSERT_EQUAL_UINT8(UBX_JAMMING_WARNING, rf.jamming_state);
+	TEST_ASSERT_EQUAL_UINT8(UBX_ANT_POWER_ON, rf.ant_power);
+
+	ant_feed(&in, &t, 3U);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ANT_SHORT, gnssmgr_ant_get_state(&g_mgr));
+	TEST_ASSERT_EQUAL_UINT(1U, g_fake.bias_calls);
+	TEST_ASSERT_FALSE(g_fake.bias_last);
+
+	/* Reversed block order must give the same verdict. */
+	setup_mgr(NULL);
+	t = walk_config(1000U);
+	in.current_valid = false;
+	send_mon_rf2(UBX_ANT_STATUS_OPEN, UBX_ANT_STATUS_SHORT,
+		     UBX_JAMMING_CRITICAL, UBX_JAMMING_OK, UBX_ANT_POWER_ON, t);
+	ant_feed(&in, &t, 3U);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ANT_SHORT, gnssmgr_ant_get_state(&g_mgr));
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_rf(&g_mgr, &rf));
+	TEST_ASSERT_EQUAL_UINT8(UBX_JAMMING_CRITICAL, rf.jamming_state);
+}
+
+/*
+ * LOW-6. MON-RF antPower is the receiver's own account of whether the antenna
+ * is powered. It corroborates the commanded-off masking (bias doc §9.3) — it
+ * can silence a phantom fault, but it must never raise one.
+ */
+static void test_mon_rf_ant_power_off_masks_faults(void)
+{
+	gnssmgr_ant_input_t in = ant_ok_input();
+	gnssmgr_rf_t rf;
+	uint32_t t;
+
+	setup_mgr(NULL);
+	t = walk_config(1000U);
+
+	/* Everything says "off" except our own two pins. */
+	in.current_ua = 0U;
+	send_mon_rf(UBX_ANT_STATUS_SHORT, UBX_ANT_POWER_OFF, t);
+	ant_feed(&in, &t, 5U);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ANT_OFF, gnssmgr_ant_get_state(&g_mgr));
+	TEST_ASSERT_EQUAL_UINT32(0U, gnssmgr_alarms(&g_mgr));
+	TEST_ASSERT_EQUAL_UINT(0U, g_fake.bias_calls);
+
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_rf(&g_mgr, &rf));
+	TEST_ASSERT_EQUAL_UINT8(UBX_ANT_POWER_OFF, rf.ant_power);
+
+	/* DONTKNOW is not "off" and masks nothing. */
+	send_mon_rf(UBX_ANT_STATUS_SHORT, UBX_ANT_POWER_DONTKNOW, t);
+	ant_feed(&in, &t, 3U);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ANT_SHORT, gnssmgr_ant_get_state(&g_mgr));
+	TEST_ASSERT_EQUAL_UINT(1U, g_fake.bias_calls);
+}
+
 /* --------------------------------------------------- receiver restarts --- */
 
 static void test_notify_reset_reruns_config(void)
@@ -1741,6 +2335,7 @@ static void test_notify_reset_reruns_config(void)
 	setup_mgr(NULL);
 	t = walk_config(1000U);
 	t += 100U;
+	send_svin(600U, 10L, 20L, 30L, 5000U, false, true, t);
 	send_svin(3600U, 10L, 20L, 30L, 900U, true, false, t);
 	t += 10U;
 	send_ack(true, t);
@@ -1853,6 +2448,7 @@ static void test_optional_callbacks_may_be_null(void)
 
 	/* store_ecef is absent: the survey still completes. */
 	t += 100U;
+	send_svin(600U, 1L, 2L, 3L, 5000U, false, true, t);
 	send_svin(3600U, 1L, 2L, 3L, 900U, true, false, t);
 	t += 10U;
 	send_ack(true, t);

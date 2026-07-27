@@ -1028,6 +1028,7 @@ int gnssmgr_start(gnssmgr_t *g, uint32_t mono_ms)
 	g->ant_state = (uint8_t)GNSSMGR_ANT_UNKNOWN;
 	g->ant_candidate = (uint8_t)GNSSMGR_ANT_UNKNOWN;
 	g->ant_count = 0U;
+	alarm_set(g, GNSSMGR_ALARM_CONFIG_DEGRADED, false);
 	return begin_walk(g, (uint8_t)GNSSMGR_STEP_PORT, mono_ms);
 }
 
@@ -1192,8 +1193,10 @@ int gnssmgr_request_survey(gnssmgr_t *g, uint32_t mono_ms)
 	}
 
 	g->have_position = false;
+	g->svin_started = false;
 	(void)memset(&g->position, 0, sizeof(g->position));
 	(void)memset(&g->svin, 0, sizeof(g->svin));
+	alarm_set(g, GNSSMGR_ALARM_SURVEY_REJECTED, false);
 
 	if ((g->state == (uint8_t)GNSSMGR_ST_CONFIG) &&
 	    (g->step < (uint8_t)GNSSMGR_STEP_TMODE)) {
@@ -1312,6 +1315,24 @@ int gnssmgr_sats(const gnssmgr_t *g, gnssmgr_sats_t *out)
 	}
 	*out = g->sats;
 	return 0;
+}
+
+int gnssmgr_rf(const gnssmgr_t *g, gnssmgr_rf_t *out)
+{
+	if ((g == NULL) || (out == NULL)) {
+		return -EINVAL;
+	}
+	if (!g->rf.valid) {
+		return -EAGAIN;
+	}
+	*out = g->rf;
+	return 0;
+}
+
+gnssmgr_step_id_t gnssmgr_failed_step(const gnssmgr_t *g)
+{
+	return (g != NULL) ? (gnssmgr_step_id_t)g->failed_step
+			   : GNSSMGR_STEP_PORT;
 }
 
 gnssmgr_ant_state_t gnssmgr_ant_get_state(const gnssmgr_t *g)

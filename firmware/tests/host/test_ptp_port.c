@@ -388,6 +388,19 @@ static void test_cfg_validate_rejects(void)
 	cfg.port_number = 0U;
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ptp_cfg_validate(&cfg));
 
+	/*
+	 * majorSdoId is a nibble. A wider value would be truncated by the
+	 * encoder, silently moving the clock to a different SDO from the one
+	 * configured — and it would then ignore the peers it was meant to hear.
+	 */
+	ptp_cfg_defaults(&cfg);
+	cfg.major_sdo_id = 0x0FU;
+	TEST_ASSERT_EQUAL_INT(0, ptp_cfg_validate(&cfg));
+	cfg.major_sdo_id = 0x10U;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ptp_cfg_validate(&cfg));
+	cfg.major_sdo_id = 0xFFU;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ptp_cfg_validate(&cfg));
+
 	ptp_cfg_defaults(&cfg);
 	cfg.transport = (ptp_transport_t)PTP_TRANSPORT_COUNT;
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ptp_cfg_validate(&cfg));
@@ -703,6 +716,33 @@ static void test_view_from_block_leap_window(void)
 	b.leap_current_s = 37;
 	b.leap_pending = 1;
 	b.leap_at_tai_s = event;
+
+	/*
+	 * Before the receiver reports, the block carries leap_current_s 0, which
+	 * as a currentUtcOffset would claim TAI == UTC. The standing 37 s goes
+	 * out instead, with currentUtcOffsetValid clear so nobody trusts it.
+	 */
+	{
+		quality_block_t fresh;
+		ptp_quality_view_t fv;
+
+		quality_block_init(&fresh);
+		TEST_ASSERT_EQUAL_INT(0, ptp_quality_view_from_block(&fresh, 0U, &fv));
+		TEST_ASSERT_EQUAL_INT16(PTP_DEFAULT_UTC_OFFSET, fv.utc_offset);
+		TEST_ASSERT_FALSE(fv.utc_offset_valid);
+
+		/* A real offset always wins, valid or not. */
+		fresh.leap_current_s = 38;
+		TEST_ASSERT_EQUAL_INT(0, ptp_quality_view_from_block(&fresh, 0U, &fv));
+		TEST_ASSERT_EQUAL_INT16(38, fv.utc_offset);
+
+		/* And a genuine zero from a validated source is respected. */
+		fresh.leap_current_s = 0;
+		fresh.utc_valid = true;
+		TEST_ASSERT_EQUAL_INT(0, ptp_quality_view_from_block(&fresh, 0U, &fv));
+		TEST_ASSERT_EQUAL_INT16(0, fv.utc_offset);
+		TEST_ASSERT_TRUE(fv.utc_offset_valid);
+	}
 
 	/* Months out: announced by the receiver, not yet by us. */
 	TEST_ASSERT_EQUAL_INT(0,
@@ -2288,6 +2328,7 @@ int main(void)
 	RUN_TEST(test_better_master_forces_passive);
 	RUN_TEST(test_worse_master_leaves_us_in_charge);
 	RUN_TEST(test_foreign_timeout_re_elects_master);
+	RUN_TEST(test_on_cadence_better_master_never_flaps);
 	RUN_TEST(test_fault_and_recovery);
 
 	RUN_TEST(test_announce_bytes_reflect_the_quality_view);
@@ -2295,11 +2336,14 @@ int main(void)
 
 	RUN_TEST(test_sync_followup_sequencing);
 	RUN_TEST(test_missing_txts_is_counted_not_hidden);
+	RUN_TEST(test_nested_txts_does_not_alias_the_sync_buffer);
+	RUN_TEST(test_nested_txts_then_failing_sync_is_counted);
 	RUN_TEST(test_sync_timestamp_falls_back_to_zero);
 	RUN_TEST(test_sync_without_a_clock_port);
 
 	RUN_TEST(test_delay_req_produces_a_delay_resp);
 	RUN_TEST(test_delay_req_negative_correction_and_unicast);
+	RUN_TEST(test_event_message_without_a_timestamp_is_rejected);
 	RUN_TEST(test_delay_req_ignored_unless_master);
 
 	RUN_TEST(test_rx_filters);

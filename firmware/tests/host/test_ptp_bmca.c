@@ -626,8 +626,11 @@ static void test_foreign_gap_past_the_window_restarts_the_count(void)
 	 * ptp_foreign_prune() is what actually retires a master.
 	 */
 	TEST_ASSERT_TRUE(f->qualified);
-	TEST_ASSERT_EQUAL_UINT32(1U, ptp_foreign_prune(&t, &pol, 3000U + 8001U));
+	/* The last Announce reset the clock, so the timeout runs from 11001 ms. */
+	TEST_ASSERT_EQUAL_UINT32(0U, ptp_foreign_prune(&t, &pol, 11001U + 5999U));
+	TEST_ASSERT_EQUAL_UINT32(1U, ptp_foreign_prune(&t, &pol, 11001U + 6000U));
 	TEST_ASSERT_FALSE(t.rec[0].qualified);
+	TEST_ASSERT_FALSE(t.rec[0].in_use);
 }
 
 static void test_foreign_uses_the_peers_own_interval(void)

@@ -103,14 +103,29 @@ void sts_pps_counters(uint32_t *captures, uint32_t *lost);
 /* clkmux.c — MUX_SEL executor (HSI bridge) + TIM12 EXTREF_MON               */
 /* ------------------------------------------------------------------------- */
 
+/** Take ownership of MUX_SEL, install the CSS NMI handler and arm CSS. */
+int sts_clkmux_init(void);
+
 /** Execute one refsel action list. Returns 0, or negative on a failed handoff. */
 int sts_clkmux_execute(const void *steps, size_t n_steps);
 
 /** Current MUX_SEL level: 0 = OCXO (input A), 1 = external (input B). */
 int sts_clkmux_get(void);
 
+/** Consume the CSS-fired latch. True when the clock security system tripped. */
+bool sts_clkmux_css_fired(void);
+
+/** Total CSS events since boot (not consumed by the read). */
+uint32_t sts_clkmux_css_events(void);
+
+/** Rebuild the clock tree on the OCXO after a CSS event. */
+int sts_clkmux_recover(void);
+
 /** Start the TIM12_CH1 (PB14) frequency measurement. */
 int sts_extref_mon_init(void);
+
+/** Close the current EXTREF_MON gate and open the next. Call at ~1 Hz. */
+void sts_extref_mon_sample(void);
 
 /**
  * Latest EXTREF_MON measurement.
