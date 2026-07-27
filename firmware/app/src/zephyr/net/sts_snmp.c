@@ -87,6 +87,18 @@
  * traps. See send_trap() for why a *configured but broken* trap user is not
  * silently downgraded to v2c.
  *
+ * The trap socket and destination belong to the SNMP thread alone. A cfg
+ * commit only raises a flag that snmp_loop() drains — the same arrangement
+ * sts_ntp_reload_keys() uses — because the committing thread is whichever one
+ * committed (web 12, MCP/shell 14, UI 15) and re-resolving there did two
+ * unrelated damages: it closed a descriptor send_trap() had already sampled, in
+ * a fd table Zephyr reuses numbers from immediately, so a trap PDU could land in
+ * a web TLS session or the syslog stream; and it ran a blocking
+ * zsock_getaddrinfo() on a thread that feeds sts_liveness_feed(), where a DNS
+ * timeout past CONFIG_STS1000_LIVENESS_DEADLINE_MS withholds the watchdog kick
+ * and cold-cycles the board. A mutex would only relocate the second problem
+ * into a critical section.
+ *
  * Enqueueing one authentication-failure trap per bad-community datagram, as this
  * file used to, turned an attack on this box into an attack on the trap
  * receiver, and buried every genuine event behind the flood — each one also
@@ -127,6 +139,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/socket.h>
+#include <zephyr/sys/atomic.h>
 
 #include "cfg/cfg.h"
 #include "fault/fault.h"
@@ -272,12 +285,21 @@ static int sock6 = -1;
 static uint8_t rx[SNMP_PKT_MAX];
 static uint8_t tx[SNMP_PKT_MAX];
 
-/* trap destination */
+/*
+ * Trap destination. Owned by the SNMP thread — resolve_trap_dest() runs there
+ * and nowhere else once the thread exists, so nothing else can close the socket
+ * or rewrite the address under send_trap(). sts_snmp_start() calls it before the
+ * thread is created, when there is no other reader.
+ */
 static int trap_sock = -1;
 static struct sockaddr_storage trap_dest;
 static socklen_t trap_dest_len;
 static bool trap_resolved;
+static bool trap_tx_warned; /* one diagnostic per unreachable run */
 static uint8_t trap_buf[SNMP_PKT_MAX];
+
+/** Set by sts_snmp_reapply(); drained by the SNMP thread. */
+static atomic_t trap_resolve_req;
 
 /* trap queue */
 static snmp_trap_t trap_q[TRAP_QUEUE_LEN];
@@ -929,6 +951,11 @@ static bool trap_dequeue(snmp_trap_t *out)
  * No trap ever arrived and nothing said so (F9). Binding the socket's family to
  * the address actually resolved is the fix; the socket is recreated on reapply
  * because the family can change with the host.
+ *
+ * SNMP-THREAD ONLY once snmp_loop() is running — see the trap_dest declaration
+ * and the file header. It closes a descriptor, rewrites a sockaddr and blocks in
+ * DNS, none of which may happen under send_trap() or on a liveness-feeding
+ * thread.
  */
 static void resolve_trap_dest(void)
 {
@@ -940,6 +967,7 @@ static void resolve_trap_dest(void)
 	int fd;
 
 	trap_resolved = false;
+	trap_tx_warned = false;
 	if (trap_sock >= 0) {
 		(void)zsock_close(trap_sock);
 		trap_sock = -1;
@@ -1165,8 +1193,26 @@ static void send_trap(snmp_trap_t t)
 		return;
 	}
 
-	(void)zsock_sendto(trap_sock, trap_buf, len, 0,
-			   (struct sockaddr *)&trap_dest, trap_dest_len);
+	/*
+	 * Report what actually happened. This used to discard the result and log
+	 * the success line regardless, so an operator reading the log saw every
+	 * trap "sent" while the receiver was unreachable and none arrived — the
+	 * same class of lie as F9, one layer up. The failure is rate-limited to
+	 * one line per unreachable run (cleared by resolve_trap_dest()) because a
+	 * dead trap host would otherwise produce a log entry per alarm.
+	 */
+	if (zsock_sendto(trap_sock, trap_buf, len, 0,
+			 (struct sockaddr *)&trap_dest, trap_dest_len) < 0) {
+		if (!trap_tx_warned) {
+			trap_tx_warned = true;
+			LOG_WRN("SNMP%s trap: %s NOT sent (errno %d); further "
+				"send failures silent until the destination is "
+				"re-resolved",
+				as_v3 ? "v3" : "v2c", snmp_trap_name(t), errno);
+		}
+		return;
+	}
+	trap_tx_warned = false;
 	LOG_INF("SNMP%s trap: %s", as_v3 ? "v3" : "v2c", snmp_trap_name(t));
 }
 
@@ -1280,7 +1326,12 @@ void sts_snmp_reapply(void)
 	publish_community();
 	(void)sts_net_cfg_str(CFG_ID_NET_HOSTNAME, hostname, sizeof(hostname));
 	load_acl();
-	resolve_trap_dest();
+	/*
+	 * Request, never resolve. This runs on the committing thread; the socket
+	 * and the sockaddr belong to the SNMP thread. See the trap_dest
+	 * declaration for what resolving here used to break.
+	 */
+	(void)atomic_set(&trap_resolve_req, 1);
 }
 
 /**
@@ -1438,6 +1489,17 @@ static void snmp_loop(void *a, void *b, void *c)
 		uint64_t now;
 		int nfds = 0;
 		int rc;
+
+		/*
+		 * Drain a pending re-resolve before anything can send. Done here
+		 * rather than after the poll so a trap dequeued this iteration
+		 * already uses the new destination, and so the close/reopen can
+		 * never straddle a send_trap() — this thread is the only one that
+		 * touches trap_sock.
+		 */
+		if (atomic_set(&trap_resolve_req, 0) != 0) {
+			resolve_trap_dest();
+		}
 
 		if (sock4 >= 0) {
 			fds[nfds].fd = sock4;

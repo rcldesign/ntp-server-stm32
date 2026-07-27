@@ -126,6 +126,14 @@ module_deps(mcp_dfu  mcp util cfg logring quality)
 # tested here. It compiles no core module, hence the empty dependency list.
 module_deps(glue_policy)
 
+# `ntp_keys` is the same idea for the net area's key reconciliation
+# (app/src/zephyr/net/sts_ntp_keys.h): Zephyr-free by construction so the
+# revocation decision can be tested here. It drives core/ntp's real key table
+# rather than a model, because the defect it guards against lived exactly in the
+# disagreement between the two — ntp_key_set() validates before it clears, so a
+# rejected rotation left the previous key live.
+module_deps(ntp_keys ntp util quality)
+
 # The Wave-4c security cluster. `core/auth` holds the AAA chain plus the RADIUS,
 # TACACS+ and LDAP codecs, so all four suites compile the same source set; the
 # LDAP codec has no suite of its own and is covered from test_auth.c, next to

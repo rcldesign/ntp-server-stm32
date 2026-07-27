@@ -1256,6 +1256,7 @@ static void fill_serial(void)
 int sts_mp_start(void)
 {
 	mp_wiring_t w;
+	uint32_t hash;
 	unsigned int i;
 	int rc;
 
@@ -1314,6 +1315,7 @@ int sts_mp_start(void)
 	 */
 	mp_engine_lock();
 	rc = mp_init(&mp, &w);
+	hash = (rc == 0) ? mp_manifest_hash_cached(&mp) : 0U;
 	mp_engine_unlock();
 	if (rc != 0) {
 		LOG_ERR("mp_init failed (%d)", rc);
@@ -1322,8 +1324,7 @@ int sts_mp_start(void)
 
 	mp_started = true;
 	LOG_INF("MP ready: %u objects, hash 0x%08x, serial %s",
-		(unsigned int)mp_obj_count(),
-		(unsigned int)mp_manifest_hash_cached(&mp), mp_serial);
+		(unsigned int)mp_obj_count(), (unsigned int)hash, mp_serial);
 	return 0;
 }
 

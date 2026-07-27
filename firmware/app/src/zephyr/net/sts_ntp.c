@@ -19,7 +19,9 @@
  *
  * Symmetric-key MAC authentication (spec §4.3) is configuration, not datapath:
  * the four `sec.ntpkeyN.*` slots are pushed into core/ntp's key table by
- * ntp_keys_apply() at start and on every 0x0A commit. core/ntp does the MAC.
+ * ntp_keys_apply() at start and on every 0x0A commit. core/ntp does the MAC;
+ * which ids the table ends up holding is decided by net/sts_ntp_keys.h, which
+ * is host-tested because a key that fails to *withdraw* is invisible here.
  *
  * Two sockets rather than one v6 socket with V6ONLY off: a dual-stack socket
  * hands v4 peers back as v4-mapped v6 addresses, which would have to be
@@ -81,6 +83,7 @@
 
 #include "cfg/cfg.h"
 #include "net/sts_net.h"
+#include "net/sts_ntp_keys.h"
 #include "storage/sts_store.h"
 #include "util/crc.h"
 #include "zephyr/sts_app.h"
@@ -129,9 +132,6 @@ LOG_MODULE_REGISTER(sts_ntp, CONFIG_STS1000_LOG_LEVEL);
 /** A pending entry older than this will never be matched; reclaim it. */
 #define TX_PENDING_TTL_MS 250U
 
-/** Symmetric-key slots in the schema: `sec.ntpkey0..3.*`. */
-#define NTP_CFG_KEY_SLOTS 4U
-
 /* Static: ntp_ctx_t carries a 256-way client table and is far too large to
  * live on a 4 kB thread stack. */
 static ntp_ctx_t ntp;
@@ -150,7 +150,7 @@ static bool nts_enabled;
  * Written only by ntp_keys_apply(), which runs on the NTP thread (or before it
  * exists); see sts_ntp_reload_keys().
  */
-static uint16_t key_installed[NTP_CFG_KEY_SLOTS];
+static uint16_t key_installed[STS_NTP_KEY_SLOTS];
 
 /** Set by sts_ntp_reload_keys(); drained by the NTP thread. */
 static atomic_t keys_reload_req;
@@ -224,135 +224,135 @@ struct ntp_key_cfg_ids {
  * a schema renumber shows up as a compile error rather than as keys silently
  * read from the wrong place.
  */
-static const struct ntp_key_cfg_ids key_slot_id_tbl[NTP_CFG_KEY_SLOTS] = {
+static const struct ntp_key_cfg_ids key_slot_id_tbl[STS_NTP_KEY_SLOTS] = {
 	{ CFG_ID_SEC_NTPKEY0_ID, CFG_ID_SEC_NTPKEY0_ALG, CFG_ID_SEC_NTPKEY0_KEY },
 	{ CFG_ID_SEC_NTPKEY1_ID, CFG_ID_SEC_NTPKEY1_ALG, CFG_ID_SEC_NTPKEY1_KEY },
 	{ CFG_ID_SEC_NTPKEY2_ID, CFG_ID_SEC_NTPKEY2_ALG, CFG_ID_SEC_NTPKEY2_KEY },
 	{ CFG_ID_SEC_NTPKEY3_ID, CFG_ID_SEC_NTPKEY3_ALG, CFG_ID_SEC_NTPKEY3_KEY },
 };
 
-/** One slot as cfg currently describes it. */
-struct ntp_key_want {
-	uint16_t keyid; /* 0 = the slot is unused */
-	uint8_t alg;
-	uint8_t key_len;
-	uint8_t key[NTP_MAC_KEY_MAX];
-	bool valid; /* usable: non-zero id, key material, known algorithm */
+/** What one slot's cfg read produced, so it can be logged outside the lock. */
+struct ntp_key_slot_diag {
+	sts_ntp_key_reject_t why;
+	uint16_t keyid;
+	uint16_t key_len;
+	uint32_t alg;
 };
 
-/** Read slot @p i out of cfg, validating the algorithm selector. */
-static void key_slot_read(size_t i, struct ntp_key_want *s)
+static const char *key_reject_str(sts_ntp_key_reject_t why)
+{
+	switch (why) {
+	case STS_NTP_KEY_NO_MATERIAL:
+		return "no key material";
+	case STS_NTP_KEY_OVERLONG:
+		return "over-long key material";
+	case STS_NTP_KEY_BAD_ALG:
+		return "the algorithm selector is not an NTP MAC algorithm";
+	case STS_NTP_KEY_BAD_LEN:
+		return "AES-CMAC-128 needs exactly 16 octets";
+	default:
+		return "unusable";
+	}
+}
+
+/** Read slot @p i out of cfg and validate it. Caller holds the cfg mutex. */
+static void key_slot_read(size_t i, sts_ntp_key_want_t *s,
+			  struct ntp_key_slot_diag *d)
 {
 	uint8_t akey[CFG_VAL_MAX];
 	size_t klen = 0U;
-	uint64_t alg;
 
-	memset(s, 0, sizeof(*s));
-	s->keyid = (uint16_t)sts_net_cfg_u64(key_slot_id_tbl[i].id, 0U);
-	if (s->keyid == 0U) {
-		return; /* RFC 5905 reserves key id 0: the slot is unused */
-	}
-
+	d->keyid = (uint16_t)sts_net_cfg_u64(key_slot_id_tbl[i].id, 0U);
 	if (cfg_get_bytes(sts_cfg(), key_slot_id_tbl[i].key, akey, sizeof(akey),
 			  &klen) != 0) {
 		klen = 0U;
 	}
-	if (klen == 0U || klen > NTP_MAC_KEY_MAX) {
-		LOG_ERR("sec.ntpkey%u has id %u but %s key material; the slot is "
-			"ignored", (unsigned int)i, (unsigned int)s->keyid,
-			(klen == 0U) ? "no" : "over-long");
-		mbedtls_platform_zeroize(akey, sizeof(akey));
-		return;
-	}
+	d->key_len = (uint16_t)klen;
+	d->alg = (uint32_t)sts_net_cfg_u64(key_slot_id_tbl[i].alg,
+					   (uint64_t)NTP_MAC_HMAC_SHA256_128);
 
-	alg = sts_net_cfg_u64(key_slot_id_tbl[i].alg,
-			      (uint64_t)NTP_MAC_HMAC_SHA256_128);
-	if (alg > (uint64_t)NTP_MAC_HMAC_SHA256_160) {
-		/* Refused rather than defaulted: a key silently bound to a
-		 * different MAC than the operator configured fails to
-		 * authenticate a peer that got the pairing right, and looks like
-		 * a wrong key. */
-		LOG_ERR("sec.ntpkey%u.alg %u is not an NTP MAC algorithm; the slot "
-			"is ignored", (unsigned int)i, (unsigned int)alg);
-		mbedtls_platform_zeroize(akey, sizeof(akey));
-		return;
-	}
-
-	s->alg = (uint8_t)alg;
-	s->key_len = (uint8_t)klen;
-	memcpy(s->key, akey, klen);
-	s->valid = true;
+	/*
+	 * Validation lives in sts_ntp_keys.h rather than here, and rejects
+	 * exactly what ntp_key_set() rejects. That equivalence is the point: a
+	 * slot core would refuse has to read as *invalid*, because only an
+	 * invalid slot makes the reconciler treat its id as no longer wanted and
+	 * withdraw whatever that id was authenticating with.
+	 */
+	d->why = sts_ntp_key_want_set(s, d->keyid, d->alg, akey, klen);
 	mbedtls_platform_zeroize(akey, sizeof(akey));
 }
 
 /**
  * Install every configured key and remove every key that is no longer wanted.
  *
- * Removal is resolved against the whole *new* set rather than slot-by-slot,
- * because two slots may legally name one key id: clearing per slot would let
- * slot 1 delete a key slot 0 had just re-installed.
+ * Runs on the NTP thread (or before it exists); see sts_ntp_reload_keys().
  */
 static void ntp_keys_apply(void)
 {
-	struct ntp_key_want want[NTP_CFG_KEY_SLOTS];
+	sts_ntp_key_want_t want[STS_NTP_KEY_SLOTS];
+	struct ntp_key_slot_diag diag[STS_NTP_KEY_SLOTS];
+	sts_ntp_keys_res_t res;
 	size_t i;
-	size_t j;
-	unsigned int live = 0U;
 
-	for (i = 0U; i < NTP_CFG_KEY_SLOTS; i++) {
-		key_slot_read(i, &want[i]);
+	/*
+	 * The cfg reads are bracketed; the reconciliation is not. This runs at
+	 * priority 8 and preempts every thread that can commit (web 12,
+	 * MCP/shell 14, UI 15), while sts_cfg_commit() updates live values under
+	 * that mutex — so an unlocked read can tear a 32-octet key, and a torn
+	 * HMAC key installs silently and then rejects every legitimately
+	 * authenticated request for its id until the next 0x0A commit, which is
+	 * the only reload trigger there is. Taking the mutex here is permitted:
+	 * it guards configuration, not timing state (ARCHITECTURE.md §10 rule
+	 * 10), this thread already blocks on zsock_poll(), and it is never held
+	 * across sts_cfg_commit(). Logging is deliberately outside it.
+	 */
+	sts_cfg_lock();
+	for (i = 0U; i < STS_NTP_KEY_SLOTS; i++) {
+		key_slot_read(i, &want[i], &diag[i]);
 	}
+	sts_cfg_unlock();
 
-	/* Withdrawals first, so a slot whose id changed cannot leave the old key
-	 * behind and a re-used id is not cleared after being re-installed. */
-	for (i = 0U; i < NTP_CFG_KEY_SLOTS; i++) {
-		bool still_wanted = false;
-
-		if (key_installed[i] == 0U) {
+	for (i = 0U; i < STS_NTP_KEY_SLOTS; i++) {
+		if (diag[i].why == STS_NTP_KEY_OK ||
+		    diag[i].why == STS_NTP_KEY_UNUSED) {
 			continue;
 		}
-		for (j = 0U; j < NTP_CFG_KEY_SLOTS; j++) {
-			if (want[j].valid && want[j].keyid == key_installed[i]) {
-				still_wanted = true;
-				break;
-			}
-		}
-		if (!still_wanted) {
-			(void)ntp_key_clear(&ntp, key_installed[i]);
+		/* Refused rather than defaulted or truncated: a key silently
+		 * bound to a different MAC than the operator configured fails to
+		 * authenticate a peer that got the pairing right, and looks like
+		 * a wrong key. */
+		LOG_ERR("sec.ntpkey%u (id %u, alg %u, %u octets) is unusable: "
+			"%s. The slot is ignored and any key already serving id "
+			"%u is withdrawn", (unsigned int)i,
+			(unsigned int)diag[i].keyid, (unsigned int)diag[i].alg,
+			(unsigned int)diag[i].key_len, key_reject_str(diag[i].why),
+			(unsigned int)diag[i].keyid);
+	}
+
+	sts_ntp_keys_reconcile(&ntp, want, key_installed, &res);
+
+	for (i = 0U; i < STS_NTP_KEY_SLOTS; i++) {
+		if (res.withdrawn[i] != 0U) {
 			LOG_INF("NTP key id %u withdrawn (sec.ntpkey%u)",
-				(unsigned int)key_installed[i], (unsigned int)i);
-			key_installed[i] = 0U;
+				(unsigned int)res.withdrawn[i], (unsigned int)i);
 		}
-	}
-
-	for (i = 0U; i < NTP_CFG_KEY_SLOTS; i++) {
-		int rc;
-
-		if (!want[i].valid) {
-			key_installed[i] = 0U;
-			continue;
+		if (res.set_rc[i] != 0) {
+			/* Only -ENOSPC can reach this after the validation
+			 * above, and 16 core slots against 4 cfg slots make it
+			 * unreachable — so this line firing means core/ntp grew
+			 * a rule sts_ntp_key_want_set() does not mirror. The id
+			 * is cleared either way. */
+			LOG_ERR("sec.ntpkey%u (id %u) rejected by core/ntp: %d; "
+				"key id %u is not in service",
+				(unsigned int)i, (unsigned int)diag[i].keyid,
+				res.set_rc[i], (unsigned int)diag[i].keyid);
 		}
-		rc = ntp_key_set(&ntp, want[i].keyid,
-				 (ntp_mac_alg_t)want[i].alg, want[i].key,
-				 want[i].key_len);
-		if (rc != 0) {
-			/* -EINVAL here is almost always AES-CMAC-128 with a key
-			 * that is not exactly 16 octets. */
-			LOG_ERR("sec.ntpkey%u (id %u, alg %u, %u octets) rejected: "
-				"%d", (unsigned int)i, (unsigned int)want[i].keyid,
-				(unsigned int)want[i].alg,
-				(unsigned int)want[i].key_len, rc);
-			key_installed[i] = 0U;
-			continue;
-		}
-		key_installed[i] = want[i].keyid;
-		live++;
 	}
 
 	mbedtls_platform_zeroize(want, sizeof(want));
 
-	LOG_INF("NTP symmetric keys: %u of %u slots live", live,
-		(unsigned int)NTP_CFG_KEY_SLOTS);
+	LOG_INF("NTP symmetric keys: %u of %u slots live", res.live,
+		(unsigned int)STS_NTP_KEY_SLOTS);
 }
 
 void sts_ntp_reload_keys(void)

@@ -319,6 +319,51 @@ static void test_ratio_beyond_the_register_field_is_refused(void)
 	TEST_ASSERT_EQUAL_UINT16(0u, out.shunt_cal);
 }
 
+/*
+ * error_ppm is reported on refusals as well as successes, so it has to survive
+ * inputs three orders of magnitude apart without wrapping. At a reference near
+ * the floor and a measurement near INT32_MAX the true figure is ~1.3e10 ppm,
+ * which does not fit int32 — it saturates rather than wrapping to a small or
+ * negative number that would read as a healthy board.
+ */
+static void test_error_ppm_saturates_rather_than_wrapping(void)
+{
+	cal_ina_in_t in;
+	cal_ina_out_t out;
+
+	in_default(&in, FS_POE_UA / 10u, 2000000000);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)CAL_INA_ERR_DISAGREE,
+				run_expect(&in, -ERANGE, &out));
+	TEST_ASSERT_EQUAL_INT32(2000000000, out.error_ppm);
+
+	in_default(&in, FS_POE_UA / 10u, -2000000000);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)CAL_INA_ERR_MEAS_RANGE,
+				run_expect(&in, -ERANGE, &out));
+	TEST_ASSERT_EQUAL_INT32(-2000000000, out.error_ppm);
+}
+
+/*
+ * The 10 %-of-full-scale floor is integer arithmetic, so a full scale under
+ * 10 uA would compute a floor of zero and re-admit the zero reference the
+ * MEAS/REF checks exist to reject. No rail on this board is anywhere near that,
+ * which is exactly why the guard needs a test rather than a reviewer.
+ */
+static void test_tiny_full_scale_still_rejects_a_zero_reference(void)
+{
+	cal_ina_in_t in;
+	cal_ina_out_t out;
+
+	in_default(&in, 0u, 5);
+	in.fs_current_ua = 5u;
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)CAL_INA_ERR_REF_RANGE,
+				run_expect(&in, -ERANGE, &out));
+
+	/* 1 uA is the clamped floor and is accepted. */
+	in_default(&in, 1u, 1);
+	in.fs_current_ua = 5u;
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)CAL_INA_OK, run_expect(&in, 0, &out));
+}
+
 /* ------------------------------------------------------- reading validity */
 
 static void test_invalid_reading_is_refused(void)
@@ -496,6 +541,8 @@ int main(void)
 	RUN_TEST(test_tolerated_error_window_is_asymmetric);
 	RUN_TEST(test_disagreement_edges_are_exclusive);
 	RUN_TEST(test_ratio_beyond_the_register_field_is_refused);
+	RUN_TEST(test_error_ppm_saturates_rather_than_wrapping);
+	RUN_TEST(test_tiny_full_scale_still_rejects_a_zero_reference);
 
 	RUN_TEST(test_invalid_reading_is_refused);
 	RUN_TEST(test_stale_reading_is_refused_at_the_boundary);
