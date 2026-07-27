@@ -1103,7 +1103,25 @@ int sts_mp_stream_raw(uint8_t ch, const uint8_t *data, size_t len)
 		 * assertion that says so is compiled out of a release build. */
 		return -EBUSY;
 	}
-	if (k_mutex_lock(&mp_lock, K_MSEC(STS_MP_TICK_LOCK_MS)) != 0) {
+	/*
+	 * K_NO_WAIT, deliberately, and it is load-bearing rather than an
+	 * optimisation.
+	 *
+	 * The only caller is sts_mp_tunnel_drain(), which sts_mp_tick() runs
+	 * before it takes the lock for the tick proper. Any timeout here would
+	 * therefore add a second wait to the same supervisor pass, and
+	 * sts_console.c's BUILD_ASSERT budgets exactly one: at the as-built
+	 * numbers a 50 ms wait here would make the worst interval between two
+	 * successful ticks (5 + 1) * (250 + 50 + 50) = 2100 ms, past the 2000 ms
+	 * MP_TICK_MAX_MS an override's dead-man is allowed to take to revert. Not
+	 * waiting at all keeps the pass at (250 + 50) and the assertion's premise
+	 * true.
+	 *
+	 * It also matches what this function already promised: "drops the bytes on
+	 * contention rather than waiting: a tee is best-effort passthrough". The
+	 * bytes stay queued in the staging ring and the next pass retries them.
+	 */
+	if (k_mutex_lock(&mp_lock, K_NO_WAIT) != 0) {
 		return -EBUSY;
 	}
 	rc = mp_stream_raw(&mp, ch, data, len);

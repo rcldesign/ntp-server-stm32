@@ -270,12 +270,17 @@ int auth_web_reload(auth_web_ctx_t *c)
 		    got != AUTH_WEB_BLOB_LEN) {
 			/* Unprovisioned or damaged: fail closed rather than
 			 * keeping a stale in-RAM credential that no longer
-			 * matches what an operator can see in config. */
+			 * matches what an operator can see in config. This is
+			 * also what erases the credential after a factory reset
+			 * — the reset empties the key, the CFG_G_SEC applier
+			 * calls this, and the RAM copy goes with it. */
 			u->has_blob = false;
-			memset(u->blob, 0, sizeof(u->blob));
+			wipe(u->blob, sizeof(u->blob));
+			wipe(buf, sizeof(buf));
 			continue;
 		}
 		memcpy(u->blob, buf, AUTH_WEB_BLOB_LEN);
+		wipe(buf, sizeof(buf));
 		u->has_blob = true;
 		n++;
 	}
@@ -315,7 +320,7 @@ int auth_web_make_blob(const auth_web_ctx_t *c, const uint8_t *salt,
 	rc = c->kdf->derive(c->kdf->user, s, sizeof(s), pw, pw_len,
 			    &out[AUTH_WEB_SALT_LEN], AUTH_WEB_TAG_LEN);
 	if (rc != 0) {
-		memset(out, 0, AUTH_WEB_BLOB_LEN);
+		wipe(out, AUTH_WEB_BLOB_LEN);
 		return rc;
 	}
 	return 0;
@@ -347,7 +352,7 @@ int auth_web_set_password(auth_web_ctx_t *c, size_t idx, const uint8_t *pw,
 	if (u->cfg_key != 0U && c->cfg != NULL) {
 		rc = cfg_set_bytes(c->cfg, u->cfg_key, blob, sizeof(blob));
 		if (rc != 0) {
-			memset(blob, 0, sizeof(blob));
+			wipe(blob, sizeof(blob));
 			return -EIO;
 		}
 	}
@@ -357,7 +362,7 @@ int auth_web_set_password(auth_web_ctx_t *c, size_t idx, const uint8_t *pw,
 	 * (through an authenticated session) that they control the account. */
 	u->fails = 0U;
 	u->lock_until_ms = 0U;
-	memset(blob, 0, sizeof(blob));
+	wipe(blob, sizeof(blob));
 	return 0;
 }
 
@@ -396,13 +401,41 @@ uint32_t auth_web_retry_after_ms(const auth_web_ctx_t *c, size_t idx,
 	return (uint32_t)(u->lock_until_ms - now_ms);
 }
 
+/** Arm the escalating backoff after a refused attempt on a KNOWN account. */
+static void penalise(auth_web_ctx_t *c, size_t idx, uint64_t now_ms)
+{
+	auth_web_user_t *u = &c->users[idx];
+	uint32_t back;
+
+	u->fails++;
+	back = backoff_ms(u->fails);
+	if (back != 0U) {
+		u->lock_until_ms = now_ms + (uint64_t)back;
+	}
+}
+
+/** True when at least one account on this box holds a credential. */
+static bool any_credential(const auth_web_ctx_t *c)
+{
+	size_t i;
+
+	for (i = 0U; i < AUTH_WEB_USERS; i++) {
+		if (c->users[i].in_use && c->users[i].has_blob) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /* ------------------------------------------------------------------------- */
 /* sessions                                                                  */
 /* ------------------------------------------------------------------------- */
 
 static void close_sess(auth_web_ctx_t *c, size_t i)
 {
-	memset(&c->sess[i], 0, sizeof(c->sess[i]));
+	/* The session and CSRF tokens are bearer secrets: wiped, not merely
+	 * marked free, so a closed slot cannot be read out of RAM later. */
+	wipe(&c->sess[i], sizeof(c->sess[i]));
 }
 
 static bool sess_expired(const auth_web_ctx_t *c, const auth_web_sess_t *s,
@@ -422,12 +455,104 @@ static bool sess_expired(const auth_web_ctx_t *c, const auth_web_sess_t *s,
 	return false;
 }
 
+/**
+ * Verify the stored credential of account @p idx.
+ *
+ * @retval 0        Match.
+ * @retval -EACCES  Mismatch, or the account holds no credential. The two are
+ *                  one answer here so the caller cannot accidentally turn
+ *                  "unprovisioned" into a distinguishable reply.
+ * @retval -EIO     The KDF failed. A fault, never a verdict.
+ */
+static int local_verify(auth_web_ctx_t *c, size_t idx, const uint8_t *pw,
+			size_t pw_len)
+{
+	uint8_t tag[AUTH_WEB_TAG_LEN];
+	auth_web_user_t *u = &c->users[idx];
+	bool ok;
+	int rc;
+
+	if (!u->has_blob) {
+		return -EACCES;
+	}
+	rc = c->kdf->derive(c->kdf->user, u->blob, AUTH_WEB_SALT_LEN, pw, pw_len,
+			    tag, sizeof(tag));
+	if (rc != 0) {
+		wipe(tag, sizeof(tag));
+		return -EIO;
+	}
+	ok = web_ct_memcmp(tag, &u->blob[AUTH_WEB_SALT_LEN],
+			   AUTH_WEB_TAG_LEN) == 0;
+	wipe(tag, sizeof(tag));
+	return ok ? 0 : -EACCES;
+}
+
+/**
+ * Refer a credential the local table could not accept to the remote authority.
+ *
+ * @retval 0        Accepted; @p out_role holds a clamped web_role_t.
+ * @retval -EBUSY   The authority holds this principal in a lockout.
+ * @retval -EACCES  Refused. EVERY other code the hook can return lands here —
+ *                  including -EHOSTUNREACH, "no authority could answer", which
+ *                  is a denial and never an allow-on-failure — so the reply
+ *                  carries nothing but "no".
+ */
+static int remote_consult(auth_web_ctx_t *c, const char *user, size_t user_len,
+			  const uint8_t *pw, size_t pw_len, uint8_t *out_role)
+{
+	char name[AUTH_WEB_NAME_MAX + 1U];
+	char secret[AUTH_WEB_PW_MAX + 1U];
+	uint8_t role = (uint8_t)WEB_ROLE_NONE;
+	int rc;
+
+	/*
+	 * The hook speaks C strings, and so does sts_aaa_check() beneath it. A
+	 * password carrying an embedded NUL would therefore be truncated at it,
+	 * and "pw\0anything" would authenticate as "pw". Refuse rather than
+	 * truncate. (A name cannot contain one — auth_web_user_find() matched it
+	 * against a C string — but an UNKNOWN name reaches here unmatched, so it
+	 * is checked too.)
+	 */
+	if (memchr(pw, 0, pw_len) != NULL ||
+	    memchr(user, 0, user_len) != NULL) {
+		c->st.logins_remote_denied++;
+		return -EACCES;
+	}
+	memcpy(name, user, user_len);
+	name[user_len] = '\0';
+	memcpy(secret, pw, pw_len);
+	secret[pw_len] = '\0';
+
+	c->st.remote_consults++;
+	rc = c->remote(c->remote_user, name, secret, &role);
+	wipe(secret, sizeof(secret));
+
+	if (rc != 0) {
+		c->st.logins_remote_denied++;
+		return (rc == -EBUSY) ? -EBUSY : -EACCES;
+	}
+	/*
+	 * An authority that accepts without naming a usable role gets the LEAST
+	 * privilege, not the most. core/auth already applies this clamp; it is
+	 * repeated here because this hook is a public extension point and may be
+	 * wired to something that does not.
+	 */
+	if (role == (uint8_t)WEB_ROLE_NONE || role > (uint8_t)WEB_ROLE_ADMIN) {
+		role = (uint8_t)WEB_ROLE_VIEWER;
+	}
+	*out_role = role;
+	c->st.logins_remote_ok++;
+	return 0;
+}
+
 int auth_web_login(auth_web_ctx_t *c, const char *user, size_t user_len,
 		   const uint8_t *pw, size_t pw_len, uint64_t now_ms,
 		   auth_web_grant_t *out)
 {
-	uint8_t tag[AUTH_WEB_TAG_LEN];
-	auth_web_user_t *u;
+	auth_web_user_t *u = NULL;
+	uint8_t role = (uint8_t)WEB_ROLE_NONE;
+	bool by_remote = false;
+	int verdict = -EACCES;
 	int uidx;
 	size_t slot;
 	size_t i;
@@ -446,51 +571,103 @@ int auth_web_login(auth_web_ctx_t *c, const char *user, size_t user_len,
 	}
 
 	uidx = auth_web_user_find(c, user, user_len);
-	if (uidx < 0) {
+	if (uidx >= 0) {
+		u = &c->users[uidx];
+
+		if (u->lock_until_ms > now_ms) {
+			/*
+			 * Throttled: neither the password nor the network is
+			 * touched, so the answer says nothing about either — and
+			 * a brute-force attempt costs the remote authority no
+			 * round trips.
+			 */
+			c->st.logins_throttled++;
+			audit(c, (uint8_t)LOGR_WARN, now_ms,
+			      "web auth: throttled, password not tested");
+			return -EBUSY;
+		}
+
+		rc = local_verify(c, (size_t)uidx, pw, pw_len);
+		if (rc == -EIO) {
+			/* A broken KDF is a fault, not a verdict: it must not
+			 * be laundered into a remote lookup. */
+			return -EIO;
+		}
+		if (rc == 0) {
+			role = u->role;
+			verdict = 0;
+		}
+	} else {
 		/*
 		 * An unknown user is reported exactly like a wrong password so
 		 * the response does not enumerate accounts. It is deliberately
 		 * NOT throttled per-name (there is no counter to attach it to);
-		 * the glue rate-limits the route itself.
+		 * the glue rate-limits the route itself and the remote
+		 * authority keeps its own lockout table.
 		 */
 		c->st.logins_bad_user++;
-		audit(c, (uint8_t)LOGR_WARN, now_ms, "web auth: unknown user");
-		return -EACCES;
-	}
-	u = &c->users[uidx];
-
-	if (u->lock_until_ms > now_ms) {
-		c->st.logins_throttled++;
-		audit(c, (uint8_t)LOGR_WARN, now_ms,
-		      "web auth: throttled, password not tested");
-		return -EBUSY;
-	}
-	if (!u->has_blob) {
-		audit(c, (uint8_t)LOGR_WARN, now_ms,
-		      "web auth: account has no credential");
-		/* -ENOENT, not -ENOKEY: picolibc has no ENOKEY. */
-		return -ENOENT;
 	}
 
-	rc = c->kdf->derive(c->kdf->user, u->blob, AUTH_WEB_SALT_LEN, pw, pw_len,
-			    tag, sizeof(tag));
-	if (rc != 0) {
-		return -EIO;
+	/*
+	 * The remote authority sees only what the local table could not accept:
+	 * an unknown account, an account with no credential, or a wrong
+	 * password. A local SUCCESS never leaves the box.
+	 */
+	if (verdict != 0 && c->remote != NULL) {
+		verdict = remote_consult(c, user, user_len, pw, pw_len, &role);
+		by_remote = (verdict == 0);
 	}
-	if (web_ct_memcmp(tag, &u->blob[AUTH_WEB_SALT_LEN], AUTH_WEB_TAG_LEN) != 0) {
-		uint32_t back;
 
-		memset(tag, 0, sizeof(tag));
-		u->fails++;
-		back = backoff_ms(u->fails);
-		if (back != 0U) {
-			u->lock_until_ms = now_ms + (uint64_t)back;
+	if (verdict != 0) {
+		if (u != NULL) {
+			c->st.logins_bad_pw++;
+			if (verdict != -EBUSY) {
+				penalise(c, (size_t)uidx, now_ms);
+			}
 		}
-		c->st.logins_bad_pw++;
-		audit(c, (uint8_t)LOGR_WARN, now_ms, "web auth: bad password");
+		if (verdict == -EBUSY) {
+			c->st.logins_throttled++;
+			audit(c, (uint8_t)LOGR_WARN, now_ms,
+			      "web auth: refused, authority holds a lockout");
+			return -EBUSY;
+		}
+		/*
+		 * -ENOENT survives for exactly one situation, and it is a
+		 * GLOBAL property of the box, never a per-account one: a login
+		 * for a known account on a unit where NO account holds a
+		 * credential. That is a virgin unit, and rest.c turns this code
+		 * into the 503 that tells the operator to commission it over
+		 * the local UI or the USB console. Removing it would leave a
+		 * fresh box answering 401 with no hint at all.
+		 *
+		 * Two deliberate narrowings, both closing an enumeration hole:
+		 *
+		 *   - it needs a KNOWN account name, so an attacker cannot
+		 *     probe with arbitrary names and read the answer;
+		 *   - it needs the box to hold NO credential at all. Once any
+		 *     account is provisioned, an unprovisioned one answers
+		 *     -EACCES like every other refusal. Reporting per-account
+		 *     provisioning state to an unauthenticated peer is exactly
+		 *     the reconnaissance ("admin is set up, operator is not —
+		 *     attack operator") that core/mcp's h_auth already refuses
+		 *     to give out, and three accounts with fixed, public names
+		 *     make it worth something.
+		 *
+		 * Deliberately NOT conditioned on whether a remote authority is
+		 * wired: the production glue always wires one, so testing that
+		 * would silently delete the bootstrap message from every
+		 * shipped image. A configured, reachable authority has already
+		 * had its say by this point — the chain runs first, above.
+		 */
+		if (uidx >= 0 && !any_credential(c)) {
+			audit(c, (uint8_t)LOGR_WARN, now_ms,
+			      "web auth: no credential provisioned on this box");
+			/* -ENOENT, not -ENOKEY: picolibc has no ENOKEY. */
+			return -ENOENT;
+		}
+		audit(c, (uint8_t)LOGR_WARN, now_ms, "web auth: refused");
 		return -EACCES;
 	}
-	memset(tag, 0, sizeof(tag));
 
 	/* Reap anything stale before hunting for a slot. */
 	(void)auth_web_tick(c, now_ms);
@@ -535,21 +712,38 @@ int auth_web_login(auth_web_ctx_t *c, const char *user, size_t user_len,
 		return -EIO;
 	}
 
-	c->sess[slot].user = (uint8_t)uidx;
-	c->sess[slot].role = u->role;
+	/*
+	 * A remote principal has no entry in the local table, so the slot carries
+	 * AUTH_WEB_NO_USER — deliberately out of range, so auth_web_user_at()
+	 * answers NULL for it and every existing caller that maps a session to an
+	 * account already fails safe. The name is kept in the session either way,
+	 * which is what audit and telemetry actually need.
+	 */
+	c->sess[slot].user = (uidx >= 0) ? (uint8_t)uidx : AUTH_WEB_NO_USER;
+	c->sess[slot].role = role;
+	c->sess[slot].remote = by_remote;
+	memcpy(c->sess[slot].name, user, user_len);
+	c->sess[slot].name[user_len] = '\0';
 	c->sess[slot].created_ms = now_ms;
 	c->sess[slot].last_ms = now_ms;
 	c->sess[slot].requests = 0U;
 	c->sess[slot].active = true;
 
-	u->fails = 0U;
-	u->lock_until_ms = 0U;
+	if (u != NULL) {
+		/* Whoever authenticated proved control of this account, so the
+		 * throttle clears — including when a remote authority is the one
+		 * that vouched for them. */
+		u->fails = 0U;
+		u->lock_until_ms = 0U;
+	}
 	c->st.logins_ok++;
-	audit(c, (uint8_t)LOGR_NOTICE, now_ms, "web auth: session opened");
+	audit(c, (uint8_t)LOGR_NOTICE, now_ms,
+	      by_remote ? "web auth: session opened (remote authority)"
+			: "web auth: session opened");
 
 	out->token = c->sess[slot].token;
 	out->csrf = c->sess[slot].csrf;
-	out->role = u->role;
+	out->role = role;
 	out->idle_s = idle_seconds(c);
 	out->absolute_s = c->absolute_s;
 	return 0;
@@ -617,6 +811,13 @@ const auth_web_sess_t *auth_web_sess_at(const auth_web_ctx_t *c, size_t idx)
 	return &c->sess[idx];
 }
 
+const char *auth_web_sess_name(const auth_web_ctx_t *c, size_t idx)
+{
+	const auth_web_sess_t *s = auth_web_sess_at(c, idx);
+
+	return (s != NULL) ? s->name : NULL;
+}
+
 int auth_web_check_csrf(auth_web_ctx_t *c, size_t idx, const char *token,
 			size_t token_len)
 {
@@ -668,6 +869,35 @@ void auth_web_logout_all(auth_web_ctx_t *c)
 			close_sess(c, i);
 			c->st.logouts++;
 		}
+	}
+}
+
+void auth_web_wipe(auth_web_ctx_t *c)
+{
+	size_t i;
+
+	if (c == NULL) {
+		return;
+	}
+	auth_web_logout_all(c);
+	/* logout_all only walks live slots; a slot closed earlier is already
+	 * wiped, but sweeping all of them keeps this a single, checkable claim:
+	 * after auth_web_wipe() no session bytes remain anywhere. */
+	for (i = 0U; i < AUTH_WEB_SESSIONS; i++) {
+		wipe(&c->sess[i], sizeof(c->sess[i]));
+	}
+	for (i = 0U; i < AUTH_WEB_USERS; i++) {
+		auth_web_user_t *u = &c->users[i];
+
+		wipe(u->blob, sizeof(u->blob));
+		u->has_blob = false;
+		/* The lockout goes too: the credential it was protecting no
+		 * longer exists, so keeping the window would only lock an
+		 * operator out of a box that has just been handed back to
+		 * them. The account name, role and cfg binding survive — the
+		 * table must still be the one the box boots with. */
+		u->fails = 0U;
+		u->lock_until_ms = 0U;
 	}
 }
 

@@ -178,13 +178,17 @@ void sts_mp_mirror_publish(const mp_mirror_in_t *frame);
  * context itself is not exported, because a caller holding `mp_ctx_t *` could
  * mutate protocol state with no lock at all.
  *
- * Takes the engine lock with a STS_MP_TICK_LOCK_MS timeout and drops the bytes
- * on contention rather than waiting: a tee is best-effort passthrough, and a
- * peripheral reader must not be pinned behind a console request.
+ * Tries the engine lock with **K_NO_WAIT** and refuses on contention rather than
+ * waiting: a tee is best-effort passthrough, and its caller runs inside
+ * sts_mp_tick()'s pass, which sts_console.c's BUILD_ASSERT budgets for exactly
+ * one lock wait (the tick's own). See the argument at the call to
+ * k_mutex_lock() in mp_glue.c — it is the dead-man's revert deadline, not a
+ * preference.
  *
  * @retval >=0      Bytes accepted.
  * @retval -ENOENT  Channel not subscribed (normal; nothing was sent).
- * @retval -EBUSY   Lock contended, or called from an ISR — bytes dropped.
+ * @retval -EBUSY   Lock held by another thread, or called from an ISR —
+ *                  nothing was sent; the caller keeps the bytes.
  * @retval <0       As mp_stream_raw().
  */
 int sts_mp_stream_raw(uint8_t ch, const uint8_t *data, size_t len);

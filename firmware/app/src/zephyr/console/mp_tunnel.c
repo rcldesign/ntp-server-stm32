@@ -485,9 +485,13 @@ void sts_mp_tunnel_drain(void)
 
 		rc = sts_mp_stream_raw(rec[0], &rec[TEE_HDR], n);
 		if (rc == -EBUSY) {
-			/* The engine lock is contended, or something called this
-			 * from an ISR. Leave the record queued and end the pass:
-			 * fifteen more attempts would only lengthen it. */
+			/*
+			 * Another thread holds the engine. sts_mp_stream_raw()
+			 * tries with K_NO_WAIT precisely so this costs nothing,
+			 * so the pass adds no delay to the tick that follows it;
+			 * leave the record queued and let the next pass retry.
+			 * Fifteen more attempts would only spin on the same lock.
+			 */
 			return;
 		}
 		if ((rc < 0) && (rc != -ENOENT) && (rc != -ENODEV)) {

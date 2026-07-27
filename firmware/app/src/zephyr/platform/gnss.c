@@ -456,12 +456,40 @@ bool sts_gnss_cfg_ack(void)
  * defaults, which is precisely when a technician opens the NMEA view, talks
  * NMEA until the configuration walk lands.
  *
- * Bytes are staged into a 64-byte run and handed over a run at a time. Per byte
- * that is a call, two compares and a store — order 15 instructions, ~60 ns at
- * 250 MHz; per run it is one sts_mp_tee_*() (an atomic read plus a memcpy under
- * a spinlock, ~350 cycles). ~82 ns/byte all in, and only when a channel is
- * armed: with nobody subscribed `tee_on` below is false and the whole thing
- * costs one atomic read per drain pass plus one predicted branch per byte.
+ * ---------------------------------------------------------------------------
+ * What this costs the receive path, counted from the generated code
+ * ---------------------------------------------------------------------------
+ * This loop feeds gnssmgr, which feeds the discipline loop, so the number is
+ * stated rather than reassured about. Counts are from `objdump -d` of the
+ * as-built image at 250 MHz, taken branches charged 3 cycles.
+ *
+ *   NOT armed (the normal state — no technician attached)
+ *       one `cbz` per byte, taken.               <= 3 cycles  ~12 ns/byte
+ *       plus one hoisted sts_mp_gnss_tee_armed() (8 instructions) per 50 ms
+ *       drain pass. At the as-built ~1 kB/s UBX rate: ~12 us per second.
+ *
+ *   ARMED, per byte in this loop
+ *       23 instructions, 6 of them taken branches. ~35 cycles ~140 ns/byte
+ *
+ *   ARMED, per 64-byte run handed to sts_mp_tee_*()
+ *       ring_free + 2x ring_putc + ring_put's 64-byte memcpy, inside
+ *       k_spin_lock.                            ~191 cycles  ~0.8 us
+ *       Amortised that is ~3 cycles (~12 ns) per byte.
+ *
+ *   ARMED, all in                                ~38 cycles  <=160 ns/byte
+ *       ~1 kB/s as-built UBX set:  ~164 us/s, ~8 us per 50 ms pass
+ *       USART3 saturated (460800 8N1, 46 080 B/s):
+ *                                  ~7.4 ms/s (0.74 % of one core),
+ *                                  ~369 us per 50 ms pass — against ~1.4 ms
+ *                                  this loop already spends in ubx_parse_byte()
+ *                                  for the same bytes.
+ *
+ * The figure that actually bounds the timing path is not throughput but the
+ * longest window with interrupts masked, because k_spin_lock() raises BASEPRI:
+ * **<= ~0.8 us, once per 64 bytes staged**. PA0/TIM2 is a hardware input
+ * capture, so a PPS edge inside that window is still timestamped by the timer
+ * at the edge — the delay shifts when the capture register is read, not what it
+ * recorded. Nothing on this path takes a mutex, allocates, or waits.
  */
 #define GNSS_TEE_STAGE 64U
 

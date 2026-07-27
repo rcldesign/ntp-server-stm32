@@ -438,14 +438,18 @@ typedef struct {
  *                  locally in this case, so the answer carries no information
  *                  about it.
  * @retval -ENOSPC  No free session slot.
- * @retval -ENOENT  NO account on this box holds a credential and no remote
- *                  authority is wired, i.e. the box has never been
- *                  commissioned. Once ANY account is provisioned, an
- *                  unprovisioned one answers -EACCES like everything else,
- *                  because otherwise the reply would report per-account
- *                  provisioning state to an unauthenticated peer. (Not -ENOKEY:
- *                  picolibc, the target libc, does not define it — see the
- *                  portable-errno note at the top of this header.)
+ * @retval -ENOENT  A KNOWN account was named and NO account on this box holds a
+ *                  credential — i.e. the unit has never been commissioned. The
+ *                  web layer turns this into a 503 telling the operator to set
+ *                  a password over the local UI or the USB console, so it is
+ *                  load-bearing for bootstrap and must not be folded away.
+ *                  It is a global property of the box, never a per-account one:
+ *                  once ANY account is provisioned, an unprovisioned one
+ *                  answers -EACCES like everything else, because otherwise the
+ *                  reply would report per-account provisioning state to an
+ *                  unauthenticated peer. (Not -ENOKEY: picolibc, the target
+ *                  libc, does not define it — see the portable-errno note at
+ *                  the top of this header.)
  * @retval -EIO     The KDF failed.
  */
 int auth_web_login(auth_web_ctx_t *c, const char *user, size_t user_len,

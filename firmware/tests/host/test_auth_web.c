@@ -450,11 +450,20 @@ static void test_login_failures(void)
 						      (const uint8_t *)"wrong-password",
 						      14U, 0U, &g));
 
-	/* An account with no credential fails closed with its own code. */
+	/*
+	 * An account with no credential on a box that HAS one elsewhere is
+	 * refused with the same -EACCES as a wrong password and an unknown
+	 * user. It used to answer -ENOENT, which told an unauthenticated peer
+	 * "this account exists but has not been set up yet" — with three
+	 * accounts whose names are fixed and public, that is which-account-to-
+	 * attack reconnaissance, and core/mcp's h_auth already refuses to give
+	 * out the same fact. See the -ENOENT contract in auth_web.h: the code
+	 * survives only as a GLOBAL "this box has never been commissioned"
+	 * signal, which test_virgin_box_still_reports_unprovisioned() pins.
+	 */
 	TEST_ASSERT_EQUAL_INT(1, auth_web_user_add(&g_auth, "opr",
 						   WEB_ROLE_OPERATOR, 0U));
-	/* -ENOENT ("no credential"), because picolibc has no ENOKEY. */
-	TEST_ASSERT_EQUAL_INT(-ENOENT, auth_web_login(&g_auth, "opr", 3U,
+	TEST_ASSERT_EQUAL_INT(-EACCES, auth_web_login(&g_auth, "opr", 3U,
 						      (const uint8_t *)PW,
 						      PW_LEN, 0U, &g));
 

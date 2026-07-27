@@ -83,6 +83,13 @@ LOG_MODULE_REGISTER(sts_console, CONFIG_STS1000_LOG_LEVEL);
  * long by the lock timeout. That interval is what MP_TICK_MAX_MS bounds.
  *
  * As built: (5 + 1) * (250 + 50) = 1800 <= 2000 ms.
+ *
+ * ONE lock wait per pass is the premise, and sts_mp_tick() has two things that
+ * want the engine: the passthrough drain and the tick proper. That is why
+ * sts_mp_stream_raw() — the drain's only route in — tries with K_NO_WAIT rather
+ * than a timeout. If it is ever given one, this becomes
+ * (5 + 1) * (250 + 50 + 50) = 2100 ms and the dead-man's revert deadline is no
+ * longer met; change the numbers here in the same edit or do not make it.
  */
 BUILD_ASSERT(((STS_MP_TICK_MISS_MAX + 1U) *
 	      ((unsigned int)CONSOLE_PERIOD_MS + STS_MP_TICK_LOCK_MS)) <=
