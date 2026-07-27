@@ -1,0 +1,114 @@
+/*
+ * MCUboot devicetree overlay for the STS1000 "Meridian".
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * The board .dts is shared by every sysbuild image, so it describes the whole
+ * product. Trim it down to what the bootloader actually needs to fit inside the
+ * 128 KB boot_partition.
+ */
+
+/ {
+	chosen {
+		/*
+		 * Sysbuild points DTC_OVERLAY_FILE at this file, which REPLACES
+		 * the default overlay list — including MCUboot's own
+		 * boot/zephyr/app.overlay. That overlay carries nothing but the
+		 * line below, so it has to be restored here or the bootloader
+		 * links against the board's zephyr,code-partition
+		 * (slot0_partition) and is built to run from 0x20000.
+		 */
+		zephyr,code-partition = &boot_partition;
+	};
+};
+
+/*
+ * The application's second CDC-ACM instance is the binary MCP channel. MCUboot
+ * only needs one interface (serial recovery on cdc_acm_uart0), and every extra
+ * instance costs descriptors, endpoints and a UART device.
+ */
+&cdc_acm_uart1 {
+	status = "disabled";
+};
+
+/*
+ * The SPI-NOR is not a boot device and is still held in reset by NOR_RST_N
+ * (PE10) while MCUboot runs. Removing the node also removes SPI4 from the
+ * bootloader image.
+ */
+&nor_flash {
+	status = "disabled";
+};
+
+&spi4 {
+	status = "disabled";
+};
+
+/* No sensors, analog or timers in the bootloader. */
+&i2c1 {
+	status = "disabled";
+};
+
+&adc1 {
+	status = "disabled";
+};
+
+&dac1 {
+	status = "disabled";
+};
+
+&timers1 {
+	status = "disabled";
+};
+
+&timers2 {
+	status = "disabled";
+};
+
+&timers3 {
+	status = "disabled";
+};
+
+&timers4 {
+	status = "disabled";
+};
+
+&timers12 {
+	status = "disabled";
+};
+
+&timers15 {
+	status = "disabled";
+};
+
+&mac {
+	status = "disabled";
+};
+
+&mdio {
+	status = "disabled";
+};
+
+&backup_sram {
+	status = "disabled";
+};
+
+&gpdma1 {
+	status = "disabled";
+};
+
+&gpdma2 {
+	status = "disabled";
+};
+
+/* UART7/UART4 are peripheral links; USART3 is the GNSS link. None are used. */
+&usart3 {
+	status = "disabled";
+};
+
+&uart4 {
+	status = "disabled";
+};
+
+&uart7 {
+	status = "disabled";
+};

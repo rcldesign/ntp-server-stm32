@@ -1,0 +1,21 @@
+# STS1000 "Meridian" sysbuild configuration
+# SPDX-License-Identifier: Apache-2.0
+#
+# The MCUboot signing key must be given as an ABSOLUTE path: both
+# bootloader/mcuboot/boot/zephyr/CMakeLists.txt and Zephyr's mcuboot.cmake fall
+# back to resolving a relative path against the MCUboot source tree. Kconfig
+# *fragment* files (sysbuild.conf) do not expand macros, so the default is set
+# here, where the Kconfig preprocessor is available, using $(APP_DIR) — the
+# main image's application directory, i.e. firmware/app.
+#
+# This default is declared before `source`ing the standard sysbuild Kconfig so
+# that it wins over the upstream in-tree MCUboot demo key. Override it from the
+# command line for production:
+#
+#   -DSB_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"/secure/path/sts1000_prod_ec_p256.pem\"
+
+config BOOT_SIGNATURE_KEY_FILE
+	string
+	default "$(APP_DIR)/keys/mcuboot_dev_ec_p256.pem"
+
+source "share/sysbuild/Kconfig"

@@ -1,0 +1,48 @@
+# STS1000 "Meridian" application configuration
+# SPDX-License-Identifier: Apache-2.0
+
+mainmenu "STS1000 Meridian"
+
+menu "STS1000 Meridian bring-up"
+
+config STS1000_NOR_RESET_RECOVERY_US
+	int "SPI-NOR reset recovery time (us)"
+	default 200
+	range 10 100000
+	help
+	  Delay inserted after NOR_RST_N (PE10) is released before the
+	  MX25L25645G is initialised (interface ref §2 Stage 2). Must cover the
+	  device's tRHSL reset-recovery specification with margin.
+
+config STS1000_PHY_RESET_ASSERT_US
+	int "Ethernet PHY reset assertion width (us)"
+	default 500
+	range 100 100000
+	help
+	  How long LAN_RST_N (PD10) is held asserted. The LAN8742AI requires a
+	  minimum 100 us reset pulse.
+
+config STS1000_PHY_RESET_RECOVERY_US
+	int "Ethernet PHY reset recovery time (us)"
+	default 1000
+	range 100 100000
+	help
+	  Delay after LAN_RST_N (PD10) is released before SMI/MDIO access is
+	  permitted. The LAN8742AI specifies 100 us.
+
+config STS1000_EARLY_RESET_INIT_PRIORITY
+	int "Init priority of the early reset-release hook"
+	default 45
+	range 0 99
+	help
+	  POST_KERNEL priority of the hook that releases LAN_RST_N. It must run
+	  before the MDIO, PHY and Ethernet drivers (default priorities 60, 70
+	  and 80) or their probe finds the PHY held in reset.
+
+endmenu
+
+module = STS1000
+module-str = sts1000
+source "subsys/logging/Kconfig.template.log_config"
+
+source "Kconfig.zephyr"

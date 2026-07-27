@@ -98,7 +98,12 @@ Conventions:
   owned by the caller. No dynamic allocation in core (fixed pools provided by glue).
 - Return `int` (0 / negative errno-style). No asserts that kill the host test runner.
 - Headers under `core/<mod>/<mod>.h` are the module's public API; internal headers stay
-  private. Cross-core-module includes allowed only for: `util`, `cfg` (read), `quality`.
+  private. Cross-core-module dependencies are fixed by this map (also encoded in the
+  host-test CMake; adding an edge requires updating both):
+  `ubx→util`; `gnssmgr→ubx,util`; `disc→util,quality`; `refsel→util`; `quality→util`;
+  `thermal→util`; `ntp→util,quality`; `nts→util`; `ptp→util,quality`; `ina228→util`;
+  `fault→util`; `pwrseq→ina228,util`; `mcp→util,cfg,logring,quality`; `cfg→util`;
+  `logring→util`; `snmp→util,quality`; `ui→util,quality`.
 
 ---
 
