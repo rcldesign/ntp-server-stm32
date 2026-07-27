@@ -1,0 +1,42 @@
+# STS1000 "Meridian" — west manifest (T2 topology: this repo is the manifest repo).
+#
+# Workspace layout (workspace root is the parent of this repository):
+#   <workspace>/
+#     ntp-server-stm32/       ← this repo (manifest repo)
+#     zephyr/                 ← pinned Zephyr
+#     modules/, bootloader/   ← pinned modules (filtered import below)
+#
+# Bootstrap:
+#   cd <workspace>
+#   west init -l ntp-server-stm32 --mf firmware/west.yml
+#   west update --narrow -o=--depth=1
+#   west zephyr-export
+#
+# Zephyr SDK: 0.17.x (arm-zephyr-eabi). Record bumps here when revisions move.
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.2.2
+      import:
+        # Keep the module set minimal and auditable. Everything the STS1000
+        # firmware needs, nothing else. (Sourcing policy: no PRC-origin
+        # security-relevant software; all modules below are Zephyr-project or
+        # ARM/ST/Microchip-origin.)
+        name-allowlist:
+          - cmsis          # legacy CMSIS headers (arch support)
+          - cmsis_6        # CMSIS 6 (Cortex-M33)
+          - hal_stm32      # ST HAL/LL + STM32H5 SoC glue
+          - hal_st         # ST MEMS (stmemsc: IIS2MDC, LIS2DH12)
+          - mbedtls        # PSA Crypto / TLS 1.3 for NTS-KE
+          - mcuboot        # bootloader + imgtool
+          - littlefs       # SPI-NOR filesystem
+          - zcbor          # CBOR for MCUmgr/SMP serial recovery
+          - picolibc       # libc (module form; SDK picolibc also acceptable)
+
+  self:
+    path: ntp-server-stm32
