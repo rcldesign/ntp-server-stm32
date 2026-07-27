@@ -159,6 +159,22 @@ config STS1000_DIGIPOT_SPI_HZ
 	  rated well above this; the conservative default keeps the edge rates
 	  down on a bus shared with a 40 MHz NOR and a display ribbon.
 
+config STS1000_RB_LOCK_ACTIVE_LOW
+	bool "RB_LOCK (PB13) is asserted low"
+	default y
+	help
+	  Which electrical level on RB_LOCK means "the FE-5680A reports lock".
+
+	  The optocoupler U48 inverts (rb_rs232_interface.md §6A.3): the FE's lock
+	  line high turns the LED on, which turns the transistor on, which pulls
+	  RB_LOCK low. So low = locked for a unit whose lock output is active-high
+	  — the documented default. Surplus FE variants are known to differ and
+	  some drive the line low when locked, which through the opto reads high,
+	  so this is a per-unit commissioning setting and must not be assumed.
+	  Determine it by correlating RB_LOCK against the FE's serial lock status
+	  (bench procedure "Lock polarity") and set it before trusting the OCXO/Rb
+	  handoff.
+
 config STS1000_PANEL_LED_PWM_HZ
 	int "Panel-LED PWM frequency (Hz)"
 	default 1000

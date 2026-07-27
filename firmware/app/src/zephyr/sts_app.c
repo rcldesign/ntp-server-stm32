@@ -22,6 +22,7 @@
 #include <zephyr/sys/byteorder.h>
 
 #include "zephyr/sts_app.h"
+#include "zephyr/sts_cfg_applier.h"
 #include "zephyr/platform/platform.h"
 
 #include "fault/fault.h"
@@ -277,32 +278,12 @@ static const port_store_t sts_ram_store_port = {
 static cfg_ctx_t sts_cfg_ctx;
 static bool sts_cfg_persistent;
 
-/* Config groups (ARCHITECTURE.md §8: 0x01..0x0C). */
-#define STS_CFG_GROUP_MAX 0x10
-
 /*
- * Subscribers per group.
- *
- * A chain, not one slot, because groups are genuinely shared: 0x09 (log) is
- * claimed by BOTH the console area (log.level -> the ring's severity floor) and
- * the net area (the syslog sender's reload). With one slot the console started
- * first and net's registration overwrote it, so log.level was honoured exactly
- * once at store-registration and was inert at runtime thereafter — field debug
- * escalation silently did nothing, and the caller's `rc != 0` warning could
- * never fire because the overwrite reported success.
- *
- * Four is sized from the current claims (log has two, everything else one) plus
- * headroom; a fifth returns -ENOSPC loudly rather than displacing anyone.
+ * Applier registry: a chain per group, not one slot. Rationale, the arithmetic
+ * and the -ENOSPC contract are all in sts_cfg_applier.h, which is Zephyr-free so
+ * tests/host can pin the behaviour down.
  */
-#define STS_CFG_GROUP_SUBS_MAX 4
-
-struct sts_cfg_applier {
-	sts_cfg_apply_fn fn;
-	void *ctx;
-};
-
-static struct sts_cfg_applier
-	sts_cfg_appliers[STS_CFG_GROUP_MAX][STS_CFG_GROUP_SUBS_MAX];
+static sts_cfg_applier_tbl_t sts_cfg_applier_tbl;
 
 static struct k_mutex sts_cfg_mutex;
 
@@ -328,47 +309,12 @@ bool sts_cfg_is_persistent(void)
 
 int sts_cfg_register_applier(uint8_t group, sts_cfg_apply_fn fn, void *ctx)
 {
-	struct sts_cfg_applier *chain;
-	size_t i;
-
-	if (group >= STS_CFG_GROUP_MAX || fn == NULL) {
-		return -EINVAL;
-	}
-
-	chain = sts_cfg_appliers[group];
-
-	for (i = 0; i < STS_CFG_GROUP_SUBS_MAX; i++) {
-		if (chain[i].fn == fn && chain[i].ctx == ctx) {
-			return 0; /* idempotent re-registration */
-		}
-		if (chain[i].fn == NULL) {
-			chain[i].ctx = ctx;
-			chain[i].fn = fn;
-			return 0;
-		}
-	}
-
-	return -ENOSPC;
+	return sts_cfg_applier_add(&sts_cfg_applier_tbl, group, fn, ctx);
 }
 
 static void sts_cfg_apply_group(uint8_t group)
 {
-	size_t i;
-
-	if (group >= STS_CFG_GROUP_MAX) {
-		return;
-	}
-
-	/* Registration order: every subscriber is called, and one that ignores
-	 * the group is expected to return quickly rather than be filtered here. */
-	for (i = 0; i < STS_CFG_GROUP_SUBS_MAX; i++) {
-		sts_cfg_apply_fn fn = sts_cfg_appliers[group][i].fn;
-
-		if (fn == NULL) {
-			break;
-		}
-		fn(sts_cfg_appliers[group][i].ctx, group);
-	}
+	sts_cfg_applier_dispatch(&sts_cfg_applier_tbl, group);
 }
 
 /*
@@ -481,16 +427,9 @@ int sts_cfg_commit(cfg_commit_res_t *res)
 
 	k_mutex_unlock(&sts_cfg_mutex);
 
-	/*
-	 * -EIO is "applied to the live tree, but N keys did not reach the store".
-	 * The running system HAS changed, so the appliers must run: returning
-	 * early here left the live tree holding a new log level, IP address or
-	 * PTP domain that nothing had been told about — the same silently-
-	 * ineffective commit as skipping the dispatch entirely, reached by a
-	 * different route. Only a validation or cross-field rejection (nothing
-	 * applied at all) skips them.
-	 */
-	if (rc != 0 && rc != -EIO) {
+	/* -EIO means the live tree changed but some keys missed the store, so the
+	 * appliers still have to run — see sts_cfg_commit_applied(). */
+	if (!sts_cfg_commit_applied(rc)) {
 		return rc;
 	}
 

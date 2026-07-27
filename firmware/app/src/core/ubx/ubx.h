@@ -80,6 +80,7 @@ extern "C" {
 #define UBX_ID_ACK_ACK    0x01U
 #define UBX_ID_CFG_VALSET 0x8AU
 #define UBX_ID_MON_RF     0x38U
+#define UBX_ID_MON_VER    0x04U
 #define UBX_ID_TIM_TP     0x01U
 
 /* Fixed payload lengths of the fixed-length messages this module decodes. */
@@ -464,6 +465,57 @@ int ubx_mon_rf_begin(const ubx_msg_t *m, ubx_mon_rf_iter_t *it);
 
 /** Produce the next RF block. Returns as ubx_nav_sat_next(). */
 int ubx_mon_rf_next(ubx_mon_rf_iter_t *it, ubx_mon_rf_block_t *blk);
+
+/* ------------------------------------------------------ MON-VER (0A 04) -- */
+
+/*
+ * UBX-MON-VER payload: swVersion[30] and hwVersion[10], both NUL-padded ASCII,
+ * followed by zero or more 30-octet extension strings. Poll it with a
+ * zero-length request; the receiver answers with its own lengths, so the number
+ * of extensions is (payload_len - 40) / 30.
+ */
+#define UBX_MON_VER_SW_LEN  30U
+#define UBX_MON_VER_HW_LEN  10U
+#define UBX_MON_VER_EXT_LEN 30U
+#define UBX_MON_VER_MIN_LEN (UBX_MON_VER_SW_LEN + UBX_MON_VER_HW_LEN)
+
+/** Extension strings kept. A ZED-F9T reports around five. */
+#define UBX_MON_VER_MAX_EXT 8U
+
+/**
+ * Decoded UBX-MON-VER.
+ *
+ * Every string is NUL-terminated here even when the wire field used all its
+ * octets, so the fields are safe to pass to string functions. This is the
+ * receiver's own statement of what firmware it is running, and therefore the
+ * post-update verification step (see core/fwupd/ubx_fwupd.h).
+ */
+typedef struct {
+	char    sw_version[UBX_MON_VER_SW_LEN + 1U];
+	char    hw_version[UBX_MON_VER_HW_LEN + 1U];
+	uint8_t n_ext;
+	char    ext[UBX_MON_VER_MAX_EXT][UBX_MON_VER_EXT_LEN + 1U];
+} ubx_mon_ver_t;
+
+/**
+ * Decode UBX-MON-VER.
+ *
+ * @retval 0        Decoded.
+ * @retval -EINVAL  NULL argument.
+ * @retval -ENOMSG  @p m is not UBX-MON-VER.
+ * @retval -EBADMSG Payload shorter than swVersion + hwVersion, or a trailing
+ *                  fragment that is not a whole extension string.
+ */
+int ubx_parse_mon_ver(const ubx_msg_t *m, ubx_mon_ver_t *out);
+
+/**
+ * Find the value of a "KEY=VALUE" extension string, e.g. "FWVER".
+ *
+ * The ZED-F9T reports its firmware version as an extension string of the form
+ * "FWVER=TIM 2.20", which is the field a firmware update has to move. Returns a
+ * pointer into @p v, or NULL when no extension has that key.
+ */
+const char *ubx_mon_ver_ext(const ubx_mon_ver_t *v, const char *key);
 
 /* ------------------------------------------------- ACK-ACK / ACK-NAK (05) -- */
 

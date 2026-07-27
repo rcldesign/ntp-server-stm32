@@ -74,13 +74,24 @@
 /* Helpers                                                                   */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * sts_cfg() is mutex-guarded (sts_app.h) — the MCP engine and ui_local write the
+ * same tree from other threads. Every read below takes the section briefly, and
+ * never with shell output inside it: the console is far slower than the lock is
+ * allowed to be held.
+ */
 static bool credential_provisioned(void)
 {
 	uint8_t blob[MCP_PW_BLOB_LEN];
 	size_t len = 0U;
+	int rc;
 
-	if (cfg_get_bytes(sts_cfg(), (uint16_t)CFG_ID_SEC_ADMIN_PW, blob,
-			  sizeof(blob), &len) != 0) {
+	sts_cfg_lock();
+	rc = cfg_get_bytes(sts_cfg(), (uint16_t)CFG_ID_SEC_ADMIN_PW, blob,
+			   sizeof(blob), &len);
+	sts_cfg_unlock();
+
+	if (rc != 0) {
 		return false;
 	}
 	return len == MCP_PW_BLOB_LEN;
@@ -101,9 +112,11 @@ static bool mutating_allowed(const struct shell *sh)
 		return true; /* first-boot provisioning window, see the banner */
 	}
 
+	sts_cfg_lock();
 	if (cfg_get_bool(sts_cfg(), (uint16_t)CFG_ID_SEC_CONSOLE_RO, &ro) != 0) {
 		ro = true; /* fail closed */
 	}
+	sts_cfg_unlock();
 	if (ro) {
 		shell_error(sh, "console is read-only (sec.console.ro=1); use "
 				"the MCP channel with AUTH to change it");
@@ -629,6 +642,7 @@ static int cmd_cfg_list(const struct shell *sh, size_t argc, char **argv)
 {
 	size_t n = cfg_key_count();
 	uint64_t start = 0U;
+	uint16_t total_staged;
 
 	if ((argc >= 2U) && (parse_u64(argv[1], &start) != 0)) {
 		shell_error(sh, "bad start id");
@@ -639,20 +653,33 @@ static int cmd_cfg_list(const struct shell *sh, size_t argc, char **argv)
 		const cfg_key_t *k = cfg_key_at(i);
 		cfg_val_t v;
 		char text[80];
+		bool staged;
+		int rc;
 
 		if ((k == NULL) || (k->id < start)) {
 			continue;
 		}
-		if (cfg_get_effective(sts_cfg(), k->id, &v) != 0) {
+
+		/* Per key, not around the loop: the output is the slow part. */
+		sts_cfg_lock();
+		rc = cfg_get_effective(sts_cfg(), k->id, &v);
+		staged = cfg_is_staged(sts_cfg(), k->id);
+		sts_cfg_unlock();
+
+		if (rc != 0) {
 			continue;
 		}
 		format_value(k, &v, text, sizeof(text));
 		shell_print(sh, "0x%04x %-20s %-4s %s%s", k->id, k->name,
 			    type_name(k->type), text,
-			    cfg_is_staged(sts_cfg(), k->id) ? "  (staged)" : "");
+			    staged ? "  (staged)" : "");
 	}
-	shell_print(sh, "%zu keys, %u staged, store %s", n,
-		    cfg_staged_count(sts_cfg()),
+
+	sts_cfg_lock();
+	total_staged = cfg_staged_count(sts_cfg());
+	sts_cfg_unlock();
+
+	shell_print(sh, "%zu keys, %u staged, store %s", n, total_staged,
 		    sts_cfg_is_persistent() ? "persistent" : "RAM-only");
 	return 0;
 }
@@ -663,6 +690,8 @@ static int cmd_cfg_get(const struct shell *sh, size_t argc, char **argv)
 	cfg_val_t live;
 	cfg_val_t eff;
 	char text[80];
+	bool staged;
+	int rc;
 
 	if (argc < 2U) {
 		shell_error(sh, "usage: sts cfg get <name|id>");
@@ -674,8 +703,17 @@ static int cmd_cfg_get(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "no such key: %s", argv[1]);
 		return -ENOENT;
 	}
-	if ((cfg_get(sts_cfg(), k->id, &live) != 0) ||
-	    (cfg_get_effective(sts_cfg(), k->id, &eff) != 0)) {
+	/* One section for both reads, so live and effective describe the same
+	 * instant even if another thread commits between commands. */
+	sts_cfg_lock();
+	rc = cfg_get(sts_cfg(), k->id, &live);
+	if (rc == 0) {
+		rc = cfg_get_effective(sts_cfg(), k->id, &eff);
+	}
+	staged = cfg_is_staged(sts_cfg(), k->id);
+	sts_cfg_unlock();
+
+	if (rc != 0) {
 		shell_error(sh, "read failed");
 		return -EIO;
 	}
@@ -683,7 +721,7 @@ static int cmd_cfg_get(const struct shell *sh, size_t argc, char **argv)
 	format_value(k, &live, text, sizeof(text));
 	shell_print(sh, "0x%04x %s (%s) = %s", k->id, k->name,
 		    type_name(k->type), text);
-	if (cfg_is_staged(sts_cfg(), k->id)) {
+	if (staged) {
 		format_value(k, &eff, text, sizeof(text));
 		shell_print(sh, "  staged -> %s", text);
 	}
@@ -699,6 +737,7 @@ static int cmd_cfg_set(const struct shell *sh, size_t argc, char **argv)
 {
 	const cfg_key_t *k;
 	cfg_val_t v;
+	uint16_t staged;
 	int rc;
 
 	if (argc < 3U) {
@@ -787,7 +826,14 @@ static int cmd_cfg_set(const struct shell *sh, size_t argc, char **argv)
 		return -ENOTSUP;
 	}
 
+	/* sts_cfg() is mutex-guarded (sts_app.h): the MCP engine and ui_local
+	 * write the same tree. Stage and read the pending count in one section so
+	 * the number reported is the one this command produced. */
+	sts_cfg_lock();
 	rc = cfg_set(sts_cfg(), k->id, &v);
+	staged = cfg_staged_count(sts_cfg());
+	sts_cfg_unlock();
+
 	if (rc != 0) {
 		shell_error(sh, "staging %s rejected (%d)%s", k->name, rc,
 			    (rc == -ERANGE) ? " - out of range" : "");
@@ -795,7 +841,7 @@ static int cmd_cfg_set(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	shell_print(sh, "staged %s; %u pending. Run `sts cfg commit`.", k->name,
-		    cfg_staged_count(sts_cfg()));
+		    staged);
 	return 0;
 }
 
@@ -846,8 +892,11 @@ static int cmd_cfg_revert(const struct shell *sh, size_t argc, char **argv)
 		return -EACCES;
 	}
 
+	sts_cfg_lock();
 	n = cfg_staged_count(sts_cfg());
 	(void)cfg_revert(sts_cfg());
+	sts_cfg_unlock();
+
 	shell_print(sh, "dropped %u staged value(s)", n);
 	return 0;
 }
@@ -885,8 +934,15 @@ static int cmd_sec_passwd(const struct shell *sh, size_t argc, char **argv)
 		return rc;
 	}
 
+	/* sts_cfg() is mutex-guarded (sts_app.h). Released before the commit
+	 * below, which takes the mutex itself and then dispatches config appliers
+	 * with it dropped — holding it across that would run those appliers, some
+	 * of which touch sockets, inside the config critical section. */
+	sts_cfg_lock();
 	rc = cfg_set_bytes(sts_cfg(), (uint16_t)CFG_ID_SEC_ADMIN_PW, blob,
 			   sizeof(blob));
+	sts_cfg_unlock();
+
 	if (rc != 0) {
 		shell_error(sh, "staging the credential failed (%d)", rc);
 		return rc;
@@ -947,12 +1003,17 @@ static int cmd_fw_info(const struct shell *sh, size_t argc, char **argv)
 
 		sts_selfconfirm_status(&st);
 		shell_warn(sh, "running image is UNCONFIRMED");
-		shell_print(sh, "self-confirm gate at %u s: age%s cfg%s nvs%s "
-				"link%s%s",
-			    st.uptime_s, st.min_age_met ? "+" : "-",
+		shell_print(sh, "self-confirm gate at %u/%u s: age%s cfg%s nvs%s "
+				"link%s lock%s strat1%s%s",
+			    st.uptime_s, st.deadline_s,
+			    st.min_age_met ? "+" : "-",
 			    st.cfg_loaded ? "+" : "-",
 			    st.store_ready ? "+" : "-", st.link_ok ? "+" : "-",
+			    st.clock_locked ? "+" : "-",
+			    st.serving_primary ? "+" : "-",
 			    st.deadline_passed ? " [ABANDONED]" : "");
+		shell_print(sh, "  the supervisor confirms when the gate closes; "
+				"`sts fw confirm` overrides it by hand");
 	}
 	return 0;
 }

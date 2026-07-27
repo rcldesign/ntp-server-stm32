@@ -787,6 +787,65 @@ float disc_retained_error_ns(const disc_ctx_t *ctx)
 	return (ctx != NULL) ? ctx->holdover_retained_ns : 0.0f;
 }
 
+/* ------------------------------------------------------- sawtooth pairing */
+
+bool disc_qerr_matches_pulse(const disc_qerr_match_t *m)
+{
+	uint64_t lead_ms;
+
+	if (m == NULL) {
+		return false;
+	}
+	if (!m->record_valid || !m->qerr_valid || !m->pulse_tow_valid) {
+		return false;
+	}
+	if (m->target_tow_ms != m->pulse_tow_ms) {
+		return false;
+	}
+	/*
+	 * The record has to have arrived before the pulse it describes, and no more
+	 * than a second before it. A record older than that with a matching ToW is
+	 * an alias — a week wrap, or a receiver that restarted onto the same second
+	 * — and must not be trusted just because two numbers agree.
+	 */
+	if (m->record_rx_mono_ms > m->capture_mono_ms) {
+		return false;
+	}
+	lead_ms = m->capture_mono_ms - m->record_rx_mono_ms;
+
+	return lead_ms <= 1000u;
+}
+
+int disc_pulse_tow_ms(uint32_t pvt_itow_ms, uint64_t pvt_rx_mono_ms,
+		      uint64_t cap_mono_ms, uint32_t max_age_ms,
+		      uint32_t *out_tow_ms)
+{
+	uint64_t dt_ms;
+	uint64_t epochs;
+	uint64_t tow;
+
+	if (out_tow_ms == NULL) {
+		return -EINVAL;
+	}
+	if (pvt_itow_ms >= DISC_GPS_WEEK_MS) {
+		return -EINVAL;
+	}
+	if (cap_mono_ms < pvt_rx_mono_ms) {
+		return -EAGAIN;
+	}
+
+	dt_ms = cap_mono_ms - pvt_rx_mono_ms;
+	if (dt_ms > (uint64_t)max_age_ms) {
+		return -EAGAIN;
+	}
+
+	epochs = (dt_ms + 500u) / 1000u;
+	tow = ((uint64_t)pvt_itow_ms + epochs * 1000u) % DISC_GPS_WEEK_MS;
+
+	*out_tow_ms = (uint32_t)tow;
+	return 0;
+}
+
 uint32_t disc_expected_advance_s(uint64_t prev_ms, uint64_t now_ms)
 {
 	uint64_t dt_ms;
@@ -877,6 +936,25 @@ static void fill_out(const disc_ctx_t *ctx, disc_out_t *o, uint32_t flags,
  * the served dispersion grow. The §3.6 estimate is the *additional* error
  * accumulated since the reference was lost.
  */
+/*
+ * The error still outstanding while recovering or parked: the larger of the last
+ * measured phase error and the error retained from the outage.
+ *
+ * |last_e_ns| alone is not a bound. Recovery is deliberately rate-limited
+ * (cfg.recover_ramp_max_ppb), so immediately after a long holdover the *measured*
+ * error can be small — the loop has barely begun to move — while the clock is
+ * still hundreds of microseconds out. Taking the maximum keeps the served
+ * dispersion an upper bound on the actual error, which is what RFC 5905 §11.1
+ * asks for, and keeps the demotion decision honest until the phase really is
+ * back.
+ */
+static float outstanding_error_ns(const disc_ctx_t *ctx)
+{
+	float e = ctx->last_e_valid ? f_abs(ctx->last_e_ns) : 0.0f;
+
+	return (ctx->holdover_retained_ns > e) ? ctx->holdover_retained_ns : e;
+}
+
 static float served_dispersion_ns(const disc_ctx_t *ctx)
 {
 	switch (ctx->state) {
@@ -884,6 +962,9 @@ static float served_dispersion_ns(const disc_ctx_t *ctx)
 		return ctx->cfg.base_disp_ns + ctx->holdover_est_ns;
 	case DISC_STATE_LOCKED:
 		return ctx->cfg.base_disp_ns + ctx->pps_sigma_ns;
+	case DISC_STATE_RECOVERING:
+	case DISC_STATE_PARKED:
+		return ctx->cfg.base_disp_ns + outstanding_error_ns(ctx);
 	default:
 		return ctx->cfg.base_disp_ns + f_abs(ctx->last_e_ns);
 	}
@@ -897,6 +978,15 @@ static uint8_t served_stratum(const disc_ctx_t *ctx)
 		 * (an unpark from ACQUIRING is the reachable case). */
 		return (uint8_t)QUALITY_STRATUM_UNSYNC;
 	}
+	if (!ctx->timebase_traceable) {
+		/*
+		 * A locked loop with no absolute epoch is a very good frequency
+		 * source and a useless time source. Advertising stratum 1 there
+		 * would serve a confidently wrong timestamp, which is strictly
+		 * worse than serving none.
+		 */
+		return (uint8_t)QUALITY_STRATUM_UNSYNC;
+	}
 
 	switch (ctx->state) {
 	case DISC_STATE_LOCKED:
@@ -906,7 +996,8 @@ static uint8_t served_stratum(const disc_ctx_t *ctx)
 			       ? (uint8_t)QUALITY_STRATUM_PRIMARY
 			       : ctx->cfg.holdover_stratum;
 	case DISC_STATE_RECOVERING:
-		return (f_abs(ctx->last_e_ns) <= ctx->cfg.demote_threshold_ns)
+		return (outstanding_error_ns(ctx) <=
+			ctx->cfg.demote_threshold_ns)
 			       ? (uint8_t)QUALITY_STRATUM_PRIMARY
 			       : ctx->cfg.holdover_stratum;
 	default:
@@ -940,7 +1031,16 @@ static void publish(const disc_ctx_t *ctx, const disc_env_t *env,
 	b.root_disp_q16 = quality_ntp_short_from_ns(
 		(int64_t)served_dispersion_ns(ctx));
 	b.holdover_est_err_ns = o->holdover_est_err_ns;
-	b.holdover_elapsed_s = o->holdover ? ctx->holdover_elapsed_s : 0u;
+	/*
+	 * Also published while RECOVERING: the outage is not over until the loop
+	 * is LOCKED again, and zeroing this the instant one pulse arrives hid the
+	 * whole episode from telemetry — an operator saw a healthy clock and no
+	 * record that it had been in holdover for sixteen hours.
+	 */
+	b.holdover_elapsed_s = (o->holdover ||
+				(ctx->state == DISC_STATE_RECOVERING))
+				       ? ctx->holdover_elapsed_s
+				       : 0u;
 	b.holdover_t_demote_s = o->holdover_t_demote_s;
 	b.last_pps_off_ns = clamp_i32(ctx->last_e_ns);
 	b.pps_off_mean_ns = ctx->pps_mean_ns;
@@ -1154,6 +1254,15 @@ static void promote_to_locked(disc_ctx_t *ctx, const disc_env_t *env)
 {
 	ctx->state = DISC_STATE_LOCKED;
 	ctx->ever_locked = true;
+	/*
+	 * The only place the retained error is cleared. Reaching LOCKED means
+	 * lock_dwell_s consecutive seconds inside cfg.lock_phase_ns, i.e. the
+	 * rate-limited pull-in has demonstrably closed the phase — so the outage
+	 * really is over, and only then may the served dispersion forget it.
+	 */
+	ctx->holdover_retained_ns = 0.0f;
+	ctx->holdover_elapsed_base_s = 0u;
+	ctx->holdover_elapsed_s = 0u;
 	/* Reference temperature for the §3.3 feed-forward, captured once so the
 	 * term is zero the moment it starts being applied and the actuator does
 	 * not bump. Only meaningful with a live sensor. */
@@ -1214,6 +1323,7 @@ int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
 	}
 	update_warm(ctx, env);
 	update_vc_check(ctx, env);
+	ctx->timebase_traceable = env->timebase_traceable;
 
 	/* GNSS time unusable: the capture may be present but it is not a UTC
 	 * reference any more (§3.6). */
@@ -1259,10 +1369,23 @@ int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
 		dt = 1.0f;
 	}
 
-	/* Holdover exit: §3.6 requires a rate-limited pull-in, never a step. */
+	/*
+	 * Holdover exit: §3.6 requires a rate-limited pull-in, never a step.
+	 *
+	 * The accumulated estimate is *retained*, not discarded. One accepted PPS
+	 * does not correct the phase — the pull-in is deliberately limited to
+	 * cfg.recover_ramp_max_ppb — so dropping the estimate here is what let a
+	 * single pulse after a 16-hour outage restore stratum 1 with a dispersion
+	 * 80x below the real error. The banked elapsed time is carried over for the
+	 * same reason: the outage is still in progress as far as a client is
+	 * concerned.
+	 */
 	if (ctx->state == DISC_STATE_HOLDOVER) {
 		ctx->state = DISC_STATE_RECOVERING;
-		ctx->holdover_elapsed_s = 0u;
+		if (ctx->holdover_est_ns > ctx->holdover_retained_ns) {
+			ctx->holdover_retained_ns = ctx->holdover_est_ns;
+		}
+		ctx->holdover_elapsed_base_s = ctx->holdover_elapsed_s;
 		ctx->t_demote_s = UINT32_MAX;
 	}
 
@@ -1522,6 +1645,7 @@ int disc_tick_no_pps(disc_ctx_t *ctx, const disc_env_t *env, quality_state_t *qs
 	}
 	update_warm(ctx, env);
 	update_vc_check(ctx, env);
+	ctx->timebase_traceable = env->timebase_traceable;
 
 	ctx->n_miss++;
 	flags = QUALITY_FLAG_NO_PPS;
@@ -1535,6 +1659,25 @@ int disc_park(disc_ctx_t *ctx, uint16_t *out_code)
 {
 	if (ctx == NULL || !ctx->initialised) {
 		return -EINVAL;
+	}
+
+	/*
+	 * Bank whatever error is outstanding before the actuator freezes. A park
+	 * corrects nothing — that is the point of it — so the unpark must not be
+	 * able to present a clean slate. Without this, a refsel mux handoff (which
+	 * parks and unparks unconditionally) laundered a demoted holdover into a
+	 * RECOVERING state with no retained error and an immediate stratum 1.
+	 */
+	if (ctx->state == DISC_STATE_HOLDOVER &&
+	    ctx->holdover_est_ns > ctx->holdover_retained_ns) {
+		ctx->holdover_retained_ns = ctx->holdover_est_ns;
+	}
+	if (ctx->last_e_valid &&
+	    (f_abs(ctx->last_e_ns) > ctx->holdover_retained_ns)) {
+		ctx->holdover_retained_ns = f_abs(ctx->last_e_ns);
+	}
+	if (ctx->state == DISC_STATE_HOLDOVER) {
+		ctx->holdover_elapsed_base_s = ctx->holdover_elapsed_s;
 	}
 
 	ctx->state = DISC_STATE_PARKED;
@@ -1555,7 +1698,9 @@ int disc_unpark(disc_ctx_t *ctx)
 	}
 
 	/* The frequency estimate survived the park, so this is a §3.6 recovery,
-	 * not a cold acquisition: rate-limited pull-in, never a step. */
+	 * not a cold acquisition: rate-limited pull-in, never a step. The retained
+	 * error survives too (banked by disc_park), so the served dispersion still
+	 * bounds an error the park did not correct. */
 	ctx->state = DISC_STATE_RECOVERING;
 	ctx->have_prev = false;
 	ctx->miss_run = 0u;

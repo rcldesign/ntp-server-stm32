@@ -19,14 +19,31 @@
  *                    so a duty of 0 is off and the idle state is dark.
  *
  * ---------------------------------------------------------------------------
- * Why the kick is a level decision, not a heartbeat
+ * The watchdog cadence, and why it has its own thread
  * ---------------------------------------------------------------------------
- * The TPS3430 window means a kick that is too *early* is as fatal as one that
- * is too late (docs/sts1000_external_wdt.md). The cadence is therefore set by
- * this function's own 4 Hz call rate — one kick per call, never more — and the
- * liveness AND-gate only decides whether that kick happens. Feeding the
- * watchdog from each participant directly would produce exactly the burst of
- * early kicks the window exists to catch.
+ * The TPS3430 window is 920-1360 ms between WDI falling edges: a kick that is
+ * too *early* is as fatal as one that is too late (docs/sts1000_external_wdt.md
+ * §4). Anything faster than tWDL(min) = 680 ms is a RUNAWAY fault, which drives
+ * WDO_N for ~200 ms, which drives POE_KILL, which drops the board's PoE port.
+ *
+ * Two consequences shape this file:
+ *
+ *   1. The cadence must be enforced by the *decision*, never by the call rate.
+ *      pwrseq_wdt_service() owns it; this file only drives the pin when that
+ *      says so. A previous version kicked once per housekeeping tick, which at
+ *      HK_PERIOD_MS = 250 ms is a runaway fault on every single tick — the board
+ *      cold-cycled itself a quarter-second after arming, forever.
+ *   2. The kicker must not be the lowest-priority thread on the board. It used
+ *      to run inside housekeeping (priority 14) — which is also a liveness
+ *      *participant* — so a housekeeping tick that merely ran slow could miss
+ *      the late boundary and cause the hardware power cycle the watchdog exists
+ *      to trigger only on a genuine hang. The kicker therefore runs on its own
+ *      thread at a cooperative priority, where no application thread can
+ *      preempt it, and it *consumes* the liveness mask instead of feeding it.
+ *
+ * Liveness stays an AND-gate: silence is the safe answer. If any registered
+ * participant is late the kick is withheld and the watchdog is allowed to do
+ * its job.
  */
 
 #include <errno.h>
@@ -36,9 +53,12 @@
 #include <zephyr/drivers/pwm.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 #include "zephyr/platform/platform.h"
 #include "zephyr/sts_app.h"
+
+#include "pwrseq/pwrseq.h"
 
 LOG_MODULE_REGISTER(sts_super, CONFIG_STS1000_LOG_LEVEL);
 
@@ -55,16 +75,45 @@ static const struct device *const rgb_pwm = DEVICE_DT_GET(RGB_PWM_NODE);
 #define RGB_CH_GREEN 2  /* TIM4_CH2, PD13 */
 #define RGB_CH_BLUE  3  /* TIM4_CH3, PD14 */
 
+/* ---------------------------------------------------------------- kicker -- */
+
+#define WDT_STACK_SIZE 768
+/*
+ * Cooperative priority: unpreemptable by every application thread, so no amount
+ * of network or UI load can delay a kick past the window's late boundary. Above
+ * the system work queue (-1) because that queue runs the NVS fast-save.
+ */
+#define WDT_PRIO       (-8)
+/* Poll rate. Far finer than the ~1.1 s cadence so the decision's own latency is
+ * a rounding error against the 440 ms-wide window. */
+#define WDT_TICK_MS    50
+
+K_THREAD_STACK_DEFINE(wdt_stack, WDT_STACK_SIZE);
+static struct k_thread wdt_tcb;
+
 static struct {
 	bool armed;         /* WDT_EN asserted (stage 9 complete) */
 	bool seq_eligible;  /* pwrseq reached RELAY_ELIGIBLE (stage 9) */
 	bool relay_on;
-	uint32_t kicks;
-	uint32_t kicks_withheld;
 	uint32_t last_stale_mask;
 	fault_rgb_state_t rgb;
 	uint32_t identify_until_ms;
 	bool ready;
+	bool wdt_thread_started;
+
+	/*
+	 * Owned by the kicker thread once it starts; written before that only by
+	 * sts_supervisor_arm()/_kick_start(), both of which run in the
+	 * housekeeping thread on the pwrseq action drain. The kicker only ever
+	 * reads `armed` through pwrseq_wdt_service(), and a 32-bit aligned store
+	 * on Cortex-M33 is atomic, so no lock is needed for a struct one thread
+	 * mutates at arm time and another mutates thereafter.
+	 */
+	pwrseq_wdt_t wdt;
+	/* Snapshot of the kicker's violation counters, so the housekeeping thread
+	 * can log them (the kicker must not, it holds a coop priority). */
+	uint32_t logged_early;
+	uint32_t logged_late;
 } super;
 
 void sts_supervisor_set_seq_eligible(bool eligible)
@@ -169,8 +218,91 @@ static void wdt_kick_once(void)
 	(void)gpio_pin_set_dt(&wdt_kick, 1);
 	k_busy_wait(CONFIG_STS1000_WDT_KICK_WIDTH_US);
 	(void)gpio_pin_set_dt(&wdt_kick, 0);
+}
 
-	super.kicks++;
+/*
+ * The liveness AND-gate, mapped onto pwrseq's three-bit model.
+ *
+ * The platform's registry is the authority on who must be alive: every area
+ * registers its own participants by name, so the count is not fixed at three.
+ * A single late participant therefore clears the whole mask — which is the
+ * AND-gate the window exists to enforce — and pwrseq_wdt_service() withholds.
+ */
+static uint32_t wdt_liveness(uint32_t now_ms)
+{
+	return (sts_liveness_stale_mask(now_ms) == 0U) ? PWRSEQ_LIVE_ALL : 0U;
+}
+
+static void wdt_entry(void *p1, void *p2, void *p3)
+{
+	ARG_UNUSED(p1);
+	ARG_UNUSED(p2);
+	ARG_UNUSED(p3);
+
+	for (;;) {
+		pwrseq_wdt_tick_t t;
+		uint32_t now;
+
+		k_msleep(WDT_TICK_MS);
+
+		if (!super.armed) {
+			continue;
+		}
+
+		now = k_uptime_get_32();
+		if (pwrseq_wdt_service(&super.wdt, wdt_liveness(now), now, &t) != 0) {
+			continue;
+		}
+		if (t.kick) {
+			wdt_kick_once();
+		}
+	}
+}
+
+int sts_supervisor_wdt_start(void)
+{
+	k_tid_t tid;
+
+	if (!super.ready) {
+		return -ENODEV;
+	}
+	if (super.wdt_thread_started) {
+		return -EALREADY;
+	}
+
+	/* Configured now, armed later: the thread spins harmlessly until stage 9
+	 * asserts WDT_EN, and the cadence is validated here rather than at the
+	 * first kick. */
+	if (pwrseq_wdt_init(&super.wdt, PWRSEQ_WDT_KICK_PERIOD_MS) != 0) {
+		LOG_ERR("WDT cadence %u ms is outside the TPS3430 window %u-%u ms",
+			PWRSEQ_WDT_KICK_PERIOD_MS, PWRSEQ_WDT_WINDOW_MIN_MS,
+			PWRSEQ_WDT_WINDOW_MAX_MS);
+		return -EINVAL;
+	}
+
+	tid = k_thread_create(&wdt_tcb, wdt_stack, WDT_STACK_SIZE, wdt_entry, NULL,
+			      NULL, NULL, WDT_PRIO, 0, K_NO_WAIT);
+	k_thread_name_set(tid, "wdt_kick");
+
+	super.wdt_thread_started = true;
+
+	LOG_INF("WDT kicker up: %u ms cadence, %u ms poll, priority %d",
+		PWRSEQ_WDT_KICK_PERIOD_MS, WDT_TICK_MS, WDT_PRIO);
+
+	return 0;
+}
+
+void sts_supervisor_kick_start(uint32_t now_ms)
+{
+	/*
+	 * PWRSEQ_ACT_WDT_KICK_START. sts_supervisor_arm() already seeded the
+	 * cadence from its own pre-arm kick; this only re-seeds if the two actions
+	 * did not land in the same drain, and re-seeding can only ever make the
+	 * next kick later, never earlier.
+	 */
+	if (super.armed && !pwrseq_wdt_is_armed(&super.wdt)) {
+		(void)pwrseq_wdt_arm(&super.wdt, now_ms);
+	}
 }
 
 int sts_supervisor_arm(void)
@@ -183,10 +315,19 @@ int sts_supervisor_arm(void)
 	if (super.armed) {
 		return 0;
 	}
+	if (!super.wdt_thread_started) {
+		LOG_ERR("refusing to arm WDT_EN with no kicker thread");
+		return -ENODEV;
+	}
 
-	/* Kick once immediately before arming so the first window opens with
-	 * the watchdog already fed. */
+	/*
+	 * Kick once immediately before arming so the first window opens with the
+	 * watchdog already fed, and seed the cadence from that same instant — so
+	 * the kicker's first serviced kick lands one full period later rather than
+	 * on its next 50 ms poll, which would be a runaway fault.
+	 */
 	wdt_kick_once();
+	(void)pwrseq_wdt_arm(&super.wdt, k_uptime_get_32());
 
 	rc = gpio_pin_set_dt(&wdt_en, 1);
 	if (rc != 0) {
@@ -219,32 +360,43 @@ void sts_supervisor_step(uint32_t now_ms)
 
 	stale = sts_liveness_stale_mask(now_ms);
 
-	/* No kick until pwrseq has armed the watchdog (WDT_EN high). Before
-	 * that the TPS3430 is not watching, and kicking into a closed window
-	 * once armed is what a premature kick would risk. */
-	if (!super.armed) {
-		super.last_stale_mask = stale;
-		goto relay_rgb;
-	}
-
-	if (stale == 0U) {
-		wdt_kick_once();
-	} else {
-		super.kicks_withheld++;
-
-		if (stale != super.last_stale_mask) {
-			for (uint32_t i = 0; i < sts_liveness_count(); i++) {
-				if ((stale & BIT(i)) != 0U) {
-					sts_log(LOGR_SUB_SYS, LOGR_CRIT,
-						"liveness lost: %s — WDT kick withheld",
-						sts_liveness_name(i));
-				}
+	/*
+	 * The kick itself belongs to the dedicated thread; this only annunciates.
+	 * Logging here rather than there is deliberate: the kicker holds a
+	 * cooperative priority and sts_log() is not something to run from one.
+	 */
+	if (super.armed && (stale != 0U) && (stale != super.last_stale_mask)) {
+		for (uint32_t i = 0; i < sts_liveness_count(); i++) {
+			if ((stale & BIT(i)) != 0U) {
+				sts_log(LOGR_SUB_SYS, LOGR_CRIT,
+					"liveness lost: %s — WDT kick withheld",
+					sts_liveness_name(i));
 			}
 		}
 	}
 	super.last_stale_mask = stale;
 
-relay_rgb:
+	/*
+	 * A kick observed outside 920-1360 ms means the board is being cold-cycled
+	 * by its own supervisor. That must be impossible by construction, so if it
+	 * ever happens say so at CRIT with the measured interval rather than
+	 * leaving an unexplained reboot loop for someone to reverse-engineer.
+	 */
+	if (super.wdt.early != super.logged_early) {
+		super.logged_early = super.wdt.early;
+		sts_log(LOGR_SUB_SYS, LOGR_CRIT,
+			"WDT kick EARLY (below %u ms): %u total — TPS3430 runaway "
+			"boundary, expect POE_KILL",
+			PWRSEQ_WDT_WINDOW_MIN_MS, super.wdt.early);
+	}
+	if (super.wdt.late != super.logged_late) {
+		super.logged_late = super.wdt.late;
+		sts_log(LOGR_SUB_SYS, LOGR_CRIT,
+			"WDT kick LATE (above %u ms): %u total — TPS3430 stall "
+			"boundary, expect POE_KILL",
+			PWRSEQ_WDT_WINDOW_MAX_MS, super.wdt.late);
+	}
+
 	(void)sts_quality_snapshot(&q);
 
 	sts_fault_lock();
@@ -329,10 +481,10 @@ int sts_supervisor_init(void)
 void sts_supervisor_counters(uint32_t *kicks, uint32_t *withheld, bool *armed)
 {
 	if (kicks != NULL) {
-		*kicks = super.kicks;
+		*kicks = super.wdt.kicks;
 	}
 	if (withheld != NULL) {
-		*withheld = super.kicks_withheld;
+		*withheld = super.wdt.withheld;
 	}
 	if (armed != NULL) {
 		*armed = super.armed;

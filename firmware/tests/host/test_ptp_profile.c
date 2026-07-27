@@ -188,6 +188,13 @@ static void test_default_clock_class_ladder_is_unchanged(void)
 		(void)memset(&q, 0, sizeof(q));
 		q.sync_state = cases[i].s;
 		q.time_source = cases[i].time_source;
+		/*
+		 * This table is about the *degradation* ladder, which only
+		 * applies to a clock that has been disciplined at some point.
+		 * The never-locked case has its own class (248) and its own
+		 * test — see test_never_locked_advertises_default_class().
+		 */
+		q.ever_locked = true;
 
 		ptp_cfg_defaults(&cfg);
 		cfg.degradation = PTP_DEGRADE_ALT_A;
@@ -1092,9 +1099,10 @@ static void test_c37238_find_reports_a_mangled_own_tlv(void)
  * ===================================================================== */
 
 /* Encode an Announce from a synthetic peer. Returns the length. */
-static size_t peer_announce(uint8_t *buf, size_t cap, const uint8_t *mac,
-			    uint8_t domain, uint8_t clock_class, uint8_t priority1,
-			    int8_t log_interval, uint16_t seq)
+static size_t peer_announce_q(uint8_t *buf, size_t cap, const uint8_t *mac,
+			      uint8_t domain, uint8_t clock_class,
+			      uint8_t clock_accuracy, uint16_t oslv,
+			      uint8_t priority1, int8_t log_interval, uint16_t seq)
 {
 	ptp_hdr_t h;
 	ptp_announce_t a;
@@ -1109,8 +1117,8 @@ static size_t peer_announce(uint8_t *buf, size_t cap, const uint8_t *mac,
 	a.gm_priority1 = priority1;
 	a.gm_priority2 = 128U;
 	a.gm_quality.clock_class = clock_class;
-	a.gm_quality.clock_accuracy = 0x21U; /* 100 ns */
-	a.gm_quality.offset_scaled_log_variance = PTP_OSLV_DEFAULT_LOCKED;
+	a.gm_quality.clock_accuracy = clock_accuracy;
+	a.gm_quality.offset_scaled_log_variance = oslv;
 	a.gm_identity = src.clock_id;
 	a.steps_removed = 0U;
 	a.time_source = (uint8_t)PTP_TIME_SRC_GNSS;
@@ -1128,6 +1136,16 @@ static size_t peer_announce(uint8_t *buf, size_t cap, const uint8_t *mac,
 
 	TEST_ASSERT_EQUAL_INT(0, ptp_announce_encode(buf, cap, &h, &a, &len));
 	return len;
+}
+
+/* A well-run peer: 100 ns accuracy, the locked variance figure. */
+static size_t peer_announce(uint8_t *buf, size_t cap, const uint8_t *mac,
+			    uint8_t domain, uint8_t clock_class, uint8_t priority1,
+			    int8_t log_interval, uint16_t seq)
+{
+	return peer_announce_q(buf, cap, mac, domain, clock_class, 0x21U,
+			       PTP_OSLV_DEFAULT_LOCKED, priority1, log_interval,
+			       seq);
 }
 
 /*
@@ -1353,7 +1371,8 @@ static void test_ever_locked_latches_and_never_clears(void)
  * to an honestly-degraded class-187 peer and to a default-class-248 peer whose
  * identity is lower — the two matchups where class 52 used to win.
  */
-static void run_never_locked_matchup(uint8_t peer_class, const uint8_t *peer_mac,
+static void run_never_locked_matchup(uint8_t peer_class, uint8_t peer_accuracy,
+				     uint16_t peer_oslv, const uint8_t *peer_mac,
 				     bool ever_locked, ptp_port_state_t expect)
 {
 	ptp_port_ctx_t c;
@@ -1379,8 +1398,9 @@ static void run_never_locked_matchup(uint8_t peer_class, const uint8_t *peer_mac
 	TEST_ASSERT_EQUAL_INT(0, ptp_port_enable(&c, t));
 
 	for (i = 0U; i < 3U; i++) {
-		len = peer_announce(buf, sizeof(buf), peer_mac, cfg.domain,
-				    peer_class, 128U, 1, (uint16_t)i);
+		len = peer_announce_q(buf, sizeof(buf), peer_mac, cfg.domain,
+				      peer_class, peer_accuracy, peer_oslv, 128U,
+				      1, (uint16_t)i);
 		TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&c, buf, len, 0U, t));
 		t += 500U;
 	}
@@ -1394,18 +1414,44 @@ static void test_never_locked_loses_the_election(void)
 	 * any tiebreak: only clockClass can decide these. */
 	static const uint8_t hi_mac[6] = { 0x0A, 0x11, 0x22, 0x33, 0x44, 0x55 };
 
-	/* Never locked (248) vs an honestly-degraded peer (187): the peer wins. */
-	run_never_locked_matchup(187U, hi_mac, false, PTP_PS_PASSIVE);
-	/* Never locked (248) vs a default-class peer (248): tie on class, and the
-	 * peer's identity is higher, so we keep it — but only by the tiebreak. */
-	run_never_locked_matchup(248U, hi_mac, false, PTP_PS_MASTER);
+	/*
+	 * Never locked (248) vs a peer that honestly degraded to 187: the peer
+	 * wins on clockClass alone. Before the gate we advertised 52 and beat it.
+	 */
+	run_never_locked_matchup(187U, 0x21U, PTP_OSLV_DEFAULT_LOCKED, hi_mac,
+				 false, PTP_PS_PASSIVE);
 
 	/*
-	 * Reversion check on both: with the latch set we advertise 52 and win
-	 * outright, which is exactly the wrong answer the gate removes.
+	 * Never locked (248) vs a peer that is *also* default-class and equally
+	 * uninformative (accuracy and variance both "unknown", as a genuine
+	 * free-running clock advertises). Class, accuracy, variance and priority2
+	 * all tie, so the decision reaches the grandmasterIdentity rung, and
+	 * self_mac's 0x02 beats hi_mac's 0x0A: we keep the role. That is the
+	 * right outcome — neither clock has anything to offer, so the tiebreak
+	 * decides — and it proves the gate did not simply make us lose every
+	 * election.
 	 */
-	run_never_locked_matchup(187U, hi_mac, true, PTP_PS_MASTER);
-	run_never_locked_matchup(248U, hi_mac, true, PTP_PS_MASTER);
+	run_never_locked_matchup(248U, PTP_CLOCK_ACCURACY_UNKNOWN,
+				 PTP_OSLV_UNKNOWN, hi_mac, false, PTP_PS_MASTER);
+
+	/*
+	 * A default-class peer that *can* state its accuracy outranks us on the
+	 * accuracy rung while we advertise "unknown". Also correct, and worth
+	 * pinning: it is the case that made the previous version of this test
+	 * wrong.
+	 */
+	run_never_locked_matchup(248U, 0x21U, PTP_OSLV_DEFAULT_LOCKED, hi_mac,
+				 false, PTP_PS_PASSIVE);
+
+	/*
+	 * Reversion check: with the latch set we advertise 52 and win both of the
+	 * matchups above outright on clockClass — exactly the wrong answer the
+	 * gate removes.
+	 */
+	run_never_locked_matchup(187U, 0x21U, PTP_OSLV_DEFAULT_LOCKED, hi_mac,
+				 true, PTP_PS_MASTER);
+	run_never_locked_matchup(248U, 0x21U, PTP_OSLV_DEFAULT_LOCKED, hi_mac,
+				 true, PTP_PS_MASTER);
 }
 
 static void test_never_yield_modes(void)

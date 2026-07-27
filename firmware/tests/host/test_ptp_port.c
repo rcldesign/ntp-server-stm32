@@ -458,6 +458,13 @@ static void test_clock_class_mapping(void)
 	ptp_cfg_defaults(&cfg);
 	memset(&q, 0, sizeof(q));
 
+	/*
+	 * The degradation ladder describes a clock that HAS been disciplined.
+	 * A never-locked clock advertises 248 instead (the never-locked gate in
+	 * ptp_port.c); that case is asserted at the end of this function.
+	 */
+	q.ever_locked = true;
+
 	q.sync_state = PTP_SYNC_LOCKED;
 	TEST_ASSERT_EQUAL_INT(0, ptp_clock_quality_from_view(&cfg, &q, &out));
 	TEST_ASSERT_EQUAL_HEX8(6U, out.clock_class);
@@ -484,6 +491,20 @@ static void test_clock_class_mapping(void)
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ptp_clock_quality_from_view(NULL, &q, &out));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ptp_clock_quality_from_view(&cfg, NULL, &out));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ptp_clock_quality_from_view(&cfg, &q, NULL));
+	/*
+	 * And the never-locked gate: identical view, ever_locked clear, and the
+	 * answer becomes 248 under both degradation alternatives. Only free-run
+	 * is gated — holdover implies a prior lock, so it keeps its own class.
+	 */
+	q.ever_locked = false;
+	q.sync_state = PTP_SYNC_FREERUN;
+	cfg.degradation = PTP_DEGRADE_ALT_A;
+	TEST_ASSERT_EQUAL_INT(0, ptp_clock_quality_from_view(&cfg, &q, &out));
+	TEST_ASSERT_EQUAL_HEX8(248U, out.clock_class);
+	cfg.degradation = PTP_DEGRADE_ALT_B;
+	TEST_ASSERT_EQUAL_INT(0, ptp_clock_quality_from_view(&cfg, &q, &out));
+	TEST_ASSERT_EQUAL_HEX8(248U, out.clock_class);
+
 }
 
 static void test_clock_accuracy_ladder(void)
@@ -923,8 +944,13 @@ static void test_init_and_identity(void)
 	TEST_ASSERT_EQUAL_HEX16(1U, d0.sender.port_number);
 	TEST_ASSERT_EQUAL_HEX16(0U, d0.steps_removed);
 	TEST_ASSERT_EQUAL_HEX8(128U, d0.priority1);
-	/* Nothing published yet: free-run, so degradation class A. */
-	TEST_ASSERT_EQUAL_HEX8(52U, d0.quality.clock_class);
+	/*
+	 * Nothing published yet, so this clock has never been disciplined and
+	 * advertises IEEE 1588-2019 Table 4's "not traceable" default class. It
+	 * must NOT be a degradation class: 52 would outrank an honest peer at
+	 * 187 and take the segment on the strength of an uncalibrated OCXO.
+	 */
+	TEST_ASSERT_EQUAL_HEX8(248U, d0.quality.clock_class);
 
 	/* D0's sender and receiver are the same port, per §9.3.4. */
 	TEST_ASSERT_EQUAL_INT(0, ptp_port_id_cmp(&d0.sender, &d0.receiver));

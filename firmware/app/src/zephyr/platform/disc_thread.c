@@ -52,6 +52,7 @@
 
 #include "disc/disc.h"
 #include "gnssmgr/gnssmgr.h"
+#include "ubx/ubx.h"
 #include "quality/quality.h"
 #include "refsel/refsel.h"
 #include "storage/sts_store.h"
@@ -89,6 +90,16 @@ static struct {
 	uint32_t expected_primary;
 	uint32_t expected_secondary;
 	bool have_expected;
+	/*
+	 * Monotonic time the prediction is currently anchored at, pinned to the
+	 * reference's one-second grid. Kept so the accumulator can advance by the
+	 * number of seconds that actually elapsed rather than by one per loop
+	 * iteration: a second with no PPS costs DISC_PPS_TIMEOUT_MS (1200 ms) of
+	 * real time, so advancing by exactly 1 s drifted 200 ms per missed second
+	 * and after three misses forced a re-anchor that discarded the first
+	 * returning sample — the one the loop most needed.
+	 */
+	uint64_t expected_ms;
 	uint32_t counts_per_second;
 	float ns_per_count;
 
@@ -103,6 +114,14 @@ static struct {
 } dt_state;
 
 static atomic_t disc_park_req = ATOMIC_INIT(0);
+static atomic_t disc_unpark_req = ATOMIC_INIT(0);
+
+/* qErr pairing bookkeeping, owned by this thread. */
+static struct {
+	uint32_t applied;      /* sawtooth corrections applied */
+	uint32_t unpaired;     /* captures with no qErr that belonged to them */
+	uint32_t no_record;    /* captures with no TIM-TP at all */
+} qerr_stats;
 
 /* ---- Vc read-back -------------------------------------------------------- */
 
@@ -202,14 +221,45 @@ void sts_disc_handoff_unpark(void)
 	(void)disc_unpark(&disc);
 }
 
+void sts_discipline_unpark_request(void)
+{
+	/* Any thread. The discipline loop owns the context (ARCHITECTURE.md
+	 * §10.2/§10.10), so the PFI recovery path in housekeeping asks rather than
+	 * calls disc_unpark() itself. */
+	atomic_set(&disc_unpark_req, 1);
+}
+
 /* ---- environment -------------------------------------------------------- */
 
-static void disc_fill_env(disc_env_t *env, uint64_t mono_ms)
+/* UBX fix type -> the quality block's coarser enumeration (§3.8). */
+static uint8_t gnss_fix_to_quality(const sts_gnss_snap_t *g)
+{
+	if (!g->have_status) {
+		return (uint8_t)QUALITY_GNSS_NO_FIX;
+	}
+	if (g->time_locked) {
+		return (uint8_t)QUALITY_GNSS_TIME_ONLY;
+	}
+	switch (g->fix_type) {
+	case UBX_FIX_3D:
+	case UBX_FIX_GNSS_DR:
+		return (uint8_t)QUALITY_GNSS_3D;
+	case UBX_FIX_2D:
+		return (uint8_t)QUALITY_GNSS_2D;
+	case UBX_FIX_TIME_ONLY:
+		return (uint8_t)QUALITY_GNSS_TIME_ONLY;
+	default:
+		return (uint8_t)QUALITY_GNSS_NO_FIX;
+	}
+}
+
+static void disc_fill_env(disc_env_t *env, sts_gnss_snap_t *g, uint64_t mono_ms)
 {
 	sts_hk_snapshot_t hk;
 	int32_t vc_mv = 0;
 
 	memset(env, 0, sizeof(*env));
+	memset(g, 0, sizeof(*g));
 	env->mono_ms = mono_ms;
 
 	if (sts_hk_read(&hk) == 0) {
@@ -224,14 +274,6 @@ static void disc_fill_env(disc_env_t *env, uint64_t mono_ms)
 	env->vc_sense_valid = disc_read_vc_mv(&vc_mv);
 	env->vc_sense_mv = vc_mv;
 
-	/*
-	 * Ancillary GNSS/reference fields. gnssmgr lives in the net-adjacent
-	 * gnss thread and is not wired yet; until it is, the block stays at
-	 * its zeroed "nothing known" state, which core/disc reads as no fix
-	 * and no UTC — the correct pre-service answer.
-	 * TODO(wave-3b): populate from gnssmgr_status() once the gnss thread
-	 * publishes it, and set active_ref from refsel_state().
-	 */
 	switch (refsel_state(&refsel)) {
 	case REFSEL_RB_ACTIVE:
 		env->anc.active_ref = QUALITY_REF_RB;
@@ -244,6 +286,37 @@ static void disc_fill_env(disc_env_t *env, uint64_t mono_ms)
 		env->anc.active_ref = QUALITY_REF_OCXO;
 		break;
 	}
+
+	/*
+	 * The GNSS half of the environment. This is the input the loop cannot run
+	 * without: disc_tick_pps() takes the !gnss_time_locked branch and processes
+	 * *no* PPS sample at all while it is false, so leaving it zeroed left the
+	 * whole timing engine inert at ACQUIRING/stratum 16 with the DAC parked at
+	 * centre, however good the pulses were.
+	 */
+	if (sts_gnss_snapshot(g) == 0) {
+		env->gnss_time_locked = g->time_locked;
+		env->anc.gnss_fix = gnss_fix_to_quality(g);
+		env->anc.gnss_sv_used = g->sv_used;
+		env->anc.gnss_sv_visible = g->sv_visible;
+		env->anc.gnss_tacc_ns = g->tacc_ns;
+		env->anc.utc_valid = g->utc_valid;
+		if (g->leap_valid) {
+			env->anc.leap_current_s = g->leap_current_s;
+			env->anc.leap_pending = g->leap_pending;
+			env->anc.leap_at_tai_s = g->leap_at_tai_s;
+		}
+	}
+
+	/*
+	 * Traceability is a separate question from lock. A disciplined oscillator
+	 * tracking PPS is a superb frequency source and says nothing about which
+	 * second it is; the served timescale only has an absolute epoch once the
+	 * net area has set the PTP hardware clock from GNSS and its servo reports
+	 * synchronised. Until then core/disc serves stratum UNSYNC rather than a
+	 * confidently wrong timestamp.
+	 */
+	env->timebase_traceable = sts_time_is_traceable();
 }
 
 /* ---- reference selection ------------------------------------------------ */
@@ -269,12 +342,14 @@ static void disc_step_refsel(uint64_t mono_ms, bool switch_failed)
 	in.switch_failed = switch_failed;
 
 	/*
-	 * RB_LOCK arrives through the housekeeping snapshot rather than being
-	 * read here: PB13 is a polled pin (interface ref §9) and the polarity
-	 * inversion the opto introduces is a config bit, both of which belong
-	 * with the rest of the Rb state.
-	 * TODO(wave-3b): in.rb_lock = hk.rb_lock once pwrseq publishes it.
+	 * RB_LOCK comes from the pwrseq area rather than being read here: PB13 is a
+	 * polled pin (interface ref §9) and the polarity inversion the opto
+	 * introduces is a firmware bit, both of which belong with the rest of the Rb
+	 * state and with the single owner of that pin. Hard-coded false, refsel
+	 * could never leave the OCXO — which also made the refsel unpark
+	 * unreachable and so left a PFI park permanent.
 	 */
+	in.rb_lock = sts_pwrseq_rb_lock();
 
 	if (refsel_step(&refsel, &in, &out) != 0) {
 		return;
@@ -312,7 +387,17 @@ static void disc_step_refsel(uint64_t mono_ms, bool switch_failed)
 
 /* ---- the tick ----------------------------------------------------------- */
 
-static bool disc_build_pps(const sts_pps_capture_t *cap, disc_pps_t *pps)
+/* Adopt this capture as the prediction's anchor, on the current second grid. */
+static void disc_anchor(const sts_pps_capture_t *cap, uint64_t mono_ms)
+{
+	dt_state.expected_primary = cap->tim2_cnt;
+	dt_state.expected_secondary = cap->tim3_cnt;
+	dt_state.expected_ms = mono_ms;
+	dt_state.have_expected = true;
+}
+
+static bool disc_build_pps(const sts_pps_capture_t *cap, disc_pps_t *pps,
+			   uint64_t mono_ms)
 {
 	uint32_t d_primary;
 	uint32_t half_second = dt_state.counts_per_second / 2U;
@@ -323,9 +408,7 @@ static bool disc_build_pps(const sts_pps_capture_t *cap, disc_pps_t *pps)
 		/* First capture of this run: adopt it as the anchor. There is
 		 * no phase error to report against a prediction that does not
 		 * exist yet. */
-		dt_state.expected_primary = cap->tim2_cnt;
-		dt_state.expected_secondary = cap->tim3_cnt;
-		dt_state.have_expected = true;
+		disc_anchor(cap, mono_ms);
 		return false;
 	}
 
@@ -335,8 +418,7 @@ static bool disc_build_pps(const sts_pps_capture_t *cap, disc_pps_t *pps)
 	 * and the difference is not a phase error.
 	 */
 	if (cap->tim2_overcapture) {
-		dt_state.expected_primary = cap->tim2_cnt;
-		dt_state.expected_secondary = cap->tim3_cnt;
+		disc_anchor(cap, mono_ms);
 		dt_state.reanchors++;
 		return false;
 	}
@@ -345,8 +427,7 @@ static bool disc_build_pps(const sts_pps_capture_t *cap, disc_pps_t *pps)
 	if (d_primary > half_second && d_primary < (0U - half_second)) {
 		/* More than half a second either way: the timebase and the
 		 * reference are no longer describing the same second. */
-		dt_state.expected_primary = cap->tim2_cnt;
-		dt_state.expected_secondary = cap->tim3_cnt;
+		disc_anchor(cap, mono_ms);
 		dt_state.reanchors++;
 		sts_log(LOGR_SUB_TIMING, LOGR_WARN,
 			"PPS re-anchored (offset beyond half a second)");
@@ -368,15 +449,29 @@ static bool disc_build_pps(const sts_pps_capture_t *cap, disc_pps_t *pps)
 	return true;
 }
 
-/** Advance the prediction by one second, whatever happened this tick. */
-static void disc_advance_expected(void)
+/**
+ * Advance the prediction by the reference seconds that actually elapsed.
+ *
+ * Not "by one second per iteration": a second with no PPS costs the loop its
+ * whole DISC_PPS_TIMEOUT_MS, so one second per iteration under-counts by 200 ms
+ * every time, and after three missed seconds the accumulator is more than half a
+ * second out and forces a re-anchor — throwing away the first sample the
+ * returning reference delivers. disc_expected_advance_s() rounds the measured
+ * elapsed time to whole seconds, which keeps the prediction on the reference's
+ * grid instead of feeding the loop's own scheduling jitter into the phase error.
+ */
+static void disc_advance_expected(uint64_t mono_ms)
 {
+	uint32_t secs;
+
 	if (!dt_state.have_expected) {
 		return;
 	}
 
-	dt_state.expected_primary += dt_state.counts_per_second;
-	dt_state.expected_secondary += dt_state.counts_per_second;
+	secs = disc_expected_advance_s(dt_state.expected_ms, mono_ms);
+	dt_state.expected_primary += secs * dt_state.counts_per_second;
+	dt_state.expected_secondary += secs * dt_state.counts_per_second;
+	dt_state.expected_ms += (uint64_t)secs * 1000u;
 }
 
 static void disc_handle_park(void)

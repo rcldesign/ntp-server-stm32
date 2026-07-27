@@ -444,7 +444,14 @@ static bool replay_ok(ptp_icv_ctx_t *c, ptp_icv_peer_t *p, uint32_t seq)
 	if (diff == 0U) {
 		return false; /* the highest itself, replayed */
 	}
-	if (diff > window) {
+	/*
+	 * The window is `window` sequence numbers wide *including* the highest,
+	 * so the deepest arrival it can still vouch for is highest - (window-1).
+	 * That makes window == 1 mean "strictly increasing only", which is what a
+	 * one-wide window has to mean: the only value it tracks is the highest,
+	 * and the highest has by definition already been seen.
+	 */
+	if (diff >= window) {
 		return false; /* below the window: unverifiable, so refused */
 	}
 	if ((p->bitmap & ((uint32_t)1U << (diff - 1U))) != 0U) {

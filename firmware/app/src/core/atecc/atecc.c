@@ -436,10 +436,15 @@ int atecc_sleep(atecc_ctx_t *c)
  * Read one response, length-first.
  *
  * The part's output buffer has a read pointer that a read advances and only the
- * Reset word address rewinds. So: read the single count octet, rewind, then
- * read exactly that many. The alternative — one over-long read padded with
- * 0xFF — asks the transport to tolerate an early NAK, which a Zephyr I²C
- * controller reports as a failed transfer rather than as padding.
+ * Reset word address rewinds. So: rewind, read the single count octet, rewind
+ * again, then read exactly that many. The alternative — one over-long read
+ * padded with 0xFF — asks the transport to tolerate an early NAK, which a
+ * Zephyr I²C controller reports as a failed transfer rather than as padding.
+ *
+ * The *leading* Reset is what makes a retry work. Without it, a second attempt
+ * would start reading from wherever the failed attempt left the pointer, so a
+ * response that failed its CRC check could never be re-read — the retry budget
+ * would be spent on transport errors instead of on the part.
  *
  * @retval >0        Octets placed in @p rsp (its declared count).
  * @retval -EIO      A transport call failed.
@@ -450,6 +455,9 @@ static int read_rsp(atecc_ctx_t *c, uint8_t *rsp)
 {
 	int cnt;
 
+	if (token(c, ATECC_WA_RESET) != 0) {
+		return -EIO;
+	}
 	if (c->bus.read(c->bus.ctx, c->addr, rsp, 1U) != 0) {
 		c->stats.bus_errors++;
 		return -EIO;
@@ -942,9 +950,10 @@ int atecc_selftest(atecc_ctx_t *c, uint8_t mode, uint8_t *out_result)
 		}
 		result = view.status;
 	} else {
-		if (view.payload_len < 1U) {
-			return -EPROTO;
-		}
+		/* A non-status response always carries at least two payload
+		 * octets (count 4 *is* the status form), so payload[0] is
+		 * always present here. Some parts answer with a two-octet
+		 * result word; the first octet carries the bitmap. */
 		result = view.payload[0];
 	}
 

@@ -419,6 +419,10 @@ typedef struct {
 	 * holdover and recovery. Never cleared. */
 	bool ever_locked;
 
+	/* Latest disc_env_t::timebase_traceable. Held here because the stratum
+	 * policy is a function of the context alone. */
+	bool timebase_traceable;
+
 	/* Accepted samples since ACQUIRING was last entered. */
 	uint32_t acq_ticks;
 
@@ -564,6 +568,63 @@ disc_state_t disc_state(const disc_ctx_t *ctx);
  * served dispersion bounds this — rather than inferring it from the state name.
  */
 float disc_retained_error_ns(const disc_ctx_t *ctx);
+
+/* ------------------------------------------------------- sawtooth pairing */
+
+/**
+ * Evidence for deciding whether a UBX-TIM-TP record describes the PPS edge that
+ * was just captured.
+ *
+ * Pairing is the whole difficulty of the sawtooth correction. The receiver emits
+ * TIM-TP in the second *before* the pulse it describes, so "the newest record"
+ * is one second early; and TIM-TP reports its ToW on the pulse's own timebase,
+ * which for this board's UTC-aligned TIMEPULSE differs from NAV-PVT's GPS iTOW by
+ * the leap-second offset. Applying a qErr to the wrong second is worse than
+ * applying none — it injects the sawtooth instead of removing it — so the match
+ * has to be positive, not assumed.
+ */
+typedef struct {
+	bool record_valid;        /**< a TIM-TP has been decoded at all */
+	bool qerr_valid;          /**< receiver flagged it good AND the ToW is on
+				    *  GPS; false when the leap offset needed for
+				    *  the UTC->GPS conversion is still unknown */
+	int32_t qerr_ps;
+	uint32_t target_tow_ms;   /**< GPS ToW of the pulse the record describes */
+	uint32_t pulse_tow_ms;    /**< GPS ToW the caller believes it captured */
+	bool pulse_tow_valid;
+	uint64_t record_rx_mono_ms; /**< when the record was decoded */
+	uint64_t capture_mono_ms;   /**< when the edge was captured */
+} disc_qerr_match_t;
+
+/** Milliseconds in a GPS week; the ToW wrap modulus. */
+#define DISC_GPS_WEEK_MS 604800000u
+
+/**
+ * Does @p m describe the captured pulse?
+ *
+ * Requires a valid record with a usable qErr, a known pulse ToW, an exact ToW
+ * match, and the record to have arrived before the capture and within one second
+ * of it — the last check catches a stale record whose ToW happens to alias after
+ * a week wrap or a receiver restart.
+ */
+bool disc_qerr_matches_pulse(const disc_qerr_match_t *m);
+
+/**
+ * GPS ToW of the pulse captured at @p cap_mono_ms, derived from the last NAV-PVT.
+ *
+ * NAV-PVT for epoch N is transmitted just after epoch N, so the elapsed time
+ * between its arrival and a later capture, rounded to whole seconds, is the
+ * number of epochs to add. Wraps the week.
+ *
+ * @retval 0        @p out_tow_ms written.
+ * @retval -EINVAL  @p out_tow_ms is NULL, or @p pvt_itow_ms is not a valid ToW.
+ * @retval -EAGAIN  The capture predates the NAV-PVT, or is too far past it to
+ *                  attribute (more than @p max_age_ms), so no honest answer
+ *                  exists.
+ */
+int disc_pulse_tow_ms(uint32_t pvt_itow_ms, uint64_t pvt_rx_mono_ms,
+		      uint64_t cap_mono_ms, uint32_t max_age_ms,
+		      uint32_t *out_tow_ms);
 
 /**
  * Whole reference seconds between two iterations of the discipline loop.

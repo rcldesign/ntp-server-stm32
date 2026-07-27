@@ -30,15 +30,28 @@
  * non-sequential write arriving here is a contract violation and returns
  * -EINVAL rather than being papered over.
  *
- * Trailer handling
- * ----------------
- * The last erase page of the staging slot is *excluded from staging_size()*
- * and reserved for the MCUboot image trailer. That matters for correctness,
- * not just tidiness: boot_request_upgrade() writes the boot magic into that
- * trailer with a plain flash write and no erase of its own, so the region has
- * to be blank first. It is erased here immediately before the upgrade request,
- * and erasing it is also exactly what cancels a pending swap, which is how
- * request_revert() is implemented.
+ * Trailer handling and the size ceiling
+ * -------------------------------------
+ * Two distinct regions at the top of the staging slot are excluded from
+ * staging_size():
+ *
+ *   the MCUboot image trailer, because boot_request_upgrade() writes the boot
+ *   magic into it with a plain flash write and no erase of its own, so the
+ *   region has to be blank first. It is erased here immediately before the
+ *   upgrade request, and erasing it is also exactly what cancels a pending swap,
+ *   which is how request_revert() is implemented;
+ *
+ *   one further erase sector, because swap-using-move begins by shifting the
+ *   primary image UP by one sector and needs somewhere to shift it to. Omitting
+ *   it over-advertised the slot by exactly 8 KiB: an image in that window
+ *   uploaded, verified, was marked pending, and was then silently declined by
+ *   swap_move() on every subsequent boot, inside a bootloader with logging
+ *   compiled out and no console.
+ *
+ * sts_stage_geom.h derives the resulting ceiling from MCUboot's own arithmetic
+ * and carries the full derivation; for this board it is 901120 B of a 917504 B
+ * slot. dfu.trailer_off is still the start of the last sector, because that is
+ * the page dfu_erase_trailer() has to blank.
  */
 
 #include <zephyr/kernel.h>
@@ -57,6 +70,7 @@
 #include <zephyr/sys/util.h>
 
 #include "console/sts_console.h"
+#include "console/sts_stage_geom.h"
 #include "port/port.h"
 
 LOG_MODULE_REGISTER(sts_dfu, CONFIG_STS1000_LOG_LEVEL);
@@ -161,9 +175,18 @@ static int dfu_open(void)
 		dfu.erase_gran = DFU_ERASE_GRAN_FALLBACK;
 	}
 
-	if ((uint32_t)dfu.fa->fa_size <= dfu.erase_gran) {
-		LOG_ERR("slot1 is only %u B; no room for an image plus trailer",
-			(unsigned int)dfu.fa->fa_size);
+	/*
+	 * The MCUboot swap-using-move ceiling, not "everything but the last
+	 * page": the trailer AND one free move sector are both excluded. See
+	 * sts_stage_geom.h for the derivation against MCUboot's own arithmetic.
+	 */
+	dfu.usable = sts_staging_usable((uint32_t)dfu.fa->fa_size, dfu.erase_gran,
+					dfu.align);
+	if (dfu.usable == 0U) {
+		LOG_ERR("slot1 is only %u B with %u B pages; no room for an image "
+			"plus the MCUboot trailer and move sector",
+			(unsigned int)dfu.fa->fa_size,
+			(unsigned int)dfu.erase_gran);
 		flash_area_close(dfu.fa);
 		dfu.fa = NULL;
 		dfu.open_failed = true;
@@ -171,12 +194,13 @@ static int dfu_open(void)
 		goto out;
 	}
 
-	/* Reserve the final erase page for the MCUboot trailer. */
+	/* The page dfu_erase_trailer() blanks so boot_request_upgrade() can write
+	 * the boot magic. Always the last one, whatever the size ceiling is. */
 	dfu.trailer_off = (uint32_t)dfu.fa->fa_size - dfu.erase_gran;
-	dfu.usable = dfu.trailer_off;
 	dfu.ready = true;
 
-	LOG_INF("DFU staging: slot1 %u B, %u B usable, %u B pages, %u B writes",
+	LOG_INF("DFU staging: slot1 %u B, %u B usable (trailer + move sector "
+		"reserved), %u B pages, %u B writes",
 		(unsigned int)dfu.fa->fa_size, (unsigned int)dfu.usable,
 		(unsigned int)dfu.erase_gran, (unsigned int)dfu.align);
 

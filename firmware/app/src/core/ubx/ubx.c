@@ -571,6 +571,93 @@ int ubx_mon_rf_next(ubx_mon_rf_iter_t *it, ubx_mon_rf_block_t *blk)
 	return 1;
 }
 
+/* ------------------------------------------------------ MON-VER (0A 04) -- */
+
+/*
+ * Copy a fixed-width, NUL-padded wire string into a NUL-terminated buffer.
+ * The wire field is not guaranteed to contain a terminator when it is full, so
+ * the terminator is written unconditionally rather than relying on the padding.
+ */
+static void ver_str(char *dst, const uint8_t *src, size_t n)
+{
+	size_t i;
+
+	for (i = 0U; i < n; i++) {
+		dst[i] = (char)src[i];
+	}
+	dst[n] = '\0';
+}
+
+int ubx_parse_mon_ver(const ubx_msg_t *m, ubx_mon_ver_t *out)
+{
+	size_t extra;
+	size_t n_ext;
+	size_t i;
+
+	if ((m == NULL) || (out == NULL)) {
+		return -EINVAL;
+	}
+	if (!ubx_msg_is(m, UBX_CLASS_MON, UBX_ID_MON_VER)) {
+		return -ENOMSG;
+	}
+	if (m->len < UBX_MON_VER_MIN_LEN) {
+		return -EBADMSG;
+	}
+
+	extra = (size_t)m->len - (size_t)UBX_MON_VER_MIN_LEN;
+	if ((extra % (size_t)UBX_MON_VER_EXT_LEN) != 0U) {
+		/*
+		 * A partial extension string means the frame is not what it
+		 * claims. Refusing it matters here: this decode is the evidence
+		 * that a firmware update landed, and a half-parsed version
+		 * string is exactly the kind of thing that would be reported as
+		 * a successful update.
+		 */
+		return -EBADMSG;
+	}
+
+	(void)memset(out, 0, sizeof(*out));
+	ver_str(out->sw_version, &m->payload[0], (size_t)UBX_MON_VER_SW_LEN);
+	ver_str(out->hw_version, &m->payload[UBX_MON_VER_SW_LEN],
+		(size_t)UBX_MON_VER_HW_LEN);
+
+	n_ext = extra / (size_t)UBX_MON_VER_EXT_LEN;
+	if (n_ext > (size_t)UBX_MON_VER_MAX_EXT) {
+		n_ext = (size_t)UBX_MON_VER_MAX_EXT;
+	}
+	for (i = 0U; i < n_ext; i++) {
+		ver_str(out->ext[i],
+			&m->payload[(size_t)UBX_MON_VER_MIN_LEN +
+				    (i * (size_t)UBX_MON_VER_EXT_LEN)],
+			(size_t)UBX_MON_VER_EXT_LEN);
+	}
+	out->n_ext = (uint8_t)n_ext;
+	return 0;
+}
+
+const char *ubx_mon_ver_ext(const ubx_mon_ver_t *v, const char *key)
+{
+	size_t klen;
+	size_t i;
+
+	if ((v == NULL) || (key == NULL)) {
+		return NULL;
+	}
+	klen = strlen(key);
+	if (klen == 0U) {
+		return NULL;
+	}
+
+	for (i = 0U; i < (size_t)v->n_ext; i++) {
+		const char *e = v->ext[i];
+
+		if ((strncmp(e, key, klen) == 0) && (e[klen] == '=')) {
+			return &e[klen + 1U];
+		}
+	}
+	return NULL;
+}
+
 int ubx_parse_ack(const ubx_msg_t *m, ubx_ack_t *out)
 {
 	if ((m == NULL) || (out == NULL) || (m->payload == NULL)) {

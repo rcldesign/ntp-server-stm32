@@ -107,6 +107,100 @@ static uint32_t mix32(uint32_t x)
 	return x;
 }
 
+/* ------------------------------------------------------ keyed client identity */
+
+/*
+ * SipHash-2-4 (Aumasson & Bernstein, 2012), the standard answer to exactly the
+ * problem in ntp_client_id()'s contract: a short-input hash whose *collisions*
+ * an adversary must not be able to solve for. ~30 lines, no tables, one pass.
+ *
+ * Pinned to the reference vectors from the paper in test_ntp.c, so this is not
+ * "a hash that looks right": it is SipHash-2-4 or the suite fails.
+ */
+static uint64_t sip_rotl(uint64_t x, unsigned int b)
+{
+	return (x << b) | (x >> (64U - b));
+}
+
+static uint64_t sip_load_le(const uint8_t *p, size_t n)
+{
+	uint64_t v = 0U;
+
+	for (size_t i = 0U; i < n; i++) {
+		v |= ((uint64_t)p[i]) << (8U * i);
+	}
+	return v;
+}
+
+static uint64_t siphash24(const uint8_t key[NTP_CLIENT_ID_KEY_LEN],
+			  const uint8_t *msg, size_t len)
+{
+	uint64_t k0 = sip_load_le(&key[0], 8U);
+	uint64_t k1 = sip_load_le(&key[8], 8U);
+	uint64_t v0 = UINT64_C(0x736f6d6570736575) ^ k0;
+	uint64_t v1 = UINT64_C(0x646f72616e646f6d) ^ k1;
+	uint64_t v2 = UINT64_C(0x6c7967656e657261) ^ k0;
+	uint64_t v3 = UINT64_C(0x7465646279746573) ^ k1;
+	size_t whole = len & ~(size_t)7U;
+	uint64_t b;
+
+#define SIP_ROUND()                                                            \
+	do {                                                                   \
+		v0 += v1;                                                      \
+		v1 = sip_rotl(v1, 13U);                                        \
+		v1 ^= v0;                                                      \
+		v0 = sip_rotl(v0, 32U);                                        \
+		v2 += v3;                                                      \
+		v3 = sip_rotl(v3, 16U);                                        \
+		v3 ^= v2;                                                      \
+		v0 += v3;                                                      \
+		v3 = sip_rotl(v3, 21U);                                        \
+		v3 ^= v0;                                                      \
+		v2 += v1;                                                      \
+		v1 = sip_rotl(v1, 17U);                                        \
+		v1 ^= v2;                                                      \
+		v2 = sip_rotl(v2, 32U);                                        \
+	} while (0)
+
+	for (size_t i = 0U; i < whole; i += 8U) {
+		uint64_t m = sip_load_le(&msg[i], 8U);
+
+		v3 ^= m;
+		SIP_ROUND();
+		SIP_ROUND();
+		v0 ^= m;
+	}
+
+	b = ((uint64_t)(len & 0xFFU)) << 56U;
+	b |= sip_load_le(&msg[whole], len - whole);
+	v3 ^= b;
+	SIP_ROUND();
+	SIP_ROUND();
+	v0 ^= b;
+
+	v2 ^= 0xFFU;
+	SIP_ROUND();
+	SIP_ROUND();
+	SIP_ROUND();
+	SIP_ROUND();
+
+#undef SIP_ROUND
+
+	return v0 ^ v1 ^ v2 ^ v3;
+}
+
+uint32_t ntp_client_id(const ntp_ctx_t *ctx, const void *addr, size_t addr_len)
+{
+	uint64_t tag;
+
+	if (ctx == NULL || addr == NULL || addr_len == 0U) {
+		return 0U;
+	}
+	tag = siphash24(ctx->id_key, (const uint8_t *)addr, addr_len);
+	/* Fold rather than truncate, so both halves of the tag contribute. */
+	return (uint32_t)(tag ^ (tag >> 32U));
+}
+
 static uint32_t clamp_burst(uint32_t burst)
 {
 	if (burst == 0U) {
@@ -214,6 +308,75 @@ void ntp_quality_view_default(ntp_quality_view_t *q)
 	q->synchronized = false;
 }
 
+int ntp_quality_view_from_block(const quality_block_t *b, uint64_t now_tai_ns,
+				uint64_t now_mono_ms, bool time_traceable,
+				int8_t precision, ntp_quality_view_t *out)
+{
+	if (b == NULL || out == NULL) {
+		return -EINVAL;
+	}
+
+	ntp_quality_view_default(out);
+	out->precision = precision;
+
+	out->stratum = b->stratum;
+	out->refid = b->refid;
+	out->root_delay_q16 = b->root_delay_q16;
+	out->root_disp_q16 = b->root_disp_q16;
+	out->tai_minus_utc = b->leap_current_s;
+	out->holdover = b->holdover;
+
+	/*
+	 * Two independent claims have to hold before this server may present
+	 * itself as a primary source, and they come from different subsystems:
+	 *
+	 *   - `disc` says the oscillator is disciplined inside policy, which is
+	 *     what b->stratum carries;
+	 *   - the platform says the counter the timestamps are *read from* has
+	 *     actually been placed on the TAI timescale, which is @p
+	 *     time_traceable.
+	 *
+	 * The second is not implied by the first. The counter powers up at zero
+	 * and is placed by a separate mechanism from the one that locks the
+	 * oscillator, so a fully locked loop on an unplaced counter yields
+	 * perfectly stable timestamps that are decades wrong — served, on this
+	 * hardware, under LI=0 / stratum 1 / refid 'GPS' (F1). Requiring both is
+	 * the whole point of taking the flag as an argument.
+	 */
+	out->synchronized = (b->stratum == (uint8_t)QUALITY_STRATUM_PRIMARY) &&
+			    time_traceable;
+
+	out->leap = (uint8_t)NTP_LI_NONE;
+	if (b->leap_pending != 0 && now_tai_ns != 0U) {
+		uint64_t now_s = now_tai_ns / UINT64_C(1000000000);
+
+		if (b->leap_at_tai_s > now_s &&
+		    (b->leap_at_tai_s - now_s) <= NTP_LEAP_ANNOUNCE_WINDOW_S) {
+			out->leap = (b->leap_pending > 0)
+					    ? (uint8_t)NTP_LI_ADD
+					    : (uint8_t)NTP_LI_DEL;
+		}
+	}
+
+	/*
+	 * Reference timestamp = the instant `disc` last published. The block
+	 * records it in monotonic milliseconds, so it is projected back onto TAI
+	 * here. In holdover it correctly stops advancing, which is how a client
+	 * sees the staleness (RFC 5905 §7.3).
+	 */
+	if (now_tai_ns != 0U && b->updated_mono_ms != 0U &&
+	    now_mono_ms >= b->updated_mono_ms) {
+		uint64_t age_ns = (now_mono_ms - b->updated_mono_ms) *
+				  UINT64_C(1000000);
+
+		if (age_ns < now_tai_ns) {
+			out->ref_tai_ns = (int64_t)(now_tai_ns - age_ns);
+		}
+	}
+
+	return 0;
+}
+
 /* ------------------------------------------------------------------ config */
 
 void ntp_cfg_default(ntp_cfg_t *cfg)
@@ -237,6 +400,10 @@ void ntp_cfg_default(ntp_cfg_t *cfg)
 int ntp_parse(const uint8_t *pkt, size_t len, ntp_pkt_t *out)
 {
 	size_t off;
+	/* Earliest remainder shaped like a MAC we cannot verify; 0 = none.
+	 * NTP_HDR_LEN is the smallest legal value, so 0 is a safe sentinel. */
+	size_t mac_cand_off = 0U;
+	size_t mac_cand_len = 0U;
 
 	if (pkt == NULL || out == NULL) {
 		return -EINVAL;
@@ -266,17 +433,38 @@ int ntp_parse(const uint8_t *pkt, size_t len, ntp_pkt_t *out)
 	 * Walk the tail (RFC 7822 §7.5.1). At each step the remainder is either a
 	 * MAC field or an extension field.
 	 *
-	 *  - A remainder of 4, 20 or 24 octets is a MAC: these are shorter than
-	 *    the 28-octet minimum for an extension field beside a MAC, so there is
-	 *    no ambiguity. 4 is a crypto-NAK (no digest); 20 and 24 carry digests
-	 *    we can verify.
-	 *  - A remainder of 36/52/68 octets is a keyid + a 32/48/64-octet digest —
-	 *    a MAC algorithm this server does not implement. It is ≥ 28, so it
-	 *    could instead be an extension field (an NTS Unique Identifier is
-	 *    exactly 36 octets); try the extension-field parse first, and only if
-	 *    that fails treat it as an unsupported MAC to be rejected. That is the
-	 *    fix for the defect where a 36-octet SHA-256 MAC parsed as garbage and
-	 *    the request was served unauthenticated.
+	 *  - A remainder of 4, 20 or 24 octets is a MAC, decided before anything
+	 *    else: 4 is below the NTP_EF_LEN_MIN floor entirely, and 20/24 are the
+	 *    two digest lengths this server can verify, so a client presenting one
+	 *    means it. 4 is a crypto-NAK, with no digest to check.
+	 *
+	 *  - A remainder of 36/52/68 octets is a key id + a 32/48/64-octet digest,
+	 *    a MAC algorithm this server does not implement — but it is also a
+	 *    legal extension-field length, so the two readings genuinely collide.
+	 *    The rule: walk extension fields, and if the walk consumes the *entire*
+	 *    tail (leaving no MAC at all) while some step's remainder was one of
+	 *    those three lengths, take the earliest such remainder as the MAC after
+	 *    all. `mac_unsupported` then makes the handler reject the request.
+	 *
+	 *    That rule is the M4/F6 fix, and the ordering is what matters. Trying
+	 *    the extension-field parse first and only falling back to the MAC
+	 *    reading *if the parse failed* was exploitable: a candidate field's
+	 *    Length is read from the same two octets that carry the low half of the
+	 *    key id, so `keyid = 36` produced `flen = 36` — 4-aligned, inside the
+	 *    remainder, and swallowed as one field. The parse did not fail, so the
+	 *    fallback never ran: mac_len came back 0 and a request carrying a MAC
+	 *    was answered unauthenticated, against this module's own invariant.
+	 *    Splitting the MAC across two aliased fields does not evade the rule
+	 *    either, because the *remainder* at the MAC's first octet is what is
+	 *    recorded, not the field length. Enforcing NTP_EF_LEN_MIN closes the
+	 *    rest of the aliasing window (tails of 8 and 12 were being served as
+	 *    extension fields).
+	 *
+	 *    Cost: a tail that is entirely extension fields but has a 36/52/68
+	 *    octet remainder somewhere is rejected as an unverifiable MAC. Nothing
+	 *    this firmware speaks is shaped that way — see ntp.h — and the safe
+	 *    reading of an ambiguous authenticator is "authentication failed".
+	 *
 	 *  - Otherwise it is an extension field; the walk is tolerant of a broken
 	 *    tail and simply stops, since nothing past ext_len is echoed.
 	 */
@@ -285,34 +473,45 @@ int ntp_parse(const uint8_t *pkt, size_t len, ntp_pkt_t *out)
 		size_t rem = len - off;
 		uint16_t flen;
 
-		if (rem == MAC_LEN_NAK || rem == MAC_LEN_128 || rem == MAC_LEN_160) {
+		if (rem == MAC_LEN_NAK || rem == MAC_LEN_128 ||
+		    rem == MAC_LEN_160) {
 			out->mac_off = off;
 			out->mac_len = rem;
 			out->keyid = bytes_get_be32(&pkt[off]);
 			out->mac_unsupported = (rem == MAC_LEN_NAK);
+			mac_cand_off = 0U; /* a real MAC field settles it */
 			break;
 		}
-		if (rem < 4U) {
+		if (rem == MAC_LEN_256 || rem == MAC_LEN_384 ||
+		    rem == MAC_LEN_512) {
+			if (mac_cand_off == 0U) {
+				mac_cand_off = off;
+				mac_cand_len = rem;
+			}
+		}
+		if (rem < NTP_EF_LEN_MIN) {
 			break; /* runt tail: ignored, never echoed */
 		}
 
 		flen = bytes_get_be16(&pkt[off + 2U]);
-		if (flen >= 4U && (flen & 3U) == 0U && (size_t)flen <= rem) {
+		if (flen >= NTP_EF_LEN_MIN && (flen & 3U) == 0U &&
+		    (size_t)flen <= rem) {
 			off += flen;
 			out->ext_len = off - NTP_HDR_LEN;
 			continue;
 		}
 
-		/* Not a valid extension field. If the whole remainder is a
-		 * MAC-shaped length for a digest we do not implement, say so — the
-		 * handler rejects it rather than answering unauthenticated. */
-		if (rem == MAC_LEN_256 || rem == MAC_LEN_384 || rem == MAC_LEN_512) {
-			out->mac_off = off;
-			out->mac_len = rem;
-			out->keyid = bytes_get_be32(&pkt[off]);
-			out->mac_unsupported = true;
-		}
-		break; /* malformed tail otherwise: tolerated, not echoed */
+		break; /* malformed tail: tolerated, not echoed */
+	}
+
+	/* The tail was consumed entirely as extension fields, yet a MAC-shaped
+	 * remainder was passed on the way: that remainder is the MAC. */
+	if (off == len && mac_cand_off != 0U) {
+		out->mac_off = mac_cand_off;
+		out->mac_len = mac_cand_len;
+		out->keyid = bytes_get_be32(&pkt[mac_cand_off]);
+		out->mac_unsupported = true;
+		out->ext_len = mac_cand_off - NTP_HDR_LEN;
 	}
 
 	return 0;
@@ -442,19 +641,38 @@ int ntp_init(ntp_ctx_t *ctx, const ntp_cfg_t *cfg, const port_crypto_t *crypto,
 	ctx->cfg.client_burst = clamp_burst(ctx->cfg.client_burst);
 	ctx->cfg.global_burst = clamp_burst(ctx->cfg.global_burst);
 
+	/*
+	 * Fixed fallback for the client-identity key. Only reached when there is
+	 * no crypto port, or its rand() fails — bring-up must not be blocked by
+	 * entropy. It is a *fixed* value rather than zero so the derivation is
+	 * still a well-mixed function of the address, but it is public, so an
+	 * appliance running on it has an attackable identity (F8): the caller is
+	 * expected to supply a crypto port, and every production path does.
+	 */
+	memcpy(ctx->id_key,
+	       "\x53\x54\x53\x31\x30\x30\x30\x2d\x6e\x74\x70\x2d\x69\x64\x00\x01",
+	       NTP_CLIENT_ID_KEY_LEN);
+
 	if (crypto != NULL) {
 		ctx->crypto = *crypto;
-		/* Salt the client-table hash from entropy (L14). Best-effort: a
-		 * rand() failure leaves the salt zero, which is no worse than the
-		 * previous unsalted hash and never blocks bring-up. */
+		/*
+		 * Key the client identity and salt the table slot from entropy
+		 * (F8 / L14). Best-effort and independent: a rand() failure leaves
+		 * the documented fallbacks in place and never blocks bring-up.
+		 */
 		if (crypto->rand != NULL) {
 			uint8_t seed[4];
+			uint8_t k[NTP_CLIENT_ID_KEY_LEN];
 
 			if (crypto->rand(crypto->ctx, seed, sizeof(seed)) == 0) {
 				ctx->hash_seed = ((uint32_t)seed[0]) |
 						 ((uint32_t)seed[1] << 8) |
 						 ((uint32_t)seed[2] << 16) |
 						 ((uint32_t)seed[3] << 24);
+			}
+			/* Staged, so a partial failure cannot leave half a key. */
+			if (crypto->rand(crypto->ctx, k, sizeof(k)) == 0) {
+				memcpy(ctx->id_key, k, sizeof(k));
 			}
 		}
 	}
@@ -962,17 +1180,38 @@ int ntp_handle_request(ntp_ctx_t *ctx, const ntp_rx_t *rx,
 	}
 
 	/*
-	 * The server MUST NOT emit a response whose transmit field equals its
-	 * receive field: interleaved detection tells the two modes apart solely by
-	 * which of those the client later echoes, so they have to be distinct for
-	 * the next exchange to be unambiguous. They differ naturally (transmit is
-	 * later than receive, or is a wholly different exchange's measured
-	 * instant); this is the backstop for the degenerate case where a caller
-	 * supplies identical timestamps. One LSB is ~233 ps.
+	 * Two invariants on the transmit field, both enforced here.
+	 *
+	 * 1. It MUST differ from this response's receive field: interleaved
+	 *    detection tells the two modes apart solely by which of them the
+	 *    client later echoes, so they have to be distinct for the next
+	 *    exchange to be unambiguous. They differ naturally (transmit is later
+	 *    than receive, or is a wholly different exchange's measured instant);
+	 *    this is the backstop for the degenerate case where a caller supplies
+	 *    identical timestamps.
+	 *
+	 * 2. It MUST differ from the previous response's transmit field, because
+	 *    the platform demultiplexes hardware egress timestamps by it — see
+	 *    NTP_XMT_DISTINCT_WINDOW. Note that rule 1 alone made this *worse*
+	 *    rather than better: under a coarse clock every client's receive field
+	 *    is the same value, so mapping the degenerate case to `rec + 1` handed
+	 *    every one of them an identical transmit field (F5).
+	 *
+	 * One LSB is ~233 ps, so satisfying both costs nothing measurable.
 	 */
 	if (xmt == rec) {
 		xmt = rec + 1U;
 	}
+	if (xmt == ctx->xmt_last ||
+	    (xmt < ctx->xmt_last &&
+	     (ctx->xmt_last - xmt) < NTP_XMT_DISTINCT_WINDOW)) {
+		xmt = ctx->xmt_last + 1U;
+		if (xmt == rec) {
+			/* Still one LSB above xmt_last, so rule 2 holds too. */
+			xmt = rec + 1U;
+		}
+	}
+	ctx->xmt_last = xmt;
 
 	if (!q->synchronized) {
 		li = (uint8_t)NTP_LI_UNSYNC;

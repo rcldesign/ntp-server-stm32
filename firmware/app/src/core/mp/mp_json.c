@@ -28,10 +28,21 @@ static bool is_digit(char c)
 
 /* =========================================================== parser ===== */
 
+/**
+ * Parser state.
+ *
+ * `stack` carries the enclosing containers explicitly rather than being
+ * recovered from a token's parent link. It has to: an object member's *value*
+ * hangs off the key token (so an object's `size` is its member count, the jsmn
+ * convention the accessors rely on), which means a nested container's parent is
+ * a string, not the container that encloses it.
+ */
 typedef struct {
 	mp_json_t *p;
 	size_t i;    /* cursor into src */
 	int16_t cur; /* token index of the container being filled, -1 at root */
+	int16_t stack[MP_JSON_DEPTH_MAX + 1U];
+	int16_t key_parent; /* key token owing a value, or -1 */
 	uint8_t depth;
 	bool root_done;
 } pstate_t;
@@ -40,6 +51,7 @@ typedef struct {
 static int tok_alloc(pstate_t *s, uint8_t type, size_t start)
 {
 	mp_json_tok_t *t;
+	int16_t parent = (s->key_parent >= 0) ? s->key_parent : s->cur;
 	int idx;
 
 	if (s->p->tok_n >= s->p->tok_cap) {
@@ -51,14 +63,15 @@ static int tok_alloc(pstate_t *s, uint8_t type, size_t start)
 
 	t->type = type;
 	t->depth = s->depth;
-	t->parent = s->cur;
+	t->parent = parent;
 	t->start = (uint16_t)start;
 	t->end = (uint16_t)start;
 	t->size = 0U;
 
-	if (s->cur >= 0) {
-		s->p->tok[s->cur].size++;
+	if (parent >= 0) {
+		s->p->tok[parent].size++;
 	}
+	s->key_parent = -1;
 	return idx;
 }
 
@@ -197,7 +210,7 @@ static int close_container(pstate_t *s, uint8_t want)
 {
 	mp_json_tok_t *t;
 
-	if (s->cur < 0) {
+	if ((s->cur < 0) || (s->depth == 0U)) {
 		return -EBADMSG;
 	}
 	t = &s->p->tok[s->cur];
@@ -205,8 +218,8 @@ static int close_container(pstate_t *s, uint8_t want)
 		return -EBADMSG;
 	}
 	t->end = (uint16_t)(s->i + 1U);
-	s->cur = t->parent;
 	s->depth--;
+	s->cur = (s->depth > 0U) ? s->stack[s->depth - 1U] : (int16_t)-1;
 	if (s->cur < 0) {
 		s->root_done = true;
 	}
@@ -252,8 +265,10 @@ int mp_json_parse(mp_json_t *p, const char *src, size_t len,
 	s.p = p;
 	s.i = 0U;
 	s.cur = -1;
+	s.key_parent = -1;
 	s.depth = 0U;
 	s.root_done = false;
+	(void)memset(s.stack, 0, sizeof(s.stack));
 
 	while (s.i < len) {
 		char c = src[s.i];
@@ -286,6 +301,7 @@ int mp_json_parse(mp_json_t *p, const char *src, size_t len,
 				return idx;
 			}
 			s.cur = (int16_t)idx;
+			s.stack[s.depth] = (int16_t)idx;
 			s.depth++;
 			exp = (kind == (uint8_t)MP_J_OBJ) ? EXP_KEY : EXP_VALUE;
 			s.i++;
@@ -357,6 +373,9 @@ int mp_json_parse(mp_json_t *p, const char *src, size_t len,
 			}
 			p->tok[idx].end = (uint16_t)endq;
 			if (exp == EXP_KEY) {
+				/* The member's value hangs off this key, so the
+				 * object's size stays its member count. */
+				s.key_parent = (int16_t)idx;
 				exp = EXP_COLON;
 			} else {
 				exp = EXP_COMMA_OR_END;

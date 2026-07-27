@@ -825,13 +825,34 @@ static void test_auth_success_and_failure(void)
 	TEST_ASSERT_EQUAL_UINT32(1U, mcp_stats(&g_mcp)->auth_fail);
 }
 
+/*
+ * LOW-8: an unprovisioned box answers AUTH exactly as a wrong password does, and
+ * pays the same brute-force penalty.
+ *
+ * It used to answer MCP_ERR_STATE, which told an unauthenticated peer whether the
+ * box had ever been commissioned; and because that path returned before
+ * auth_penalise(), it was the one AUTH branch with no throttle at all.
+ */
 static void test_auth_without_a_provisioned_credential_locks_the_box(void)
 {
+	unsigned int i;
+
 	/* Auth required by default, no password stored: the box is locked, not
-	 * wide open. */
+	 * wide open — and it does not say which of those it is. */
 	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"anything", 8U);
-	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_STATE);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_AUTH);
 	TEST_ASSERT_FALSE(mcp_authenticated(&g_mcp));
+
+	/* Counted as a failure, exactly like a mismatch. */
+	TEST_ASSERT_EQUAL_UINT32(1U, mcp_stats(&g_mcp)->auth_fail);
+
+	/* And throttled: past MCP_AUTH_FREE_TRIES the backoff window arms and
+	 * further attempts are refused with BUSY without being tested. */
+	for (i = 1U; i <= MCP_AUTH_FREE_TRIES; i++) {
+		(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"anything", 8U);
+	}
+	TEST_ASSERT_EQUAL_HEX8((uint8_t)MCP_ERR_BUSY, tx_status(last_tx()));
+	TEST_ASSERT_TRUE(mcp_stats(&g_mcp)->auth_throttled > 0U);
 
 	(void)feed_req(MCP_CMD_CFG_COMMIT, NULL, 0U);
 	expect_status(MCP_CMD_CFG_COMMIT, g_seq, (uint8_t)MCP_ERR_AUTH);
@@ -1363,6 +1384,14 @@ static void test_cfg_secret_needs_a_session(void)
 
 	provision_password("pw");
 
+	/* snmp.community ships EMPTY (the agent fails closed until it is
+	 * configured), so give it a value to read back — an empty payload would
+	 * not distinguish "withheld" from "unset". */
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_set_bytes(&g_cfg, CFG_ID_SNMP_COMMUNITY,
+			      (const uint8_t *)"s3cret", 6U));
+	TEST_ASSERT_EQUAL_INT(0, cfg_commit(&g_cfg, NULL));
+
 	bytes_put_le16(req, CFG_ID_SNMP_COMMUNITY);
 	(void)feed_req(MCP_CMD_CFG_GET, req, 2U);
 	expect_status(MCP_CMD_CFG_GET, g_seq, (uint8_t)MCP_ERR_AUTH);
@@ -1370,7 +1399,8 @@ static void test_cfg_secret_needs_a_session(void)
 	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"pw", 2U);
 	(void)feed_req(MCP_CMD_CFG_GET, req, 2U);
 	expect_status(MCP_CMD_CFG_GET, g_seq, (uint8_t)MCP_OK);
-	TEST_ASSERT_EQUAL_HEX8_ARRAY("public", &tx_pay(last_tx())[7], 6);
+	TEST_ASSERT_EQUAL_UINT16(6U, bytes_get_le16(&tx_pay(last_tx())[5]));
+	TEST_ASSERT_EQUAL_HEX8_ARRAY("s3cret", &tx_pay(last_tx())[7], 6);
 }
 
 static void test_cfg_export_streams_and_reimports(void)
@@ -1683,6 +1713,86 @@ static void test_cfg_import_absorbs_a_repeated_chunk(void)
 	p = tx_pay(last_tx());
 	TEST_ASSERT_EQUAL_UINT8(1U, p[5]);                    /* complete */
 	TEST_ASSERT_EQUAL_UINT16(1U, bytes_get_le16(&p[6]));  /* same applied */
+}
+
+/*
+ * MEDIUM-4: a repeat of the FINAL export offset is answered, not refused.
+ *
+ * Completing an export clears exp_active, and every repeat-offset branch used to
+ * be gated on it, so a retransmit of the last chunk — the one whose response is
+ * most likely to be the one lost, because it is the last thing on the wire — fell
+ * through to MCP_ERR_OFFSET and meridian_ctl.py aborted an export that had in
+ * fact succeeded. CFG_IMPORT always handled its own final chunk; this is the same
+ * rule on the export side.
+ */
+static void test_cfg_export_re_emits_the_final_chunk(void)
+{
+	uint8_t req[8];
+	uint8_t saved[MCP_MAX_PAYLOAD];
+	const uint8_t *p;
+	uint16_t saved_len;
+	uint32_t final_off = 0U;
+	uint32_t off = 0U;
+	unsigned int rounds = 0U;
+	uint8_t more;
+
+	policy_no_auth();
+
+	/* Stream to completion, remembering where the last chunk started. */
+	do {
+		bytes_put_le32(req, off);
+		req[4] = 0U;
+		(void)feed_req(MCP_CMD_CFG_EXPORT, req, 5U);
+		expect_status(MCP_CMD_CFG_EXPORT, g_seq, (uint8_t)MCP_OK);
+
+		p = tx_pay(last_tx());
+		TEST_ASSERT_EQUAL_UINT32(off, bytes_get_le32(&p[1]));
+		more = p[5];
+		final_off = off;
+		off += (uint32_t)(tx_plen(last_tx()) - 6U);
+		rounds++;
+		TEST_ASSERT_TRUE(rounds < 50U);
+	} while (more != 0U);
+
+	TEST_ASSERT_TRUE(rounds > 1U); /* multi-chunk, so "final" is not "first" */
+
+	saved_len = tx_plen(last_tx());
+	memcpy(saved, tx_pay(last_tx()), saved_len);
+
+	/* Repeat the final offset: byte-identical answer, still flagged complete. */
+	bytes_put_le32(req, final_off);
+	req[4] = 0U;
+	(void)feed_req(MCP_CMD_CFG_EXPORT, req, 5U);
+	expect_status(MCP_CMD_CFG_EXPORT, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_UINT16(saved_len, tx_plen(last_tx()));
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(saved, tx_pay(last_tx()), saved_len);
+	TEST_ASSERT_EQUAL_UINT8(0U, tx_pay(last_tx())[5]); /* no more follows */
+
+	/* Idempotent: a second repeat answers the same again. */
+	bytes_put_le32(req, final_off);
+	req[4] = 0U;
+	(void)feed_req(MCP_CMD_CFG_EXPORT, req, 5U);
+	expect_status(MCP_CMD_CFG_EXPORT, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(saved, tx_pay(last_tx()), saved_len);
+
+	/* A stale offset is still refused, and so is the end-of-stream offset:
+	 * the tool stops when more == 0 and never asks for it. */
+	bytes_put_le32(req, 7U);
+	req[4] = 0U;
+	(void)feed_req(MCP_CMD_CFG_EXPORT, req, 5U);
+	expect_status(MCP_CMD_CFG_EXPORT, g_seq, (uint8_t)MCP_ERR_OFFSET);
+
+	bytes_put_le32(req, off);
+	req[4] = 0U;
+	(void)feed_req(MCP_CMD_CFG_EXPORT, req, 5U);
+	expect_status(MCP_CMD_CFG_EXPORT, g_seq, (uint8_t)MCP_ERR_OFFSET);
+
+	/* Offset 0 still starts a fresh export rather than replaying. */
+	bytes_put_le32(req, 0U);
+	req[4] = 0U;
+	(void)feed_req(MCP_CMD_CFG_EXPORT, req, 5U);
+	expect_status(MCP_CMD_CFG_EXPORT, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_UINT8(1U, tx_pay(last_tx())[5]); /* more follows again */
 }
 
 static void test_factory_reset_needs_the_magic(void)

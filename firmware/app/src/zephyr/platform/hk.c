@@ -114,6 +114,17 @@ static struct {
 	struct gpio_callback tach_cb;
 	atomic_t tach_edges;
 	uint32_t tach_last_ms;
+
+	/*
+	 * core/thermal's escalation requests, cached from the 1 Hz step for the
+	 * 4 Hz sequencer. Rungs 2 and 3 of ARCHITECTURE.md §5 / spec §13 —
+	 * "fan max -> shed Rb -> POE_KILL" — which used to become alarm *bits* and
+	 * nothing else: nothing consumed request_rb_shed at all, so a stalled fan
+	 * past the kill threshold lit an LED and sent a trap while the ~12 W
+	 * rubidium kept running and the board never cold-cycled.
+	 */
+	atomic_t thermal_shed_rb;
+	atomic_t thermal_poe_kill;
 } hk;
 
 /* ========================================================================= */
@@ -477,6 +488,30 @@ void sts_hk_request_ina(uint8_t rail_idx)
 	atomic_or(&hk.ina_request_mask, (atomic_val_t)BIT(rail_idx));
 }
 
+int sts_hk_read_ina_now(uint8_t rail_idx)
+{
+	if (rail_idx >= INA228_RAIL_COUNT) {
+		return -EINVAL;
+	}
+	if (!device_is_ready(i2c1)) {
+		return -EIO;
+	}
+
+	hk_read_ina((ina228_rail_t)rail_idx, true);
+
+	return hk_cache.ina[rail_idx].valid ? 0 : -EIO;
+}
+
+void sts_hk_thermal_requests(bool *shed_rb, bool *poe_kill)
+{
+	if (shed_rb != NULL) {
+		*shed_rb = atomic_get(&hk.thermal_shed_rb) != 0;
+	}
+	if (poe_kill != NULL) {
+		*poe_kill = atomic_get(&hk.thermal_poe_kill) != 0;
+	}
+}
+
 int sts_hk_read(sts_hk_snapshot_t *out)
 {
 	if (out == NULL) {
@@ -668,6 +703,15 @@ static void hk_thermal_1hz(uint32_t now_ms)
 	(void)sts_alarm_set(FAULT_ALARM_THERMAL_WARN, out.alarm_overtemp);
 	(void)sts_alarm_set(FAULT_ALARM_THERMAL_CRITICAL, out.request_poe_kill);
 	(void)sts_alarm_set(FAULT_ALARM_FAN_FAULT, out.fan_stall);
+
+	/*
+	 * Rungs 2 and 3 reach an actuator: pwrseq_build_input() picks these up and
+	 * pwrseq's shed policy drops the rubidium and, if the temperature keeps
+	 * climbing, commands POE_KILL. Annunciating alone was the whole of the
+	 * previous response, which meant the ladder had no bottom.
+	 */
+	atomic_set(&hk.thermal_shed_rb, out.request_rb_shed ? 1 : 0);
+	atomic_set(&hk.thermal_poe_kill, out.request_poe_kill ? 1 : 0);
 }
 
 static void hk_entry(void *p1, void *p2, void *p3)
@@ -695,9 +739,9 @@ static void hk_entry(void *p1, void *p2, void *p3)
 			hk_thermal_1hz(now_ms);
 		}
 
-		if (sts_pfi_fired()) {
-			(void)sts_alarm_set(FAULT_ALARM_PFI, true);
-		}
+		/* Latch bookkeeping, the ordered park list, and the recovery
+		 * dwell that releases a spurious or ridden-out PFI edge. */
+		sts_pfi_service(now_ms);
 
 		/*
 		 * pwrseq first (it may arm the watchdog and mark the relay

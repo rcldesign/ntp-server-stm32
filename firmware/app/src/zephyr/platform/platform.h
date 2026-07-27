@@ -19,7 +19,9 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
 
+#include "disc/disc.h"
 #include "fault/fault.h"
+#include "gnssmgr/gnssmgr.h"
 #include "ina228/ina228.h"
 #include "quality/quality.h"
 
@@ -199,6 +201,30 @@ int sts_hk_read(sts_hk_snapshot_t *out);
 void sts_hk_request_ina(uint8_t rail_idx);
 
 /**
+ * Read one INA228 synchronously, on the calling thread.
+ *
+ * For bring-up only, before the housekeeping thread exists: stage 3 has to check
+ * rails it is about to allow other stages to depend on, and a request queued for
+ * a thread that has not started yet is answered by an empty cache.
+ *
+ * @retval 0        The cache now holds a fresh reading for @p rail_idx.
+ * @retval -EINVAL  @p rail_idx out of range.
+ * @retval -EIO     The transfer failed; the reading is marked invalid.
+ */
+int sts_hk_read_ina_now(uint8_t rail_idx);
+
+/**
+ * Latest core/thermal escalation requests (rungs 2 and 3), for pwrseq.
+ *
+ * Cached from the 1 Hz thermal step so the 4 Hz sequencer sees a stable value.
+ * Either pointer may be NULL.
+ */
+void sts_hk_thermal_requests(bool *shed_rb, bool *poe_kill);
+
+/** Run the PFI latch/recovery state machine. Called at 4 Hz from housekeeping. */
+void sts_pfi_service(uint32_t now_ms);
+
+/**
  * Stage 3: probe all nine INA228s, apply CONFIG/ADC_CONFIG/SHUNT_CAL/SOVL/SUVL.
  *
  * @retval 0     All nine configured.
@@ -216,6 +242,21 @@ int sts_hk_start(void);
 
 int sts_supervisor_init(void);
 
+/**
+ * Start the dedicated watchdog-kick thread.
+ *
+ * Separate from the housekeeping thread on purpose. The kick used to be issued
+ * from housekeeping (priority 14, the lowest-priority liveness participant on the
+ * board), which made a starved or slow low-priority thread able to *cause* the
+ * very hardware power cycle the watchdog exists to trigger only on a real hang.
+ * The kicker therefore runs at a cooperative priority — unpreemptable by any
+ * application thread — and consumes the liveness mask rather than being in it.
+ */
+int sts_supervisor_wdt_start(void);
+
+/** Stage 9: begin the WDT_KICK cadence (PWRSEQ_ACT_WDT_KICK_START). */
+void sts_supervisor_kick_start(uint32_t now_ms);
+
 /** Called at 4 Hz from the housekeeping thread. */
 void sts_supervisor_step(uint32_t now_ms);
 
@@ -228,6 +269,48 @@ int sts_pwrseq_start(uint32_t now_ms);
 
 /** Step pwrseq and drain its action queue. Called at 4 Hz from housekeeping. */
 void sts_pwrseq_step(uint32_t now_ms);
+
+/**
+ * Run pwrseq's power-fail park list and drain it synchronously.
+ *
+ * Housekeeping-thread context, so it cannot race pwrseq_step()/action_get() —
+ * which is the mutual exclusion pwrseq.h §pwrseq_pfi demands and which calling it
+ * from the EXTI8 ISR would violate (the ISR's queue purge could delete a
+ * mid-flight drain's remaining park list). The two pin writes that genuinely must
+ * happen inside the ~4.8 ms hold-up window are done in the ISR instead, by
+ * sts_pwrseq_rb_quiesce_from_isr().
+ */
+void sts_pwrseq_pfi(uint32_t now_ms);
+
+/**
+ * Drop the rubidium at the pins: RB_VCC_GATE low, then RB_PWR_EN low.
+ *
+ * ISR-safe (two GPIO register writes, no locks, no logging) and idempotent.
+ * Called from the PFI handler: the FE's warm-up surge is the largest concurrent
+ * load on the board, so shedding it is what extends the hold-up window that the
+ * NVS fast-save has to complete inside (power_fail_input §5 item 3).
+ */
+void sts_pwrseq_rb_quiesce_from_isr(void);
+
+/**
+ * Operator-initiated retry of the guarded rubidium sequence.
+ *
+ * Exposed for a console/MCP command; the bounded automatic retry lives in
+ * core/pwrseq. Returns pwrseq_rb_retry()'s result, or -ENODEV before start.
+ */
+int sts_pwrseq_rb_retry(uint32_t now_ms);
+
+/** RB_LOCK (PB13) as a logical "the FE reports lock", polarity applied. */
+bool sts_pwrseq_rb_lock(void);
+
+/**
+ * Drive ANT_BIAS_EN (PC9) on gnssmgr's behalf.
+ *
+ * The antenna supervisor decides to cut the bias on a persistent short, but
+ * pwrseq_exec.c is the single writer of that pin (ARCHITECTURE.md §10), so the
+ * request is routed here rather than driven from the gnss thread.
+ */
+void sts_pwrseq_ant_bias_request(bool on);
 
 /** Stage 9: assert WDT_EN and begin the kick cadence. */
 int sts_supervisor_arm(void);
@@ -255,6 +338,15 @@ int sts_discipline_start(void);
 /** PFI handler: park the loop and freeze the DAC. ISR-safe. */
 void sts_discipline_park(void);
 
+/**
+ * Ask the discipline thread to leave a latched park.
+ *
+ * A flag, not a call into core/disc: the discipline thread is the only writer of
+ * the loop context (ARCHITECTURE.md §10.2/§10.10), so the PFI recovery path in
+ * the housekeeping thread must not touch it directly. Safe from any thread.
+ */
+void sts_discipline_unpark_request(void);
+
 /* refsel handoff bracket: transient park/unpark around a mux flip, called by
  * the clock-mux executor on REFSEL_ACT_PARK/UNPARK_DISCIPLINE. Discipline
  * thread context only. */
@@ -269,6 +361,53 @@ int sts_pfi_init(void);
 
 /** True once PFI has fired; the console area polls this to fast-save. */
 bool sts_pfi_fired(void);
+
+/* ------------------------------------------------------------------------- */
+/* gnss.c — USART3 UBX link + core/gnssmgr (ARCHITECTURE.md §6, priority 6)   */
+/* ------------------------------------------------------------------------- */
+
+/** Everything the discipline loop and the sequencer need from the receiver. */
+typedef struct {
+	bool     have_status;      /* at least one NAV-PVT decoded */
+	bool     time_locked;      /* fix usable for timing, tAcc inside window */
+	bool     utc_valid;
+	uint8_t  fix_type;         /* UBX_FIX_* */
+	uint8_t  sv_used;
+	uint8_t  sv_visible;
+	uint32_t tacc_ns;
+	int16_t  leap_current_s;   /* TAI-UTC offset, 0 when unknown */
+	int8_t   leap_pending;     /* +1 insert, -1 delete, 0 none */
+	uint64_t leap_at_tai_s;
+	bool     leap_valid;
+	bool     cfg_ack;          /* the config walk has passed its ACK gate */
+	bool     cfg_failed;
+	uint8_t  ant_state;        /* gnssmgr_ant_state_t */
+
+	/* Pulse-pairing evidence: the NAV-PVT iTOW and when it was decoded. */
+	uint32_t pvt_itow_ms;
+	uint64_t pvt_rx_mono_ms;
+
+	/* The latest UBX-TIM-TP, already normalised to GPS ToW by gnssmgr. */
+	gnssmgr_qerr_t qerr;
+} sts_gnss_snap_t;
+
+/** Start the gnss thread and open USART3. Idempotent (-EALREADY). */
+int sts_gnss_start(void);
+
+/** Stage 5.5: begin (or restart) the UBX configuration walk. */
+int sts_gnss_configure(uint32_t now_ms);
+
+/** Stage 5.2: the receiver was just reset; its configuration is gone. */
+int sts_gnss_notify_reset(uint32_t now_ms);
+
+/** Stage 5.4: begin fusing the antenna supervisor's three evidence sources. */
+void sts_gnss_ant_supervisor_start(void);
+
+/** Copy the published receiver view. Returns 0, or -EINVAL/-ENODEV. */
+int sts_gnss_snapshot(sts_gnss_snap_t *out);
+
+/** True once the F9T has ACKed the essential configuration (stage-5 gate). */
+bool sts_gnss_cfg_ack(void);
 
 /* ------------------------------------------------------------------------- */
 /* panel_pwm.c — LPTIM2_CH2 on PE0                                            */

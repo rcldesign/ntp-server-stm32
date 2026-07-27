@@ -22,9 +22,16 @@ typedef struct {
 
 typedef struct {
 	/* Maximum IMAGE size the staging slot accepts, in bytes — the slot
-	 * capacity MINUS the MCUboot trailer/magic region. A signed image whose
-	 * total length exceeds this must be rejected at FW_BEGIN (there must
-	 * always be room for the swap trailer that mark_pending writes). */
+	 * capacity MINUS everything the bootloader's swap needs for itself: the
+	 * MCUboot trailer/magic region that mark_pending writes, AND (for
+	 * swap-using-move, which is this project's mode) one further erase sector
+	 * for the algorithm to shift the primary image up into. A signed image
+	 * whose total length exceeds this must be rejected at FW_BEGIN.
+	 *
+	 * This is the ONLY size check in the system: with slot-info and
+	 * data-sharing disabled the bootloader never reports its own ceiling, and
+	 * an over-advertised value produces an image that stages and verifies
+	 * cleanly and is then silently declined by the swap on every boot. */
 	uint32_t (*staging_size)(void *ctx);
 	/* Erase [off, off+len) in the staging slot (sector-aligned by impl). */
 	int (*staging_erase)(void *ctx, uint32_t off, uint32_t len);

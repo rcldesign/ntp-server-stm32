@@ -94,6 +94,15 @@ module_deps(pwrseq   ina228 util)
 module_deps(mcp      util cfg logring quality)
 module_deps(snmp     util quality)
 module_deps(ui       util quality)
+module_deps(atecc    util)
+module_deps(auth     util)
+# `mp` (the Maintenance Protocol, FMT device side) adds one edge to the
+# ARCHITECTURE.md §4 map: `ina228`, for the nine-monitor rail table the
+# capability manifest publishes (name, designator, address, shunt) rather than
+# copying. It also includes ui/ui.h and port/port_image.h for *types only* — no
+# ui symbol is referenced, so `ui` is deliberately not a link dependency and
+# stays out of these suites' coverage.
+module_deps(mp       util cfg logring quality ina228)
 
 # A module may own several focused suites. Each suite name needs its own entry
 # naming the module it belongs to. `util` is split across four because CRC,
@@ -105,6 +114,26 @@ module_deps(ring     util)
 module_deps(bytes    util)
 module_deps(aes_siv  nts)
 module_deps(mcp_dfu  mcp util cfg logring quality)
+
+# The Wave-4c security cluster. `core/auth` holds the AAA chain plus the RADIUS,
+# TACACS+ and LDAP codecs, so all four suites compile the same source set; the
+# LDAP codec has no suite of its own and is covered from test_auth.c, next to
+# the chain that drives it. `snmpv3` is the USM envelope over the same PDU layer
+# the `snmp` suite already exercises, hence the `snmp` edge.
+module_deps(radius   auth)
+module_deps(tacacs   auth)
+module_deps(snmpv3   snmp util quality)
+
+# `mp` is split by layer: the frame codec, the JSON codec, the RPC dispatch, the
+# override/guard/interlock engine, the manifest, the stream records and the
+# panel mirror fail independently and are tested independently.
+module_deps(mp_frame    mp)
+module_deps(mp_json     mp)
+module_deps(mp_rpc      mp)
+module_deps(mp_override mp)
+module_deps(mp_manifest mp)
+module_deps(mp_stream   mp)
+module_deps(mp_mirror   mp)
 
 # `ptp` is split by layer: the wire codecs, the best-master algorithm and the
 # port state machine are independent enough to fail independently.

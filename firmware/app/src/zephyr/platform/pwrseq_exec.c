@@ -59,6 +59,7 @@
 #include "ina228/ina228.h"
 #include "pwrseq/pwrseq.h"
 #include "quality/quality.h"
+#include "storage/sts_store.h"
 
 LOG_MODULE_REGISTER(sts_pwrseq, CONFIG_STS1000_LOG_LEVEL);
 
@@ -67,6 +68,19 @@ LOG_MODULE_REGISTER(sts_pwrseq, CONFIG_STS1000_LOG_LEVEL);
 #define CFG_KEY_PWR_RB_VMAX_MV   0x0703U
 #define CFG_KEY_PWR_POE_BUDGET_MW 0x0704U
 #define CFG_KEY_PWR_RB_WARMUP_S  0x0705U
+
+/*
+ * Hard ceiling on the configurable VCC_RB limit, millivolts.
+ *
+ * The schema bounds PWR_RB_VMAX_MV only by its u16 type and the buck's own range
+ * (4510..24450), so an operator could raise the "FE ceiling" to 24 V — above the
+ * absolute maximum of the 15 V-class FE-5680A this board is built around — and the
+ * measured<=vmax gate would then wave through a rail that destroys the FE. cfg
+ * may lower the ceiling for a lower-voltage unit; it may never raise it past what
+ * the hardware was designed for. Documented in docs/sts1000_vcc_rb_supply.md and
+ * the CLAUDE.md digipot gotcha.
+ */
+#define PWR_RB_VMAX_MV_CEILING 15000U
 
 /* Supervisor gate that pwrseq's WDT_EN / RELAY_ELIGIBLE actions drive. */
 void sts_supervisor_set_seq_eligible(bool eligible);
@@ -113,7 +127,31 @@ static void pwrseq_load_cfg(pwrseq_cfg_t *cfg)
 	 * the wiper by voltage (rb_vmax_mv), not by a code ceiling.
 	 */
 	if (cfg_get_u64(sts_cfg(), CFG_KEY_PWR_RB_VMAX_MV, &v) == 0) {
-		cfg->rb_vmax_mv = (uint32_t)v;
+		uint32_t vmax = (v > (uint64_t)PWR_RB_VMAX_MV_CEILING)
+					? PWR_RB_VMAX_MV_CEILING
+					: (uint32_t)v;
+		int32_t need = pwrseq_rb_expected_mv(&cfg->rb_xfer,
+						     cfg->digipot_operating_code);
+
+		if (vmax != (uint32_t)v) {
+			LOG_WRN("pwr.rb.vmax.mv %llu mV exceeds the %u mV hardware "
+				"ceiling; clamped",
+				(unsigned long long)v, PWR_RB_VMAX_MV_CEILING);
+		}
+		/*
+		 * A ceiling below the fixed operating setpoint would make
+		 * pwrseq_init() reject the whole configuration — and a sequencer
+		 * that never starts means no GPS, no display, no watchdog and no
+		 * relay, i.e. a config typo would brick the box far beyond the
+		 * rubidium. Refuse the value instead and keep the default.
+		 */
+		if ((need > 0) && (vmax < (uint32_t)need)) {
+			LOG_ERR("pwr.rb.vmax.mv %u mV is below the %d mV operating "
+				"setpoint; keeping the %u mV default",
+				vmax, need, cfg->rb_vmax_mv);
+		} else {
+			cfg->rb_vmax_mv = vmax;
+		}
 	}
 	/*
 	 * The PoE budget is a per-tick input (pwrseq_in_t.poe_granted_mw), not
@@ -191,13 +229,22 @@ static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms)
 	 */
 	in->phy_refclk_stable = true;
 	in->phy_id_ok = true;
-	/* TODO(wave-3b): gnss_cfg_ack from the gnss thread's CFG-TXREADY ACK. */
-	in->gnss_cfg_ack = true;
+	in->gnss_cfg_ack = sts_gnss_cfg_ack();
 
 	for (size_t r = 0; r < INA228_RAIL_COUNT; r++) {
 		in->ina_valid[r] = hk.ina[r].valid && hk.ina[r].cal_ok;
 		in->ina_vbus_mv[r] = hk.ina[r].bus_uv / 1000;
 		in->ina_current_ma[r] = hk.ina[r].current_ua / 1000;
+		/*
+		 * sts_ina_reading_t::age_ms is the *timestamp* of the reading, so
+		 * the age is the difference. Without this the rubidium rail windows
+		 * judged whatever happened to be in the cache, which on a 1 Hz sweep
+		 * against a 250 ms tick meant a reading up to a second older than
+		 * the rail change it was supposed to observe.
+		 */
+		in->ina_age_ms[r] = hk.ina[r].valid
+					    ? (now_ms - hk.ina[r].age_ms)
+					    : UINT32_MAX;
 	}
 	in->pg_mask = pwrseq_pg_mask();
 
@@ -213,13 +260,7 @@ static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms)
 		in->digipot_readback_valid = true;
 	}
 
-	/* rb_lock: raw pin level. The opto (U48) inverts and the electrical
-	 * polarity is a cfg bit that refsel applies; pwrseq only needs the
-	 * boolean, so the logical DT level is passed through.
-	 * TODO(wave-3b): apply the configured RB_LOCK polarity here too. */
-	if (gpio_is_ready_dt(&rb_lock_in)) {
-		in->rb_lock = gpio_pin_get_dt(&rb_lock_in) == 1;
-	}
+	in->rb_lock = sts_pwrseq_rb_lock();
 	in->extref_in_band = extref_valid && extref_hz >= 9999800U &&
 			     extref_hz <= 10000200U;
 	if (gpio_is_ready_dt(&rb_ov_det)) {
@@ -236,7 +277,17 @@ static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms)
 
 	in->ui_wanted = IS_ENABLED(CONFIG_STS1000_UI);
 	in->liveness_ok = sts_liveness_stale_mask(now_ms) == 0U;
-	in->debugger_attached = false;
+	/*
+	 * external_wdt §7.4: the TPS3430 cannot freeze on a core halt, so the
+	 * watchdog must stay disarmed under a debugger or the first breakpoint
+	 * cold-cycles the board. CoreDebug DHCSR C_DEBUGEN is the only reliable
+	 * "a probe has claimed this core" bit on a Cortex-M33 and it is readable
+	 * from software.
+	 */
+	in->debugger_attached = (CoreDebug->DHCSR & CoreDebug_DHCSR_C_DEBUGEN_Msk) != 0U;
+
+	/* Rungs 2 and 3 of the thermal ladder — the actuator side of spec §13. */
+	sts_hk_thermal_requests(&in->thermal_shed_rb, &in->thermal_poe_kill);
 }
 
 /* ------------------------------------------------------------- actions ---- */
@@ -248,6 +299,56 @@ static void pwrseq_set(const struct gpio_dt_spec *g, int val)
 	}
 }
 
+/*
+ * Signals whose asserted level is *expected* while a load is deliberately off.
+ *
+ * fault_set_expected_off() had no caller outside its own tests, so every
+ * commanded load-off raised a real fault. That is not cosmetic: the GNSS LDO's
+ * power-good (FAULT_SIG_PG_3V3_GPS_LDO) is in FAULT_RELAY_DISQUALIFY_DEFAULT, so
+ * the stage-5 GPS-off failure path released K2 and reddened the status RGB for a
+ * condition firmware had just commanded. Each entry is (load-off action, the
+ * signals that then legitimately read asserted).
+ */
+static void pwrseq_expect_off(bool off, const fault_sig_t *sigs, size_t n)
+{
+	sts_fault_lock();
+	for (size_t i = 0; i < n; i++) {
+		(void)fault_set_expected_off(sts_fault(), sigs[i], off);
+	}
+	sts_fault_unlock();
+}
+
+/* GPS rail: the LDO power-good plus its own INA228 alert. */
+static const fault_sig_t sig_gps[] = {
+	FAULT_SIG_PG_3V3_GPS_LDO,
+	FAULT_SIG_INA_ALERT_3V3_GPS,
+};
+/* Antenna bias: the RT9742 nFLG and the antenna-rail alert. An unbiased antenna
+ * rail reads as an open, which is the definition of "expected" here. */
+static const fault_sig_t sig_ant[] = {
+	FAULT_SIG_V_ANT_EN_FAULT,
+	FAULT_SIG_INA_ALERT_V_ANT,
+};
+/* Display 5 V: load-switch nFLG and the 5V_DISP alert. */
+static const fault_sig_t sig_disp[] = {
+	FAULT_SIG_V_DISP_EN_FAULT,
+	FAULT_SIG_INA_ALERT_5V_DISP,
+};
+/* Panel LEDs: load-switch nFLG and the panel-rail alert. */
+static const fault_sig_t sig_panel[] = {
+	FAULT_SIG_PANEL_LED_FAULT,
+	FAULT_SIG_INA_ALERT_PANEL,
+};
+/* Rubidium: the MIC28516 power-good and the VCC_RB alert. Both are excluded from
+ * the relay-disqualify set already, but they still hold fault_any_active() true
+ * and so keep the status RGB red on a healthy OCXO-only unit. */
+static const fault_sig_t sig_rb[] = {
+	FAULT_SIG_PG_RB_PSU,
+	FAULT_SIG_INA_ALERT_VCC_RB,
+};
+
+#define EXPECT_OFF(off, arr) pwrseq_expect_off((off), (arr), ARRAY_SIZE(arr))
+
 static void pwrseq_exec_action(const pwrseq_act_t *a)
 {
 	switch ((pwrseq_action_t)a->action) {
@@ -257,10 +358,19 @@ static void pwrseq_exec_action(const pwrseq_act_t *a)
 	case PWRSEQ_ACT_READ_RAIL_BASELINE:
 	case PWRSEQ_ACT_LAN_RST_RELEASE:
 	case PWRSEQ_ACT_PHY_MDIO_POLL:
-	case PWRSEQ_ACT_ANT_SUPERVISOR_START:
-	case PWRSEQ_ACT_GNSS_CONFIG_REQUEST:
-	case PWRSEQ_ACT_WDT_KICK_START: /* supervisor kicks once armed */
 	case PWRSEQ_ACT_NONE:
+		break;
+
+	case PWRSEQ_ACT_ANT_SUPERVISOR_START:
+		sts_gnss_ant_supervisor_start();
+		break;
+	case PWRSEQ_ACT_GNSS_CONFIG_REQUEST:
+		/* Interface ref §2 step 5.5. Idempotent: gnssmgr restarts the walk
+		 * from its first step, which is what a retry of this row wants. */
+		(void)sts_gnss_configure(k_uptime_get_32());
+		break;
+	case PWRSEQ_ACT_WDT_KICK_START:
+		sts_supervisor_kick_start(k_uptime_get_32());
 		break;
 
 	case PWRSEQ_ACT_DISP_RST_RELEASE:
@@ -277,33 +387,44 @@ static void pwrseq_exec_action(const pwrseq_act_t *a)
 		break;
 
 	case PWRSEQ_ACT_GPS_PWR_EN:
+		EXPECT_OFF(false, sig_gps);
 		pwrseq_set(&gps_pwr_en, 1);
 		break;
 	case PWRSEQ_ACT_GPS_PWR_DIS:
 		pwrseq_set(&gps_pwr_en, 0);
+		EXPECT_OFF(true, sig_gps);
 		break;
 	case PWRSEQ_ACT_GPS_RST_RELEASE:
 		pwrseq_set(&gps_rst, 0); /* active-low: 0 = released */
+		/* Its configuration is gone with the reset; gnssmgr has to know
+		 * before it starts believing NAV messages from the new session. */
+		(void)sts_gnss_notify_reset(k_uptime_get_32());
 		break;
 	case PWRSEQ_ACT_ANT_BIAS_EN:
+		EXPECT_OFF(false, sig_ant);
 		pwrseq_set(&ant_bias_en, 1);
 		break;
 	case PWRSEQ_ACT_ANT_BIAS_DIS:
 		pwrseq_set(&ant_bias_en, 0);
+		EXPECT_OFF(true, sig_ant);
 		break;
 
 	case PWRSEQ_ACT_DISP_EN:
+		EXPECT_OFF(false, sig_disp);
 		pwrseq_set(&disp_en, 1);
 		break;
 	case PWRSEQ_ACT_DISP_DIS:
 		pwrseq_set(&disp_en, 0);
+		EXPECT_OFF(true, sig_disp);
 		break;
 	case PWRSEQ_ACT_PANEL_LED_EN:
 		/* The rail-enable is folded into the duty set; a bare enable
 		 * comes up dark until PANEL_LED_PWM sets a duty. */
+		EXPECT_OFF(false, sig_panel);
 		break;
 	case PWRSEQ_ACT_PANEL_LED_DIS:
 		(void)sts_panel_led_set(0);
+		EXPECT_OFF(true, sig_panel);
 		break;
 	case PWRSEQ_ACT_PANEL_LED_PWM:
 		(void)sts_panel_led_set((uint8_t)a->arg);
@@ -316,6 +437,14 @@ static void pwrseq_exec_action(const pwrseq_act_t *a)
 			LOG_ERR("pwrseq: digipot write %u failed; Rb sequence halts",
 				a->arg);
 		}
+		/*
+		 * Ask housekeeping to re-read VCC_RB now. The window steps that
+		 * follow are judged against this cache, and its unconditional
+		 * sweep is only 1 Hz — a step that has to decide inside its own
+		 * timeout cannot wait for that and must not judge the reading that
+		 * predates this write.
+		 */
+		sts_hk_request_ina((uint8_t)INA228_RAIL_VCC_RB);
 		break;
 	case PWRSEQ_ACT_DIGIPOT_VERIFY: {
 		uint16_t rb = 0;
@@ -329,10 +458,16 @@ static void pwrseq_exec_action(const pwrseq_act_t *a)
 		break;
 	}
 	case PWRSEQ_ACT_RB_PWR_EN:
+		EXPECT_OFF(false, sig_rb);
 		pwrseq_set(&rb_pwr_en, 1);
+		/* Same reason as the digipot writes: step 8.13 verifies this rail
+		 * inside its own window and needs a reading taken after the buck
+		 * came up, not before. */
+		sts_hk_request_ina((uint8_t)INA228_RAIL_VCC_RB);
 		break;
 	case PWRSEQ_ACT_RB_PWR_DIS:
 		pwrseq_set(&rb_pwr_en, 0);
+		EXPECT_OFF(true, sig_rb);
 		break;
 	case PWRSEQ_ACT_RB_VCC_GATE_EN:
 		pwrseq_set(&rb_vcc_gate, 1);
@@ -361,10 +496,20 @@ static void pwrseq_exec_action(const pwrseq_act_t *a)
 		sts_discipline_park();
 		break;
 	case PWRSEQ_ACT_PERSIST_STATE:
+		/* power_fail_input §5 item 2. The PFI ISR already scheduled this on
+		 * the system work queue (which is cooperative, so it runs ahead of
+		 * every application thread); re-requesting it is idempotent and
+		 * covers a park list run for any other reason. */
+		sts_store_critical_flush_from_isr();
+		break;
 	case PWRSEQ_ACT_SET_SHUTDOWN_FLAG:
-		/* The console area owns NVS fast-save; the PFI flag it polls
-		 * (sts_pfi_fired) is the trigger. Nothing to drive here.
-		 * TODO(wave-3b): a direct sts_store_critical_flush() hook. */
+		/*
+		 * power_fail_input §5 item 4. Records *why* the record was written,
+		 * which is what lets the next boot tell an orderly line drop from a
+		 * crash — previously nothing emitted this at all, so every boot
+		 * looked like a crash.
+		 */
+		(void)sts_store_critical_flush(STS_CRITICAL_REASON_SHUTDOWN);
 		break;
 	case PWRSEQ_ACT_POE_KILL:
 		LOG_WRN("pwrseq: POE_KILL asserted — board cold-cycle");
@@ -379,10 +524,18 @@ static void pwrseq_exec_action(const pwrseq_act_t *a)
 
 /* ------------------------------------------------------------- driver ----- */
 
+static void pwrseq_drain(void)
+{
+	pwrseq_act_t act;
+
+	while (pwrseq_action_get(&pwrseq, &act) == 0) {
+		pwrseq_exec_action(&act);
+	}
+}
+
 void sts_pwrseq_step(uint32_t now_ms)
 {
 	pwrseq_in_t in;
-	pwrseq_act_t act;
 
 	if (!pwrseq_started) {
 		return;
@@ -394,11 +547,96 @@ void sts_pwrseq_step(uint32_t now_ms)
 		return;
 	}
 
-	while (pwrseq_action_get(&pwrseq, &act) == 0) {
-		pwrseq_exec_action(&act);
-	}
+	pwrseq_drain();
 
 	sts_liveness_feed(pwrseq_liveness_id);
+}
+
+void sts_pwrseq_pfi(uint32_t now_ms)
+{
+	if (!pwrseq_started) {
+		return;
+	}
+
+	/*
+	 * Housekeeping-thread context, so nothing can be mid-drain: this is the
+	 * mutual exclusion pwrseq.h §pwrseq_pfi requires and that an ISR-side call
+	 * would break. Drained synchronously right here, because the whole point of
+	 * the park list is that it completes inside the hold-up window rather than
+	 * waiting for the next 250 ms tick.
+	 */
+	(void)pwrseq_pfi(&pwrseq, now_ms);
+	pwrseq_drain();
+
+	if (pwrseq_actions_dropped(&pwrseq) != 0U) {
+		LOG_ERR("pwrseq: %u actions were dropped before the power fail; "
+			"the board state may not match the sequencer's model",
+			pwrseq_actions_dropped(&pwrseq));
+	}
+}
+
+void sts_pwrseq_rb_quiesce_from_isr(void)
+{
+	/*
+	 * Load side first, then the supply — the same order as pwrseq's own
+	 * rb_shutdown(). Two GPIO register writes, no locks and no logging, so it
+	 * is safe from the PFI EXTI8 handler; idempotent, so the park list
+	 * re-emitting them later costs nothing.
+	 */
+	pwrseq_set(&rb_vcc_gate, 0);
+	pwrseq_set(&rb_pwr_en, 0);
+}
+
+int sts_pwrseq_rb_retry(uint32_t now_ms)
+{
+	if (!pwrseq_started) {
+		return -ENODEV;
+	}
+
+	return pwrseq_rb_retry(&pwrseq, now_ms);
+}
+
+bool sts_pwrseq_rb_lock(void)
+{
+	int level;
+
+	if (!gpio_is_ready_dt(&rb_lock_in)) {
+		return false;
+	}
+
+	level = gpio_pin_get_dt(&rb_lock_in);
+	if (level < 0) {
+		return false;
+	}
+
+	/*
+	 * The opto (U48) inverts: FE lock line high -> LED on -> transistor on ->
+	 * RB_LOCK pulled low (rb_rs232_interface §6A.3). Which level means "locked"
+	 * cannot be assumed for a surplus FE variant, so it is a firmware bit,
+	 * commissioned per unit — not a hard-coded polarity.
+	 */
+	if (IS_ENABLED(CONFIG_STS1000_RB_LOCK_ACTIVE_LOW)) {
+		return level == 0;
+	}
+
+	return level == 1;
+}
+
+void sts_pwrseq_ant_bias_request(bool on)
+{
+	if (!pwrseq_started) {
+		return;
+	}
+
+	/* Single writer per pin: the antenna supervisor decides, this file drives
+	 * (ARCHITECTURE.md §10). Keep the expected-off mask in step with it. */
+	if (on) {
+		EXPECT_OFF(false, sig_ant);
+		pwrseq_set(&ant_bias_en, 1);
+	} else {
+		pwrseq_set(&ant_bias_en, 0);
+		EXPECT_OFF(true, sig_ant);
+	}
 }
 
 int sts_pwrseq_start(uint32_t now_ms)
@@ -435,12 +673,37 @@ int sts_pwrseq_start(uint32_t now_ms)
 		}
 	}
 
+	/*
+	 * Every gated load boots off, so every one of their fault signals reads
+	 * asserted before firmware has enabled anything. Marking them expected-off
+	 * here is what keeps a cold board from coming up with a red status RGB and
+	 * a released relay for rails nobody has switched on yet.
+	 */
+	EXPECT_OFF(true, sig_gps);
+	EXPECT_OFF(true, sig_ant);
+	EXPECT_OFF(true, sig_disp);
+	EXPECT_OFF(true, sig_panel);
+	EXPECT_OFF(true, sig_rb);
+
 	pwrseq_load_cfg(&cfg);
 
 	rc = pwrseq_init(&pwrseq, &cfg);
 	if (rc != 0) {
-		LOG_ERR("pwrseq_init failed (%d)", rc);
-		return rc;
+		/*
+		 * A rejected safety envelope must not leave the board with no
+		 * sequencer: stages 5-9 (GPS, display, rubidium, watchdog, relay)
+		 * all live here, so refusing to start would cost far more than the
+		 * bad setting. Fall back to the documented defaults and say so.
+		 */
+		LOG_ERR("pwrseq_init rejected the configured envelope (%d); "
+			"falling back to the built-in defaults",
+			rc);
+		pwrseq_cfg_default(&cfg);
+		rc = pwrseq_init(&pwrseq, &cfg);
+		if (rc != 0) {
+			LOG_ERR("pwrseq_init failed on the defaults too (%d)", rc);
+			return rc;
+		}
 	}
 
 	rc = pwrseq_start(&pwrseq, now_ms);

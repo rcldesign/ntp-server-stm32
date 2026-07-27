@@ -112,17 +112,34 @@ config STS1000_SELF_CONFIRM_MIN_S
 	help
 	  Spec §8.3. Proxy for "every core thread has registered and fed its
 	  liveness slot"; the slowest application thread runs at 1 Hz, so a
-	  minute is many cycles. The supervisor's own
-	  sts_update_self_confirm() bypasses this wait.
+	  minute is many cycles. It applies to every caller: the timing terms
+	  of the gate take far longer than this to satisfy anyway, so there is
+	  nothing to gain from a path that skips it.
+
+config STS1000_SELF_CONFIRM_LOCK_MARGIN_S
+	int "Self-confirm allowance ahead of the lock-hold window (seconds)"
+	default 1200
+	range 60 86400
+	help
+	  Everything that has to happen before cfg key tim.lock.hold can even
+	  start counting: GNSS time-to-first-fix, OCXO warm-up, discipline-loop
+	  convergence, PHY autonegotiation and a DHCP lease. The abandon
+	  deadline is MIN_S + tim.lock.hold + this, floored at
+	  STS1000_SELF_CONFIRM_DEADLINE_S.
 
 config STS1000_SELF_CONFIRM_DEADLINE_S
-	int "Give up self-confirming after (seconds)"
+	int "Self-confirm deadline floor (seconds)"
 	default 600
 	range 60 86400
 	help
-	  Long enough to cover PHY autonegotiation and a DHCP lease. Past it
-	  the attempt is abandoned with a CRIT log line and MCUboot reverts on
-	  the next reboot. Must exceed STS1000_SELF_CONFIRM_MIN_S.
+	  FLOOR, not the deadline. The real deadline is derived at runtime as
+	  STS1000_SELF_CONFIRM_MIN_S + tim.lock.hold +
+	  STS1000_SELF_CONFIRM_LOCK_MARGIN_S, because the gate requires
+	  QUALITY_LOCK_LOCKED and that cannot be declared until the lock
+	  criteria have held for tim.lock.hold seconds (default 300) —
+	  a fixed 600 s would abandon a legitimately slow first fix. Past the
+	  deadline the attempt is abandoned with a CRIT log line and MCUboot
+	  reverts on the next reboot. Must exceed STS1000_SELF_CONFIRM_MIN_S.
 
 endmenu
 

@@ -52,6 +52,7 @@
 #include <stdint.h>
 
 #include "port/port_crypto.h"
+#include "quality/quality.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -198,6 +199,47 @@ typedef struct {
 /** Fill @p q with the unsynchronised defaults (LI 3, stratum 16, precision −20). */
 void ntp_quality_view_default(ntp_quality_view_t *q);
 
+/** How far ahead of the event the leap indicator is advertised (RFC 5905 §7.3). */
+#define NTP_LEAP_ANNOUNCE_WINDOW_S UINT64_C(86400)
+
+/**
+ * Project a §3.8 quality block onto the NTP view.
+ *
+ * The counterpart of ptp_quality_view_from_block(): the one place the §3.8
+ * layout and the NTP header meet, so the glue does not hand-roll it and the
+ * mapping is under host test. The mapping, with its reasoning:
+ *
+ * | NTP field       | Source |
+ * |---|---|
+ * | stratum/refid/root_delay/root_disp | copied; `disc` has already folded holdover into all four |
+ * | tai_minus_utc   | `leap_current_s` |
+ * | leap            | `leap_pending` sign, and only inside NTP_LEAP_ANNOUNCE_WINDOW_S of `leap_at_tai_s`; LI 0 otherwise |
+ * | ref_tai_ns      | `now_tai_ns` less the block's age, so it stops advancing in holdover and a client can see the staleness |
+ * | synchronized    | stratum is primary **and** @p time_traceable |
+ *
+ * @param b              The snapshot to project. Not retained.
+ * @param now_tai_ns     Current TAI nanoseconds; 0 when no time is available,
+ *                       which suppresses the leap announcement and the
+ *                       reference timestamp rather than inventing either.
+ * @param now_mono_ms    Current monotonic milliseconds, to age @p b.
+ * @param time_traceable Whether the served timescale is actually traceable to
+ *                       the primary reference. **This is a hard gate**: false
+ *                       forces LI 3 / stratum 16 / refid 'INIT' however healthy
+ *                       the discipline loop believes it is. The clock counter
+ *                       the timestamps come from is placed on TAI by a separate
+ *                       mechanism from the one that locks the oscillator, and a
+ *                       locked oscillator on an unplaced counter serves
+ *                       confidently wrong time (F1).
+ * @param precision      Clock precision as log2 seconds, for the header.
+ * @param out            Receives the view.
+ *
+ * @retval 0        Success.
+ * @retval -EINVAL  @p b or @p out is NULL.
+ */
+int ntp_quality_view_from_block(const quality_block_t *b, uint64_t now_tai_ns,
+				uint64_t now_mono_ms, bool time_traceable,
+				int8_t precision, ntp_quality_view_t *out);
+
 /* --------------------------------------------------------- parsed request */
 
 /** A parsed NTP datagram. Offsets index the caller's buffer. */
@@ -242,6 +284,18 @@ typedef struct {
 } ntp_pkt_t;
 
 /**
+ * Smallest extension-field length this parser accepts, octets.
+ *
+ * RFC 7822 §7.5.1: in a packet with no MAC an extension field is at least 16
+ * octets; beside a MAC it is at least 28. 16 is therefore the floor for any
+ * field, and enforcing it is not pedantry — every 4-aligned length below it
+ * that the walk accepts is another value a chosen key id can alias to, and the
+ * low 16 bits of a key id are exactly what the length field reads as when a MAC
+ * is mistaken for an extension field (M4/F6).
+ */
+#define NTP_EF_LEN_MIN 16U
+
+/**
  * Parse a datagram into @p out. Performs no policy: version, mode and
  * authentication are the caller's business.
  *
@@ -249,13 +303,31 @@ typedef struct {
  * (ntpd, chrony): a trailing remainder whose length is that of a MAC field
  * (key id + a recognised digest length) is a MAC, not an extension field —
  * extension fields alongside a MAC are ≥ 28 octets, so the short MAC lengths
- * are unambiguous. A MAC-shaped remainder of a digest length this server does
- * not implement is still recognised, and flagged in @p mac_unsupported so the
- * handler rejects it instead of ignoring it and answering unauthenticated.
+ * are unambiguous.
+ *
+ * That decision is taken **before** the extension-field parse, for every
+ * recognised MAC length including the three this server cannot verify
+ * (36/52/68 = key id + a 32/48/64-octet digest). Trying the extension-field
+ * parse first was a real hole: the length field of a candidate extension field
+ * sits exactly where the low 16 bits of the key id are, so a client choosing
+ * `keyid = 36` produced `flen = 36` — 4-aligned, within the remainder, and
+ * therefore consumed as one extension field. The MAC vanished, @p mac_len came
+ * back 0, and the request was answered unauthenticated (M4/F6).
+ *
+ * The cost of resolving the ambiguity this way is that a *final* extension
+ * field of exactly 36, 52 or 68 octets is read as an unsupported MAC and the
+ * request is rejected. Nothing this firmware speaks is shaped that way: an NTS
+ * request's last field is the authenticator (40 octets with an empty
+ * plaintext), its Unique Identifier (36) is never last, and its cookie and
+ * placeholder fields are 104. A client that really does put a 36-octet
+ * extension field last is indistinguishable from one presenting a SHA-256 MAC,
+ * and the safe reading of an ambiguous authenticator is "authentication
+ * failed".
  *
  * The extension-field walk is otherwise tolerant: it stops at the first field
- * that is short, unaligned or overruns, reports the octets it did validate in
- * @p ext_len, and ignores the remainder. Nothing beyond ext_len is ever echoed.
+ * that is short (< NTP_EF_LEN_MIN), unaligned or overruns, reports the octets
+ * it did validate in @p ext_len, and ignores the remainder. Nothing beyond
+ * ext_len is ever echoed.
  *
  * @retval 0         Parsed. @p out is fully populated.
  * @retval -EINVAL   @p pkt or @p out is NULL.
@@ -536,6 +608,31 @@ typedef struct {
 	uint32_t xl_gen;          /* per-client response generation counter */
 } ntp_client_t;
 
+/** Octets of per-boot key material behind ntp_client_id(). */
+#define NTP_CLIENT_ID_KEY_LEN 16U
+
+/**
+ * Backward window over which the transmit field is kept strictly increasing,
+ * in units of the NTP 32.32 fraction (2^32 == one second). 2^32/50 == 20 ms.
+ *
+ * Why the field must be distinct at all: the platform demultiplexes the
+ * hardware egress timestamp of a response by the transmit field that went on
+ * the wire, because that is the only per-response value the driver's callback
+ * can see (there is no MSG_ERRQUEUE in Zephyr). Two responses carrying the same
+ * transmit field are therefore indistinguishable, and one client's measured
+ * egress instant can be paired with another client's exchange and reported to
+ * it as its own t3. That is not a narrow race: it happens for every pair of
+ * responses built inside one tick of whatever clock the transmit estimate came
+ * from, and the software fallback clock ticks at 1 ms (F5).
+ *
+ * So the server nudges the field forward by one LSB (233 ps) whenever it would
+ * otherwise repeat or move backwards. The nudge is bounded to this window so
+ * that a *legitimate* backward move larger than it — an era rollover, or a
+ * servo step, which is only ever taken for an offset above 20 ms — resets the
+ * register instead of pinning the served time to the pre-step value.
+ */
+#define NTP_XMT_DISTINCT_WINDOW (((UINT64_C(1) << 32U) / UINT64_C(50)))
+
 /** One symmetric key. All fields private. */
 typedef struct {
 	uint32_t keyid;
@@ -554,7 +651,14 @@ typedef struct {
 	ntp_client_t clients[NTP_CLIENT_SLOTS];
 	uint32_t g_tokens_milli;
 	int64_t g_tokens_ms;
-	uint32_t hash_seed; /* per-boot client-table hash salt (L14) */
+	uint32_t hash_seed; /* per-boot client-table slot salt (L14) */
+	/* Per-boot key for ntp_client_id(). Separate from hash_seed because the
+	 * two protect different things: hash_seed only randomises which set an
+	 * identity lands in, this keys the identity itself (F8). */
+	uint8_t id_key[NTP_CLIENT_ID_KEY_LEN];
+	/* Transmit field of the previous response, for the distinctness rule
+	 * documented at NTP_XMT_DISTINCT_WINDOW. 0 = none issued yet. */
+	uint64_t xmt_last;
 	ntp_stats_t stats;
 } ntp_ctx_t;
 
@@ -566,10 +670,12 @@ typedef struct {
  *                clamped into [1, NTP_BURST_MAX].
  * @param crypto  Crypto port. Required only for symmetric authentication —
  *                pass NULL to run without it, and any MAC-bearing request is
- *                then an auth failure. When present its rand() also salts the
- *                per-client hash table, so an attacker cannot craft a set of
- *                source addresses that all collide into one bucket (L14); a
- *                rand() failure is non-fatal and leaves the salt zero.
+ *                then an auth failure. When present its rand() also keys
+ *                ntp_client_id() and salts the per-client hash table, so an
+ *                attacker can neither craft a source address that shares a
+ *                victim's identity (F8) nor a set that all collide into one
+ *                bucket (L14); a rand() failure is non-fatal and leaves both at
+ *                a documented fixed value.
  * @param now_ms  Monotonic milliseconds; seeds the global bucket.
  *
  * @retval 0        Initialised.
@@ -577,6 +683,38 @@ typedef struct {
  */
 int ntp_init(ntp_ctx_t *ctx, const ntp_cfg_t *cfg, const port_crypto_t *crypto,
 	     int64_t now_ms);
+
+/**
+ * Derive the ntp_rx_t::client_id of a source address.
+ *
+ * A **keyed** 32-bit tag (SipHash-2-4 over @p addr under the context's per-boot
+ * key), truncated to 32 bits.
+ *
+ * Keyed, not merely hashed, and that distinction is the whole point. The
+ * previous derivation was an unkeyed CRC-32 over the address. CRC-32 is affine
+ * over GF(2), so for a 16-octet IPv6 address a second address colliding with a
+ * chosen victim is *solved*, not searched — and a colliding source shares the
+ * victim's token bucket and its interleave cache, so anyone with a routable /64
+ * could drain a specific customer's rate budget into Kiss-o'-Death and silent
+ * drops (F8). Salting only the table slot did not help: mix32() is a bijection,
+ * so a slot salt applied after the CRC leaves `crc(a) == crc(b)` exactly as
+ * easy to solve as before. The identity itself had to become key-dependent.
+ *
+ * IPv4 was never solvable — four octets through CRC-32 is a bijection — but it
+ * goes through the same function so there is one derivation to reason about.
+ *
+ * Truncation to 32 bits keeps ntp_rx_t and ntp_tx_complete() unchanged. A
+ * *random* collision with one chosen victim still needs ~2^32 addresses tried
+ * against a rate-limited server; without the key, forging one was free.
+ *
+ * @param ctx       Initialised context; supplies the key. NULL yields 0.
+ * @param addr      Raw address octets — 4 for IPv4, 16 for IPv6. Pass the
+ *                  address alone: no port, no packet contents.
+ * @param addr_len  Length of @p addr in octets.
+ *
+ * @return The identity, or 0 when @p ctx or @p addr is NULL or @p addr_len is 0.
+ */
+uint32_t ntp_client_id(const ntp_ctx_t *ctx, const void *addr, size_t addr_len);
 
 /**
  * Install the response extension-field hook, or NULL to remove it. The hook
@@ -627,6 +765,9 @@ typedef struct {
 	 * would split one client's interleave state and, worse, split its rate
 	 * bucket so a single host could multiply its budget by cycling ports.
 	 * Deriving from the address alone keeps one client to one bucket.
+	 *
+	 * Use ntp_client_id(): the identity has to be a *keyed* function of the
+	 * address, not merely a hashed one (F8).
 	 */
 	uint32_t client_id;
 	int64_t rx_tai_ns;  /**< Hardware receive timestamp (t6), TAI ns. */

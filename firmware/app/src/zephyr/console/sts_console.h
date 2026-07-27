@@ -80,11 +80,13 @@ const char *sts_dfu_swap_type_name(void);
 int sts_selfconfirm_start(void);
 
 /**
- * Re-evaluate the health gate and confirm if it passes.
+ * Report on the health gate, and abandon the attempt once the deadline passes.
  *
- * Called from the console supervisor thread. The authoritative path is the
- * supervisor's own sts_update_self_confirm() (sts_app.h); this poll is the
- * fallback that keeps a healthy image from reverting if that call never comes.
+ * Called from the console supervisor thread. It does NOT confirm: the only
+ * confirming path is sts_update_self_confirm() (sts_app.h), driven by the
+ * platform supervisor. A second, weaker gate racing the strict one is how an
+ * undisciplined image used to confirm itself sixty seconds after boot — see the
+ * header of sts_selfconfirm.c.
  */
 void sts_selfconfirm_poll(void);
 
@@ -95,8 +97,11 @@ typedef struct {
 	bool cfg_loaded;       /* the platform area published a cfg context */
 	bool store_ready;      /* NVS mounted, so cfg is genuinely persistent */
 	bool link_ok;          /* USB configured or a network interface is up */
+	bool clock_locked;     /* quality lock_state == QUALITY_LOCK_LOCKED */
+	bool serving_primary;  /* quality stratum == QUALITY_STRATUM_PRIMARY */
 	bool deadline_passed;  /* gave up; MCUboot will revert on next boot */
 	uint32_t uptime_s;
+	uint32_t deadline_s;   /* derived from tim.lock.hold, not a constant */
 } sts_selfconfirm_status_t;
 
 void sts_selfconfirm_status(sts_selfconfirm_status_t *out);

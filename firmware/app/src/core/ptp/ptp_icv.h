@@ -186,7 +186,16 @@ typedef struct {
 	uint32_t tx_key_id;
 	/** Emit sequenceNo on TX and enforce the window on RX. */
 	bool replay_protect;
-	/** Window width, 1..PTP_ICV_REPLAY_WINDOW_MAX. 0 means "1" (strict). */
+	/**
+	 * Window width in sequence numbers, 1..PTP_ICV_REPLAY_WINDOW_MAX.
+	 *
+	 * The width *includes* the highest accepted value, so the deepest
+	 * out-of-order arrival still accepted is highest - (replay_window - 1).
+	 * A width of 1 therefore means "strictly increasing only": the only
+	 * value tracked is the highest, which has already been seen. 0 is
+	 * treated as 1 rather than as "no window", so a zeroed configuration
+	 * fails closed.
+	 */
 	uint8_t replay_window;
 	/** Zero correctionField and messageTypeSpecific before hashing. */
 	bool mask_mutable;
