@@ -769,35 +769,38 @@ static int status_encode_gnss(uint8_t *buf, size_t cap)
 
 static int status_encode_power(uint8_t *buf, size_t cap)
 {
-	sts_hk_snapshot_t hk;
+	sts_health_t h;
 	struct sts_pack p = { .buf = buf, .cap = cap, .len = 0, .overflow = false };
-	int rc;
 
-	rc = sts_hk_read(&hk);
-	if (rc != 0) {
-		memset(&hk, 0, sizeof(hk));
+	/* Same source as the UI Power/Health page and SNMP: sts_health_t. */
+	if (sts_health_snapshot(&h) != 0) {
+		memset(&h, 0, sizeof(h));
 	}
 
 	pk_u8(&p, STS_STATUS_VER);
-	pk_u8(&p, (uint8_t)INA228_RAIL_COUNT);
-	pk_u8(&p, (uint8_t)(hk.temp_enclosure_valid ? 1U : 0U));
-	pk_u8(&p, (uint8_t)(hk.temp_osc_valid ? 1U : 0U));
-	pk_i32(&p, hk.temp_enclosure_mc);
-	pk_i32(&p, hk.temp_osc_mc);
-	pk_i32(&p, hk.humidity_mpct);
-	pk_u32(&p, hk.fan_rpm);
-	pk_u16(&p, hk.fan_duty_pct);
-	pk_u16(&p, 0U); /* reserved */
+	pk_u8(&p, (uint8_t)h.ina_count);
+	pk_u8(&p, (uint8_t)(h.tmp_amb_valid ? 1U : 0U));
+	pk_u8(&p, (uint8_t)(h.tmp_osc_valid ? 1U : 0U));
+	pk_i32(&p, h.tmp_amb_mc);
+	pk_i32(&p, h.tmp_osc_mc);
+	pk_i32(&p, h.die_mc);
+	pk_i32(&p, h.humidity_mpct);
+	pk_u32(&p, h.fan_rpm);
+	pk_u16(&p, h.fan_duty_pct);
+	pk_u8(&p, h.poe_class);
+	pk_u8(&p, (uint8_t)((h.bkp_stm_pg ? 1U : 0U) | (h.bkp_gps_pg ? 2U : 0U) |
+			    (h.die_valid ? 4U : 0U) | (h.humidity_valid ? 8U : 0U)));
+	pk_u32(&p, h.poe_draw_mw);
+	pk_u32(&p, h.poe_budget_mw);
 
 	/* Nine fixed-width rail records, in ina228_rail_t order. */
-	for (size_t i = 0; i < INA228_RAIL_COUNT; i++) {
+	for (size_t i = 0; i < STS_HEALTH_INA_COUNT && i < INA228_RAIL_COUNT; i++) {
 		pk_u8(&p, ina228_rail_tbl[i].addr);
-		pk_u8(&p, (uint8_t)((hk.ina[i].valid ? 1U : 0U) |
-				    (hk.ina[i].cal_ok ? 2U : 0U)));
-		pk_u16(&p, hk.ina[i].diag_alrt);
-		pk_i32(&p, hk.ina[i].bus_uv / 1000);      /* millivolts */
-		pk_i32(&p, hk.ina[i].current_ua);
-		pk_u32(&p, hk.ina[i].power_uw / 1000U);   /* milliwatts */
+		pk_u8(&p, (uint8_t)(h.ina[i].valid ? 1U : 0U));
+		pk_u16(&p, h.ina[i].diag_alrt);
+		pk_i32(&p, h.ina[i].bus_mv);
+		pk_i32(&p, h.ina[i].current_ua);
+		pk_u32(&p, h.ina[i].power_uw / 1000U); /* milliwatts */
 	}
 
 	return p.overflow ? -ENOMEM : (int)p.len;

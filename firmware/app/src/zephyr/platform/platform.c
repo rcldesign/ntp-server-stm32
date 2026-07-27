@@ -333,6 +333,14 @@ int sts_platform_init(void)
 
 	STEP("stage 7", stage7_timing());
 
+	/*
+	 * Stage 5 onward (GPS, display, guarded Rb, watchdog, relay) plus the
+	 * runtime fault responses are driven by the pwrseq stage machine, run
+	 * from the housekeeping tick. It observes the infrastructure this
+	 * function just brought up through its inputs and picks up from there.
+	 */
+	STEP("pwrseq", sts_pwrseq_start(k_uptime_get_32()));
+
 #undef STEP
 
 	if (first_err != 0) {

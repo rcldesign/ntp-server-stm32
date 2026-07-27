@@ -180,10 +180,12 @@ typedef struct {
 	sts_ina_reading_t ina[INA228_RAIL_COUNT];
 	int32_t  temp_enclosure_mc; /* TMP117 0x48, millicelsius */
 	int32_t  temp_osc_mc;       /* TMP117 0x49, millicelsius */
+	int32_t  die_mc;            /* STM32 internal sensor, millicelsius */
 	int32_t  humidity_mpct;     /* SHT45 0x44, milli-percent RH */
 	int32_t  temp_sht_mc;
 	bool     temp_enclosure_valid;
 	bool     temp_osc_valid;
+	bool     die_valid;
 	bool     sht_valid;
 	uint32_t fan_rpm;
 	uint16_t fan_duty_pct;
@@ -216,6 +218,16 @@ int sts_supervisor_init(void);
 
 /** Called at 4 Hz from the housekeeping thread. */
 void sts_supervisor_step(uint32_t now_ms);
+
+/* ------------------------------------------------------------------------- */
+/* pwrseq_exec.c — core/pwrseq runtime sequencer + action executor           */
+/* ------------------------------------------------------------------------- */
+
+/** Initialise pwrseq (cfg from the power group) and start the stage machine. */
+int sts_pwrseq_start(uint32_t now_ms);
+
+/** Step pwrseq and drain its action queue. Called at 4 Hz from housekeeping. */
+void sts_pwrseq_step(uint32_t now_ms);
 
 /** Stage 9: assert WDT_EN and begin the kick cadence. */
 int sts_supervisor_arm(void);

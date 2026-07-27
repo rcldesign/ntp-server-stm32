@@ -415,7 +415,6 @@ static int getter(void *ctx, uint16_t obj, uint16_t inst, snmp_value_t *out)
 		return 0;
 
 	/* -- platform-owned health scalars: not reachable from this area -- */
-	case SNMP_OBJ_SYS_OBJECT_ID: /* handled by core/snmp getter for OID? no */
 	default:
 		/* Includes the rail table, enclosure/die temp, humidity, fan,
 		 * PoE, supercaps, gnss antenna/fw, serial — see the file

@@ -116,6 +116,50 @@ typedef int (*sts_status_encode_fn)(void *ctx, uint8_t group, uint8_t *buf,
 int sts_status_register_encoder(uint8_t group, sts_status_encode_fn fn,
 				void *ctx);
 
+/* ---- health snapshot (rails, temps, fan, PoE, backup) ------------------- */
+/* Aggregate environmental/power health, published by the platform's
+ * housekeeping thread and read by the UI Power/Health page, the MCP
+ * STATUS_GET POWER group and the SNMP agent — one source so all three agree.
+ * Non-timing data; snapshot is a bounded mutex copy of the housekeeping cache,
+ * safe from any management thread (not an ISR). */
+#define STS_HEALTH_VER 1u
+#define STS_HEALTH_INA_COUNT 9u /* == INA228_RAIL_COUNT, ina228_rail_t order */
+
+typedef struct {
+	int32_t  bus_mv;
+	int32_t  current_ua;
+	uint32_t power_uw;
+	uint16_t diag_alrt;
+	bool     valid;   /* read succeeded AND SHUNT_CAL confirmed present */
+} sts_health_ina_t;
+
+typedef struct {
+	uint16_t ver;       /* STS_HEALTH_VER */
+	uint16_t ina_count; /* STS_HEALTH_INA_COUNT */
+
+	sts_health_ina_t ina[STS_HEALTH_INA_COUNT];
+
+	int32_t tmp_osc_mc;   bool tmp_osc_valid;   /* TMP117 0x49 (oscillator) */
+	int32_t tmp_amb_mc;   bool tmp_amb_valid;   /* TMP117 0x48 (enclosure) */
+	int32_t die_mc;       bool die_valid;       /* STM32 internal sensor */
+	int32_t humidity_mpct; bool humidity_valid; /* SHT45 0x44, milli-%RH */
+
+	uint32_t fan_rpm;
+	uint16_t fan_duty_pct;
+
+	uint8_t  poe_class;      /* negotiated class, 0 = unknown (see note) */
+	uint32_t poe_draw_mw;    /* measured, INA228 0x40 */
+	uint32_t poe_budget_mw;  /* granted budget (cfg pwr.poe.mw) */
+
+	bool bkp_stm_pg;         /* STM supercap backup rail good */
+	bool bkp_gps_pg;         /* GPS V_BCKP backup rail good */
+
+	uint32_t mono_ms;        /* age of the underlying sweep */
+} sts_health_t;
+
+/* Fill @p out from the housekeeping cache. Returns 0, or -EINVAL for NULL. */
+int sts_health_snapshot(sts_health_t *out);
+
 /* ---- alarms / health ---------------------------------------------------- */
 /* Bitmask view of active alarms (fault-module alarm ids, FAULT_ALARM_BIT). */
 uint64_t sts_alarms_active(void);

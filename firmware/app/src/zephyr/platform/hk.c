@@ -490,6 +490,70 @@ int sts_hk_read(sts_hk_snapshot_t *out)
 	return 0;
 }
 
+int sts_health_snapshot(sts_health_t *out)
+{
+	sts_hk_snapshot_t hk;
+	uint64_t budget_mw = 0;
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+
+	(void)sts_hk_read(&hk);
+
+	memset(out, 0, sizeof(*out));
+	out->ver = STS_HEALTH_VER;
+	out->ina_count = STS_HEALTH_INA_COUNT;
+
+	for (size_t r = 0; r < INA228_RAIL_COUNT && r < STS_HEALTH_INA_COUNT; r++) {
+		out->ina[r].bus_mv = hk.ina[r].bus_uv / 1000;
+		out->ina[r].current_ua = hk.ina[r].current_ua;
+		out->ina[r].power_uw = hk.ina[r].power_uw;
+		out->ina[r].diag_alrt = hk.ina[r].diag_alrt;
+		out->ina[r].valid = hk.ina[r].valid && hk.ina[r].cal_ok;
+	}
+
+	out->tmp_osc_mc = hk.temp_osc_mc;
+	out->tmp_osc_valid = hk.temp_osc_valid;
+	out->tmp_amb_mc = hk.temp_enclosure_mc;
+	out->tmp_amb_valid = hk.temp_enclosure_valid;
+	out->die_mc = hk.die_mc;
+	out->die_valid = hk.die_valid;
+	out->humidity_mpct = hk.humidity_mpct;
+	out->humidity_valid = hk.sht_valid;
+
+	out->fan_rpm = hk.fan_rpm;
+	out->fan_duty_pct = hk.fan_duty_pct;
+
+	/*
+	 * poe_draw_mw from the PoE-input monitor (INA228 0x40, which reads the
+	 * 54 V bus directly, no divider); poe_budget_mw from the configured
+	 * grant. poe_class stays 0/unknown: the NCP1095 negotiates the class in
+	 * hardware and the NCM/NCL/LCF pins encode it, but decoding them is not
+	 * wired yet (documented TODO).
+	 */
+	if (hk.ina[INA228_RAIL_POE].valid) {
+		int32_t mv = hk.ina[INA228_RAIL_POE].bus_uv / 1000;
+		int32_t ma = hk.ina[INA228_RAIL_POE].current_ua / 1000;
+
+		if (mv > 0 && ma > 0) {
+			out->poe_draw_mw = (uint32_t)(((int64_t)mv * ma) / 1000);
+		}
+	}
+	(void)cfg_get_u64(sts_cfg(), (uint16_t)(0x0700U | 0x04U), &budget_mw);
+	out->poe_budget_mw = (uint32_t)budget_mw;
+	out->poe_class = 0U;
+
+	sts_fault_lock();
+	out->bkp_stm_pg = !fault_asserted(sts_fault(), FAULT_SIG_BKP_STM_PG);
+	out->bkp_gps_pg = !fault_asserted(sts_fault(), FAULT_SIG_BKP_GPS_PG);
+	sts_fault_unlock();
+
+	out->mono_ms = hk.mono_ms;
+
+	return 0;
+}
+
 static void hk_service_requests(void)
 {
 	atomic_val_t mask = atomic_set(&hk.ina_request_mask, 0);
@@ -577,6 +641,13 @@ static void hk_thermal_1hz(uint32_t now_ms)
 		}
 	}
 
+	/* Cache the die reading too, so the health snapshot (sts_health_t)
+	 * publishes the same value the ladder acted on. */
+	k_mutex_lock(&hk_mutex, K_FOREVER);
+	hk_cache.die_mc = in.die_mc;
+	hk_cache.die_valid = in.die_valid;
+	k_mutex_unlock(&hk_mutex);
+
 	in.fan_rpm = (uint16_t)MIN(hk_tach_rpm(now_ms), (uint32_t)UINT16_MAX);
 	in.rpm_valid = true;
 
@@ -628,6 +699,13 @@ static void hk_entry(void *p1, void *p2, void *p3)
 			(void)sts_alarm_set(FAULT_ALARM_PFI, true);
 		}
 
+		/*
+		 * pwrseq first (it may arm the watchdog and mark the relay
+		 * eligible this tick), then the supervisor, which does the
+		 * windowed WDT kick and drives the relay/RGB from the state
+		 * pwrseq just set.
+		 */
+		sts_pwrseq_step(now_ms);
 		sts_supervisor_step(now_ms);
 
 		sts_liveness_feed(hk.liveness_id);

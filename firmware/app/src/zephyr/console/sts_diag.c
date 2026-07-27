@@ -37,6 +37,7 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/util.h>
 
 #if DT_NODE_HAS_STATUS(DT_NODELABEL(i2c1), okay)
