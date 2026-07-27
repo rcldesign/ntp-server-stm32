@@ -16,6 +16,40 @@
  * idle: --gc-sections drops mp_init(), obj_apply() and the override/lease code
  * out of the image entirely.
  *
+ * Concurrency (F11). Wiring the tick gave the engine a *second* driver, and the
+ * two are on different threads at different priorities:
+ *
+ *   RX   shell thread, prio K_LOWEST_APPLICATION_THREAD_PRIO (19 here)
+ *        mp_bypass() -> mp_input()
+ *   tick console supervisor, prio 14
+ *        sts_mp_tick() -> mp_tick()
+ *
+ * 14 preempts 19 on a single-CPU preemptible build, so before this file owned a
+ * lock the tick landed *inside* mp_input() every 250 ms. Two mechanisms turned
+ * that into corruption rather than a race in the abstract:
+ *
+ *   1. One shared TX scratch. mp_ctx_t holds a single mp_frame_tx_t, and
+ *      mp_frame.h says the encoded bytes "point into tx->enc and stay valid
+ *      until the next mp_frame_encode() on the same scratch". mp_tx() below
+ *      walks that buffer one uart_poll_out() at a time. A tick that preempts
+ *      mid-walk re-encodes into the same buffer, and the shell thread resumes
+ *      emitting the *new* frame's bytes from the old offset: a spliced COBS
+ *      frame, i.e. a CRC error at the tool or a decoder desync. `stream.sub` on
+ *      telemetry plus any control request is enough; no timing luck is needed.
+ *   2. One lease array. mp_ovr_tick() runs the dead-man revert and actuates
+ *      through obj_apply() while the shell thread may be inside mp_ovr_grant()
+ *      for the same object — and sts_mp_tunnel_set_gnss()'s entire balance
+ *      argument (that `tunnel_gnss` is the single record of who owns USART3)
+ *      assumes one writer.
+ *
+ * The fix is one mutex, `mp_lock`, owned here and taken across **every** entry
+ * into the engine — including the whole encode-plus-transmit sequence, because a
+ * lock released before mp_tx() drains fixes nothing. core/mp stays lock-free and
+ * platform-neutral; see mp.h's threading block for the contract this satisfies.
+ *
+ * The lock is released at exactly one point, prov_auth(); the argument for why
+ * that is safe is written out there.
+ *
  * Panel mirror: WIRED. The ui area publishes a frame after each ui_render()
  * (src/zephyr/ui/sts_ui.c) through sts_mp_mirror_publish(), declared in
  * src/zephyr/sts_app.h because mp_glue.h is private to this area
@@ -148,6 +182,44 @@ static bool mirror_valid;
 static char mp_serial[MP_CONFIRM_MAX];
 static const struct shell *mp_shell;
 
+/* --------------------------------------------------------- the engine lock */
+
+/*
+ * Serialises every entry into core/mp (F11; rationale in the file header).
+ *
+ * Held across encode *and* transmit, so a frame on the wire is never spliced
+ * with another. Zephyr's k_mutex carries priority inheritance, so the console
+ * supervisor waiting here lifts the shell thread to prio 14 for the duration
+ * instead of leaving it at 19 behind other work.
+ */
+static K_MUTEX_DEFINE(mp_lock);
+
+/*
+ * Set only while prov_auth() has released mp_lock across a blocking credential
+ * check. It is what lets the two mode-leaving entry points below tell "the
+ * engine is idle" from "the shell thread is suspended with an inbound frame
+ * half-decoded", which they must not disturb.
+ */
+static bool mp_auth_window;
+/** A BREAK / DTR drop that arrived during that window, honoured by mp_bypass(). */
+static bool mp_exit_pending;
+
+/* Tick-skip accounting; reported by `mp status`. */
+static uint32_t mp_tick_misses;
+static uint8_t mp_tick_miss_run;
+static uint8_t mp_tick_miss_worst;
+
+/** Enter the engine from a thread that may wait. Never call from an ISR. */
+static void mp_engine_lock(void)
+{
+	(void)k_mutex_lock(&mp_lock, K_FOREVER);
+}
+
+static void mp_engine_unlock(void)
+{
+	(void)k_mutex_unlock(&mp_lock);
+}
+
 /* ------------------------------------------------------------------ ports */
 
 static uint32_t mono_ms(void *user)
@@ -162,6 +234,12 @@ static uint32_t mono_ms(void *user)
  * Polled output: MP owns the port exclusively while it is active (the shell is
  * bypassed), the frames are small, and a poll loop cannot desynchronise the COBS
  * stream the way a partially-accepted ring write could.
+ *
+ * `wire` points into the engine's single mp_frame_tx_t scratch and is only valid
+ * until the next mp_frame_encode(), so this loop **must** run inside mp_lock —
+ * which it does, because every path that reaches mp_send() is entered under it.
+ * A lock released before this drain would leave the splice described in the file
+ * header exactly as it was.
  */
 static int mp_tx(void *user, const uint8_t *wire, size_t len)
 {
@@ -343,9 +421,6 @@ static int prov_mirror(void *user, mp_mirror_in_t *out)
 {
 	ARG_UNUSED(user);
 
-	if (!mirror_valid) {
-		return -ENOTSUP;
-	}
 	/*
 	 * A timeout means the ui thread is mid-memcpy into mirror_ch/mirror_attr,
 	 * so copying anyway would serve cells from two different renders — and
@@ -362,6 +437,17 @@ static int prov_mirror(void *user, mp_mirror_in_t *out)
 	 */
 	if (k_mutex_lock(&mirror_lock, K_MSEC(20)) != 0) {
 		return -EBUSY;
+	}
+	/*
+	 * mirror_valid is tested *inside* the lock, not before it: the publisher
+	 * sets it at the end of its memcpy sequence, so an unlocked read is a read
+	 * of the one word that says whether the other words are complete. It is
+	 * benign today (a single aligned bool, false->true exactly once) and would
+	 * stop being benign the moment the mirror is ever invalidated.
+	 */
+	if (!mirror_valid) {
+		(void)k_mutex_unlock(&mirror_lock);
+		return -ENOTSUP;
 	}
 	*out = mirror_frame;
 	out->ch = mirror_ch;
@@ -412,10 +498,64 @@ static int prov_cfg_commit(void *user, cfg_commit_res_t *res)
  * Only -EBUSY is passed through with its identity intact, because core reports a
  * lockout distinctly; every other refusal reaches the host as one
  * indistinguishable answer, so this is not an account oracle.
+ *
+ * ---------------------------------------------------------------------------
+ * Why the engine lock is dropped here, and only here
+ * ---------------------------------------------------------------------------
+ *
+ * sts_aaa.h states its own cost: sts_aaa_check() "blocks (DNS, a UDP round trip,
+ * or a TCP+TLS handshake) for up to the configured per-backend timeout". Against
+ * an unreachable chain that is not milliseconds. From the cfg schema
+ * (cfg_schema.h, group 0x0A), per login attempt:
+ *
+ *   RADIUS   sec.radius.tmo.ms  <= 30 000, x (sec.radius.retries <= 5) + 1
+ *                                             ->  180 000 ms
+ *   TACACS+  sec.tacacs.tmo.ms  <= 30 000, >= 4 blocking recv()s per login
+ *                                             ->  120 000 ms
+ *   LDAP     sec.ldap.tmo.ms    <= 30 000, >= 8 blocking recv()s (bind, service
+ *                                bind, three membership searches)
+ *                                             ->  240 000 ms
+ *
+ * i.e. a worst-case configured chain of local->radius->tacacs->ldap is about
+ * **540 s**, and 69 s at the shipped defaults (3000x3 + 5000x4 + 5000x8). Those
+ * are floors, not ceilings: read_exact()/ldap_recv() loop per-recv, so a server
+ * that dribbles one octet just inside each timeout extends them without bound.
+ *
+ * Holding mp_lock across that would suspend the dead-man for the same duration —
+ * the tick-miss budget in mp_glue.h tolerates 1800 ms, so *any* remote backend
+ * blows it — and would leave a granted override commanding hardware minutes past
+ * its keepalive. Bounding the wait instead of releasing it does not help: no
+ * bound both fits 1800 ms and lets a real RADIUS server answer.
+ *
+ * So the lock is released across exactly this call, and the release is safe
+ * because the engine is *between* operations at this point. m_session_open()
+ * authenticates before mp_ovr_session_open() (deliberately, so a bad credential
+ * cannot kick a working tool off the board), so the only mp_ctx_t state alive on
+ * this thread's stack is:
+ *
+ *   c->rx           the inbound frame being decoded
+ *   c->tok, c->reply, c->err_*   the parsed request and half-built response
+ *
+ * and nothing else reaches any of them: mp_tick(), mp_stream_raw() and the
+ * status readers touch c->ovr, c->st, c->diag, c->mirror, c->txf and w.scratch
+ * only. c->txf in particular is *not* live — mp_rpc_handle() has not transmitted
+ * anything yet; on_msg() sends the reply after it returns — so the TX-scratch
+ * splice this lock exists to prevent cannot occur through this window.
+ *
+ * The one exception is mp_mode_exit(), which resets c->rx. It is reachable from
+ * another thread only through sts_mp_notify_break()/sts_mp_notify_link(false),
+ * and both defer it while mp_auth_window is set; mp_bypass() honours the
+ * deferral once mp_input() has returned. Their safety half (reverting every
+ * lease) still runs immediately.
+ *
+ * A tick that lands in the window and finds the *previous* session stale will
+ * revert its overrides and zero it. That is correct, not a race:
+ * mp_ovr_session_open() then opens a fresh session from a cleared struct.
  */
 static int prov_auth(void *user, const char *user_name, const char *secret,
 		     uint8_t *out_role)
 {
+	bool released;
 	int rc;
 
 	ARG_UNUSED(user);
@@ -425,7 +565,28 @@ static int prov_auth(void *user, const char *user_name, const char *secret,
 		return -EACCES;
 	}
 
+	/* Raised before the release and cleared after the re-acquisition, so it
+	 * is observable to another thread exactly while the window is open. */
+	mp_auth_window = true;
+	released = (k_mutex_unlock(&mp_lock) == 0);
+	if (!released) {
+		/*
+		 * Not this thread's to release, i.e. prov_auth() was somehow
+		 * reached without the engine lock. Re-taking it below would then
+		 * deadlock the console, so leave the lock state alone and just do
+		 * the check. Unreachable through mp_bypass(); handled rather than
+		 * asserted because an assert is compiled out of a release image.
+		 */
+		mp_auth_window = false;
+	}
+
 	rc = sts_aaa_check(user_name, secret, out_role);
+
+	if (released) {
+		mp_engine_lock();
+		mp_auth_window = false;
+	}
+
 	if (rc != 0) {
 		*out_role = (uint8_t)AUTH_ROLE_NONE;
 		return (rc == -EBUSY) ? -EBUSY : -EACCES;

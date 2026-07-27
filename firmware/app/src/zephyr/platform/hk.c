@@ -53,6 +53,7 @@
 #include "zephyr/platform/platform.h"
 #include "zephyr/sts_app.h"
 
+#include "cal/cal.h"
 #include "cfg/cfg.h"
 #include "thermal/thermal.h"
 
@@ -138,6 +139,17 @@ static struct {
 	 */
 	atomic_t thermal_shed_rb;
 	atomic_t thermal_poe_kill;
+
+	/*
+	 * Set by the group-0x0C config applier, drained by this thread. A commit
+	 * of cal.ina.* used to reach the parts only at the next reboot or the
+	 * next MEMSTAT recovery, so a freshly trimmed board kept reporting on the
+	 * old calibration until someone power-cycled it. Deferred rather than
+	 * applied in the applier because appliers run on the COMMITTING thread —
+	 * which is a web worker or the shell — and nine I2C writes do not belong
+	 * there (sts_app.h: "must be quick or defer to the area's own thread").
+	 */
+	atomic_t ina_cal_reload;
 } hk;
 
 /* ========================================================================= */
@@ -288,6 +300,200 @@ int sts_hk_ina_configure_all(void)
 	hk.i2c_ok = (configured > 0);
 
 	return (configured == (int)INA228_RAIL_COUNT) ? 0 : -EIO;
+}
+
+/* ---- per-board trim reload (group 0x0C) --------------------------------- */
+
+/** Config applier for the cal group. Runs on the committing thread: flag only. */
+static void hk_cal_applier(void *ctx, uint8_t group)
+{
+	ARG_UNUSED(ctx);
+	ARG_UNUSED(group);
+
+	atomic_set(&hk.ina_cal_reload, 1);
+}
+
+/**
+ * Push any changed cal.ina.* trim into its part. Housekeeping-thread context.
+ *
+ * Only rails already flagged `cal_ok` are touched. A rail that is absent or
+ * that never accepted its configuration needs the full CONFIG/ADC_CONFIG/SOVL
+ * walk, not a lone SHUNT_CAL write, and that is what the MEMSTAT recovery path
+ * in hk_read_ina() does; writing one register here would flip `cal_ok` true on
+ * a part that is not otherwise set up.
+ */
+static void hk_reload_shunt_cal(void)
+{
+	if (atomic_set(&hk.ina_cal_reload, 0) == 0) {
+		return;
+	}
+
+	for (size_t i = 0; i < INA228_RAIL_COUNT; i++) {
+		const ina228_rail_info_t *info = &ina228_rail_tbl[i];
+		uint16_t want = hk_shunt_cal_for((ina228_rail_t)i);
+		bool ok;
+
+		if (want == hk.shunt_cal[i]) {
+			continue;
+		}
+
+		k_mutex_lock(&hk_mutex, K_FOREVER);
+		ok = hk_cache.ina[i].cal_ok;
+		k_mutex_unlock(&hk_mutex);
+		if (!ok) {
+			continue;
+		}
+
+		if (ina_write16(info->addr, INA228_REG_SHUNT_CAL, want) != 0) {
+			LOG_ERR("INA228 %s: SHUNT_CAL %u write failed", info->name,
+				want);
+			k_mutex_lock(&hk_mutex, K_FOREVER);
+			hk_cache.ina[i].cal_ok = false;
+			k_mutex_unlock(&hk_mutex);
+			continue;
+		}
+
+		hk.shunt_cal[i] = want;
+		sts_log(LOGR_SUB_PWR, LOGR_NOTICE, "INA228 %s: SHUNT_CAL -> %u",
+			info->name, want);
+	}
+}
+
+/* ---- bench calibration (sts_app.h sts_cal_run) --------------------------- */
+
+/*
+ * Oldest INA228 reading a trim will accept. The 1 Hz sweep refreshes every
+ * rail, so 2 s tolerates one missed sweep and nothing more: a trim is a ratio
+ * against a load the operator is holding steady *now*, and a stale reading
+ * would silently calibrate against whatever the board was doing before.
+ */
+#define HK_CAL_INA_MAX_AGE_MS 2000U
+
+static int hk_cal_ina_trim(uint32_t arg)
+{
+	const ina228_rail_info_t *info;
+	sts_hk_snapshot_t snap;
+	cal_ina_in_t in;
+	cal_ina_out_t out;
+	uint32_t rail = (arg >> 24) & 0xFFU;
+	uint32_t i_ref_ua = arg & 0x00FFFFFFU;
+	uint16_t key;
+	int rc;
+
+	if ((rail >= (uint32_t)INA228_RAIL_COUNT) || (i_ref_ua == 0U)) {
+		return -EINVAL;
+	}
+	info = &ina228_rail_tbl[rail];
+
+	if (hk.shunt_cal[rail] == 0U) {
+		/* Stage 3 never configured this part, so there is no calibration
+		 * in force to trim from and the reading means nothing. */
+		return -ENODATA;
+	}
+
+	(void)sts_hk_read(&snap);
+
+	memset(&in, 0, sizeof(in));
+	in.base_shunt_cal = hk.shunt_cal[rail];
+	in.i_ref_ua = i_ref_ua;
+	in.i_meas_ua = snap.ina[rail].current_ua;
+	in.meas_valid = snap.ina[rail].valid && snap.ina[rail].cal_ok;
+	in.meas_age_ms = k_uptime_get_32() - snap.ina[rail].age_ms;
+	in.max_age_ms = HK_CAL_INA_MAX_AGE_MS;
+	in.fs_current_ua = info->fs_current_ua;
+	in.trim_min = (uint16_t)CAL_INA_TRIM_MIN;
+	in.trim_max = (uint16_t)CAL_INA_TRIM_MAX;
+
+	rc = cal_ina_trim(&in, &out);
+	if (rc != 0) {
+		sts_log(LOGR_SUB_PWR, LOGR_WARN,
+			"INA trim %s refused: %s (ref %u uA, read %d uA, %d ppm)",
+			info->name, cal_ina_reason_name(out.reason),
+			(unsigned int)i_ref_ua, (int)in.i_meas_ua,
+			(int)out.error_ppm);
+		return rc;
+	}
+
+	/*
+	 * Persist. A calibration constant that evaporates on the next reboot is
+	 * worse than none, because the operator has been told it took — so this
+	 * commits rather than leaving the key staged, and the REST response
+	 * carries no "commit required" field to say otherwise.
+	 *
+	 * Committing is a whole-tree operation, so refuse when anything else is
+	 * staged rather than sweeping an operator's half-finished config edit
+	 * into a calibration run. (The window between this check and the commit
+	 * is the same one every commit path on the box has; it is not widened
+	 * here.)
+	 */
+	key = (uint16_t)(CFG_KEY_CAL_INA_TRIM_0 + rail);
+
+	sts_cfg_lock();
+	if (cfg_staged_count(sts_cfg()) != 0U) {
+		sts_cfg_unlock();
+		return -EBUSY;
+	}
+	rc = cfg_set_u64(sts_cfg(), key, (uint64_t)out.shunt_cal);
+	sts_cfg_unlock();
+
+	if (rc != 0) {
+		/* The band checks above are the schema's own, so a bounds
+		 * rejection here would mean the two have drifted apart. */
+		LOG_ERR("cal.ina.%u: staging %u failed (%d)", (unsigned int)rail,
+			out.shunt_cal, rc);
+		return -EIO;
+	}
+
+	/* Not under sts_cfg_lock(): sts_cfg_commit() takes it itself and then
+	 * dispatches appliers with it released (sts_app.h). */
+	rc = sts_cfg_commit(NULL);
+	if ((rc != 0) && (rc != -EIO)) {
+		sts_cfg_lock();
+		(void)cfg_revert(sts_cfg());
+		sts_cfg_unlock();
+		LOG_ERR("cal.ina.%u: commit failed (%d)", (unsigned int)rail, rc);
+		return -EIO;
+	}
+
+	/* hk_cal_applier() has already flagged the reload; the part picks the new
+	 * SHUNT_CAL up on this thread's next tick. */
+	sts_log(LOGR_SUB_PWR, LOGR_NOTICE,
+		"INA trim %s: SHUNT_CAL %u -> %u (%d ppm against %u uA)",
+		info->name, in.base_shunt_cal, out.shunt_cal, (int)out.error_ppm,
+		(unsigned int)i_ref_ua);
+
+	return (rc == -EIO) ? -EIO : 0;
+}
+
+int sts_cal_run(uint8_t proc, uint32_t arg)
+{
+	switch (proc) {
+	case (uint8_t)STS_CAL_INA_TRIM:
+		return hk_cal_ina_trim(arg);
+
+	case (uint8_t)STS_CAL_HOLDOVER:
+	case (uint8_t)STS_CAL_OCXO_TUNE:
+	case (uint8_t)STS_CAL_COMPASS:
+		/*
+		 * Bench operations, not device procedures. Holdover
+		 * characterisation is hours of GNSS-denied running against a
+		 * reference clock; the OCXO pull/tempco sweep is a thermal
+		 * chamber; the e-compass fit needs the enclosure rotated through
+		 * a sphere — and this build has no magnetometer sampling path at
+		 * all (the IIS2MDC and LIS2DH12 are in the devicetree and no glue
+		 * reads them) nor any cfg key to store a hard/soft-iron fit in.
+		 *
+		 * Their results are entered through the group 0x0C keys, which
+		 * the config API already exposes. A firmware entry point that
+		 * wrote one of those keys would be a config set with a
+		 * procedure's name on it, and would report success for work
+		 * nobody did.
+		 */
+		return -ENOTSUP;
+
+	default:
+		return -EINVAL;
+	}
 }
 
 /* ========================================================================= */
@@ -615,7 +821,10 @@ static void hk_service_requests(void)
 
 static void hk_sweep_1hz(uint32_t now_ms)
 {
-	int32_t mc;
+	int32_t enc_mc = 0;
+	int32_t osc_mc = 0;
+	bool enc_ok;
+	bool osc_ok;
 	int32_t rh;
 	int32_t t;
 
@@ -623,21 +832,28 @@ static void hk_sweep_1hz(uint32_t now_ms)
 		hk_read_ina((ina228_rail_t)i, false);
 	}
 
+	/*
+	 * Both TMP117 transfers happen OUTSIDE hk_mutex, as the SHT45 read below
+	 * already did. Holding the cache lock across blocking I2C made every
+	 * sts_hk_read() caller wait on the bus — including the priority-4
+	 * discipline thread, which takes it once a second in disc_fill_env(), and
+	 * now the web thread's calibration path. The lock exists to keep the
+	 * cache self-consistent, not to serialise transfers.
+	 */
+	enc_ok = hk_read_tmp117(TMP117_ENCLOSURE_ADDR, &enc_mc);
+	osc_ok = hk_read_tmp117(TMP117_OSC_ADDR, &osc_mc);
+
 	k_mutex_lock(&hk_mutex, K_FOREVER);
 
-	if (hk_read_tmp117(TMP117_ENCLOSURE_ADDR, &mc)) {
-		hk_cache.temp_enclosure_mc = mc;
-		hk_cache.temp_enclosure_valid = true;
-	} else {
-		hk_cache.temp_enclosure_valid = false;
+	if (enc_ok) {
+		hk_cache.temp_enclosure_mc = enc_mc;
 	}
+	hk_cache.temp_enclosure_valid = enc_ok;
 
-	if (hk_read_tmp117(TMP117_OSC_ADDR, &mc)) {
-		hk_cache.temp_osc_mc = mc;
-		hk_cache.temp_osc_valid = true;
-	} else {
-		hk_cache.temp_osc_valid = false;
+	if (osc_ok) {
+		hk_cache.temp_osc_mc = osc_mc;
 	}
+	hk_cache.temp_osc_valid = osc_ok;
 
 	hk_cache.mono_ms = now_ms;
 
@@ -745,6 +961,7 @@ static void hk_entry(void *p1, void *p2, void *p3)
 		tick++;
 
 		hk_service_requests();
+		hk_reload_shunt_cal();
 
 		if ((tick % (1000U / HK_PERIOD_MS)) == 0U) {
 			hk_sweep_1hz(now_ms);

@@ -81,6 +81,121 @@ uint64_t sts_mono_ms(void);
  * platform adds this when publishing. Not a leap second and never changes. */
 #define STS_TAI_MINUS_GPS_S 19
 
+/* ---- reference-selection override (operator intent) --------------------- */
+/*
+ * The operator's standing request to core/refsel, read by the discipline
+ * thread once a second as refsel_in_t::request.
+ *
+ * A single atomic word, not a mutex. The discipline thread is priority 4 and
+ * owns the DAC and the reference state machine; nothing it touches may be
+ * held by a priority-12 web worker, so the request crosses as one aligned
+ * store with no lock on either side (ARCHITECTURE.md §10 invariant 10).
+ *
+ * refsel decides; this only expresses intent. AUTO is the normal setting and
+ * the boot default: refsel engages the rubidium whenever its guards allow.
+ * OCXO pins the OCXO and reverts immediately if input B is live. EXTREF is the
+ * explicit selection of input B as a house standard — refsel.h states it is
+ * "never entered automatically", and the automatic path cannot reach it here
+ * either, because refsel_step() maps AUTO to REFSEL_RB_ACTIVE and only an
+ * explicit REFSEL_REQ_EXTREF names REFSEL_EXTREF_ACTIVE.
+ *
+ * The guards are NOT bypassed by any of these: selecting a reference whose
+ * 10 MHz is out of band, or whose lock line is not asserted, leaves the machine
+ * on the OCXO until the guards hold for the hysteresis window. There is no
+ * force.
+ *
+ * RUNTIME-ONLY. The request resets to AUTO on every boot. There is no cfg key
+ * for it — group 0x06 (timing) has no reference-request row — and a pinned
+ * reference surviving a reboot is the failure mode where a box repaired months
+ * ago is still running on its OCXO because nobody remembered.
+ */
+typedef enum {
+	STS_REF_REQ_AUTO = 0,  /**< engage the Rb whenever the guards allow */
+	STS_REF_REQ_OCXO,      /**< pin the OCXO; revert now if not already */
+	STS_REF_REQ_EXTREF,    /**< explicit selection of input B */
+	STS_REF_REQ__COUNT,
+} sts_ref_req_t;
+
+/**
+ * Set the standing reference request.
+ *
+ * Idempotent: setting the mode already in force changes nothing and does not
+ * disturb the state machine. That matters — refsel.h notes that changing the
+ * request restarts the guard-debounce window, so a management plane polling or
+ * re-POSTing a control must not be able to hold the machine off its reference
+ * indefinitely.
+ *
+ * Non-blocking, callable from any thread (not an ISR).
+ *
+ * @retval 0        Stored (or already in force).
+ * @retval -EINVAL  @p mode is not an sts_ref_req_t.
+ */
+int sts_ref_override_set(uint8_t mode);
+
+/**
+ * The standing request currently in force (sts_ref_req_t).
+ *
+ * This is INTENT, not state: the reference actually feeding PH0 is
+ * quality_block_t::active_ref from sts_quality_snapshot(). A management plane
+ * showing an override control needs both — "requested rb, running ocxo" is the
+ * normal reading while the guards debounce.
+ */
+uint8_t sts_ref_override_get(void);
+
+/* ---- bench calibration procedures ---------------------------------------- */
+/*
+ * One entry point, one genuinely automatable procedure. See core/cal/cal.h for
+ * why the other three are refused rather than faked.
+ */
+typedef enum {
+	STS_CAL_HOLDOVER = 0, /**< §10.4 holdover characterisation run */
+	STS_CAL_OCXO_TUNE,    /**< OCXO pull-range / tempco sweep */
+	STS_CAL_INA_TRIM,     /**< per-board SHUNT_CAL trim against a load */
+	STS_CAL_COMPASS,      /**< e-compass hard/soft-iron */
+	STS_CAL__COUNT,
+} sts_cal_proc_t;
+
+/**
+ * Pack an STS_CAL_INA_TRIM argument: rail index in the top byte, the reference
+ * instrument's current in the low 24 bits, in MICROAMPS.
+ *
+ * Microamps because the trim's whole purpose is to remove a 1 % error: at
+ * milliamp granularity the argument's own quantisation would be 0.7 % of the
+ * antenna rail's design current and the calibration would be measuring the
+ * operator's rounding. 24 bits reaches 16.777 A, comfortably past the largest
+ * rail full scale on the board (VCC_RB, 5.8514 A).
+ */
+#define STS_CAL_INA_ARG(rail, i_ref_ua)                                        \
+	((((uint32_t)(rail) & 0xFFU) << 24) | ((uint32_t)(i_ref_ua) & 0xFFFFFFU))
+
+/**
+ * Run a bench calibration procedure.
+ *
+ * Runs to completion on the CALLING thread and takes no timing-state lock. The
+ * only bounded wait is the housekeeping sensor-cache mutex, held for a struct
+ * copy by a priority-14 thread; nothing here touches the gnss or discipline
+ * contexts.
+ *
+ * STS_CAL_INA_TRIM (@p arg built with STS_CAL_INA_ARG):
+ *   compares the named rail's INA228 reading against the operator's reference
+ *   current, computes a bounded SHUNT_CAL trim (core/cal), writes it to
+ *   cal.ina.<rail>, commits, and re-applies the calibration to the part.
+ *
+ * @retval 0        The procedure ran and its result was persisted.
+ * @retval -ENOTSUP @p proc is a bench operation this device cannot perform on
+ *                  itself. Its result is entered through the group 0x0C cfg
+ *                  keys; there is no procedure to start.
+ * @retval -EINVAL  @p proc is out of range, or the packed argument is malformed
+ *                  (unknown rail, zero reference).
+ * @retval -ENODATA The monitor has no fresh, calibrated reading to trim against.
+ * @retval -ERANGE  The reference and the measurement are not consistent with a
+ *                  1 % shunt: refused rather than persisted.
+ * @retval -EBUSY   Uncommitted config changes are staged; this procedure
+ *                  commits, and committing would sweep them in.
+ * @retval -EIO     The trim was computed but could not be staged or persisted.
+ */
+int sts_cal_run(uint8_t proc, uint32_t arg);
+
 /* ---- GNSS wall-clock (absolute epoch source for the PTP clock) ----------- */
 /* The receiver's civil time, used ONCE per boot (and after any step) to place
  * the ETH PTP counter's absolute epoch via ptp_clock_set(). The discipline loop
@@ -138,6 +253,77 @@ int sts_gnss_uart_resume(void);
 int sts_gnss_uart_raw_tx(const uint8_t *buf, size_t len);
 int sts_gnss_uart_raw_rx(uint8_t *buf, size_t cap);
 int sts_gnss_uart_set_baud(uint32_t baud);
+
+/* ---- GNSS operator requests (management planes -> the gnss thread) ------- */
+/*
+ * Two operator actions change what the receiver is doing: re-survey, and adopt
+ * a fixed antenna position. Both are REQUESTS, not calls.
+ *
+ * gnssmgr.h is explicit that a gnssmgr_t is owned by one thread and is not
+ * internally synchronised. Calling gnssmgr_request_survey() from a web worker
+ * would mutate the manager's state machine and emit a UBX frame underneath the
+ * gnss thread's own parse and ACK bookkeeping. So these post into a
+ * single-slot mailbox that the gnss thread drains on its next wake.
+ *
+ * Non-blocking by construction. The post is a k_spinlock critical section of a
+ * handful of stores — no k_mutex, so a priority-12 web worker can never park
+ * the priority-6 gnss thread, and no management thread ever waits on a timing
+ * thread (firmware/CLAUDE.md hard rule, ARCHITECTURE.md §10 invariant 10).
+ * Callable from any cooperative thread, not from an ISR.
+ *
+ * The mailbox holds ONE request. A second arriving before the first is drained
+ * is refused with -EBUSY rather than queued: these are mutually exclusive
+ * reconfigurations of the same TMODE setting, and silently applying both in
+ * sequence is never what the operator meant.
+ */
+
+/**
+ * Start survey-in.
+ *
+ * The stored position is discarded when the request is applied and the receiver
+ * surveys for `gnss.survey.dur` seconds (default 1 h). Returning 0 means the
+ * request was ACCEPTED, never that the survey finished; progress arrives on
+ * UBX-NAV-SVIN and is read back with gnssmgr_svin().
+ *
+ * @param start  Must be true; see -ENOTSUP.
+ *
+ * @retval 0        Queued; the gnss thread applies it within one of its ticks.
+ * @retval -ENOTSUP @p start is false. core/gnssmgr exposes no survey abort —
+ *                  gnssmgr_request_survey() has no inverse — and there is no
+ *                  honest local substitute: the position surveyed so far has by
+ *                  definition not met its accuracy limit, and the position that
+ *                  preceded the survey was discarded when it started. Refused
+ *                  and reported rather than silently ignored.
+ * @retval -ENODEV  The gnss thread never started.
+ * @retval -EBUSY   A previous request has not been drained yet.
+ */
+int sts_gnss_request_survey(bool start);
+
+/**
+ * Adopt an operator-supplied fixed ECEF antenna position.
+ *
+ * Units are centimetres, matching the REST contract (rest.h gnss_fixed) and
+ * gnssmgr_ecef_t::x_cm — NOT the 0.1 mm of gnssmgr_ecef_t::acc_0p1mm, which is
+ * derived from `gnss.survey.acc` because the caller supplies no accuracy.
+ *
+ * Applying it re-runs the configuration walk so the TMODE step goes out in its
+ * fixed-position form; the receiver leaves survey-in and starts fixed-position
+ * timing mode. That costs the receiver's measured state for one navigation
+ * epoch (gnssmgr_notify_reset() invalidates it), which is why this is an
+ * operator action and not something anything does on its own.
+ *
+ * NOT PERSISTED — see the note in src/zephyr/platform/gnss.c. The cfg schema
+ * has no key for a site position (group 0x05 stops at 0x0507), so a cold boot
+ * surveys again. Position error is a fixed delay error, so the cost is survey
+ * time, not accuracy.
+ *
+ * @retval 0        Queued.
+ * @retval -EINVAL  A coordinate does not fit int32 centimetres, or the triple
+ *                  is not a point on or near the Earth's surface.
+ * @retval -ENODEV  The gnss thread never started.
+ * @retval -EBUSY   A previous request has not been drained yet.
+ */
+int sts_gnss_set_fixed_ecef(int64_t x_cm, int64_t y_cm, int64_t z_cm);
 
 /* ---- config ------------------------------------------------------------- */
 /* The single live cfg context (loaded before any area starts). Never NULL

@@ -116,6 +116,19 @@ static struct {
 static atomic_t disc_park_req = ATOMIC_INIT(0);
 static atomic_t disc_unpark_req = ATOMIC_INIT(0);
 
+/*
+ * The operator's standing reference request (sts_app.h sts_ref_req_t), read by
+ * this thread once a second as refsel_in_t::request.
+ *
+ * One atomic word, no lock on either side. This thread is priority 4 and owns
+ * the DAC and the reference state machine; a mutex shared with a priority-12
+ * web worker would put a management plane on the timing path, which
+ * ARCHITECTURE.md §10 invariant 10 forbids outright. A single aligned word is
+ * all the state there is, so an atomic is not a shortcut — it is the whole
+ * synchronisation requirement.
+ */
+static atomic_t ref_request = ATOMIC_INIT((atomic_val_t)STS_REF_REQ_AUTO);
+
 /* qErr pairing bookkeeping, owned by this thread. */
 static struct {
 	uint32_t applied;      /* sawtooth corrections applied */
@@ -321,6 +334,62 @@ static void disc_fill_env(disc_env_t *env, sts_gnss_snap_t *g, uint64_t mono_ms)
 
 /* ---- reference selection ------------------------------------------------ */
 
+uint8_t sts_ref_override_get(void)
+{
+	return (uint8_t)atomic_get(&ref_request);
+}
+
+int sts_ref_override_set(uint8_t mode)
+{
+	if (mode >= (uint8_t)STS_REF_REQ__COUNT) {
+		/* An out-of-range request must not select a reference. refsel's
+		 * own default branch maps anything unrecognised to "want the
+		 * rubidium", so letting a bad REST value through would engage
+		 * input B on a typo. */
+		return -EINVAL;
+	}
+
+	if (sts_ref_override_get() == mode) {
+		/* Idempotent on purpose. refsel.h: changing the request restarts
+		 * the guard-debounce window, so a management plane that re-POSTs
+		 * or polls its own control must not be able to hold the machine
+		 * off its reference for as long as it keeps asking. */
+		return 0;
+	}
+
+	(void)atomic_set(&ref_request, (atomic_val_t)mode);
+
+	sts_log(LOGR_SUB_TIMING, LOGR_NOTICE,
+		"reference request set to %s by operator",
+		(mode == (uint8_t)STS_REF_REQ_OCXO)     ? "force-ocxo"
+		: (mode == (uint8_t)STS_REF_REQ_EXTREF) ? "extref"
+							: "auto");
+
+	return 0;
+}
+
+/**
+ * The operator request as core/refsel spells it.
+ *
+ * An explicit mapping rather than a cast: the two enumerations agree
+ * numerically today and nothing keeps them that way, and the failure mode of a
+ * silent divergence is the wrong 10 MHz feeding PH0. Anything unrecognised
+ * becomes AUTO — the safe answer, and the one that cannot reach
+ * REFSEL_EXTREF_ACTIVE, which refsel.h says is never entered automatically.
+ */
+static refsel_request_t disc_refsel_request(void)
+{
+	switch (sts_ref_override_get()) {
+	case (uint8_t)STS_REF_REQ_OCXO:
+		return REFSEL_REQ_FORCE_OCXO;
+	case (uint8_t)STS_REF_REQ_EXTREF:
+		return REFSEL_REQ_EXTREF;
+	case (uint8_t)STS_REF_REQ_AUTO:
+	default:
+		return REFSEL_REQ_AUTO;
+	}
+}
+
 static void disc_step_refsel(uint64_t mono_ms, bool switch_failed)
 {
 	const refsel_step_t *steps = NULL;
@@ -338,7 +407,7 @@ static void disc_step_refsel(uint64_t mono_ms, bool switch_failed)
 	in.extref_freq_hz = hz;
 	in.extref_valid = valid;
 	in.extref_edges_advancing = edges;
-	in.request = REFSEL_REQ_AUTO;
+	in.request = disc_refsel_request();
 	in.switch_failed = switch_failed;
 
 	/*
@@ -379,7 +448,11 @@ static void disc_step_refsel(uint64_t mono_ms, bool switch_failed)
 
 		memset(&in, 0, sizeof(in));
 		in.mono_ms = mono_ms;
-		in.request = REFSEL_REQ_AUTO;
+		/* Same standing request: this re-step exists to deliver the
+		 * switch_failed edge, not to change what the operator asked for.
+		 * Passing AUTO here would have restarted the guard window under a
+		 * different target the moment a handoff failed. */
+		in.request = disc_refsel_request();
 		in.switch_failed = true;
 		(void)refsel_step(&refsel, &in, &out);
 	}

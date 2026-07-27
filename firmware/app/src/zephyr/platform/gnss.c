@@ -99,6 +99,30 @@ static ring_t rx_ring;
 static sts_gnss_snap_t snap;
 static K_MUTEX_DEFINE(snap_mutex);
 
+/*
+ * Operator-request mailbox (sts_app.h "GNSS operator requests").
+ *
+ * A spinlock, not a mutex: the producers are management threads at priority 12
+ * and the consumer is this thread at priority 6, so a lock that can be held
+ * across a preemption would let the web plane park the GNSS link. The critical
+ * section is four stores on both sides.
+ *
+ * One slot. Survey-in and fixed-position are mutually exclusive settings of the
+ * same TMODE step, so a second request arriving before the first is applied is
+ * refused rather than queued.
+ */
+enum gnss_req_kind {
+	GNSS_REQ_NONE = 0,
+	GNSS_REQ_SURVEY,
+	GNSS_REQ_FIXED,
+};
+
+static struct k_spinlock req_lock;
+static struct {
+	uint8_t kind; /* enum gnss_req_kind */
+	gnssmgr_ecef_t pos;
+} gnss_req;
+
 static struct {
 	int liveness_id;
 	bool started;
@@ -111,6 +135,15 @@ static struct {
 	uint32_t pvt_itow_ms;
 	uint64_t pvt_rx_mono_ms;
 	bool have_pvt;
+	/*
+	 * The configured survey accuracy limit, in gnssmgr's 0.1 mm units, kept
+	 * here so an operator-supplied fixed position can declare an accuracy
+	 * without reading cfg from either the requesting thread (which would put
+	 * the cfg mutex on the web path) or this one (which would put it on a
+	 * priority-6 timing thread). It is the same value gnssmgr was handed at
+	 * start, so the two cannot disagree.
+	 */
+	uint32_t survey_acc_0p1mm;
 	/* A receiver flash session owns USART3: the RX ISR still fills the ring so
 	 * the loader transport can drain it, but nothing feeds the UBX parser or
 	 * gnssmgr while this is set. See the USART3 seam at the end of this file. */
@@ -236,13 +269,19 @@ static const gnssmgr_cb_t gnss_cb = {
 	.send_ubx = gnss_send_ubx,
 	.set_ant_bias = gnss_set_ant_bias,
 	/*
-	 * store_ecef is deliberately absent. Persisting the surveyed position
-	 * needs a calibration key this build's cfg schema does not define
-	 * (group 0x0C holds only the nine INA228 trims), and inventing one here
-	 * would put a schema decision in a glue file. Consequence, stated rather
-	 * than hidden: a cold boot re-runs the survey instead of going straight to
-	 * fixed-position timing mode. Position error is a fixed delay error, so the
-	 * cost is survey time, not accuracy.
+	 * store_ecef is deliberately absent, and so — for the same reason — is
+	 * any persistence behind sts_gnss_set_fixed_ecef(). The site position is
+	 * a stored calibration constant (gnssmgr.h) and this build's cfg schema
+	 * defines no key for one: group 0x05 stops at gnss.ant.bias (0x0507) and
+	 * group 0x0C holds only the INA trims, the PPS offsets, the tempco and the
+	 * DAC centre. Adding four rows to cfg_schema.h is the fix; inventing a
+	 * private NVS record here would be a second persistence path for a
+	 * constant core/gnssmgr already knows how to hand over.
+	 *
+	 * Consequence, stated rather than hidden: a cold boot re-runs the survey
+	 * instead of going straight to fixed-position timing mode, whether the
+	 * position came from a survey or from an operator. Position error is a
+	 * fixed delay error, so the cost is survey time, not accuracy.
 	 */
 	.alarm = gnss_alarm,
 };
@@ -440,6 +479,70 @@ static void gnss_ant_sample(uint32_t now_ms)
 	(void)gnssmgr_tick_1hz(&mgr, &ant, now_ms);
 }
 
+/*
+ * Apply at most one operator request. Runs on this thread, so every gnssmgr_*
+ * call below is on the thread that owns the manager.
+ */
+static void gnss_drain_requests(uint32_t now_ms)
+{
+	k_spinlock_key_t key;
+	gnssmgr_ecef_t pos;
+	uint8_t kind;
+	int rc;
+
+	key = k_spin_lock(&req_lock);
+	kind = gnss_req.kind;
+	pos = gnss_req.pos;
+	gnss_req.kind = (uint8_t)GNSS_REQ_NONE;
+	k_spin_unlock(&req_lock, key);
+
+	if (kind == (uint8_t)GNSS_REQ_NONE) {
+		return;
+	}
+
+	/*
+	 * A flash session owns USART3. gnssmgr is parked in GNSSMGR_ST_FW_UPDATE
+	 * and would refuse the request anyway, but drop it here and say so: the
+	 * operator asked for something that is not going to happen, and a
+	 * -EPERM logged from three layers down names the wrong cause.
+	 */
+	if (gs.fw_mode) {
+		sts_log(LOGR_SUB_GNSS, LOGR_WARN,
+			"GNSS operator request ignored: a receiver firmware "
+			"session owns the port");
+		return;
+	}
+
+	if (kind == (uint8_t)GNSS_REQ_SURVEY) {
+		rc = gnssmgr_request_survey(&mgr, now_ms);
+		sts_log(LOGR_SUB_GNSS, (rc == 0) ? LOGR_NOTICE : LOGR_ERR,
+			"operator requested survey-in (rc %d)", rc);
+		return;
+	}
+
+	/*
+	 * Fixed position. gnssmgr_set_stored_ecef() only records the constant —
+	 * it does not re-issue TMODE, and the receiver stays in whatever timing
+	 * mode it was last given. gnssmgr_start() re-runs the walk, whose TMODE
+	 * step then builds its fixed-position form because a position is now
+	 * held; it is the only public route to that, since the one other caller
+	 * of the TMODE walk (gnssmgr_request_survey) clears the position first.
+	 *
+	 * gnssmgr_start() rather than gnssmgr_notify_reset(): the receiver has
+	 * NOT restarted, so its measurements are still valid, and invalidating
+	 * them would drop gnss_time_locked and stall the discipline loop for a
+	 * navigation epoch over a configuration change.
+	 */
+	rc = gnssmgr_set_stored_ecef(&mgr, &pos);
+	if (rc == 0) {
+		rc = gnssmgr_start(&mgr, now_ms);
+	}
+
+	sts_log(LOGR_SUB_GNSS, (rc == 0) ? LOGR_NOTICE : LOGR_ERR,
+		"operator set fixed ECEF %d,%d,%d cm (rc %d)", (int)pos.x_cm,
+		(int)pos.y_cm, (int)pos.z_cm, rc);
+}
+
 static void gnss_entry(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1);
@@ -455,6 +558,7 @@ static void gnss_entry(void *p1, void *p2, void *p3)
 		now_ms = k_uptime_get_32();
 
 		gnss_drain_rx(now_ms);
+		gnss_drain_requests(now_ms);
 		(void)gnssmgr_step(&mgr, now_ms);
 
 		if ((now_ms - gs.last_1hz_ms) >= 1000U) {
@@ -519,6 +623,7 @@ int sts_gnss_start(void)
 	}
 
 	gnss_load_cfg(&cfg);
+	gs.survey_acc_0p1mm = cfg.survey_acc_limit_0p1mm;
 
 	rc = gnssmgr_init(&mgr, &cfg, &gnss_cb);
 	if (rc != 0) {
@@ -576,6 +681,119 @@ int sts_gnss_notify_reset(uint32_t now_ms)
 void sts_gnss_ant_supervisor_start(void)
 {
 	gs.ant_supervisor_on = true;
+}
+
+/* ========================================================================= */
+/* operator requests (sts_app.h)                                             */
+/* ========================================================================= */
+
+/*
+ * Plausibility bound on an operator-supplied ECEF triple.
+ *
+ * The REST layer already boxes each axis at 1.5 earth radii, which stops an
+ * absurd coordinate but passes (0,0,0) — the centre of the Earth — and every
+ * other point inside the planet. A fixed position the receiver can never
+ * reconcile with its observations does not fail loudly: the F9T accepts it,
+ * reports fixed mode, and produces a time solution biased by whatever the
+ * position error is. So bound the RADIUS, which is the quantity that actually
+ * has to be terrestrial.
+ *
+ * WGS-84 radii run 6357 km (polar) to 6378 km (equatorial). 6000/6800 km leaves
+ * roughly 350 km of margin on each side — far more than any site altitude — and
+ * still rejects the whole interior of the Earth and anything in orbit.
+ */
+#define GNSS_ECEF_MIN_CM 600000000LL /* 6000 km */
+#define GNSS_ECEF_MAX_CM 680000000LL /* 6800 km */
+
+static bool gnss_ecef_plausible(int64_t x_cm, int64_t y_cm, int64_t z_cm)
+{
+	int64_t r2;
+
+	/* Per-axis first: it is the int32 representability check gnssmgr_ecef_t
+	 * needs, and it also keeps the three squares below inside int64. */
+	if ((x_cm > GNSS_ECEF_MAX_CM) || (x_cm < -GNSS_ECEF_MAX_CM) ||
+	    (y_cm > GNSS_ECEF_MAX_CM) || (y_cm < -GNSS_ECEF_MAX_CM) ||
+	    (z_cm > GNSS_ECEF_MAX_CM) || (z_cm < -GNSS_ECEF_MAX_CM)) {
+		return false;
+	}
+
+	r2 = (x_cm * x_cm) + (y_cm * y_cm) + (z_cm * z_cm);
+
+	return (r2 >= (GNSS_ECEF_MIN_CM * GNSS_ECEF_MIN_CM)) &&
+	       (r2 <= (GNSS_ECEF_MAX_CM * GNSS_ECEF_MAX_CM));
+}
+
+/** Claim the single request slot. -EBUSY when one is already pending. */
+static int gnss_req_post(uint8_t kind, const gnssmgr_ecef_t *pos)
+{
+	k_spinlock_key_t key;
+	int rc = 0;
+
+	key = k_spin_lock(&req_lock);
+	if (gnss_req.kind != (uint8_t)GNSS_REQ_NONE) {
+		rc = -EBUSY;
+	} else {
+		gnss_req.kind = kind;
+		if (pos != NULL) {
+			gnss_req.pos = *pos;
+		}
+	}
+	k_spin_unlock(&req_lock, key);
+
+	return rc;
+}
+
+int sts_gnss_request_survey(bool start)
+{
+	if (!start) {
+		/*
+		 * core/gnssmgr has no survey abort and this file will not invent
+		 * one. The three things a local "stop" could mean are all wrong:
+		 * adopting the partial survey stores a position that has by
+		 * definition not met its accuracy limit; restoring the previous
+		 * position is impossible because gnssmgr_request_survey() cleared
+		 * it; and leaving TMODE altogether turns a grandmaster back into
+		 * a navigation receiver. Report the gap.
+		 */
+		return -ENOTSUP;
+	}
+	if (!gs.started) {
+		return -ENODEV;
+	}
+
+	return gnss_req_post((uint8_t)GNSS_REQ_SURVEY, NULL);
+}
+
+int sts_gnss_set_fixed_ecef(int64_t x_cm, int64_t y_cm, int64_t z_cm)
+{
+	gnssmgr_ecef_t pos;
+
+	if (!gnss_ecef_plausible(x_cm, y_cm, z_cm)) {
+		return -EINVAL;
+	}
+	if (!gs.started) {
+		return -ENODEV;
+	}
+
+	memset(&pos, 0, sizeof(pos));
+	pos.x_cm = (int32_t)x_cm;
+	pos.y_cm = (int32_t)y_cm;
+	pos.z_cm = (int32_t)z_cm;
+	/*
+	 * The high-precision residuals stay zero: the contract is whole
+	 * centimetres, so there is no 0.1 mm term to carry, and inventing one
+	 * would claim precision the operator did not supply.
+	 *
+	 * The declared accuracy is the configured survey acceptance limit. It is
+	 * the site's stated position-accuracy target and the only number on the
+	 * board that describes how well this position is meant to be known;
+	 * gnssmgr's own default (cfg.fixed_pos_acc_0p1mm == 0) would otherwise
+	 * hand the receiver a claimed accuracy of zero.
+	 */
+	pos.acc_0p1mm = gs.survey_acc_0p1mm;
+	pos.valid = true;
+
+	return gnss_req_post((uint8_t)GNSS_REQ_FIXED, &pos);
 }
 
 /* ========================================================================= */
