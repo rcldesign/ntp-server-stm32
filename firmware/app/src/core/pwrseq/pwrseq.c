@@ -2137,35 +2137,118 @@ int pwrseq_poe_kill(pwrseq_ctx_t *ctx, uint32_t magic, uint32_t mono_ms)
 	}
 
 	ctx->now_ms = mono_ms;
-	emit(ctx, PWRSEQ_ACT_POE_KILL);
-	return 0;
+	return emit(ctx, PWRSEQ_ACT_POE_KILL);
 }
 
 /* --------------------------------------------------------------- watchdog */
 
-bool pwrseq_wdt_kick_ok(const pwrseq_ctx_t *ctx, uint32_t liveness,
-			uint32_t mono_ms)
-{
-	if ((ctx == NULL) || !ctx->wdt_armed) {
-		return false;
-	}
-	if ((liveness & PWRSEQ_LIVE_ALL) != PWRSEQ_LIVE_ALL) {
-		return false;
-	}
-	return (uint32_t)(mono_ms - ctx->last_kick_ms) >=
-	       ctx->cfg.wdt_kick_period_ms;
-}
-
-int pwrseq_wdt_kicked(pwrseq_ctx_t *ctx, uint32_t mono_ms)
-{
-	if (ctx == NULL) {
-		return -EINVAL;
-	}
-	ctx->last_kick_ms = mono_ms;
-	return 0;
-}
-
 bool pwrseq_wdt_armed(const pwrseq_ctx_t *ctx)
 {
 	return (ctx != NULL) && ctx->wdt_armed;
+}
+
+pwrseq_wdt_interval_t pwrseq_wdt_classify_interval(uint32_t interval_ms)
+{
+	if (interval_ms < PWRSEQ_WDT_WINDOW_MIN_MS) {
+		return PWRSEQ_WDT_INTERVAL_EARLY;
+	}
+	if (interval_ms > PWRSEQ_WDT_WINDOW_MAX_MS) {
+		return PWRSEQ_WDT_INTERVAL_LATE;
+	}
+	return PWRSEQ_WDT_INTERVAL_OK;
+}
+
+int pwrseq_wdt_init(pwrseq_wdt_t *w, uint32_t period_ms)
+{
+	if (w == NULL) {
+		return -EINVAL;
+	}
+	/*
+	 * A windowed watchdog punishes an early kick exactly as hard as a late
+	 * one, so a cadence outside 920-1360 ms is rejected here rather than
+	 * discovered as an unexplained cold cycle in the field.
+	 */
+	if ((period_ms < PWRSEQ_WDT_WINDOW_MIN_MS) ||
+	    (period_ms > PWRSEQ_WDT_WINDOW_MAX_MS)) {
+		return -EINVAL;
+	}
+
+	memset(w, 0, sizeof(*w));
+	w->period_ms = period_ms;
+	return 0;
+}
+
+int pwrseq_wdt_arm(pwrseq_wdt_t *w, uint32_t mono_ms)
+{
+	if (w == NULL) {
+		return -EINVAL;
+	}
+
+	w->armed = true;
+	w->last_kick_ms = mono_ms;
+	/*
+	 * The caller issues one edge immediately before asserting WDT_EN, so the
+	 * arm time IS a kick time. Marking it as such is what makes the first
+	 * serviced kick land one full period later instead of immediately — which
+	 * would be inside tWDL and therefore a runaway fault.
+	 */
+	w->have_kicked = true;
+	w->kicks++;
+	return 0;
+}
+
+bool pwrseq_wdt_is_armed(const pwrseq_wdt_t *w)
+{
+	return (w != NULL) && w->armed;
+}
+
+int pwrseq_wdt_service(pwrseq_wdt_t *w, uint32_t liveness, uint32_t mono_ms,
+		       pwrseq_wdt_tick_t *out)
+{
+	uint32_t since;
+
+	if ((w == NULL) || (out == NULL)) {
+		return -EINVAL;
+	}
+
+	memset(out, 0, sizeof(*out));
+	out->verdict = (uint8_t)PWRSEQ_WDT_INTERVAL_OK;
+
+	if (!w->armed) {
+		return 0;
+	}
+
+	since = mono_ms - w->last_kick_ms;
+	out->due = since >= w->period_ms;
+	out->liveness_ok = (liveness & PWRSEQ_LIVE_ALL) == PWRSEQ_LIVE_ALL;
+
+	if (!out->due) {
+		return 0;
+	}
+	if (!out->liveness_ok) {
+		/* Silence is the safe answer: the TPS3430 times out, WDO_N drives
+		 * POE_KILL and the board cold-cycles, which is the intended
+		 * response to a thread that has stopped feeding. */
+		w->withheld++;
+		return 0;
+	}
+
+	out->kick = true;
+	out->interval_ms = since;
+	out->verdict_valid = w->have_kicked;
+	if (out->verdict_valid) {
+		pwrseq_wdt_interval_t v = pwrseq_wdt_classify_interval(since);
+
+		out->verdict = (uint8_t)v;
+		if (v == PWRSEQ_WDT_INTERVAL_EARLY) {
+			w->early++;
+		} else if (v == PWRSEQ_WDT_INTERVAL_LATE) {
+			w->late++;
+		}
+	}
+
+	w->last_kick_ms = mono_ms;
+	w->have_kicked = true;
+	w->kicks++;
+	return 0;
 }

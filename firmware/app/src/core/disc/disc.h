@@ -214,6 +214,21 @@ typedef struct {
 	/** UBX-NAV-* says receiver time is usable. False forces holdover. */
 	bool gnss_time_locked;
 
+	/**
+	 * The served timescale has a valid absolute epoch.
+	 *
+	 * PPS lock proves *rate*, not *epoch*: a disciplined oscillator tracking a
+	 * 1 Hz edge says nothing about which second it is. Until the served clock
+	 * has actually been set — on this board, the ETH PTP hardware clock loaded
+	 * from GNSS and its servo reporting synchronised — a primary stratum would
+	 * advertise a wrong absolute time with a small dispersion, which is worse
+	 * than advertising nothing (RFC 5905 §11.1). served_stratum() therefore
+	 * returns UNSYNC while this is false, however well the loop is locked.
+	 *
+	 * Defaults false: a caller that does not know must not claim traceability.
+	 */
+	bool timebase_traceable;
+
 	int32_t osc_temp_mc;      /**< TMP117 #1 (0x49), milli-°C */
 	bool osc_temp_valid;
 
@@ -376,6 +391,26 @@ typedef struct {
 	float holdover_est_ns;          /* monotonic non-decreasing while held */
 	uint32_t t_demote_s;
 
+	/*
+	 * The accumulated error the loop is still carrying, retained across
+	 * RECOVERING and PARKED and cleared only when LOCKED is genuinely
+	 * re-achieved.
+	 *
+	 * Without it, one accepted PPS after a 16-hour holdover — or any refsel
+	 * park/unpark bracket — moved the loop to RECOVERING, where the estimate
+	 * was abandoned and the served dispersion collapsed to |last_e_ns|. The
+	 * clock advertised stratum 1 with a dispersion two orders of magnitude
+	 * below its actual error, while the recovery ramp had corrected almost
+	 * none of the phase. RFC 5905 §11.1 requires dispersion to *bound* the
+	 * error, so the retained value is the floor for both the dispersion and
+	 * the demotion decision until the phase is demonstrably back.
+	 */
+	float holdover_retained_ns;
+	/* Elapsed seconds already banked by earlier legs of this outage, so the
+	 * published holdover_elapsed_s is monotonic across the whole episode
+	 * rather than restarting on every brief return of the reference. */
+	uint32_t holdover_elapsed_base_s;
+
 	/* Tempco reference temperature, captured on first lock */
 	bool tref_valid;
 	int32_t tref_mc;
@@ -509,7 +544,9 @@ int disc_park(disc_ctx_t *ctx, uint16_t *out_code);
  * Leave the PFI park after the rail recovers without a reset.
  *
  * Resumes in RECOVERING, not ACQUIRING: the frequency estimate is still valid,
- * so the correct behaviour is §3.6's rate-limited pull-in with no step.
+ * so the correct behaviour is §3.6's rate-limited pull-in with no step. The
+ * retained error estimate survives the park, so the served dispersion after an
+ * unpark still bounds an error the park did nothing to correct.
  *
  * @retval 0        Resumed (no-op if not parked).
  * @retval -EINVAL  @p ctx is NULL or not initialised.
@@ -518,6 +555,35 @@ int disc_unpark(disc_ctx_t *ctx);
 
 /** Current state. DISC_STATE__COUNT for a NULL/uninitialised context. */
 disc_state_t disc_state(const disc_ctx_t *ctx);
+
+/**
+ * Error the loop is still carrying, nanoseconds: the holdover estimate retained
+ * across RECOVERING and PARKED. Zero once LOCKED has been re-achieved.
+ *
+ * Exposed so the glue and the tests can assert the property that matters — the
+ * served dispersion bounds this — rather than inferring it from the state name.
+ */
+float disc_retained_error_ns(const disc_ctx_t *ctx);
+
+/**
+ * Whole reference seconds between two iterations of the discipline loop.
+ *
+ * The phase-prediction accumulator in the discipline thread must advance by the
+ * number of *reference seconds* that actually elapsed, not by one per loop
+ * iteration: a second with no PPS costs the loop its whole 1.2 s timeout, so
+ * advancing by exactly one second each time drifts 200 ms per missed second and
+ * after three misses forces a re-anchor that throws away the first returning
+ * sample.
+ *
+ * Rounding to the nearest whole second — rather than using the raw elapsed
+ * milliseconds — is deliberate: the prediction has to stay on the reference's
+ * one-second grid, and feeding the loop's own scheduling jitter into `expected`
+ * would inject that jitter straight into the measured phase error.
+ *
+ * Never returns 0 for a forward-going clock: a stalled prediction is not a valid
+ * answer, and the caller has no other way to keep the accumulator moving.
+ */
+uint32_t disc_expected_advance_s(uint64_t prev_ms, uint64_t now_ms);
 
 /* ------------------------------------------------------- offline utilities */
 

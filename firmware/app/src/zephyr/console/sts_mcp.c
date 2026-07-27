@@ -137,6 +137,40 @@ static int mcp_status_cb(void *user, uint8_t group, uint8_t *buf, size_t cap)
 	return sts_status_encode(group, buf, cap);
 }
 
+/* ------------------------------------------------------------------ config */
+
+/*
+ * The engine reaches the ONE live cfg_ctx_t, which the Zephyr shell backend and
+ * the ui_local thread also write. cfg.h is explicit that the context is not
+ * internally locked, so the engine borrows this area's mutual exclusion for the
+ * whole of any request that touches config (mcp.h "Config locking").
+ */
+static void mcp_cfg_lock(void *user)
+{
+	ARG_UNUSED(user);
+	sts_cfg_lock();
+}
+
+static void mcp_cfg_unlock(void *user)
+{
+	ARG_UNUSED(user);
+	sts_cfg_unlock();
+}
+
+/*
+ * Commits go through sts_cfg_commit(), not cfg_commit(): it is the only thing
+ * that runs the per-group config appliers, and it is the same call the local
+ * shell and the panel UI make. Without it `meridian_ctl.py cfg-set && cfg-commit`
+ * wrote the tree and NVS, answered "applied=N, reboot_groups=0", and left the
+ * log ring, the syslog sender, the network services and the display exactly as
+ * they were.
+ */
+static int mcp_cfg_commit(void *user, cfg_commit_res_t *res)
+{
+	ARG_UNUSED(user);
+	return sts_cfg_commit(res);
+}
+
 /* ------------------------------------------------------------------ ISR */
 
 static void mcp_uart_isr(const struct device *dev, void *user)
@@ -403,6 +437,9 @@ int sts_mcp_start(void)
 	w.sha = sts_port_sha256_stream();
 	w.img = sts_dfu_port();
 	w.cfg = sts_cfg();
+	w.cfg_lock = mcp_cfg_lock;
+	w.cfg_unlock = mcp_cfg_unlock;
+	w.cfg_commit_cb = mcp_cfg_commit;
 	w.log = sts_logring();
 	w.status_cb = mcp_status_cb;
 	w.diag_cb = sts_diag_encode;

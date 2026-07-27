@@ -371,6 +371,18 @@ static void sts_cfg_apply_group(uint8_t group)
 	}
 }
 
+/*
+ * cfg_init() memsets the whole context, which drops the cross-field validation
+ * hook along with everything else. Anything that re-inits the live context has
+ * to come back through here or the schema's joint constraints (cfg.h
+ * cfg_schema_xvalidate: snmp.enable needs a non-default community) stop being
+ * enforced from that point on. Caller holds sts_cfg_mutex.
+ */
+static void sts_cfg_bind_hooks(void)
+{
+	(void)cfg_set_validate_hook(&sts_cfg_ctx, cfg_schema_xvalidate, NULL);
+}
+
 int sts_cfg_register_store(const port_store_t *store)
 {
 	uint32_t corrupt = 0;
@@ -387,6 +399,7 @@ int sts_cfg_register_store(const port_store_t *store)
 
 	rc = cfg_init(&sts_cfg_ctx, store);
 	if (rc == 0) {
+		sts_cfg_bind_hooks();
 		rc = cfg_load_all(&sts_cfg_ctx, &corrupt);
 	}
 
@@ -405,6 +418,7 @@ int sts_cfg_register_store(const port_store_t *store)
 		 */
 		k_mutex_lock(&sts_cfg_mutex, K_FOREVER);
 		(void)cfg_init(&sts_cfg_ctx, &sts_ram_store_port);
+		sts_cfg_bind_hooks();
 		(void)cfg_load_all(&sts_cfg_ctx, NULL);
 		k_mutex_unlock(&sts_cfg_mutex);
 		return rc;
@@ -467,7 +481,16 @@ int sts_cfg_commit(cfg_commit_res_t *res)
 
 	k_mutex_unlock(&sts_cfg_mutex);
 
-	if (rc != 0) {
+	/*
+	 * -EIO is "applied to the live tree, but N keys did not reach the store".
+	 * The running system HAS changed, so the appliers must run: returning
+	 * early here left the live tree holding a new log level, IP address or
+	 * PTP domain that nothing had been told about — the same silently-
+	 * ineffective commit as skipping the dispatch entirely, reached by a
+	 * different route. Only a validation or cross-field rejection (nothing
+	 * applied at all) skips them.
+	 */
+	if (rc != 0 && rc != -EIO) {
 		return rc;
 	}
 
@@ -475,7 +498,7 @@ int sts_cfg_commit(cfg_commit_res_t *res)
 		sts_cfg_apply_group((uint8_t)touched[j]);
 	}
 
-	return 0;
+	return rc;
 }
 
 /* ========================================================================= */
@@ -944,6 +967,7 @@ int sts_app_early_init(void)
 	if (rc != 0) {
 		return rc;
 	}
+	sts_cfg_bind_hooks();
 
 	/* Populates every key with its schema default; the RAM store is empty
 	 * on the first call, so nothing is "loaded" but the bounds and type

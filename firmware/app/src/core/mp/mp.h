@@ -247,6 +247,14 @@ typedef struct {
 	/* magic detectors (shell mode: enter; MP mode: exit) */
 	uint8_t magic_n;
 
+	/*
+	 * Deferred effects of a request. A handler cannot reboot or drop out of
+	 * MP mode itself: its reply has to reach the host first. Both are
+	 * honoured by mp_input()/mp_tick() once the reply has been transmitted.
+	 */
+	uint8_t pending_reboot; /**< 0 = none, else port_image reboot mode + 1 */
+	bool pending_exit;      /**< leave MP mode after the reply */
+
 	/* cached manifest content hash */
 	uint32_t manifest_hash;
 

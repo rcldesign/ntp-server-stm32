@@ -706,16 +706,27 @@ static uint32_t holdover_time_to_demote(const disc_ctx_t *ctx, float dt_c,
 
 static void enter_holdover(disc_ctx_t *ctx, const disc_env_t *env)
 {
+	float base;
+
 	ctx->state = DISC_STATE_HOLDOVER;
 	ctx->holdover_start_ms = env->mono_ms;
 	ctx->holdover_prev_ms = env->mono_ms;
 	ctx->holdover_start_temp_mc = env->osc_temp_mc;
 	ctx->holdover_start_temp_valid = env->osc_temp_valid;
 	ctx->holdover_last_dt_c = 0.0f;
-	ctx->holdover_elapsed_s = 0u;
-	/* Seed at the model's base error (clamped non-negative). */
-	ctx->holdover_est_ns = quality_holdover_err_ns(&ctx->cfg.holdover, 0.0f,
-						       0.0f);
+	ctx->holdover_elapsed_s = ctx->holdover_elapsed_base_s;
+	/*
+	 * Seed at the model's base error, but never below the error already being
+	 * carried. Re-entering holdover after a brief, unconverged return of the
+	 * reference does not undo the drift accumulated before it: seeding at the
+	 * model base would reset a 1.2 ms estimate to ~1 us and hand the clock its
+	 * primary stratum back, which is exactly the false stratum-1 this floor
+	 * exists to prevent.
+	 */
+	base = quality_holdover_err_ns(&ctx->cfg.holdover, 0.0f, 0.0f);
+	ctx->holdover_est_ns = (ctx->holdover_retained_ns > base)
+				       ? ctx->holdover_retained_ns
+				       : base;
 	ctx->t_demote_s = holdover_time_to_demote(ctx, 0.0f, 0.0f);
 
 	/* The actuator is frozen from here; nothing that assumes continuity of
@@ -734,7 +745,10 @@ static void update_holdover(disc_ctx_t *ctx, const disc_env_t *env)
 	if (env->mono_ms >= ctx->holdover_start_ms) {
 		uint64_t ms = env->mono_ms - ctx->holdover_start_ms;
 
-		ctx->holdover_elapsed_s = (uint32_t)(ms / 1000u);
+		/* Banked + this leg, so the reported outage length never goes
+		 * backwards while the episode is still running. */
+		ctx->holdover_elapsed_s =
+			ctx->holdover_elapsed_base_s + (uint32_t)(ms / 1000u);
 		t_s = (float)ms * 0.001f;
 	}
 	if (env->mono_ms > ctx->holdover_prev_ms) {
@@ -760,6 +774,35 @@ static void update_holdover(disc_ctx_t *ctx, const disc_env_t *env)
 	}
 
 	ctx->t_demote_s = holdover_time_to_demote(ctx, dt_c, t_s);
+
+	/* Keep the retained floor at the running estimate, so leaving holdover
+	 * cannot lose what the outage has already cost. */
+	if (ctx->holdover_est_ns > ctx->holdover_retained_ns) {
+		ctx->holdover_retained_ns = ctx->holdover_est_ns;
+	}
+}
+
+float disc_retained_error_ns(const disc_ctx_t *ctx)
+{
+	return (ctx != NULL) ? ctx->holdover_retained_ns : 0.0f;
+}
+
+uint32_t disc_expected_advance_s(uint64_t prev_ms, uint64_t now_ms)
+{
+	uint64_t dt_ms;
+	uint64_t secs;
+
+	if (now_ms <= prev_ms) {
+		return 1u; /* never stall the prediction */
+	}
+
+	dt_ms = now_ms - prev_ms;
+	secs = (dt_ms + 500u) / 1000u;
+
+	if (secs == 0u) {
+		secs = 1u;
+	}
+	return (secs > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)secs;
 }
 
 /* --------------------------------------------------------------- actuator */

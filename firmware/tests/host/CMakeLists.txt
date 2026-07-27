@@ -121,6 +121,22 @@ module_deps(ptp_msg  ptp)
 module_deps(ptp_bmca ptp)
 module_deps(ptp_port ptp)
 
+# Profile descriptors/TLVs and the Annex-P AUTHENTICATION TLV. Both live in
+# core/ptp/, so they arrive with the module rather than as new dependency edges.
+module_deps(ptp_profile ptp)
+module_deps(ptp_icv     ptp)
+
+# `fwupd` is the multi-IC firmware-update orchestrator. Its three translation
+# units — the orchestrator, the u-blox safeboot loader client and the FE-5680A
+# client — all live in core/fwupd/, so each suite names the same module set. The
+# `ubx` edge is real: ubx_fwupd.c frames UBX and reads back UBX-MON-VER.
+module_deps(fwupd     ubx util)
+module_deps(ubx_fwupd ubx util)
+module_deps(rb_fwupd  ubx util)
+
+# The polar skyplot renderer lives in core/ui/ and consumes ui_sv_t.
+module_deps(skyplot ui)
+
 # ---------------------------------------------------------------------------
 # Dependency resolution
 # ---------------------------------------------------------------------------

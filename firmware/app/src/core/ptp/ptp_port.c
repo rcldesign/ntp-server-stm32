@@ -1067,9 +1067,17 @@ static void run_bmca(ptp_port_ctx_t *c, uint64_t now_ms)
 		 * either a genuinely better primary reference appeared on the
 		 * segment, or somebody is spoofing Announces — and the operator
 		 * cannot tell which from an alarm that fires in both cases.
+		 *
+		 * Recomputed, not latched: a unit that is displaced while locked
+		 * and then loses its lock is an ordinary displaced-and-degraded
+		 * clock, and leaving the stronger bit asserted would keep
+		 * pointing at a spoof that is no longer the story. ptp.h documents
+		 * every alarm here as live except PROFILE_UNSUPPORTED.
 		 */
 		if (c->quality.sync_state == PTP_SYNC_LOCKED) {
 			c->alarms |= PTP_ALARM_DISPLACED_WHILE_LOCKED;
+		} else {
+			c->alarms &= ~PTP_ALARM_DISPLACED_WHILE_LOCKED;
 		}
 		break;
 	default:
