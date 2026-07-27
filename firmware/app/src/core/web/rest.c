@@ -1345,10 +1345,13 @@ typedef int (*rest_handler_fn)(rest_ctx_t *c, const http_req_t *req,
 			       size_t body_len, web_resp_t *r, const char *tail,
 			       size_t tail_len);
 
-/** Route flags. */
+/*
+ * Route flags. Auditing is NOT a flag: every mutating handler calls
+ * audit_action() itself, because only the handler knows what the operator
+ * actually asked for ("survey-start" is more useful than "POST gnss/survey").
+ */
 #define RF_PREFIX 0x01U /**< match by prefix; the remainder is the tail */
-#define RF_OPEN   0x02U /**< no session required (login only) */
-#define RF_AUDIT  0x04U /**< write an audit record when accepted */
+#define RF_OPEN   0x02U /**< no session required (login / session probe) */
 
 static int h_status(rest_ctx_t *c, const http_req_t *req,
 		    const rest_authctx_t *a, const char *body, size_t body_len,
@@ -2165,7 +2168,8 @@ static int h_service(rest_ctx_t *c, const http_req_t *req,
 	web_jw_obj_begin(&w);
 	web_jw_kstr(&w, "service", names[svc]);
 	web_jw_kbool(&w, "enabled", enable);
-	web_jw_kbool(&w, "commit_required", cfg_staged_count(c->cfg) != 0U);
+	web_jw_kbool(&w, "commit_required",
+		     (c->cfg != NULL) && (cfg_staged_count(c->cfg) != 0U));
 	web_jw_obj_end(&w);
 	r->no_store = true;
 	return ok_json(c, r, &w);
@@ -2986,52 +2990,52 @@ static const rest_route_t routes[] = {
 	  h_auth_logout },
 
 	/* --- config ----------------------------------------------------- */
-	{ "config/commit", WEB_METHOD_POST, WEB_ROLE_OPERATOR, RF_AUDIT,
+	{ "config/commit", WEB_METHOD_POST, WEB_ROLE_OPERATOR, 0U,
 	  h_config_commit },
-	{ "config/revert", WEB_METHOD_POST, WEB_ROLE_OPERATOR, RF_AUDIT,
+	{ "config/revert", WEB_METHOD_POST, WEB_ROLE_OPERATOR, 0U,
 	  h_config_revert },
 	{ "config/export", WEB_METHOD_GET, WEB_ROLE_ADMIN, 0U, h_config_export },
-	{ "config/import", WEB_METHOD_POST, WEB_ROLE_ADMIN, RF_AUDIT,
+	{ "config/import", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U,
 	  h_config_import },
 	{ "config", WEB_METHOD_GET, WEB_ROLE_VIEWER, 0U, h_config_list },
-	{ "config", WEB_METHOD_PUT, WEB_ROLE_OPERATOR, RF_AUDIT, h_config_put },
+	{ "config", WEB_METHOD_PUT, WEB_ROLE_OPERATOR, 0U, h_config_put },
 	{ "config/", WEB_METHOD_GET, WEB_ROLE_VIEWER, RF_PREFIX,
 	  h_config_get_one },
 
 	/* --- control ---------------------------------------------------- */
-	{ "calibration/run", WEB_METHOD_POST, WEB_ROLE_OPERATOR, RF_AUDIT,
+	{ "calibration/run", WEB_METHOD_POST, WEB_ROLE_OPERATOR, 0U,
 	  h_cal_run },
-	{ "gnss/survey", WEB_METHOD_POST, WEB_ROLE_OPERATOR, RF_AUDIT,
+	{ "gnss/survey", WEB_METHOD_POST, WEB_ROLE_OPERATOR, 0U,
 	  h_gnss_survey },
-	{ "gnss/position", WEB_METHOD_POST, WEB_ROLE_OPERATOR, RF_AUDIT,
+	{ "gnss/position", WEB_METHOD_POST, WEB_ROLE_OPERATOR, 0U,
 	  h_gnss_position },
-	{ "timing/reference", WEB_METHOD_POST, WEB_ROLE_OPERATOR, RF_AUDIT,
+	{ "timing/reference", WEB_METHOD_POST, WEB_ROLE_OPERATOR, 0U,
 	  h_reference },
 	{ "services/", WEB_METHOD_POST, WEB_ROLE_OPERATOR,
-	  RF_PREFIX | RF_AUDIT, h_service },
+	  RF_PREFIX, h_service },
 
 	/* --- firmware (admin only) -------------------------------------- */
-	{ "firmware/begin", WEB_METHOD_POST, WEB_ROLE_ADMIN, RF_AUDIT,
+	{ "firmware/begin", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U,
 	  h_fw_begin },
 	{ "firmware/data", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U, h_fw_data },
-	{ "firmware/end", WEB_METHOD_POST, WEB_ROLE_ADMIN, RF_AUDIT, h_fw_end },
-	{ "firmware/confirm", WEB_METHOD_POST, WEB_ROLE_ADMIN, RF_AUDIT,
+	{ "firmware/end", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U, h_fw_end },
+	{ "firmware/confirm", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U,
 	  h_fw_confirm },
-	{ "firmware/revert", WEB_METHOD_POST, WEB_ROLE_ADMIN, RF_AUDIT,
+	{ "firmware/revert", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U,
 	  h_fw_revert },
 
 	/* --- security (admin only) -------------------------------------- */
 	{ "security/users", WEB_METHOD_GET, WEB_ROLE_ADMIN, 0U, h_sec_users },
-	{ "security/password", WEB_METHOD_POST, WEB_ROLE_ADMIN, RF_AUDIT,
+	{ "security/password", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U,
 	  h_sec_password },
 	{ "security/tls", WEB_METHOD_GET, WEB_ROLE_ADMIN, 0U, h_sec_tls_get },
-	{ "security/tls", WEB_METHOD_POST, WEB_ROLE_ADMIN, RF_AUDIT,
+	{ "security/tls", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U,
 	  h_sec_tls_post },
-	{ "security/csr", WEB_METHOD_POST, WEB_ROLE_ADMIN, RF_AUDIT, h_sec_csr },
+	{ "security/csr", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U, h_sec_csr },
 
 	/* --- system (admin only) --------------------------------------- */
-	{ "reboot", WEB_METHOD_POST, WEB_ROLE_ADMIN, RF_AUDIT, h_reboot },
-	{ "factory-reset", WEB_METHOD_POST, WEB_ROLE_ADMIN, RF_AUDIT,
+	{ "reboot", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U, h_reboot },
+	{ "factory-reset", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U,
 	  h_factory_reset },
 };
 

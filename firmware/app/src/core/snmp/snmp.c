@@ -1112,9 +1112,24 @@ int snmp_stats_reset(snmp_ctx_t *c)
 
 /* -------------------------------------------------------------- resolution */
 
+/**
+ * The community string to emit, never NULL.
+ *
+ * `snmp_set_community(c, NULL)` is documented to disable the agent, and
+ * parse_request() enforces that by refusing every request before a PDU is even
+ * parsed. But the configuration pointer is replaced by a *different* thread (the
+ * cfg-commit applier calls snmp_set_community() while the agent thread may be
+ * mid-request), so a NULL can appear between the parse and the reply. Rather
+ * than reason about that window, every read of the community goes through here.
+ */
+static const char *community_of(const snmp_ctx_t *c)
+{
+	return (c->cfg.community != NULL) ? c->cfg.community : "";
+}
+
 /** Resolve (obj, inst) through the getter, with sysUpTime supplied locally. */
-static void resolve(snmp_ctx_t *c, uint16_t obj, uint16_t inst,
-		    uint32_t uptime_cs, snmp_value_t *v)
+void snmp__resolve(snmp_ctx_t *c, uint16_t obj, uint16_t inst,
+		   uint32_t uptime_cs, snmp_value_t *v)
 {
 	memset(v, 0, sizeof(*v));
 
@@ -1153,29 +1168,12 @@ static bool names_known_object(const uint32_t *arcs, size_t n)
 
 /* ------------------------------------------------------------ request state */
 
-/** One parsed varbind name plus the GETBULK walk cursor for it. */
-typedef struct {
-	uint32_t arcs[SNMP_OID_MAX_LEN];
-	uint8_t n;
-	bool over; /* the encoded OID had more arcs than we store */
-	int next;  /* GETBULK: flat index of the next instance, or -1 at the end */
-} vb_t;
-
-typedef struct {
-	uint8_t pdu;
-	int32_t reqid;
-	int32_t f2; /* error-status, or non-repeaters */
-	int32_t f3; /* error-index, or max-repetitions */
-	size_t n_vb;
-	vb_t vb[SNMP_MAX_VARBINDS];
-	/* The request's varbind-list content, echoed verbatim in a SET reply. */
-	const uint8_t *vbl;
-	size_t vbl_len;
-} req_t;
+/* snmp_vb_t and snmp_req_t live in snmp_internal.h so snmp_v3.c can reuse the
+ * PDU layer verbatim — see that header for why. */
 
 /** Append one varbind: name then value. */
-static int put_varbind(snmp_wr_t *w, const uint32_t *arcs, size_t n,
-		       const snmp_value_t *v)
+int snmp__put_varbind(snmp_wr_t *w, const uint32_t *arcs, size_t n,
+		      const snmp_value_t *v)
 {
 	size_t mark;
 	int rc;
@@ -1196,7 +1194,7 @@ static int put_varbind(snmp_wr_t *w, const uint32_t *arcs, size_t n,
 }
 
 /** GET: one varbind, exact match. */
-static int emit_get(snmp_ctx_t *c, snmp_wr_t *w, vb_t *vb, uint32_t uptime_cs)
+static int emit_get(snmp_ctx_t *c, snmp_wr_t *w, snmp_vb_t *vb, uint32_t uptime_cs)
 {
 	snmp_value_t v;
 	uint16_t obj = 0U;
@@ -1218,11 +1216,11 @@ static int emit_get(snmp_ctx_t *c, snmp_wr_t *w, vb_t *vb, uint32_t uptime_cs)
 
 			(void)snmp_mib_instance((size_t)idx, &obj, &inst, NULL,
 						full);
-			resolve(c, obj, inst, uptime_cs, &v);
+			snmp__resolve(c, obj, inst, uptime_cs, &v);
 		}
 	}
 
-	return put_varbind(w, vb->arcs, vb->n, &v);
+	return snmp__put_varbind(w, vb->arcs, vb->n, &v);
 }
 
 /**
@@ -1231,7 +1229,7 @@ static int emit_get(snmp_ctx_t *c, snmp_wr_t *w, vb_t *vb, uint32_t uptime_cs)
  * @param from  Index to emit, or negative for end-of-MIB.
  * @return the index emitted, or -1 once endOfMibView has been reported.
  */
-static int emit_next(snmp_ctx_t *c, snmp_wr_t *w, const vb_t *vb, int from,
+static int emit_next(snmp_ctx_t *c, snmp_wr_t *w, const snmp_vb_t *vb, int from,
 		     uint32_t uptime_cs, int *rc_out)
 {
 	snmp_value_t v;
@@ -1244,19 +1242,19 @@ static int emit_next(snmp_ctx_t *c, snmp_wr_t *w, const vb_t *vb, int from,
 
 	if (from < 0) {
 		v.type = SNMP_TAG_END_OF_MIB_VIEW;
-		*rc_out = put_varbind(w, vb->arcs, vb->n, &v);
+		*rc_out = snmp__put_varbind(w, vb->arcs, vb->n, &v);
 		return -1;
 	}
 
 	len = snmp_mib_instance((size_t)from, &obj, &inst, NULL, full);
 	if (len < 0) {
 		v.type = SNMP_TAG_END_OF_MIB_VIEW;
-		*rc_out = put_varbind(w, vb->arcs, vb->n, &v);
+		*rc_out = snmp__put_varbind(w, vb->arcs, vb->n, &v);
 		return -1;
 	}
 
-	resolve(c, obj, inst, uptime_cs, &v);
-	*rc_out = put_varbind(w, full, (size_t)len, &v);
+	snmp__resolve(c, obj, inst, uptime_cs, &v);
+	*rc_out = snmp__put_varbind(w, full, (size_t)len, &v);
 	return from;
 }
 
@@ -1274,7 +1272,7 @@ static int emit_next(snmp_ctx_t *c, snmp_wr_t *w, const vb_t *vb, int from,
  * @retval 0        Built.
  * @retval -ENOSPC  A GET/GETNEXT response did not fit.
  */
-static int build_response(snmp_ctx_t *c, req_t *rq, int32_t err,
+static int build_response(snmp_ctx_t *c, snmp_req_t *rq, int32_t err,
 			  int32_t err_index, uint32_t uptime_cs, uint8_t *rsp,
 			  size_t cap, size_t *out_len)
 {
@@ -1472,7 +1470,7 @@ close:
 
 /** Parse the message envelope and PDU into @p rq. */
 static int parse_request(snmp_ctx_t *c, const uint8_t *req, size_t req_len,
-			 req_t *rq)
+			 snmp_req_t *rq)
 {
 	snmp_rd_t r;
 	snmp_rd_t body;
@@ -1628,7 +1626,7 @@ int snmp_handle(snmp_ctx_t *c, const uint8_t *req, size_t req_len,
 		uint32_t uptime_cs, uint8_t *rsp, size_t rsp_cap,
 		size_t *rsp_len)
 {
-	req_t rq;
+	snmp_req_t rq;
 	size_t out = 0U;
 	int rc;
 
@@ -1833,7 +1831,7 @@ int snmp_make_trap(snmp_ctx_t *c, snmp_trap_t t, uint32_t uptime_cs,
 	if (n < 0) {
 		return n;
 	}
-	rc = put_varbind(&w, arcs, (size_t)n, &v);
+	rc = snmp__put_varbind(&w, arcs, (size_t)n, &v);
 	if (rc != 0) {
 		return rc;
 	}
@@ -1844,7 +1842,7 @@ int snmp_make_trap(snmp_ctx_t *c, snmp_trap_t t, uint32_t uptime_cs,
 		return n;
 	}
 	snmp_val_oid(&v, arcs, (size_t)n);
-	rc = put_varbind(&w, o_snmp_trap_oid,
+	rc = snmp__put_varbind(&w, o_snmp_trap_oid,
 			 sizeof(o_snmp_trap_oid) / sizeof(o_snmp_trap_oid[0]),
 			 &v);
 	if (rc != 0) {
@@ -1859,8 +1857,8 @@ int snmp_make_trap(snmp_ctx_t *c, snmp_trap_t t, uint32_t uptime_cs,
 			 * the trap exists to report. */
 			continue;
 		}
-		resolve(c, binds[i].obj, binds[i].inst, uptime_cs, &v);
-		rc = put_varbind(&w, arcs, (size_t)n, &v);
+		snmp__resolve(c, binds[i].obj, binds[i].inst, uptime_cs, &v);
+		rc = snmp__put_varbind(&w, arcs, (size_t)n, &v);
 		if (rc != 0) {
 			return rc;
 		}
