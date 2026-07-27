@@ -281,14 +281,11 @@ static int clamp_i16(int64_t v, int16_t *out)
 	return 0;
 }
 
+/* Callers guarantee v >= 0 by rejecting negative inputs up front. */
 static int clamp_u16(int64_t v, uint16_t *out)
 {
 	if (v > (int64_t)0xFFFF) {
 		*out = 0xFFFFU;
-		return -ERANGE;
-	}
-	if (v < 0) {
-		*out = 0U;
 		return -ERANGE;
 	}
 	*out = (uint16_t)v;
@@ -709,10 +706,12 @@ const char *ina228_cause_str(ina228_cause_t cause)
 		"math-ovf",  "charge-ovf", "energy-ovf", "conv-ready",
 	};
 
-	if ((cause < 0) || (cause >= INA228_CAUSE_COUNT)) {
+	/* Unsigned compare catches both a negative cast and an out-of-range
+	 * value without tripping -Wtype-limits on an unsigned enum. */
+	if ((unsigned int)cause >= (unsigned int)INA228_CAUSE_COUNT) {
 		return "invalid";
 	}
-	return names[cause];
+	return names[(unsigned int)cause];
 }
 
 /* ---------------------------------------------------------------------- IDs */
@@ -896,10 +895,10 @@ const ina228_rail_info_t ina228_rail_tbl[INA228_RAIL_COUNT] = {
 
 const ina228_rail_info_t *ina228_rail(ina228_rail_t rail)
 {
-	if ((rail < 0) || (rail >= INA228_RAIL_COUNT)) {
+	if ((unsigned int)rail >= (unsigned int)INA228_RAIL_COUNT) {
 		return NULL;
 	}
-	return &ina228_rail_tbl[rail];
+	return &ina228_rail_tbl[(unsigned int)rail];
 }
 
 int ina228_rail_by_addr(uint8_t addr, ina228_rail_t *out)

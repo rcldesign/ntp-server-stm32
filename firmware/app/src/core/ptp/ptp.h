@@ -51,11 +51,10 @@
  *
  * clockClass/clockAccuracy/offsetScaledLogVariance and the timePropertiesDS
  * flags come from the §3.8 quality block, never from anything this module
- * measures itself. core/quality does not exist yet, so ptp_quality_view_t below
- * is the minimal projection this module needs. TODO(wave-3): once
- * core/quality/quality.h lands, replace this struct with an adapter that
- * projects quality_snapshot_t onto it — the field set was chosen to be a strict
- * subset of the §3.8 block.
+ * measures itself. ptp_quality_view_t below is the projection of that block
+ * onto what PTP needs, and ptp_quality_view_from_block() is the one place the
+ * two layouts meet — the engine itself never sees a quality_block_t, so the
+ * §3.8 block can keep evolving without touching the state machine.
  */
 
 #ifndef STS1000_CORE_PTP_PTP_H_
@@ -66,6 +65,7 @@
 #include <stdint.h>
 
 #include "ptp/ptp_msg.h"
+#include "quality/quality.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -89,7 +89,13 @@ extern "C" {
 
 /* ---------------------------------------------------------------- alarms -- */
 
-/** BMCA says another clock is the better master; we defer instead of slaving. */
+/**
+ * BMCA has taken this port out of the master role: a better clock is on the
+ * segment. Raised for recommended states P1, P2 and S1, cleared otherwise. S1
+ * is the case where strict 1588 would slave and this appliance goes PASSIVE
+ * instead; P1 and P2 are ordinary 1588 outcomes. Either way the operator wants
+ * to know that the grandmaster is not grandmastering.
+ */
 #define PTP_ALARM_NOT_BEST_MASTER  0x00000001U
 /** The port is in FAULTY: the glue reported a transport fault. */
 #define PTP_ALARM_FAULTY           0x00000002U
@@ -121,9 +127,13 @@ typedef enum {
  * clockClass to advertise once holdover leaves its specified window.
  *
  * IEEE 1588-2019 Table 4 offers two ladders down from class 7: alternative A
- * degrades to 52, alternative B to 187. A above 127 is the "never a slave"
- * range, so alternative A keeps this appliance grandmaster-only even while
- * degraded; alternative B lets a healthier peer take over.
+ * degrades to 52, alternative B to 187. The choice is not cosmetic. §7.6.2.5
+ * reserves clockClass below 128 for clocks that shall never be a slave, so
+ * alternative A (52) keeps the port in the M1/P1 branch of the state decision
+ * and this appliance stays grandmaster-or-passive however far it degrades.
+ * Alternative B (187) is above the line, which is what makes the S1 branch —
+ * and therefore the deviation described at the top of this file — reachable at
+ * all.
  */
 typedef enum {
 	PTP_DEGRADE_ALT_A = 0, /* class 52 */
@@ -204,9 +214,15 @@ typedef enum {
 } ptp_sync_state_t;
 
 /**
- * The §3.8 quality block projected onto what PTP needs. See the file header for
- * the wave-3 adaptation note.
+ * How far ahead of a leap second the flags may be announced.
+ *
+ * §9.4: leap61/leap59 are asserted no more than 12 hours before the event. The
+ * GNSS receiver knows about a leap months in advance, so the window matters —
+ * without it every Announce for a whole quarter would carry the flag.
  */
+#define PTP_LEAP_ANNOUNCE_WINDOW_S 43200U
+
+/** The §3.8 quality block projected onto what PTP needs. */
 typedef struct {
 	ptp_sync_state_t sync_state;
 	int16_t utc_offset;        /* currentUtcOffset: TAI - UTC, seconds */
@@ -219,6 +235,36 @@ typedef struct {
 	uint64_t est_accuracy_ns;  /* estimated |time error|, ns; 0 = unknown */
 	uint64_t adev_tau1_e18;    /* ADEV at tau = 1 s, scaled by 1e18; 0 = unknown */
 } ptp_quality_view_t;
+
+/**
+ * Project a §3.8 quality block onto the PTP view.
+ *
+ * This is the only place the two layouts meet. The mapping, with its reasoning:
+ *
+ * | PTP field        | Source |
+ * |---|---|
+ * | sync_state       | LOCKED and not holdover -> LOCKED; holdover (flag, state, or the rate-limited RECOVERING pull-in) -> HOLDOVER, or HOLDOVER_EXCEEDED once QUALITY_FLAG_DEMOTED says policy is past; anything else -> FREERUN |
+ * | utc_offset       | `leap_current_s` (TAI - UTC) |
+ * | leap61/leap59    | `leap_pending` sign, but only inside PTP_LEAP_ANNOUNCE_WINDOW_S of `leap_at_tai_s` |
+ * | time_traceable   | locked or in holdover: traceability survives holdover, which is what holdover is for |
+ * | freq_traceable   | that, or an atomic/house reference on the mux even while free-running |
+ * | time_source      | GNSS while the receiver's time is locked; else atomic clock on the Rb, "other" on the external house reference, internal oscillator otherwise |
+ * | est_accuracy_ns  | `holdover_est_err_ns` in holdover, else the receiver's `gnss_tacc_ns`, else the rolling PPS sigma |
+ * | adev_tau1_e18    | `adev_1s` scaled by 1e18, clamped; 0 when not yet characterised |
+ *
+ * No libm: the float fields are handled with comparisons and casts only, and a
+ * NaN or infinity in the block degrades to "unknown" rather than to a trap.
+ *
+ * @param b           The snapshot to project. Not retained.
+ * @param now_tai_s   Current TAI seconds since the PTP epoch, for the leap
+ *                    announcement window.
+ * @param out         Receives the view.
+ *
+ * @retval 0        Success.
+ * @retval -EINVAL  @p b or @p out is NULL.
+ */
+int ptp_quality_view_from_block(const quality_block_t *b, uint64_t now_tai_s,
+				ptp_quality_view_t *out);
 
 /**
  * Map a quality view onto grandmasterClockQuality.
@@ -384,6 +430,14 @@ typedef struct {
 void ptp_foreign_init(ptp_foreign_tbl_t *t);
 
 /**
+ * Drop every record but keep the lifetime counters.
+ *
+ * Used when the segment's state stops being trustworthy — a transport fault —
+ * where forgetting the peers is right but rewinding the counters is not.
+ */
+void ptp_foreign_clear(ptp_foreign_tbl_t *t);
+
+/**
  * Record an Announce, creating or refreshing the sender's entry.
  *
  * Qualification follows §9.3.2.4.5: a record becomes qualified once
@@ -490,7 +544,14 @@ typedef struct {
 	void *ctx;
 } ptp_port_ops_t;
 
-/** Per-message-type and engine counters. */
+/**
+ * Per-message-type and engine counters.
+ *
+ * @p tx counts messages the transmit callback accepted; a rejected one lands in
+ * @p tx_errors instead, so tx + tx_errors is what was attempted. @p rx counts
+ * messages that passed the header, domain and self-address filters — the three
+ * rejection counters below account for the rest.
+ */
 typedef struct {
 	uint32_t tx[PTP_MSG_TYPE_COUNT];
 	uint32_t rx[PTP_MSG_TYPE_COUNT];

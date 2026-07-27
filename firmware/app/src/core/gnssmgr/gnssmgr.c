@@ -243,6 +243,12 @@ static void config_failed(gnssmgr_t *g)
  * A build failure is a programming error (buffer too small, key/setter width
  * mismatch), not a receiver problem, so it goes straight to CONFIG_FAILED
  * rather than burning retries on a frame that will never be right.
+ *
+ * That branch is unreachable for the step set as it stands, and deliberately
+ * so: tests/host/test_gnssmgr.c::test_every_step_fits_the_scratch_buffer pins
+ * the largest step at 98 bytes against GNSSMGR_TXBUF_SZ. It stays here because
+ * the alternative for a step that one day outgrows the buffer is transmitting a
+ * silently truncated VALSET.
  */
 static int emit_step(gnssmgr_t *g, uint32_t now_ms)
 {
@@ -776,7 +782,11 @@ static bool cfg_valid(const gnssmgr_cfg_t *c)
 	if (c->ant_debounce == 0U) {
 		return false;
 	}
-	if (c->itow_backstep_ms == 0U) {
+	/* Bounded above so the week-rollover guard in itow_backstep() cannot
+	 * underflow, and because a threshold past half a week cannot separate a
+	 * restart from a rollover anyway. */
+	if ((c->itow_backstep_ms == 0U) ||
+	    (c->itow_backstep_ms > (GNSSMGR_WEEK_MS / 2U))) {
 		return false;
 	}
 	return true;
@@ -821,8 +831,13 @@ int gnssmgr_notify_reset(gnssmgr_t *g, uint32_t mono_ms)
 		return -EINVAL;
 	}
 
-	/* Everything the receiver told us is about its previous life. The stored
-	 * position survives — it is a site constant, not receiver state. */
+	/*
+	 * Everything the receiver measured is about its previous life. Two
+	 * things survive because they describe the world rather than the
+	 * receiver: the stored position (a site constant) and the leap-second
+	 * schedule (constellation truth, and dropping it would force NTP to
+	 * advertise LI=UNSYNC for no reason).
+	 */
 	g->status.time_locked = false;
 	g->status.valid = false;
 	g->pvt_seen = false;
@@ -972,6 +987,18 @@ int gnssmgr_request_survey(gnssmgr_t *g, uint32_t mono_ms)
 	g->have_position = false;
 	(void)memset(&g->position, 0, sizeof(g->position));
 	(void)memset(&g->svin, 0, sizeof(g->svin));
+
+	if ((g->state == (uint8_t)GNSSMGR_ST_CONFIG) &&
+	    (g->step < (uint8_t)GNSSMGR_STEP_TMODE)) {
+		/*
+		 * The walk has not reached TMODE yet. Dropping the stored
+		 * position is enough — the TMODE step builds its survey-in form
+		 * when the walk gets there. Restarting the walk at TMODE from
+		 * here would skip every step in between and leave the receiver
+		 * with no message rates and no time pulse.
+		 */
+		return 0;
+	}
 	return begin_walk(g, (uint8_t)GNSSMGR_STEP_TMODE, mono_ms);
 }
 
@@ -1040,13 +1067,8 @@ gnssmgr_li_t gnssmgr_leap_indicator(const gnssmgr_t *g)
 	    ((uint32_t)g->leap.time_to_event_s > g->cfg.leap_announce_s)) {
 		return GNSSMGR_LI_NONE;
 	}
-	if (g->leap.ls_change > 0) {
-		return GNSSMGR_LI_INSERT;
-	}
-	if (g->leap.ls_change < 0) {
-		return GNSSMGR_LI_DELETE;
-	}
-	return GNSSMGR_LI_NONE;
+	/* event_pending already established that ls_change is non-zero. */
+	return (g->leap.ls_change > 0) ? GNSSMGR_LI_INSERT : GNSSMGR_LI_DELETE;
 }
 
 int gnssmgr_qerr_for_pps(const gnssmgr_t *g, gnssmgr_qerr_t *out)

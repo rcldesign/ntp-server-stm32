@@ -103,6 +103,14 @@ module_deps(crc      util)
 module_deps(cobs     util)
 module_deps(ring     util)
 module_deps(bytes    util)
+module_deps(aes_siv  nts)
+module_deps(mcp_dfu  mcp util cfg logring quality)
+
+# `ptp` is split by layer: the wire codecs, the best-master algorithm and the
+# port state machine are independent enough to fail independently.
+module_deps(ptp_msg  ptp)
+module_deps(ptp_bmca ptp)
+module_deps(ptp_port ptp)
 
 # ---------------------------------------------------------------------------
 # Dependency resolution

@@ -267,8 +267,10 @@ typedef struct {
 	uint16_t dac_center_code;  /**< code for 1.65 V (2048) */
 	uint16_t dac_max_code;     /**< 4095 for the 12-bit DAC1_OUT1 */
 	uint16_t dac_vref_mv;      /**< DAC reference, 3300 */
-	float slew_lsb_per_s;      /**< disciplined slew limit (5) */
-	float slew_acq_lsb_per_s;  /**< ACQUIRING slew limit (256) */
+	/** Slew limit while serving a primary stratum, LSB/s (5). */
+	float slew_lsb_per_s;
+	/** Slew limit while converging (ACQUIRING/LOCKING), LSB/s (256). */
+	float slew_acq_lsb_per_s;
 
 	/* ---- §3.3 tempco feed-forward ---- */
 	float tempco_ppb_per_c;    /**< BENCH oscillator df/dT; see disc_tempco_fit */
@@ -369,6 +371,13 @@ typedef struct {
 	/* Tempco reference temperature, captured on first lock */
 	bool tref_valid;
 	int32_t tref_mc;
+
+	/* Set the first time LOCKED is reached; gates the primary stratum in
+	 * holdover and recovery. Never cleared. */
+	bool ever_locked;
+
+	/* Accepted samples since ACQUIRING was last entered. */
+	uint32_t acq_ticks;
 
 	/* Telemetry */
 	float last_e_ns;

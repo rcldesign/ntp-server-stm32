@@ -215,6 +215,19 @@ void ptp_foreign_init(ptp_foreign_tbl_t *t)
 	memset(t, 0, sizeof(*t));
 }
 
+void ptp_foreign_clear(ptp_foreign_tbl_t *t)
+{
+	size_t i;
+
+	if (t == NULL) {
+		return;
+	}
+	for (i = 0U; i < (size_t)PTP_MAX_FOREIGN_MASTERS; i++) {
+		t->rec[i].in_use = false;
+		t->rec[i].qualified = false;
+	}
+}
+
 void ptp_foreign_dataset(const ptp_foreign_t *f, const ptp_port_id_t *receiver,
 			 ptp_dataset_t *out)
 {

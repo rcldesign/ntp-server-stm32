@@ -940,9 +940,10 @@ int cfg_export_read(const cfg_ctx_t *c, cfg_export_t *ex, uint8_t *buf,
 		ex->phase = 1U;
 	}
 
-	while ((ex->phase == 1U) && ((cap - w) >= CFG_EXPORT_MIN_CHUNK)) {
+	while (ex->phase == 1U) {
 		const cfg_key_t *k;
 		uint8_t rec[CFG_EXPORT_REC_HDR + CFG_VAL_MAX];
+		size_t rec_len;
 		int n;
 
 		if (ex->idx >= CFG_KEY_COUNT) {
@@ -960,11 +961,19 @@ int cfg_export_read(const cfg_ctx_t *c, cfg_export_t *ex, uint8_t *buf,
 		if (n < 0) {
 			return -EPROTO;
 		}
+		rec_len = CFG_EXPORT_REC_HDR + (size_t)n;
+		if ((cap - w) < rec_len) {
+			/* Records are never split; the caller gets a short
+			 * chunk and this one leads the next. A record always
+			 * fits in an empty chunk because cap is at least
+			 * CFG_EXPORT_MIN_CHUNK, so this cannot livelock. */
+			break;
+		}
+
 		bytes_put_le16(&rec[0], k->id);
 		rec[2] = k->type;
 		bytes_put_le16(&rec[3], (uint16_t)n);
-		export_emit(ex, buf, &w, rec,
-			    CFG_EXPORT_REC_HDR + (size_t)n);
+		export_emit(ex, buf, &w, rec, rec_len);
 		ex->idx++;
 	}
 

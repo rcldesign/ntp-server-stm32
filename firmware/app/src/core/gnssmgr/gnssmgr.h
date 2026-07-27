@@ -423,6 +423,14 @@ int gnssmgr_on_msg(gnssmgr_t *g, const ubx_msg_t *m, uint32_t mono_ms);
 /**
  * 1 Hz housekeeping: one antenna-supervisor sample plus NAV-PVT staleness.
  *
+ * Each call with a non-NULL @p ant is exactly one debounce sample. Every change
+ * of antenna verdict needs @p ant_debounce consecutive samples agreeing — the
+ * first one included, so GNSSMGR_ANT_UNKNOWN reaches GNSSMGR_ANT_OK no faster
+ * than it would reach GNSSMGR_ANT_SHORT. That symmetry is the point: adopting
+ * whatever the first sample says would let one spurious reading during rail
+ * settling cut the antenna bias. The single exception is the commanded-off
+ * state, which is a fact rather than a measurement and is adopted at once.
+ *
  * @param ant  Antenna evidence; may be NULL to run only the staleness check.
  * @retval 0 / -EINVAL.
  */
@@ -445,7 +453,11 @@ int gnssmgr_position(const gnssmgr_t *g, gnssmgr_ecef_t *out);
 /**
  * Explicit operator re-survey (spec §3.7: never automatic).
  *
- * Discards the stored position and re-issues the TMODE step in survey-in form.
+ * Discards the stored position and arranges for the TMODE step to be issued in
+ * its survey-in form. Called while the configuration walk is still short of the
+ * TMODE step, it only drops the position and lets the walk arrive there
+ * normally — it does not restart the walk at TMODE, which would skip the
+ * message rates and the time-pulse setup.
  *
  * @retval 0        Survey requested.
  * @retval -EINVAL  NULL argument.
