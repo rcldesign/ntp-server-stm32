@@ -14,6 +14,7 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "unity.h"
@@ -284,6 +285,48 @@ static logr_t     g_log;
 static logr_rec_t g_log_slots[LOG_CAP];
 static uint16_t   g_seq;
 
+/*
+ * A stand-in for sts_aaa_check(), with the same three-valued contract: 0
+ * accepts and names a role, -EBUSY is a lockout, and every other code — most
+ * importantly -EHOSTUNREACH, "no authority could answer" — is a refusal.
+ *
+ * g_remote.wired is what "an unwired hook" means for the fixture: false leaves
+ * mcp_wiring_t::auth_remote_cb NULL, which is the pre-hook engine exactly.
+ */
+static struct {
+	bool         wired;
+	unsigned int calls;
+	char         last_name[MCP_AUTH_USER_MAX + 1U];
+	char         last_secret[MCP_PW_MAX + 1U];
+	int          rc;
+	uint8_t      role;
+} g_remote;
+
+static int remote_stub(void *user, const char *name, const char *secret,
+		       uint8_t *out_role)
+{
+	(void)user;
+	g_remote.calls++;
+	(void)snprintf(g_remote.last_name, sizeof(g_remote.last_name), "%s",
+		       name);
+	(void)snprintf(g_remote.last_secret, sizeof(g_remote.last_secret), "%s",
+		       secret);
+	if (g_remote.rc == 0) {
+		*out_role = g_remote.role;
+	}
+	return g_remote.rc;
+}
+
+/* Arm the authority for the next AUTH. Does not disturb g_remote.wired. */
+static void remote_answer(int rc, uint8_t role)
+{
+	g_remote.calls = 0U;
+	g_remote.rc = rc;
+	g_remote.role = role;
+	memset(g_remote.last_name, 0, sizeof(g_remote.last_name));
+	memset(g_remote.last_secret, 0, sizeof(g_remote.last_secret));
+}
+
 static void wire_up(bool with_cfg, bool with_log, bool with_status)
 {
 	mcp_wiring_t w;
@@ -314,6 +357,11 @@ static void wire_up(bool with_cfg, bool with_log, bool with_status)
 	w.status_cb = with_status ? status_cb : NULL;
 	w.diag_cb = with_status ? diag_cb : NULL;
 	w.tx = tx_cb;
+	if (g_remote.wired) {
+		w.auth_remote_cb = remote_stub;
+		(void)snprintf(w.auth_user, sizeof(w.auth_user), "%s",
+			       "console-admin");
+	}
 	memcpy(w.ident.model, "STS1000", 7);
 	memcpy(w.ident.board_id, "\x01\x02\x03\x04\x05\x06\x07\x08", 8);
 
@@ -2699,6 +2747,13 @@ int main(void)
 	RUN_TEST(test_session_expires_when_idle);
 	RUN_TEST(test_reset_session_drops_everything_but_dfu);
 	RUN_TEST(test_auth_blob_helper);
+
+	RUN_TEST(test_remote_authority_consulted_only_on_local_miss);
+	RUN_TEST(test_remote_unreachable_denies_the_console);
+	RUN_TEST(test_remote_lockout_is_reported_as_busy);
+	RUN_TEST(test_unwired_remote_hook_changes_nothing);
+	RUN_TEST(test_remote_role_gates_destructive_commands);
+	RUN_TEST(test_remote_embedded_nul_password_is_refused);
 
 	RUN_TEST(test_reboot_is_deferred_until_the_answer_is_out);
 	RUN_TEST(test_reboot_validates_its_mode);

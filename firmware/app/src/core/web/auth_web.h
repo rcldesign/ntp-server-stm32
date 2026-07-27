@@ -471,13 +471,6 @@ int auth_web_validate(auth_web_ctx_t *c, const char *token, uint64_t now_ms,
 /** Session by slot index, or NULL. */
 const auth_web_sess_t *auth_web_sess_at(const auth_web_ctx_t *c, size_t idx);
 
-/**
- * Name of the principal behind session @p idx, or NULL when the slot is dead.
- *
- * Works for a remote principal, which has no entry in the local account table
- * and therefore cannot be named through auth_web_user_at().
- */
-const char *auth_web_sess_name(const auth_web_ctx_t *c, size_t idx);
 
 /**
  * Constant-time CSRF check for session @p idx.

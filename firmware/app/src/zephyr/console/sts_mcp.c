@@ -191,11 +191,105 @@ static int mcp_cfg_commit(void *user, cfg_commit_res_t *res)
  * carried on with the configuration they had been handed before the reset — until
  * somebody rebooted the unit. sts_cfg_factory_reset() runs every registered
  * group's appliers.
+ *
+ * It then zeroizes key material and reboots, so a factory reset over the console
+ * leaves exactly the same unit behind as one over the web. The full inventory of
+ * what is erased and what is deliberately kept is at sts_sec_factory_wipe()'s
+ * definition in src/zephyr/net/sts_web.c; the short version is that the reboot
+ * is what clears the RAM-only key material (the NTS cookie master keyring, the
+ * per-boot NTS-KE server key) and what mints the fresh TLS identity to replace
+ * the one just deleted.
  */
+static void factory_reboot_handler(struct k_work *w)
+{
+	const port_image_t *img = sts_dfu_port();
+
+	ARG_UNUSED(w);
+	if (img != NULL && img->reboot != NULL) {
+		LOG_WRN("rebooting to complete the factory reset");
+		img->reboot(img->ctx, 0);
+	}
+}
+
+static K_WORK_DELAYABLE_DEFINE(factory_reboot_work, factory_reboot_handler);
+
 static int mcp_cfg_factory_reset(void *user)
 {
+	int rc = 0;
+
 	ARG_UNUSED(user);
-	return sts_cfg_factory_reset();
+
+	if (sts_cfg_factory_reset() != 0) {
+		rc = -EIO;
+	}
+	if (sts_sec_factory_wipe != NULL) {
+		if (sts_sec_factory_wipe() != 0) {
+			rc = -EIO;
+		}
+	} else {
+		LOG_WRN("no net area in this image: factory reset is "
+			"config-only, TLS key material is not erased");
+	}
+
+	/*
+	 * Deferred so the FACTORY_RESET response reaches the tool first: the
+	 * engine frames its reply after this callback returns, and the ISR then
+	 * drains the TX ring. 1500 ms is ample for a 4-byte response on a USB
+	 * CDC endpoint and is the same order as MCP's own REBOOT delay.
+	 */
+	(void)k_work_reschedule(&factory_reboot_work, K_MSEC(1500));
+
+	return rc;
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * The remote authority
+ * ---------------------------------------------------------------------------
+ *
+ * core/mcp asks this when the local credential blob could not accept a
+ * password, so RADIUS / TACACS+ / LDAP reach the console exactly as they reach
+ * the web plane, sharing one lockout table and one role mapping.
+ *
+ * Every non-zero return is a denial, -EHOSTUNREACH included (sts_aaa.h). Only
+ * -EBUSY keeps its identity, and core/mcp turns it into the same MCP_ERR_BUSY
+ * its own throttle uses, so the two are one answer on the wire.
+ *
+ * WHY sts_aaa_check_fed() AND NOT sts_aaa_check(): this runs on the `mcp`
+ * thread, which is alone and owns its liveness participant outright. A direct
+ * call would block it for the operator's whole configured chain timeout — up to
+ * ~540 s, against CONFIG_STS1000_LIVENESS_DEADLINE_MS of 5 000 — so the
+ * supervisor would withhold the external watchdog kick and the TPS3430 would
+ * cold-cycle the board. One unauthenticated AUTH frame, one reboot, repeatable.
+ * sts_aaa_check_fed() runs the lookup on its own thread and feeds
+ * `mcp_liveness_id` while this thread sleeps.
+ *
+ * The config critical section is already released by core/mcp before it calls
+ * this (mcp.h): holding it would stall the shell, the panel UI and the web
+ * plane behind one console login attempt.
+ */
+static int mcp_remote_auth(void *user, const char *name, const char *secret,
+			   uint8_t *out_role)
+{
+	int rc;
+
+	ARG_UNUSED(user);
+
+	*out_role = (uint8_t)MCP_ROLE_NONE;
+	if (sts_aaa_check_fed == NULL) {
+		/* No net area: no authority could answer, which is a denial. */
+		return -EACCES;
+	}
+
+	rc = sts_aaa_check_fed(name, secret, out_role, mcp_liveness_id);
+	if (rc != 0) {
+		*out_role = (uint8_t)MCP_ROLE_NONE;
+		return (rc == -EBUSY) ? -EBUSY : -EACCES;
+	}
+	/* auth_role_t and the MCP_ROLE_* values are the same four numbers by
+	 * construction (auth.h, mcp.h); core/mcp clamps anything outside the
+	 * range to the least privilege regardless. */
+	return 0;
 }
 
 /* ------------------------------------------------------------------ ISR */
@@ -468,6 +562,17 @@ int sts_mcp_start(void)
 	w.cfg_unlock = mcp_cfg_unlock;
 	w.cfg_commit_cb = mcp_cfg_commit;
 	w.cfg_factory_cb = mcp_cfg_factory_reset;
+	/*
+	 * AUTH carries no user name on the wire (mcp_wire.h) — the channel is a
+	 * physically-present point-to-point port with one implicit account — so
+	 * the principal presented to a remote authority is configuration, not
+	 * protocol. MCP_AUTH_USER_DEFAULT ("admin") matches the web plane's
+	 * administrator account name, which is what an operator will have
+	 * created in their directory.
+	 */
+	w.auth_remote_cb = mcp_remote_auth;
+	(void)strncpy(w.auth_user, MCP_AUTH_USER_DEFAULT,
+		      sizeof(w.auth_user) - 1U);
 	w.log = sts_logring();
 	w.status_cb = mcp_status_cb;
 	w.diag_cb = sts_diag_encode;

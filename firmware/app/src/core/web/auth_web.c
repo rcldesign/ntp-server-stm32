@@ -811,12 +811,6 @@ const auth_web_sess_t *auth_web_sess_at(const auth_web_ctx_t *c, size_t idx)
 	return &c->sess[idx];
 }
 
-const char *auth_web_sess_name(const auth_web_ctx_t *c, size_t idx)
-{
-	const auth_web_sess_t *s = auth_web_sess_at(c, idx);
-
-	return (s != NULL) ? s->name : NULL;
-}
 
 int auth_web_check_csrf(auth_web_ctx_t *c, size_t idx, const char *token,
 			size_t token_len)

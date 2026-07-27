@@ -983,7 +983,7 @@ static void test_remote_session_has_no_local_account(void)
 	TEST_ASSERT_EQUAL_UINT8(AUTH_WEB_NO_USER, s->user);
 	/* The whole point of the sentinel: this must be NULL, not users[0]. */
 	TEST_ASSERT_NULL(auth_web_user_at(&g_auth, s->user));
-	TEST_ASSERT_EQUAL_STRING("alice", auth_web_sess_name(&g_auth, sess));
+	TEST_ASSERT_EQUAL_STRING("alice", s->name);
 
 	/* A local login still names its account both ways. */
 	remote_reset(-EHOSTUNREACH, 0U);
@@ -995,7 +995,7 @@ static void test_remote_session_has_no_local_account(void)
 	TEST_ASSERT_NOT_NULL(s);
 	TEST_ASSERT_FALSE(s->remote);
 	TEST_ASSERT_NOT_NULL(auth_web_user_at(&g_auth, s->user));
-	TEST_ASSERT_EQUAL_STRING("admin", auth_web_sess_name(&g_auth, sess));
+	TEST_ASSERT_EQUAL_STRING("admin", s->name);
 }
 
 /*
