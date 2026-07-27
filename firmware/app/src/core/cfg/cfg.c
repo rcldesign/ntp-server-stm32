@@ -218,13 +218,30 @@ static bool val_equal(const cfg_val_t *a, const cfg_val_t *b)
 	if (a->type != b->type) {
 		return false;
 	}
-	if (type_is_numeric(a->type)) {
-		/* Compare the raw union payload so an F32 -0.0/NaN difference is
-		 * still a difference — this decides whether the key is written
-		 * back to the store, not whether two values are equivalent. */
+
+	switch (a->type) {
+	case CFG_T_F32: {
+		/* Bit comparison, not ==: this decides whether the key is
+		 * written back to the store, so -0.0 vs 0.0 and NaN vs NaN must
+		 * both answer "same bits, nothing to write". Reading the wider
+		 * union member instead would sample bytes the float never
+		 * wrote. */
+		uint32_t ba;
+		uint32_t bb;
+
+		memcpy(&ba, &a->v.f, sizeof(ba));
+		memcpy(&bb, &b->v.f, sizeof(bb));
+		return ba == bb;
+	}
+	case CFG_T_I32:
+		return a->v.i == b->v.i;
+	case CFG_T_STR:
+	case CFG_T_BLOB:
+		return (a->len == b->len) &&
+		       (memcmp(a->v.b, b->v.b, a->len) == 0);
+	default:
 		return a->v.u == b->v.u;
 	}
-	return (a->len == b->len) && (memcmp(a->v.b, b->v.b, a->len) == 0);
 }
 
 int cfg_val_decode(cfg_val_t *out, uint8_t type, const uint8_t *data,
@@ -457,9 +474,10 @@ int cfg_load_all(cfg_ctx_t *c, uint32_t *out_corrupt)
 			c->load_missing++;
 			continue;
 		}
-		if (rc < 1) {
-			/* Negative error, or a zero-length record that cannot
-			 * even carry the type byte. */
+		if ((rc < 1) || ((size_t)rc > sizeof(buf))) {
+			/* Negative error, a zero-length record that cannot even
+			 * carry the type byte, or a store that claims to have
+			 * written more than it was given. */
 			c->load_corrupt++;
 			continue;
 		}
@@ -800,6 +818,10 @@ int cfg_set_u64(cfg_ctx_t *c, uint16_t id, uint64_t v)
 	if (k == NULL) {
 		return -ENOENT;
 	}
+	if ((k->type == CFG_T_I32) || (k->type == CFG_T_F32) ||
+	    !type_is_numeric(k->type)) {
+		return -EPROTO;
+	}
 	memset(&val, 0, sizeof(val));
 	val.type = k->type;
 	val.v.u = v;
@@ -833,6 +855,9 @@ int cfg_set_bytes(cfg_ctx_t *c, uint16_t id, const uint8_t *v, size_t len)
 
 	if (k == NULL) {
 		return -ENOENT;
+	}
+	if ((k->type != CFG_T_STR) && (k->type != CFG_T_BLOB)) {
+		return -EPROTO;
 	}
 	if ((v == NULL) && (len != 0U)) {
 		return -EINVAL;
@@ -868,6 +893,7 @@ int cfg_export_begin(const cfg_ctx_t *c, cfg_export_t *ex, bool secrets)
 
 	memset(ex, 0, sizeof(*ex));
 	ex->secrets = secrets;
+	ex->crc = STS_CRC32_IEEE_SEED;
 
 	for (i = 0U; i < CFG_KEY_COUNT; i++) {
 		if (export_includes(&schema[i], secrets)) {
@@ -1011,6 +1037,7 @@ int cfg_import_begin(cfg_ctx_t *c, cfg_import_t *im, bool strict)
 	}
 	memset(im, 0, sizeof(*im));
 	im->strict = strict;
+	im->crc = STS_CRC32_IEEE_SEED;
 	staged_clear_all(c);
 	return 0;
 }

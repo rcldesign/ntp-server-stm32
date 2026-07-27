@@ -72,6 +72,10 @@ extern "C" {
 /** logMessageInterval value meaning "unspecified" (§13.3.2.14). */
 #define PTP_LOG_INTERVAL_UNSPEC ((int8_t)0x7F)
 
+/** Widest log message interval this engine accepts: 2^-7 s .. 2^7 s. */
+#define PTP_LOG_INTERVAL_MIN (-7)
+#define PTP_LOG_INTERVAL_MAX (7)
+
 /* --------------------------------------------------------- message types -- */
 
 /** messageType field, low nibble of octet 0 (§13.3.2.2, Table 36). */
@@ -203,6 +207,16 @@ uint8_t ptp_msg_control_field(uint8_t msg_type);
 
 /** Short name of @p msg_type for logs; "reserved" for unassigned codes. */
 const char *ptp_msg_type_name(uint8_t msg_type);
+
+/**
+ * Milliseconds in 2^@p log_interval seconds.
+ *
+ * logMessageInterval is a signed power-of-two exponent (§13.3.2.14). The
+ * exponent is clamped to [-7, +7] — 7.8125 ms to 128 s, which brackets every
+ * interval any profile in scope uses — and fractional-millisecond results are
+ * rounded to nearest, so 2^-7 s reports 8 ms.
+ */
+uint32_t ptp_log_interval_ms(int8_t log_interval);
 
 /* ------------------------------------------------------------ timestamp --- */
 

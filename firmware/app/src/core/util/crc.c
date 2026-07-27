@@ -53,7 +53,7 @@ uint32_t sts_crc32_ieee_update(uint32_t crc, const void *data, size_t len)
 
 uint32_t sts_crc32_ieee(const void *data, size_t len)
 {
-	return sts_crc32_ieee_update(CRC32_IEEE_SEED, data, len);
+	return sts_crc32_ieee_update(STS_CRC32_IEEE_SEED, data, len);
 }
 
 uint16_t sts_crc16_ccitt_update(uint16_t crc, const void *data, size_t len)
@@ -77,5 +77,5 @@ uint16_t sts_crc16_ccitt_update(uint16_t crc, const void *data, size_t len)
 
 uint16_t sts_crc16_ccitt(const void *data, size_t len)
 {
-	return sts_crc16_ccitt_update(CRC16_CCITT_SEED, data, len);
+	return sts_crc16_ccitt_update(STS_CRC16_CCITT_SEED, data, len);
 }

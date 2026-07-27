@@ -202,6 +202,32 @@ const char *ptp_msg_type_name(uint8_t msg_type)
 	}
 }
 
+uint32_t ptp_log_interval_ms(int8_t log_interval)
+{
+	int shift;
+
+	if (log_interval < PTP_LOG_INTERVAL_MIN) {
+		log_interval = (int8_t)PTP_LOG_INTERVAL_MIN;
+	} else if (log_interval > PTP_LOG_INTERVAL_MAX) {
+		log_interval = (int8_t)PTP_LOG_INTERVAL_MAX;
+	} else {
+		/* in range */
+	}
+
+	if (log_interval >= 0) {
+		shift = log_interval;
+		return 1000U << (unsigned int)shift;
+	}
+
+	shift = -log_interval;
+	{
+		uint32_t div = 1U << (unsigned int)shift;
+
+		/* Round to nearest so 2^-7 s is 8 ms rather than 7. */
+		return (1000U + (div / 2U)) / div;
+	}
+}
+
 /* -------------------------------------------------------------- timestamp -- */
 
 void ptp_ts_decode(const uint8_t *buf, ptp_timestamp_t *out)

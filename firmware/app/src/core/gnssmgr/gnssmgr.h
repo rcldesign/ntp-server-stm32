@@ -378,6 +378,11 @@ int gnssmgr_init(gnssmgr_t *g, const gnssmgr_cfg_t *cfg, const gnssmgr_cb_t *cb)
  *
  * @retval 0        First step emitted.
  * @retval -EINVAL  NULL argument.
+ * @retval -EIO     send_ubx() refused the frame. The walk is still armed and
+ *                  the ACK timeout will retry it; the caller is told only so it
+ *                  can log the transport failure.
+ * @retval <0       The frame could not be built at all (a programming error);
+ *                  the manager is left in GNSSMGR_ST_CONFIG_FAILED.
  */
 int gnssmgr_start(gnssmgr_t *g, uint32_t mono_ms);
 
@@ -388,6 +393,9 @@ int gnssmgr_start(gnssmgr_t *g, uint32_t mono_ms);
  * the primary reset signal; the iTOW-backstep heuristic in gnssmgr_on_msg() is
  * only a net for a restart the glue did not cause. Equivalent to
  * gnssmgr_start() plus discarding volatile receiver-derived state.
+ *
+ * The stored position is kept: it describes the site, not the receiver.
+ * Returns as gnssmgr_start().
  */
 int gnssmgr_notify_reset(gnssmgr_t *g, uint32_t mono_ms);
 
@@ -443,6 +451,7 @@ int gnssmgr_position(const gnssmgr_t *g, gnssmgr_ecef_t *out);
  * @retval -EINVAL  NULL argument.
  * @retval -EPERM   The manager has not been started, or configuration failed —
  *                  restart it first.
+ * @retval -EIO     As gnssmgr_start().
  */
 int gnssmgr_request_survey(gnssmgr_t *g, uint32_t mono_ms);
 

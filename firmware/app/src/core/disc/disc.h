@@ -1,0 +1,565 @@
+/*
+ * STS1000 "Meridian" — core/disc: the OCXO disciplining engine.
+ *
+ * Copyright (c) 2026 RCL Design
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Platform-neutral C11. No dynamic allocation, no platform headers, no globals,
+ * no libm (see quality_sqrtf()). All state lives in a caller-owned disc_ctx_t.
+ *
+ * Implements spec §3.2 (PPS capture conditioning), §3.3 (FLL+PI loop, actuator
+ * scaling, tempco feed-forward, lock criteria) and §3.6 (holdover engine), and
+ * publishes the §3.8 quality block. Hardware contract:
+ * docs/sts1000_firmware_hardware_interface.md §3.
+ *
+ * ARCHITECTURE.md §10 invariant 2: the DAC on PA4 is written by the discipline
+ * thread and nobody else. This module never touches hardware — it returns the
+ * code to write — but that invariant is why disc_out_t::dac_code has exactly
+ * one legitimate consumer.
+ *
+ * ==========================================================================
+ * SIGN CONVENTIONS — get these wrong and the loop runs away
+ * ==========================================================================
+ *
+ * Phase error `e`:  e = t_true - t_local, in nanoseconds.
+ *
+ *   e > 0  =>  the local clock reads BEHIND true UTC: it is LATE and must
+ *              speed up.
+ *   e < 0  =>  the local clock is EARLY and must slow down.
+ *
+ * It is derived from the capture as
+ *
+ *       e_raw = (int32_t)(expected_count - captured_count) * ns_per_count
+ *
+ * where `captured_count` is the free-running timer value latched by the GNSS
+ * PPS edge and `expected_count` is the count at which the local clock predicted
+ * the top of second. The subtraction is done in uint32 and reinterpreted as
+ * int32, so it is correct across the ~17.18 s wrap of a 32-bit counter at
+ * 250 MHz. Worked example: the true second arrives *before* the local clock
+ * reaches its predicted mark, so captured < expected, so e > 0 — the local
+ * clock has not got there yet, i.e. it is late. Correct.
+ *
+ * Corrections (§3.2 steps 2 and 3) all move the *measured* edge earlier, and
+ * therefore all add to e:
+ *
+ *       e = e_raw + qErr_ns + cable_delay_ns + board_delay_ns
+ *
+ *   - qErr: UBX-TIM-TP reports the receiver's quantisation error for the pulse
+ *     it has just tagged. The pulse fires qErr *after* the ideal instant, so
+ *     the true second is at (capture - qErr) and e gains +qErr. This matches
+ *     the convention used by gpsd and chrony. disc_cfg_t::qerr_sign exists
+ *     because the polarity is worth confirming on the bench against a
+ *     reference PPS before it is trusted (bench item, §10.4 "PPS / board
+ *     routing offset").
+ *   - Cable and board delay: the edge arrives late by the propagation delay,
+ *     so the same +correction refers it back to the antenna phase centre.
+ *
+ * Frequency `y`, in ppb (parts per 10^9). Because 1 ppb of a 1 s interval is
+ * exactly 1 ns, ppb and ns/s are the same number here:
+ *
+ *   y > 0  =>  the local clock runs FAST.       de/dt = -y.
+ *
+ * The command sent to the OCXO has the same sign: a positive command raises the
+ * OCXO frequency (positive Vc slope). An oscillator with an inverting tuning
+ * slope is handled by a negative disc_cfg_t::dac_full_scale_ppb, not by
+ * flipping anything else.
+ *
+ * ==========================================================================
+ * CONTROLLER
+ * ==========================================================================
+ *
+ * The plant from frequency command to phase error is a pure integrator with
+ * unity gain in these units (de/dt = -y). With a PI controller
+ *
+ *       y = Kp*e + Ki*integral(e dt)
+ *
+ * the closed loop is  e'' + Kp*e' + Ki*e = 0, i.e. a standard second-order
+ * system with wn = sqrt(Ki) and 2*zeta*wn = Kp. Parameterising by the loop time
+ * constant tau and a damping constant a:
+ *
+ *       Kp = 1 / tau                 [ppb per ns]      = 1/s
+ *       Ki = 1 / (a * tau^2)         [ppb per ns per s] = 1/s^2
+ *
+ * gives wn = 1/(tau*sqrt(a)) and zeta = sqrt(a)/2. The default a = 2 is
+ * therefore zeta = 0.707 (Butterworth, ~4 % overshoot, fastest settle without
+ * ringing); a = 4 is critically damped. tau is the §3.3 configurable
+ * 10..1000 s.
+ *
+ * During ACQUIRING the same integrator is driven by an FLL instead of by Ki*e,
+ * which is what makes the handover bumpless — there is only ever one frequency
+ * state. The FLL estimates the oscillator's own offset from what actually
+ * happened over the last interval:
+ *
+ *       f_obs   = -(e[k] - e[k-1]) / dt        (measured local frequency error)
+ *       f_osc   = y_applied - f_obs            (the oscillator's contribution)
+ *       I      += g * ((f_osc - ff) - I)
+ *
+ * `y_applied` is the command that was really in effect (post clamp, post slew),
+ * so saturation does not corrupt the estimate: with the phase term railed at
+ * +400 ppb, y_applied - f_obs still isolates the oscillator term exactly.
+ *
+ * ==========================================================================
+ */
+
+#ifndef STS1000_CORE_DISC_DISC_H_
+#define STS1000_CORE_DISC_DISC_H_
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "quality/quality.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ------------------------------------------------------------ dimensioning */
+
+/** Maximum median/MAD window. disc_cfg_t::mad_window must not exceed it. */
+#define DISC_MAD_WIN_MAX 16u
+
+/** Maximum lock dwell / rolling-variance window, in samples (= seconds). */
+#define DISC_LOCK_WIN_MAX 64u
+
+/**
+ * Phase-sample ring feeding the ADEV estimator, in samples (= seconds).
+ *
+ * Memory bound: 512 * sizeof(float) = 2048 B, the dominant term in
+ * sizeof(disc_ctx_t). 512 is chosen from the largest tau reported: an
+ * overlapping estimate at tau = 100 s needs at least 201 samples and gets
+ * 512 - 200 = 312 averaging terms here, which is a usable confidence interval.
+ * Halving it to 256 would leave 56.
+ */
+#define DISC_ADEV_CAP 512u
+
+/* ------------------------------------------------------------------ states */
+
+/**
+ * Discipline state machine (spec §3.3 lock criteria, §3.6 holdover).
+ *
+ *   ACQUIRING --|e| small--> LOCKING --criteria met--> LOCKED
+ *       ^                       |                        |
+ *       |                       v                        v
+ *       +---|e| large-----------+                    HOLDOVER
+ *                               ^                        |
+ *                               |                        v
+ *                               +----criteria met---- RECOVERING
+ *
+ * HOLDOVER is entered only from LOCKING/LOCKED/RECOVERING: from ACQUIRING there
+ * is no frequency estimate to fly on, so PPS loss just freezes the actuator and
+ * stays in ACQUIRING. PARKED is entered only by disc_park() and left only by
+ * disc_unpark().
+ */
+typedef enum {
+	DISC_STATE_ACQUIRING = 0,
+	DISC_STATE_LOCKING,
+	DISC_STATE_LOCKED,
+	DISC_STATE_HOLDOVER,
+	DISC_STATE_RECOVERING,
+	DISC_STATE_PARKED,
+	DISC_STATE__COUNT
+} disc_state_t;
+
+/* ------------------------------------------------------------------ inputs */
+
+/**
+ * One second's PPS capture pair (spec §3.2).
+ *
+ * The primary is TIMEPULSE on PA0/TIM2_CH1, the secondary TIMEPULSE2 on
+ * PC6/TIM3_CH1 (interface ref §3). Both are free-running 32-bit captures; the
+ * caller supplies, per channel, the count its own timebase predicted for the
+ * top of second and the nanoseconds-per-count scale of that timer.
+ */
+typedef struct {
+	uint32_t primary_count;      /**< PA0/TIM2_CH1 capture value */
+	uint32_t primary_expected;   /**< predicted count at top of second */
+	float primary_ns_per_count;  /**< e.g. 4.0 for TIM2 at 250 MHz */
+	bool primary_valid;
+
+	uint32_t secondary_count;    /**< PC6/TIM3_CH1 capture value */
+	uint32_t secondary_expected;
+	float secondary_ns_per_count;
+	bool secondary_valid;
+
+	/** UBX-TIM-TP quantisation error for the tagged pulse, picoseconds. */
+	int32_t qerr_ps;
+	bool qerr_valid;
+} disc_pps_t;
+
+/**
+ * Fields the discipline thread copies straight into the quality block but does
+ * not own: they come from `gnssmgr` (§3.7) and `refsel` (§3.5).
+ */
+typedef struct {
+	uint8_t active_ref;       /**< quality_ref_t, from refsel */
+	uint8_t gnss_fix;         /**< quality_gnss_fix_t */
+	uint8_t gnss_sv_used;
+	uint8_t gnss_sv_visible;
+	uint32_t gnss_tacc_ns;
+	int8_t leap_pending;      /**< +1 insert, 0 none, -1 delete */
+	int16_t leap_current_s;   /**< current TAI-UTC offset */
+	uint64_t leap_at_tai_s;   /**< epoch of the pending leap */
+	bool utc_valid;
+	uint32_t refid;           /**< 0 selects the default, "GPS\0" */
+	int32_t root_delay_ns;    /**< 0 for a GNSS primary (RFC 5905) */
+} disc_anc_t;
+
+/**
+ * Everything the loop needs every second regardless of whether a PPS arrived.
+ */
+typedef struct {
+	uint64_t mono_ms;         /**< monotonic milliseconds (port_time.h) */
+
+	/** UBX-NAV-* says receiver time is usable. False forces holdover. */
+	bool gnss_time_locked;
+
+	int32_t osc_temp_mc;      /**< TMP117 #1 (0x49), milli-°C */
+	bool osc_temp_valid;
+
+	int32_t ocxo_current_ua;  /**< INA228 0x46 rail current, microamps */
+	bool ocxo_current_valid;
+
+	int32_t vc_sense_mv;      /**< OCXO_V on PA3, millivolts */
+	bool vc_sense_valid;
+
+	disc_anc_t anc;
+} disc_env_t;
+
+/** A second with a PPS capture. */
+typedef struct {
+	disc_env_t env;
+	disc_pps_t pps;
+} disc_in_t;
+
+/* ------------------------------------------------------------------ config */
+
+/**
+ * Loop configuration. disc_cfg_defaults() fills sane, documented values; the
+ * `timing` config group (ARCHITECTURE.md §8, group 0x06) overrides them.
+ *
+ * Values marked BENCH must be characterised on hardware before the numbers
+ * mean anything — they are placeholders chosen to be safe, not correct.
+ */
+typedef struct {
+	/* ---- §3.2 sample conditioning ---- */
+	int32_t cable_delay_ns;    /**< BENCH §10.4 antenna cable delay */
+	int32_t board_delay_ns;    /**< BENCH §10.4 board PPS routing delay */
+	int8_t qerr_sign;          /**< +1 (default) or -1; see header banner */
+	uint32_t xcheck_tol_ns;    /**< PA0 vs PC6 divergence tolerance (250) */
+	uint8_t mad_window;        /**< median/MAD window, 3..DISC_MAD_WIN_MAX */
+	float mad_k;               /**< MAD multiplier (5.0) */
+	float mad_floor_ns;        /**< minimum acceptance half-width (100) */
+	uint8_t max_consec_reject; /**< force-accept after this many rejects (5) */
+
+	/* ---- §3.3 controller ---- */
+	float tau_s;               /**< loop time constant, 10..1000 (150) */
+	float pi_damping_a;        /**< zeta = sqrt(a)/2; 2.0 => 0.707 */
+	float fll_gain;            /**< ACQUIRING FLL gain, 0..1 (0.25) */
+	float acq_exit_ns;         /**< ACQUIRING -> LOCKING below this (10000) */
+	float acq_reentry_ns;      /**< LOCKING -> ACQUIRING above this (50000) */
+	uint16_t acq_min_ticks;    /**< minimum accepted samples in ACQUIRING (8) */
+	float acq_ramp_max_ppb;    /**< phase-term clamp while ACQUIRING (400) */
+	float recover_ramp_max_ppb;/**< §3.6 pull-in rate limit, ns/s (50) */
+
+	/* ---- actuator (interface ref §3) ---- */
+	float dac_full_scale_ppb;  /**< BENCH pull at full scale; +-0.4 ppm => 400 */
+	uint16_t dac_center_code;  /**< code for 1.65 V (2048) */
+	uint16_t dac_max_code;     /**< 4095 for the 12-bit DAC1_OUT1 */
+	uint16_t dac_vref_mv;      /**< DAC reference, 3300 */
+	float slew_lsb_per_s;      /**< disciplined slew limit (5) */
+	float slew_acq_lsb_per_s;  /**< ACQUIRING slew limit (256) */
+
+	/* ---- §3.3 tempco feed-forward ---- */
+	float tempco_ppb_per_c;    /**< BENCH oscillator df/dT; see disc_tempco_fit */
+	bool tempco_enable;
+
+	/* ---- §3.3 lock criteria ---- */
+	float lock_phase_ns;       /**< |e| threshold (500) */
+	float lock_var_ns2;        /**< rolling variance threshold (40000 = 200 ns) */
+	uint8_t lock_dwell_s;      /**< consecutive good seconds, <= 64 (30) */
+	uint8_t unlock_dwell_s;    /**< consecutive bad seconds to drop lock (10) */
+
+	/* ---- OCXO warm detection (INA228 0x46 + TMP117 0x49) ---- */
+	int32_t warm_temp_mc;      /**< BENCH case temperature when warm (40000) */
+	int32_t warm_current_ua;   /**< BENCH steady current ceiling (700000) */
+	uint16_t warm_dwell_s;     /**< both conditions held this long (60) */
+	uint16_t warm_timeout_s;   /**< sensorless fallback after this long (600) */
+
+	/* ---- §3.6 holdover ---- */
+	uint8_t pps_loss_ticks;    /**< missing/rejected seconds before holdover (3) */
+	quality_holdover_model_t holdover; /**< BENCH §10.4 drift model */
+	float demote_threshold_ns; /**< error budget before demotion (1e6 = 1 ms) */
+	uint8_t holdover_stratum;  /**< stratum once demoted (16) */
+
+	/* ---- Vc sense cross-check (PA3) ---- */
+	int32_t vc_tol_mv;         /**< |cmd - sense| tolerance (100) */
+	uint8_t vc_fault_dwell_s;  /**< consecutive seconds before fault (3) */
+
+	/* ---- served dispersion ---- */
+	float base_disp_ns;        /**< dispersion floor while locked (1000) */
+} disc_cfg_t;
+
+/* ----------------------------------------------------------------- context */
+
+/** Loop state. Caller-owned, opaque in practice — use the disc_* functions. */
+typedef struct {
+	disc_cfg_t cfg;
+
+	/* Derived from cfg at init, cached to keep the tick divide-free. */
+	float kp;                  /* ppb per ns */
+	float ki;                  /* ppb per ns per s */
+	float ppb_per_code;        /* signed: tracks dac_full_scale_ppb */
+	float y_range_lo;          /* ppb at code 0 or dac_max_code */
+	float y_range_hi;
+
+	bool initialised;
+	disc_state_t state;
+
+	/* Actuator */
+	uint16_t dac_code;
+	float y_int;               /* integrator == frequency command, ppb */
+	float y_eff_prev;          /* command actually applied last interval */
+	float ff_ppb;              /* tempco feed-forward currently applied */
+
+	/* Sample history */
+	bool have_prev;
+	float e_prev;
+	uint64_t prev_mono_ms;
+	uint64_t first_mono_ms;
+	bool have_first;
+
+	/* Median/MAD gate */
+	float mad_buf[DISC_MAD_WIN_MAX];
+	uint8_t mad_n;
+	uint8_t mad_head;
+	uint8_t consec_reject;
+
+	/* Lock dwell + rolling variance */
+	float lock_buf[DISC_LOCK_WIN_MAX];
+	uint8_t lock_n;
+	uint8_t lock_head;
+	uint16_t lock_run;
+	uint16_t unlock_run;
+
+	/* ADEV */
+	float adev_buf[DISC_ADEV_CAP];
+	uint16_t adev_n;
+	uint16_t adev_head;
+	float adev_1s;
+	float adev_10s;
+	float adev_100s;
+
+	/* Warm-up */
+	uint16_t warm_run;
+	bool ocxo_warm;
+
+	/* Vc cross-check */
+	uint8_t vc_bad_run;
+	bool vc_fault;
+
+	/* Holdover */
+	uint64_t holdover_start_ms;
+	int32_t holdover_start_temp_mc;
+	bool holdover_start_temp_valid;
+	uint32_t holdover_elapsed_s;
+	float holdover_est_ns;
+	uint32_t t_demote_s;
+
+	/* Tempco reference temperature, captured on first lock */
+	bool tref_valid;
+	int32_t tref_mc;
+
+	/* Telemetry */
+	float last_e_ns;
+	bool last_e_valid;
+	float freq_err_ppb;
+	float pps_mean_ns;
+	float pps_sigma_ns;
+	int32_t vc_cmd_mv;
+	int32_t vc_sense_mv;
+	bool vc_sense_valid;
+	uint32_t flags;
+	uint32_t miss_run;
+
+	/* Counters, for DIAG and the console */
+	uint32_t n_accept;
+	uint32_t n_reject;
+	uint32_t n_diverge;
+	uint32_t n_miss;
+} disc_ctx_t;
+
+/* ----------------------------------------------------------------- outputs */
+
+/** Result of one tick. */
+typedef struct {
+	disc_state_t state;
+	uint16_t dac_code;         /**< value to write to DAC1_OUT1 (PA4) */
+	int32_t vc_cmd_mv;         /**< commanded Vc, for telemetry */
+
+	bool sample_accepted;      /**< a PPS sample passed the §3.2 gate */
+	bool phase_valid;          /**< phase_err_ns is meaningful this tick */
+	float phase_err_ns;        /**< corrected phase error, sign per banner */
+
+	float applied_ppb;         /**< frequency command actually applied */
+	float freq_err_ppb;        /**< filtered residual frequency error */
+
+	float adev_1s;             /**< 0 when not enough data yet */
+	float adev_10s;
+	float adev_100s;
+
+	bool holdover;
+	int64_t holdover_est_err_ns;
+	uint32_t holdover_t_demote_s; /**< UINT32_MAX when not on the horizon */
+
+	uint8_t stratum;
+	uint32_t flags;            /**< QUALITY_FLAG_* */
+} disc_out_t;
+
+/* --------------------------------------------------------------------- API */
+
+/**
+ * Fill @p cfg with the documented defaults.
+ *
+ * @retval 0        Success.
+ * @retval -EINVAL  @p cfg is NULL.
+ */
+int disc_cfg_defaults(disc_cfg_t *cfg);
+
+/**
+ * Initialise the loop. The actuator starts at disc_cfg_t::dac_center_code
+ * (1.65 V, never floating — interface ref §3) and the state at ACQUIRING.
+ *
+ * @param ctx  Context to initialise.
+ * @param cfg  Configuration, or NULL for disc_cfg_defaults().
+ *
+ * @retval 0        Success.
+ * @retval -EINVAL  @p ctx is NULL, or @p cfg fails validation (tau outside
+ *                  10..1000, window sizes out of range, zero DAC span,
+ *                  qerr_sign not +-1, ...).
+ */
+int disc_init(disc_ctx_t *ctx, const disc_cfg_t *cfg);
+
+/**
+ * Run one second with a PPS capture.
+ *
+ * Pipeline: cross-check and condition the captures (§3.2), gate them through
+ * the median/MAD filter, update the FLL or PI, apply the tempco feed-forward,
+ * clamp and slew-limit the actuator, run the lock/holdover state machine, and
+ * publish the §3.8 block.
+ *
+ * A tick whose sample is rejected, whose captures are all invalid, or that
+ * arrives while GNSS time is not locked, is handled exactly like a missed PPS.
+ *
+ * @param ctx  Context.
+ * @param in   Environment plus this second's captures.
+ * @param qs   Quality slot to publish into, or NULL to skip publication.
+ * @param out  Receives the tick result, or NULL if not wanted.
+ *
+ * @retval 0        Success.
+ * @retval -EINVAL  @p ctx or @p in is NULL, or the context is not initialised.
+ */
+int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
+		  disc_out_t *out);
+
+/**
+ * Run one second with no PPS capture (the 1.2 s PPS-semaphore timeout in the
+ * discipline thread). Freezes the actuator and drives the holdover transitions.
+ *
+ * @retval 0        Success.
+ * @retval -EINVAL  @p ctx or @p env is NULL, or the context is not initialised.
+ */
+int disc_tick_no_pps(disc_ctx_t *ctx, const disc_env_t *env, quality_state_t *qs,
+		     disc_out_t *out);
+
+/**
+ * PFI park (§10.3): stop steering and hold the actuator where it is.
+ *
+ * The returned code is the value the PFI handler persists to NVS as "last good
+ * Vc" and the value the DAC must keep driving — PA4 must never be tri-stated
+ * (interface ref §10 caution 12). Subsequent ticks are no-ops that keep
+ * returning this code until disc_unpark().
+ *
+ * @param ctx       Context.
+ * @param out_code  Receives the held DAC code; may be NULL.
+ *
+ * @retval 0        Parked (idempotent).
+ * @retval -EINVAL  @p ctx is NULL or not initialised.
+ */
+int disc_park(disc_ctx_t *ctx, uint16_t *out_code);
+
+/**
+ * Leave the PFI park after the rail recovers without a reset.
+ *
+ * Resumes in RECOVERING, not ACQUIRING: the frequency estimate is still valid,
+ * so the correct behaviour is §3.6's rate-limited pull-in with no step.
+ *
+ * @retval 0        Resumed (no-op if not parked).
+ * @retval -EINVAL  @p ctx is NULL or not initialised.
+ */
+int disc_unpark(disc_ctx_t *ctx);
+
+/** Current state. DISC_STATE__COUNT for a NULL/uninitialised context. */
+disc_state_t disc_state(const disc_ctx_t *ctx);
+
+/* ------------------------------------------------------- offline utilities */
+
+/**
+ * Overlapping Allan deviation from phase samples (spec §3.3 telemetry).
+ *
+ * Standard estimator over phase data (NIST SP 1065 §5.2.4):
+ *
+ *   sigma_y^2(m*tau0) = SUM (x[i+2m] - 2x[i+m] + x[i])^2
+ *                       / (2 * m^2 * tau0^2 * (n - 2m))
+ *
+ * The second difference removes any constant frequency offset, so a disciplined
+ * clock's residual is measured rather than its (steered) rate.
+ *
+ * Exposed publicly because it is a pure function: the loop calls it on its own
+ * ring, and DIAG/console and the unit tests call it on supplied data.
+ *
+ * @param phase_ns  Uniformly spaced phase samples, nanoseconds, oldest first.
+ * @param n         Number of samples.
+ * @param m         Averaging factor; tau = m * tau0.
+ * @param tau0_s    Sample interval, seconds (1.0 for a 1 Hz PPS).
+ * @param out       Receives the dimensionless deviation.
+ *
+ * @retval 0        Success.
+ * @retval -EINVAL  NULL argument, m == 0, or tau0_s not positive.
+ * @retval -ENODATA Fewer than 2m+1 samples — the estimate is undefined.
+ */
+int disc_adev_overlapping(const float *phase_ns, size_t n, uint32_t m,
+			  float tau0_s, float *out);
+
+/**
+ * Offline tempco fit (spec §10.4 "OCXO tuning characterization ... learn tempco
+ * vs TMP117 #1"). Ordinary least squares of @p osc_ppb against @p temp_c.
+ *
+ * Learning is deliberately offline: the runtime only ever *applies* the stored
+ * coefficient, so a bad data set can never destabilise the live loop.
+ *
+ * @p osc_ppb is the oscillator's own fractional frequency offset, not the
+ * command. From a disciplined log it is the negated applied correction:
+ * `osc_ppb[i] = -applied_ppb[i]` over an interval where the loop was LOCKED.
+ * The returned slope is therefore df/dT, and disc_cfg_t::tempco_ppb_per_c takes
+ * it unchanged — the runtime applies the negative as feed-forward.
+ *
+ * @param temp_c          Oscillator temperature per sample, °C.
+ * @param osc_ppb         Oscillator frequency offset per sample, ppb.
+ * @param n               Sample count; at least 2.
+ * @param out_ppb_per_c   Receives the slope (df/dT). Required.
+ * @param out_offset_ppb  Receives the intercept, or NULL.
+ * @param out_r2          Receives the coefficient of determination, or NULL.
+ *
+ * @retval 0        Success.
+ * @retval -EINVAL  NULL required argument or n < 2.
+ * @retval -EDOM    The temperature does not vary — the slope is unidentifiable.
+ */
+int disc_tempco_fit(const float *temp_c, const float *osc_ppb, size_t n,
+		    float *out_ppb_per_c, float *out_offset_ppb, float *out_r2);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* STS1000_CORE_DISC_DISC_H_ */

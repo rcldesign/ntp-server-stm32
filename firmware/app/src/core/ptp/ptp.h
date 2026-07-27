@@ -87,10 +87,6 @@ extern "C" {
 /** stepsRemoved at or above which an Announce is ignored (§9.3.2.5 d). */
 #define PTP_STEPS_REMOVED_MAX 255U
 
-/** Widest log message interval accepted, either sign. 2^-7 s .. 2^7 s. */
-#define PTP_LOG_INTERVAL_MIN (-7)
-#define PTP_LOG_INTERVAL_MAX (7)
-
 /* ---------------------------------------------------------------- alarms -- */
 
 /** BMCA says another clock is the better master; we defer instead of slaving. */
@@ -260,9 +256,6 @@ int ptp_clock_quality_from_view(const ptp_cfg_t *cfg, const ptp_quality_view_t *
  * timescale, never ARB.
  */
 uint16_t ptp_flags_from_view(const ptp_quality_view_t *q);
-
-/** Milliseconds in 2^@p log_interval seconds, clamped to [-7, 7] and rounded. */
-uint32_t ptp_log_interval_ms(int8_t log_interval);
 
 /* ------------------------------------------------------------------ BMCA -- */
 

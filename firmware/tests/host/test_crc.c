@@ -127,9 +127,9 @@ static void test_crc32_seed_is_the_identity(void)
 {
 	/* The zlib convention: seeding with the constant reproduces one-shot. */
 	TEST_ASSERT_EQUAL_HEX32(0xCBF43926U,
-				sts_crc32_ieee_update(CRC32_IEEE_SEED, "123456789", 9U));
-	TEST_ASSERT_EQUAL_HEX32(CRC32_IEEE_SEED,
-				sts_crc32_ieee_update(CRC32_IEEE_SEED, "", 0U));
+				sts_crc32_ieee_update(STS_CRC32_IEEE_SEED, "123456789", 9U));
+	TEST_ASSERT_EQUAL_HEX32(STS_CRC32_IEEE_SEED,
+				sts_crc32_ieee_update(STS_CRC32_IEEE_SEED, "", 0U));
 }
 
 static void test_crc32_null_is_no_data(void)
@@ -154,7 +154,7 @@ static void test_crc32_chaining_matches_one_shot(void)
 		size_t split;
 
 		for (split = 0U; split <= n; split++) {
-			uint32_t c = sts_crc32_ieee_update(CRC32_IEEE_SEED, buf, split);
+			uint32_t c = sts_crc32_ieee_update(STS_CRC32_IEEE_SEED, buf, split);
 
 			c = sts_crc32_ieee_update(c, &buf[split], n - split);
 			TEST_ASSERT_EQUAL_HEX32_MESSAGE(vectors[i].crc32, c,
@@ -166,7 +166,7 @@ static void test_crc32_chaining_matches_one_shot(void)
 static void test_crc32_byte_at_a_time_matches_one_shot(void)
 {
 	static const char msg[] = "123456789";
-	uint32_t c = CRC32_IEEE_SEED;
+	uint32_t c = STS_CRC32_IEEE_SEED;
 	size_t i;
 
 	for (i = 0U; i < 9U; i++) {
@@ -243,10 +243,10 @@ static void test_crc16_seed_is_the_init_value(void)
 {
 	/* CCITT-FALSE init is 0xFFFF and xorout is 0, so the empty message
 	 * hashes to the init value itself. */
-	TEST_ASSERT_EQUAL_HEX16(0xFFFFU, CRC16_CCITT_SEED);
+	TEST_ASSERT_EQUAL_HEX16(0xFFFFU, STS_CRC16_CCITT_SEED);
 	TEST_ASSERT_EQUAL_HEX16(0xFFFFU, sts_crc16_ccitt("", 0U));
 	TEST_ASSERT_EQUAL_HEX16(0x29B1U,
-				sts_crc16_ccitt_update(CRC16_CCITT_SEED, "123456789", 9U));
+				sts_crc16_ccitt_update(STS_CRC16_CCITT_SEED, "123456789", 9U));
 }
 
 static void test_crc16_null_is_no_data(void)
@@ -266,7 +266,7 @@ static void test_crc16_chaining_matches_one_shot(void)
 		size_t split;
 
 		for (split = 0U; split <= n; split++) {
-			uint16_t c = sts_crc16_ccitt_update(CRC16_CCITT_SEED, buf, split);
+			uint16_t c = sts_crc16_ccitt_update(STS_CRC16_CCITT_SEED, buf, split);
 
 			c = sts_crc16_ccitt_update(c, &buf[split], n - split);
 			TEST_ASSERT_EQUAL_HEX16_MESSAGE(vectors[i].crc16, c,
@@ -278,7 +278,7 @@ static void test_crc16_chaining_matches_one_shot(void)
 static void test_crc16_byte_at_a_time_matches_one_shot(void)
 {
 	static const char msg[] = "123456789";
-	uint16_t c = CRC16_CCITT_SEED;
+	uint16_t c = STS_CRC16_CCITT_SEED;
 	size_t i;
 
 	for (i = 0U; i < 9U; i++) {

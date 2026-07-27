@@ -35,17 +35,17 @@ extern "C" {
  *
  * This is the zlib convention: the seed and the returned value are both the
  * *finalised* CRC, so chaining composes naturally and
- * sts_crc32_ieee_update(CRC32_IEEE_SEED, d, n) == sts_crc32_ieee(d, n).
+ * sts_crc32_ieee_update(STS_CRC32_IEEE_SEED, d, n) == sts_crc32_ieee(d, n).
  */
-#define CRC32_IEEE_SEED 0x00000000U
+#define STS_CRC32_IEEE_SEED 0x00000000U
 
 /** Seed for a fresh sts_crc16_ccitt_update() chain (the algorithm's init value). */
-#define CRC16_CCITT_SEED 0xFFFFU
+#define STS_CRC16_CCITT_SEED 0xFFFFU
 
 /**
  * Continue a CRC-32/ISO-HDLC over @p len bytes at @p data.
  *
- * @param crc   Result of the previous call, or CRC32_IEEE_SEED to start.
+ * @param crc   Result of the previous call, or STS_CRC32_IEEE_SEED to start.
  * @param data  Input bytes. May be NULL only when @p len is 0; a NULL pointer
  *              is treated as "no data" and returns @p crc unchanged rather than
  *              faulting, because core code must not trap the host test runner.
@@ -56,14 +56,14 @@ uint32_t sts_crc32_ieee_update(uint32_t crc, const void *data, size_t len);
 
 /**
  * One-shot CRC-32/ISO-HDLC. Equivalent to
- * sts_crc32_ieee_update(CRC32_IEEE_SEED, data, len).
+ * sts_crc32_ieee_update(STS_CRC32_IEEE_SEED, data, len).
  */
 uint32_t sts_crc32_ieee(const void *data, size_t len);
 
 /**
  * Continue a CRC-16/CCITT-FALSE over @p len bytes at @p data.
  *
- * @param crc   Result of the previous call, or CRC16_CCITT_SEED to start.
+ * @param crc   Result of the previous call, or STS_CRC16_CCITT_SEED to start.
  * @param data  Input bytes; NULL is treated as "no data" (see sts_crc32_ieee_update).
  * @param len   Number of bytes at @p data.
  * @return      The running CRC after the supplied bytes.
@@ -72,7 +72,7 @@ uint16_t sts_crc16_ccitt_update(uint16_t crc, const void *data, size_t len);
 
 /**
  * One-shot CRC-16/CCITT-FALSE. Equivalent to
- * sts_crc16_ccitt_update(CRC16_CCITT_SEED, data, len).
+ * sts_crc16_ccitt_update(STS_CRC16_CCITT_SEED, data, len).
  */
 uint16_t sts_crc16_ccitt(const void *data, size_t len);
 

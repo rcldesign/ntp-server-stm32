@@ -133,11 +133,17 @@ extern "C" {
 uint64_t ntp_ts_from_tai(int64_t tai_ns, int32_t tai_minus_utc);
 
 /**
- * Convert seconds in 16.16 fixed point (q16) to the NTP short format used by
- * the root-delay and root-dispersion fields, saturating at the format maximum
- * of 65535.9999847 s rather than wrapping.
+ * Convert seconds in 16.16 fixed point to the NTP short format carried by the
+ * root-delay and root-dispersion fields.
+ *
+ * The short format *is* 16.16, so the conversion is a range check: the argument
+ * is 64-bit because the natural place to accumulate a growing holdover
+ * dispersion is a wide counter, and the result saturates at the format maximum
+ * of 65535.9999847 s. Saturating rather than wrapping matters — a wrapped
+ * dispersion reads as a tiny one, and a client would trust a clock that has in
+ * fact been free-running for a day.
  */
-uint32_t ntp_short_from_q16(uint32_t q16);
+uint32_t ntp_short_from_q16(uint64_t q16);
 
 /* ------------------------------------------------------------- quality view */
 
@@ -337,12 +343,17 @@ void ntp_cfg_default(ntp_cfg_t *cfg);
 typedef struct {
 	uint64_t rx;          /**< Datagrams handed to ntp_handle_request(). */
 	uint64_t served;      /**< Ordinary mode-4 responses produced. */
-	uint64_t dropped;     /**< Requests answered with nothing. */
+	/**
+	 * Requests discarded after passing the mode/version filter: malformed,
+	 * rate-limited, authentication failure, no room. Disjoint from `ignored`,
+	 * so rx == served + kod + dropped + ignored always holds.
+	 */
+	uint64_t dropped;
 	uint64_t kod;         /**< Kiss-o'-Death responses produced. */
 	uint64_t auth_fail;   /**< MAC present and unacceptable. */
 	uint64_t interleaved; /**< Responses sent in interleaved mode. */
 	uint64_t rate_limited;/**< Requests over a token bucket (KoD or dropped). */
-	uint64_t ignored;     /**< Wrong mode/version, including modes 6 and 7. */
+	uint64_t ignored;     /**< Wrong mode or version, including modes 6 and 7. */
 } ntp_stats_t;
 
 /* ------------------------------------------------------------------ result */

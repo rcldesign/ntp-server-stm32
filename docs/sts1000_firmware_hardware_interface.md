@@ -174,7 +174,7 @@ assignments follow the STM32H563 AF table.
 | 137 | RB_PWR_EN | OUT | GPIO (PB7) | Rb rail buck (U40) enable | **low = off** (R164 100k↓) | high=on | **Enable ONLY after safe digipot code + INA228 0x47 verify.** |
 | 139 | I2C_SCL | OD | **I2C1 AF4** (PB8) | I²C1 clock | high (R202 4.7k↑) | — | 400 kHz, LTC4311 accelerated. |
 | 140 | I2C_SDA | OD | **I2C1 AF4** (PB9) | I²C1 data | high (R203 4.7k↑) | — | Shared 15-device bus. |
-| 141 | PANEL_LED_PWM | OUT | GPIO (PE0, software PWM) | Panel-LED brightness PWM | **low = off** (Q23 base pd) | duty | Hi-Z reset = double default-OFF. **Software PWM** (~100 Hz, 10-step duty from 1 kHz scan); averaging window ≫ PWM period (§4.1). |
+| 141 | PANEL_LED_PWM | OUT | LPTIM2_CH2 (PE0, AF3) | Panel-LED brightness PWM | **low = off** (Q23 base pd) | duty | **HW PWM via LPTIM2_CH2.** Zephyr 4.2 has no in-tree LPTIM PWM driver — firmware drives LPTIM2 via LL/registers in glue, or falls back to software PWM from the 1 kHz scan. Hi-Z reset = double default-OFF. Averaging window ≫ PWM period (§4.1). |
 
 ### 1.2 Power / ground / analog-reference pins
 
@@ -335,8 +335,8 @@ over/under-voltage, over-power, conversion-ready), then run alarm evaluation. Sh
 register constants are in §4.2.
 
 ### 4.1 Panel-LED current averaging
-The panel LEDs are PWM-dimmed (`PANEL_LED_PWM`, PE0, **software PWM** ~100 Hz, 10-step duty). INA228 U54 (0x4C) must average over a
-window **≫ the ~10 ms software-PWM period** so the ALERT fires on the averaged (not instantaneous) current.
+The panel LEDs are PWM-dimmed (`PANEL_LED_PWM`, PE0, **LPTIM2_CH2**). INA228 U54 (0x4C) must average over a
+window **≫ the PWM period** (1 ms at the nominal 1 kHz LPTIM2 PWM; ≫10 ms if the software-PWM fallback is used) so the ALERT fires on the averaged (not instantaneous) current.
 Firmware **duty-normalizes**: I_true ≈ I_avg / duty. Health check = duty-normalized current within
 the expected all-on band (≈126–132 mA at full duty), corroborated by `PANEL_LED_FAULT` (PF12).
 At R199 = 150 mΩ one CURRENT LSB is 520.833 nA — about 0.4 % of a single LED's ~17 mA, so a dead or
