@@ -60,6 +60,12 @@ extern "C" {
 /** Revert timestamps retained for the flap window. */
 #define REFSEL_FLAP_HISTORY 8u
 
+/** Upper bound on the blocking mux/HSE settle handed to the glue (1 s). */
+#define REFSEL_MAX_SETTLE_MS 1000u
+
+/** Upper bound on the hysteresis and lockout debounce windows (7 days). */
+#define REFSEL_MAX_WINDOW_MS 604800000u
+
 /* ------------------------------------------------------------------ states */
 
 /** Selected reference (spec §3.5, §11). */

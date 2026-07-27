@@ -52,7 +52,7 @@
 #include "zephyr/platform/platform.h"
 #include "zephyr/sts_app.h"
 
-#include "cfg/cfg_schema.h"
+#include "cfg/cfg.h"
 #include "thermal/thermal.h"
 
 LOG_MODULE_REGISTER(sts_hk, CONFIG_STS1000_LOG_LEVEL);
@@ -151,34 +151,26 @@ static int ina_read16(uint8_t addr, uint8_t reg, uint16_t *val)
 /* ========================================================================= */
 
 /*
- * SHUNT_CAL = 4096 on every rail. Setting Max_Expected_Current to each device's
- * own full scale makes the shunt resistance cancel out of the TI calibration
- * formula, so one constant serves all nine and the per-rail resolution comes
- * from CURRENT_LSB = 78.125 nV / R_SHUNT instead. The per-board trim (config
- * group 0x0C) multiplies that base to absorb the 1 % shunt tolerance, which
- * dominates the uncalibrated error budget.
+ * SHUNT_CAL = 4096 on every rail before trimming. Setting Max_Expected_Current
+ * to each device's own full scale makes the shunt resistance cancel out of the
+ * TI calibration formula, so one constant serves all nine and the per-rail
+ * resolution comes from CURRENT_LSB = 78.125 nV / R_SHUNT instead.
+ *
+ * config group 0x0C holds the per-board trimmed value itself — keys
+ * CAL_INA_TRIM_0..8 at 0x0C01..0x0C09, in ina228_rail_t order, defaulting to
+ * 4096 and bounded to +-20 % by the schema. A board that has never been
+ * calibrated therefore comes up on the untrimmed constant rather than on
+ * nothing, and the bench trim (interface ref §4.2) only has to write the keys.
  */
 #define INA228_SHUNT_CAL_BASE 4096U
+#define CFG_KEY_CAL_INA_TRIM_0 0x0C01U
 
 static uint16_t hk_shunt_cal_for(ina228_rail_t rail)
 {
-	uint16_t id = (uint16_t)(CFG_GRP_CAL << 8) | (uint16_t)rail;
-	uint64_t trim_ppm = 0;
-	uint64_t cal;
+	uint16_t id = (uint16_t)(CFG_KEY_CAL_INA_TRIM_0 + (uint16_t)rail);
+	uint64_t cal = 0;
 
-	/*
-	 * The trim is stored in parts-per-million of the base so a value of 0
-	 * (an unprovisioned board, or a key that does not exist yet) reads as
-	 * "no trim" rather than "calibrate to zero".
-	 */
-	if (cfg_get_u64(sts_cfg(), id, &trim_ppm) != 0 || trim_ppm == 0U) {
-		return INA228_SHUNT_CAL_BASE;
-	}
-
-	cal = ((uint64_t)INA228_SHUNT_CAL_BASE * trim_ppm) / 1000000ULL;
-	if (cal == 0U || cal > 0x7FFFU) {
-		LOG_WRN("INA228 %s: trim %llu ppm out of range, using base cal",
-			ina228_rail_tbl[rail].name, (unsigned long long)trim_ppm);
+	if (cfg_get_u64(sts_cfg(), id, &cal) != 0 || cal == 0U || cal > 0x7FFFU) {
 		return INA228_SHUNT_CAL_BASE;
 	}
 
@@ -195,7 +187,7 @@ static int hk_ina_configure(ina228_rail_t rail)
 
 	/* ADCRANGE=1 (+-40.96 mV) on all nine — the shunt values were sized
 	 * against that full scale (interface ref §4.2). */
-	cfg.adcrange = INA228_ADCRANGE_40MV;
+	cfg.adcrange = INA228_ADCRANGE_40_96MV;
 	cfg.conv_delay_ms = 0U;
 	cfg.temp_comp = false;
 	cfg.reset = false;
@@ -205,7 +197,7 @@ static int hk_ina_configure(ina228_rail_t rail)
 		return rc;
 	}
 
-	adc.mode = INA228_MODE_CONT_BUS_SHUNT_TEMP;
+	adc.mode = INA228_MODE_CONT_ALL;
 	adc.vbus_ct = INA228_CT_1052US;
 	adc.vshunt_ct = INA228_CT_1052US;
 	adc.temp_ct = INA228_CT_1052US;
@@ -314,7 +306,7 @@ static void hk_read_ina(ina228_rail_t rail, bool with_diag)
 	if (current_raw >= 0x80000) {
 		current_raw -= 0x100000; /* 20-bit two's complement */
 	}
-	current_lsb_pa = ina228_current_lsb_pa(info->r_shunt_uohm, INA228_ADCRANGE_40MV);
+	current_lsb_pa = ina228_current_lsb_pa(info->r_shunt_uohm, INA228_ADCRANGE_40_96MV);
 	r.current_ua = (int32_t)(((int64_t)current_raw * (int64_t)current_lsb_pa) /
 				 1000000LL);
 
@@ -322,7 +314,7 @@ static void hk_read_ina(ina228_rail_t rail, bool with_diag)
 	if (rc != 0) {
 		goto out;
 	}
-	power_lsb_nw = ina228_power_lsb_nw(info->r_shunt_uohm, INA228_ADCRANGE_40MV);
+	power_lsb_nw = ina228_power_lsb_nw(info->r_shunt_uohm, INA228_ADCRANGE_40_96MV);
 	r.power_uw = (uint32_t)(((uint64_t)ina228_raw24(buf) * (uint64_t)power_lsb_nw) /
 				1000ULL);
 
