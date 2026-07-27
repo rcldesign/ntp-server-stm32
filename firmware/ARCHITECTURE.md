@@ -113,7 +113,7 @@ Conventions:
 |---|---|---|
 | `util` | CRC32 (IEEE), CRC16-CCITT, COBS enc/dec, ring buffer, be/le helpers | `crc32()`, `cobs_encode/decode()`, `ring_*` |
 | `cfg` | Typed config registry: numeric key IDs `0xGGII` (group/item), types u8..u64/i32/f32/bool/str/blob; defaults, bounds validation, dirty/commit, TLV export/import, schema version + migration | `cfg_get/set/commit/export/import`, `cfg_iter` |
-| `quality` | §3.8 single source of truth: quality block struct, publish/snapshot (seqlock pattern; glue provides memory), root-dispersion growth in holdover | `quality_publish()`, `quality_get()` |
+| `quality` | §3.8 single source of truth: quality block struct, publish/snapshot (seqlock pattern; glue provides memory), root-dispersion growth in holdover | `quality_publish()`, `quality_snapshot()` |
 | `disc` | §3.2–3.3, §3.6: PPS sample conditioning (sawtooth qErr apply, cable-delay offset, PA0-vs-PC6 cross-check, median/MAD gate), FLL+PI loop (τ 10–1000 s), DAC scaling ±0.4 ppm FS center 1.65 V + slew limit, tempco feed-forward, lock criteria, holdover estimator + freeze, rate-limited re-converge | `disc_tick_pps()`, `disc_tick_no_pps()` → `disc_out{dac_code, state}` |
 | `refsel` | §3.5 reference SM: OCXO_ACTIVE⇄RB_ACTIVE(+EXTREF), guards (`extref_ok && rb_lock`), debounce/hysteresis, emits action list (`BRIDGE_HSI`, `SET_MUX(x)`, `UNBRIDGE`) executed by glue | `refsel_input()`, `refsel_step()` |
 | `ubx` | UBX frame codec (sync/class/id/len/ck), builders: CFG-VALSET (UART, rate, constellations, TP5, TXREADY, TMODE3), MON/NAV/TIM pollers; parsers: NAV-PVT, NAV-SAT, NAV-TIMELS, TIM-TP (qErr), MON-RF, ACK | `ubx_frame()`, `ubx_parse_byte()`, typed msg structs |

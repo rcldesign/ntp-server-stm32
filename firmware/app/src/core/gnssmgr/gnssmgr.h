@@ -62,7 +62,8 @@ typedef enum {
 	GNSSMGR_ST_CONFIG,        /**< walking the config sequence, awaiting ACKs */
 	GNSSMGR_ST_SURVEY_IN,     /**< TMODE survey-in running, watching NAV-SVIN */
 	GNSSMGR_ST_FIXED,         /**< fixed-position timing mode — steady state */
-	GNSSMGR_ST_CONFIG_FAILED, /**< retries exhausted; needs an explicit restart */
+	GNSSMGR_ST_CONFIG_FAILED, /**< an essential step was refused or went
+				    *  unanswered; needs an explicit restart */
 } gnssmgr_state_t;
 
 /**
@@ -182,10 +183,14 @@ typedef struct {
  *   meas_rate_ms  1000   1 Hz navigation (spec §3.7).
  *   min_elev_deg    10   Conventional timing elevation mask.
  *   txready_pio      6   VERIFY — the PIO index behind F9T pin 19. The pin is
- *                        named in the docs, the PIO number is not; a wrong value
- *                        is NAKed, and PD5 is simply never trusted until the
- *                        remap ACKs (interface ref §10 caution 2, ARCHITECTURE
- *                        §10 invariant 8).
+ *                        named in the docs, the PIO number is not. Because that
+ *                        value is unverified, the TX_READY step is ADVISORY: if
+ *                        the receiver NAKs it the walk carries on, TMODE is
+ *                        still configured, gnssmgr_txready_trusted() stays
+ *                        false, and CONFIG_DEGRADED is raised naming the step.
+ *                        An unverified convenience feature must not be able to
+ *                        stop a grandmaster from serving time (interface ref
+ *                        §10 caution 2, ARCHITECTURE §10 invariant 8).
  *   survey_min_dur_s 3600         One hour: the shortest survey that gives a
  *                                 standalone receiver a metre-class position.
  *   survey_acc_limit_0p1mm 10000  1.0 m. A standalone (no-RTCM) survey-in will
@@ -567,6 +572,17 @@ int gnssmgr_svin(const gnssmgr_t *g, gnssmgr_svin_t *out);
 
 /** Copy the NAV-SAT summary. @retval 0 / -EINVAL / -EAGAIN. */
 int gnssmgr_sats(const gnssmgr_t *g, gnssmgr_sats_t *out);
+
+/** Copy the MON-RF view (antenna claims + jamming). @retval 0 / -EINVAL / -EAGAIN. */
+int gnssmgr_rf(const gnssmgr_t *g, gnssmgr_rf_t *out);
+
+/**
+ * The step named by the CONFIG_FAILED or CONFIG_DEGRADED alarm.
+ *
+ * Meaningful only while one of those alarms is active; GNSSMGR_STEP_PORT
+ * otherwise. Pair with gnssmgr_step_name() for a log line.
+ */
+gnssmgr_step_id_t gnssmgr_failed_step(const gnssmgr_t *g);
 
 /** Debounced antenna verdict. */
 gnssmgr_ant_state_t gnssmgr_ant_get_state(const gnssmgr_t *g);

@@ -562,7 +562,44 @@ static void test_foreign_qualification_needs_two_in_the_window(void)
 	TEST_ASSERT_EQUAL_UINT32(1U, t.added);
 }
 
-static void test_foreign_window_lapse_restarts_the_count(void)
+static void test_foreign_window_slides_with_each_announce(void)
+{
+	ptp_foreign_tbl_t t;
+	ptp_port_id_t src;
+	ptp_announce_t a;
+	const ptp_foreign_t *f;
+	unsigned int k;
+
+	/*
+	 * Regression: the window is measured against the previous Announce, not
+	 * against a fixed origin. A tumbling window would drop the count back to
+	 * 1 every fourth interval — de-qualifying a master that is announcing
+	 * perfectly on cadence, and taking it out of Erbest for an interval at a
+	 * time. Announce on cadence for 40 intervals and the count must only ever
+	 * rise.
+	 */
+	ptp_foreign_init(&t);
+	set_port(&src, 0x10U, 1U);
+	mk_announce(&a, 0x10U, 128U);
+
+	for (k = 0U; k < 40U; k++) {
+		f = ptp_foreign_update(&t, &pol, &src, &a, 0U, 1,
+				       1000U + ((uint64_t)k * 2000U));
+		TEST_ASSERT_NOT_NULL(f);
+		TEST_ASSERT_EQUAL_UINT16((uint16_t)(k + 1U), f->count);
+		TEST_ASSERT_EQUAL_INT(k >= (PTP_FOREIGN_MASTER_THRESHOLD - 1U),
+				      f->qualified ? 1 : 0);
+	}
+	TEST_ASSERT_EQUAL_UINT32(1U, t.added);
+
+	/* Exactly one window since the last Announce is still inside it. */
+	f = ptp_foreign_update(&t, &pol, &src, &a, 0U, 1,
+			       1000U + (39U * 2000U) + 8000U);
+	TEST_ASSERT_EQUAL_UINT16(41U, f->count);
+	TEST_ASSERT_TRUE(f->qualified);
+}
+
+static void test_foreign_gap_past_the_window_restarts_the_count(void)
 {
 	ptp_foreign_tbl_t t;
 	ptp_port_id_t src;
@@ -573,19 +610,24 @@ static void test_foreign_window_lapse_restarts_the_count(void)
 	set_port(&src, 0x10U, 1U);
 	mk_announce(&a, 0x10U, 128U);
 
-	f = ptp_foreign_update(&t, &pol, &src, &a, 0U, 1, 1000U);
-	TEST_ASSERT_EQUAL_UINT16(1U, f->count);
-
-	/* 8001 ms later is past the 4 x 2000 ms window: the count restarts. */
-	f = ptp_foreign_update(&t, &pol, &src, &a, 0U, 1, 9002U);
-	TEST_ASSERT_EQUAL_UINT16(1U, f->count);
-	TEST_ASSERT_FALSE(f->qualified);
-	TEST_ASSERT_EQUAL_UINT32(1U, t.added);  /* refreshed, not re-added */
-
-	/* Exactly at the window edge still counts as inside it. */
-	f = ptp_foreign_update(&t, &pol, &src, &a, 0U, 1, 9002U + 8000U);
-	TEST_ASSERT_EQUAL_UINT16(2U, f->count);
+	(void)ptp_foreign_update(&t, &pol, &src, &a, 0U, 1, 1000U);
+	f = ptp_foreign_update(&t, &pol, &src, &a, 0U, 1, 3000U);
 	TEST_ASSERT_TRUE(f->qualified);
+
+	/* One millisecond past the 4 x 2000 ms window: the count starts over. */
+	f = ptp_foreign_update(&t, &pol, &src, &a, 0U, 1, 3000U + 8001U);
+	TEST_ASSERT_EQUAL_UINT16(1U, f->count);
+	TEST_ASSERT_EQUAL_UINT32(1U, t.added); /* refreshed, not re-added */
+
+	/*
+	 * Qualification is not surrendered by the dip: only prune or clear takes
+	 * it away. With any sane policy the receipt timeout (3 intervals) fires
+	 * long before a 4-interval gap, so this record would already be gone —
+	 * ptp_foreign_prune() is what actually retires a master.
+	 */
+	TEST_ASSERT_TRUE(f->qualified);
+	TEST_ASSERT_EQUAL_UINT32(1U, ptp_foreign_prune(&t, &pol, 3000U + 8001U));
+	TEST_ASSERT_FALSE(t.rec[0].qualified);
 }
 
 static void test_foreign_uses_the_peers_own_interval(void)
@@ -879,7 +921,8 @@ int main(void)
 	RUN_TEST(test_recommended_names);
 
 	RUN_TEST(test_foreign_qualification_needs_two_in_the_window);
-	RUN_TEST(test_foreign_window_lapse_restarts_the_count);
+	RUN_TEST(test_foreign_window_slides_with_each_announce);
+	RUN_TEST(test_foreign_gap_past_the_window_restarts_the_count);
 	RUN_TEST(test_foreign_uses_the_peers_own_interval);
 	RUN_TEST(test_foreign_prune_expires_the_silent);
 	RUN_TEST(test_foreign_eviction_is_least_recently_heard);

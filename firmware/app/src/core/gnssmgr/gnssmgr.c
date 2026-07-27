@@ -63,21 +63,10 @@ static void alarm_set(gnssmgr_t *g, gnssmgr_alarm_t id, bool active)
 /* -------------------------------------------------------- config builders -- */
 
 /*
- * Step order. Protocols first so the receiver is speaking UBX-only before
- * anything else is asked of it; TMODE last because it is the one step whose
- * content depends on runtime state (surveyed or stored position).
+ * Step order (the enum lives in gnssmgr.h). Protocols first so the receiver is
+ * speaking UBX-only before anything else is asked of it; TMODE last because it
+ * is the one step whose content depends on runtime state.
  */
-enum {
-	GNSSMGR_STEP_PORT = 0,
-	GNSSMGR_STEP_MSGOUT,
-	GNSSMGR_STEP_RATE,
-	GNSSMGR_STEP_SIGNAL,
-	GNSSMGR_STEP_TP1,
-	GNSSMGR_STEP_TP2,
-	GNSSMGR_STEP_TXREADY,
-	GNSSMGR_STEP_TMODE,
-	GNSSMGR_STEP_COUNT,
-};
 
 typedef void (*gnssmgr_build_fn)(const gnssmgr_t *g, ubx_valset_t *v);
 
@@ -218,21 +207,55 @@ static void build_tmode(const gnssmgr_t *g, ubx_valset_t *v)
 	}
 }
 
-static const gnssmgr_build_fn k_steps[GNSSMGR_STEP_TMODE] = {
-	[GNSSMGR_STEP_PORT] = build_port,
-	[GNSSMGR_STEP_MSGOUT] = build_msgout,
-	[GNSSMGR_STEP_RATE] = build_rate,
-	[GNSSMGR_STEP_SIGNAL] = build_signal,
-	[GNSSMGR_STEP_TP1] = build_tp1,
-	[GNSSMGR_STEP_TP2] = build_tp2,
-	[GNSSMGR_STEP_TXREADY] = build_txready,
+/**
+ * One step of the walk.
+ *
+ * @p essential decides what a refusal costs. An essential step is one the clock
+ * cannot serve time without — protocol framing, message rates, the time pulses,
+ * the timing mode. Refusing any of those means the receiver is not the receiver
+ * this firmware was written against, and CONFIG_FAILED is the honest answer.
+ *
+ * TX_READY is the one advisory step. It is a parser-wakeup convenience whose
+ * PIO number is still marked VERIFY (gnssmgr.h), and PD5 is independently
+ * gated by gnssmgr_txready_trusted(). Letting an unverified convenience feature
+ * abort the walk would leave TMODE unconfigured and the grandmaster dead over a
+ * wrong constant in a table — so a NAK here degrades instead of failing.
+ */
+typedef struct {
+	gnssmgr_build_fn build;
+	bool             essential;
+	const char      *name;
+} gnssmgr_step_desc_t;
+
+static const gnssmgr_step_desc_t k_steps[GNSSMGR_STEP_COUNT] = {
+	[GNSSMGR_STEP_PORT] = {build_port, true, "PORT"},
+	[GNSSMGR_STEP_MSGOUT] = {build_msgout, true, "MSGOUT"},
+	[GNSSMGR_STEP_RATE] = {build_rate, true, "RATE"},
+	[GNSSMGR_STEP_SIGNAL] = {build_signal, true, "SIGNAL"},
+	[GNSSMGR_STEP_TP1] = {build_tp1, true, "TP1"},
+	[GNSSMGR_STEP_TP2] = {build_tp2, true, "TP2"},
+	[GNSSMGR_STEP_TXREADY] = {build_txready, false, "TXREADY"},
+	/* TMODE has no static builder: build_tmode() picks survey-in or fixed
+	 * from runtime state. It is essential — a grandmaster that never leaves
+	 * the receiver's default navigation mode is not a grandmaster. */
+	[GNSSMGR_STEP_TMODE] = {NULL, true, "TMODE"},
 };
+
+const char *gnssmgr_step_name(gnssmgr_step_id_t step)
+{
+	if ((unsigned int)step >= (unsigned int)GNSSMGR_STEP_COUNT) {
+		return "?";
+	}
+	return k_steps[step].name;
+}
 
 /* --------------------------------------------------------- step sequencer -- */
 
 static void config_failed(gnssmgr_t *g)
 {
 	g->awaiting_ack = false;
+	g->inflight = 0U;
+	g->failed_step = g->step;
 	g->state = (uint8_t)GNSSMGR_ST_CONFIG_FAILED;
 	alarm_set(g, GNSSMGR_ALARM_CONFIG_FAILED, true);
 }
@@ -258,7 +281,7 @@ static int emit_step(gnssmgr_t *g, uint32_t now_ms)
 	rc = ubx_valset_begin(&v, g->txbuf, sizeof(g->txbuf), g->cfg.cfg_layers);
 	if (rc == 0) {
 		if (g->step < (uint8_t)GNSSMGR_STEP_TMODE) {
-			k_steps[g->step](g, &v);
+			k_steps[g->step].build(g, &v);
 		} else {
 			build_tmode(g, &v);
 		}
@@ -275,42 +298,77 @@ static int emit_step(gnssmgr_t *g, uint32_t now_ms)
 
 	if (g->cb.send_ubx(g->cb.user, g->txbuf, (size_t)rc) != 0) {
 		/*
-		 * The transport refused it. The deadline is already armed, so
-		 * the retry path handles it at the normal cadence instead of
-		 * spinning on a UART that is not ready.
+		 * The transport refused it, so nothing went on the wire and no
+		 * acknowledgement can come back — do not count it as in flight.
+		 * The deadline is already armed, so the retry path handles it at
+		 * the normal cadence instead of spinning on a UART that is not
+		 * ready.
 		 */
 		return -EIO;
 	}
+
+	if (g->inflight < 0xFF) {
+		g->inflight++;
+	}
 	return 0;
+}
+
+static void advance_step(gnssmgr_t *g, uint32_t now_ms);
+
+/** Finish an advisory step that the receiver would not accept. */
+static void config_degraded(gnssmgr_t *g, uint32_t now_ms)
+{
+	g->failed_step = g->step;
+	alarm_set(g, GNSSMGR_ALARM_CONFIG_DEGRADED, true);
+	/* The feature is gone, not the clock: carry on with the walk. */
+	advance_step(g, now_ms);
+}
+
+/**
+ * Give up on the current step: fail the walk, or degrade past it.
+ *
+ * Reached when the retry budget is spent, or immediately on a NAK of an
+ * advisory step (a NAK is a considered refusal — re-sending byte-identical
+ * bytes will be refused byte-identically).
+ */
+static void abandon_step(gnssmgr_t *g, uint32_t now_ms)
+{
+	if (k_steps[g->step].essential) {
+		config_failed(g);
+	} else {
+		config_degraded(g, now_ms);
+	}
 }
 
 /** Emit the current step again, or give up if the attempt budget is spent. */
 static void retry_or_fail(gnssmgr_t *g, uint32_t now_ms)
 {
 	if (g->attempt > g->cfg.ack_retries) {
-		config_failed(g);
+		abandon_step(g, now_ms);
 		return;
 	}
 	(void)emit_step(g, now_ms);
 }
 
-/** Move past the acknowledged step. */
+/** Move past the current step, acknowledged or written off. */
 static void advance_step(gnssmgr_t *g, uint32_t now_ms)
 {
-	if (g->step == (uint8_t)GNSSMGR_STEP_TXREADY) {
-		/* Only a remap we actually asked for makes PD5 meaningful. */
-		g->txready_acked = g->cfg.txready_enable;
-	}
-
 	if (g->step >= (uint8_t)GNSSMGR_STEP_TMODE) {
 		g->awaiting_ack = false;
+		g->inflight = 0U;
 		g->state = g->have_position ? (uint8_t)GNSSMGR_ST_FIXED
 					    : (uint8_t)GNSSMGR_ST_SURVEY_IN;
+		if (!g->have_position) {
+			/* A survey that has not started yet cannot finish; see
+			 * on_nav_svin(). */
+			g->svin_started = false;
+		}
 		return;
 	}
 
 	g->step++;
 	g->attempt = 0U;
+	g->inflight = 0U;
 	(void)emit_step(g, now_ms);
 }
 
@@ -320,6 +378,7 @@ static int begin_walk(gnssmgr_t *g, uint8_t step, uint32_t now_ms)
 	g->state = (uint8_t)GNSSMGR_ST_CONFIG;
 	g->step = step;
 	g->attempt = 0U;
+	g->inflight = 0U;
 	g->awaiting_ack = false;
 	if (step <= (uint8_t)GNSSMGR_STEP_TXREADY) {
 		/* The remap is about to be re-sent, so PD5 is untrustworthy
@@ -468,16 +527,65 @@ static void on_nav_timels(gnssmgr_t *g, const ubx_nav_timels_t *t)
 	g->leap.event_pending = t->valid_time_to_ls_event && (t->ls_change != 0);
 }
 
+/**
+ * Move a UTC time-of-week onto the GPS timescale.
+ *
+ * GPS ToW runs ahead of UTC ToW by the current leap-second offset. Adding it
+ * can carry past the end of the week, which advances the week number too.
+ *
+ * @param tow_ms  UTC time of week, ms. Updated in place to GPS.
+ * @param week    GPS week, advanced or retarded if the ToW wraps.
+ * @param leap_s  Current GPS-UTC offset, signed.
+ */
+static void utc_tow_to_gps(uint32_t *tow_ms, uint16_t *week, int32_t leap_s)
+{
+	int64_t tow = (int64_t)*tow_ms + ((int64_t)leap_s * 1000);
+
+	while (tow >= (int64_t)GNSSMGR_WEEK_MS) {
+		tow -= (int64_t)GNSSMGR_WEEK_MS;
+		*week = (uint16_t)(*week + 1U);
+	}
+	while (tow < 0) {
+		tow += (int64_t)GNSSMGR_WEEK_MS;
+		*week = (uint16_t)(*week - 1U);
+	}
+	*tow_ms = (uint32_t)tow;
+}
+
 static void on_tim_tp(gnssmgr_t *g, const ubx_tim_tp_t *t, uint32_t now_ms)
 {
+	uint32_t tow = t->tow_ms;
+	uint16_t week = t->week;
+	bool converted = false;
+	bool pairable = !t->qerr_invalid;
+
+	/*
+	 * towMS already names the NEXT pulse, but on the pulse's own timebase.
+	 * Normalise it to GPS so it can be compared with NAV-PVT iTOW and with
+	 * the ToW the discipline glue derives for a captured edge — see the
+	 * gnssmgr_qerr_t contract.
+	 */
+	if (t->time_base_utc) {
+		if (g->leap.valid && g->leap.curr_ls_valid) {
+			utc_tow_to_gps(&tow, &week, (int32_t)g->leap.current_ls);
+			converted = true;
+		} else {
+			/* UTC-aligned pulse, leap offset unknown: the record
+			 * cannot be placed on the GPS timescale, so it must not
+			 * be paired with a PPS edge. */
+			pairable = false;
+		}
+	}
+
 	g->qerr.valid = true;
-	/* towMS already names the NEXT pulse — see gnssmgr_qerr_t. */
-	g->qerr.target_tow_ms = t->tow_ms;
+	g->qerr.target_tow_ms = tow;
 	g->qerr.target_tow_sub_ms = t->tow_sub_ms;
+	g->qerr.raw_tow_ms = t->tow_ms;
 	g->qerr.qerr_ps = t->qerr_ps;
-	g->qerr.qerr_valid = !t->qerr_invalid;
-	g->qerr.week = t->week;
+	g->qerr.qerr_valid = pairable;
+	g->qerr.week = week;
 	g->qerr.time_base_utc = t->time_base_utc;
+	g->qerr.tow_from_utc = converted;
 	g->qerr.utc_available = t->utc_available;
 	g->qerr.raim = t->raim;
 	g->qerr.rx_mono_ms = now_ms;
@@ -503,11 +611,38 @@ static void on_nav_svin(gnssmgr_t *g, const ubx_nav_svin_t *s, uint32_t now_ms)
 	if (g->state != (uint8_t)GNSSMGR_ST_SURVEY_IN) {
 		return;
 	}
-	/* Complete = the receiver says the mean position is valid and it has
-	 * stopped accumulating. Either alone is not a finished survey. */
-	if (!s->valid || s->active) {
+
+	if (s->active) {
+		/*
+		 * Proof that the survey we asked for is the one running. A
+		 * receiver that has not yet processed our TMODE frame keeps
+		 * reporting the *previous* survey, complete and valid; without
+		 * this latch a re-survey requested by an operator would be
+		 * abandoned a second later by a stale message describing the
+		 * result they asked to discard.
+		 */
+		g->svin_started = true;
 		return;
 	}
+	/* Complete = valid mean position, no longer accumulating. Either alone
+	 * is not a finished survey. */
+	if (!s->valid || !g->svin_started) {
+		return;
+	}
+
+	/*
+	 * Trust but verify. TMODE-SVIN_MIN_DUR and TMODE-SVIN_ACC_LIMIT were
+	 * given to the receiver, but the position is about to become a stored
+	 * calibration constant that every served timestamp leans on, so check
+	 * the result against the same limits rather than assuming the receiver
+	 * enforced them.
+	 */
+	if ((s->dur_s < g->cfg.survey_min_dur_s) ||
+	    (s->mean_acc_0p1mm > g->cfg.survey_acc_limit_0p1mm)) {
+		alarm_set(g, GNSSMGR_ALARM_SURVEY_REJECTED, true);
+		return;
+	}
+	alarm_set(g, GNSSMGR_ALARM_SURVEY_REJECTED, false);
 
 	g->position = g->svin.pos;
 	g->position.valid = true;
@@ -524,7 +659,8 @@ static int on_mon_rf(gnssmgr_t *g, const ubx_msg_t *m)
 {
 	ubx_mon_rf_iter_t it;
 	ubx_mon_rf_block_t blk;
-	uint8_t worst_ant = (uint8_t)UBX_ANT_STATUS_INIT;
+	bool any_short = false;
+	bool any_open = false;
 	uint8_t power = (uint8_t)UBX_ANT_POWER_DONTKNOW;
 	uint8_t jam = (uint8_t)UBX_JAMMING_UNKNOWN;
 	bool any = false;
@@ -534,16 +670,22 @@ static int on_mon_rf(gnssmgr_t *g, const ubx_msg_t *m)
 	}
 	while (ubx_mon_rf_next(&it, &blk) == 1) {
 		/*
-		 * antStatus/antPower are receiver-global and repeat per block,
-		 * but take the most alarming value rather than assuming that:
-		 * the enum happens to be ordered INIT < DONTKNOW < OK < SHORT <
-		 * OPEN, so a plain max picks a fault over an "ok".
+		 * antStatus is receiver-global and repeats per block, but do
+		 * not rely on that: collect each claim separately. Taking the
+		 * numeric maximum would be wrong, because the enum runs
+		 * INIT < DONTKNOW < OK < SHORT < OPEN and a block reporting
+		 * OPEN would then hide a block reporting SHORT — the one
+		 * verdict that cuts the antenna bias.
 		 */
-		if (!any || (blk.ant_status > worst_ant)) {
-			worst_ant = blk.ant_status;
+		if (blk.ant_status == (uint8_t)UBX_ANT_STATUS_SHORT) {
+			any_short = true;
+		} else if (blk.ant_status == (uint8_t)UBX_ANT_STATUS_OPEN) {
+			any_open = true;
+		} else {
+			/* INIT / DONTKNOW / OK claim nothing. */
 		}
 		if (!any || (blk.jamming_state > jam)) {
-			jam = blk.jamming_state;
+			jam = blk.jamming_state; /* worst-case is right here */
 		}
 		if (!any) {
 			power = blk.ant_power;
@@ -554,16 +696,39 @@ static int on_mon_rf(gnssmgr_t *g, const ubx_msg_t *m)
 		return 0; /* a block-less MON-RF tells us nothing */
 	}
 
-	g->mon_rf_valid = true;
-	g->mon_rf_ant_status = worst_ant;
-	g->mon_rf_ant_power = power;
-	g->mon_rf_jamming = jam;
+	g->rf.valid = true;
+	g->rf.ant_short = any_short;
+	g->rf.ant_open = any_open;
+	g->rf.ant_power = power;
+	g->rf.jamming_state = jam;
 	return 0;
 }
 
+/**
+ * Consume one UBX-ACK-ACK / UBX-ACK-NAK.
+ *
+ * UBX gives an acknowledgement no sequence number — the payload of every VALSET
+ * ack is the same two bytes, 06 8A — so responses can only be matched to
+ * requests by counting. That matters as soon as a step is retried: after a
+ * timeout the original copy may still be queued in the receiver, and then two
+ * acknowledgements come back for one step. Attributing the second one
+ * positionally advanced the *following* step, which is how a NAKed CFG-TXREADY
+ * could still end up setting txready_acked, breaking ARCHITECTURE.md §10
+ * invariant 8, and how a NAK of the final TMODE step could be dropped entirely.
+ *
+ * So @p inflight counts copies sent and not yet answered. Everything but the
+ * last outstanding copy is superseded: consume it and say nothing. Only the
+ * answer to the newest copy decides what happens to the step.
+ *
+ * The one case this cannot repair is a copy corrupted in transit, which is
+ * never answered at all and leaves the count permanently high. That drains the
+ * retry budget and ends in CONFIG_FAILED — loud, alarmed and recoverable with
+ * gnssmgr_start(). Given the choice, a timing appliance should stop and say so
+ * rather than quietly believe a configuration it does not have.
+ */
 static void on_ack(gnssmgr_t *g, const ubx_ack_t *a, uint32_t now_ms)
 {
-	if (!g->awaiting_ack || (g->state != (uint8_t)GNSSMGR_ST_CONFIG)) {
+	if (g->state != (uint8_t)GNSSMGR_ST_CONFIG) {
 		return;
 	}
 	/* Only VALSET acknowledgements drive the walk. */
@@ -571,10 +736,29 @@ static void on_ack(gnssmgr_t *g, const ubx_ack_t *a, uint32_t now_ms)
 	    (a->msg_id != (uint8_t)UBX_ID_CFG_VALSET)) {
 		return;
 	}
+	if (g->inflight == 0U) {
+		return; /* nothing of ours is outstanding */
+	}
+	if (g->inflight > 1U) {
+		g->inflight--; /* answer to a superseded copy */
+		return;
+	}
+	g->inflight = 0U;
 
 	if (a->ack) {
+		if (g->step == (uint8_t)GNSSMGR_STEP_TXREADY) {
+			/* Only a remap we asked for and that was accepted
+			 * makes PD5 meaningful. */
+			g->txready_acked = g->cfg.txready_enable;
+		}
 		g->awaiting_ack = false;
 		advance_step(g, now_ms);
+	} else if (!k_steps[g->step].essential) {
+		/* A considered refusal: re-sending identical bytes would be
+		 * refused identically, so degrade now rather than after four
+		 * pointless attempts. */
+		g->awaiting_ack = false;
+		config_degraded(g, now_ms);
 	} else {
 		retry_or_fail(g, now_ms);
 	}

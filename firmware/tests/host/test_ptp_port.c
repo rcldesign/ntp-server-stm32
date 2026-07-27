@@ -75,24 +75,60 @@ typedef struct {
 	size_t n;
 	size_t overflow;
 	int tx_rc;
+	int sync_rc;              /* overrides tx_rc for Sync only */
 	uint64_t tai_ns;
 	bool tai_fails;
 	bool have_tai;
+
+	/*
+	 * Synchronous-egress-timestamp glue: report the Sync's timestamp from
+	 * inside its own transmit callback, which is what a MAC that can read
+	 * its own TX timestamp does. The Follow_Up is then built and sent while
+	 * the Sync descriptor is still live, so this is also where the buffer
+	 * aliasing is checked.
+	 */
+	ptp_port_ctx_t *nested_ctx;
+	bool nested_txts;
+	uint64_t nested_ts;
+	int nested_txts_rc;
+	bool nested_saw_mutation;
 } fake_t;
 
 static int fake_tx(void *ctx, const ptp_tx_desc_t *d)
 {
 	fake_t *f = (fake_t *)ctx;
+	bool is_sync = (d->msg_type == (uint8_t)PTP_MSG_SYNC);
+	int rc = f->tx_rc;
 
-	if (f->tx_rc != 0) {
-		return f->tx_rc;
+	TEST_ASSERT_NOT_NULL(d->buf);
+	TEST_ASSERT_LESS_OR_EQUAL_size_t(PTP_MSG_MAX_LEN, d->len);
+
+	if (is_sync && (f->sync_rc != 0)) {
+		rc = f->sync_rc;
+	}
+
+	if (is_sync && f->nested_txts && (f->nested_ctx != NULL)) {
+		uint8_t snapshot[PTP_MSG_MAX_LEN];
+
+		memcpy(snapshot, d->buf, d->len);
+		f->nested_txts_rc =
+			ptp_on_sync_txts(f->nested_ctx, d->seq, f->nested_ts);
+		/*
+		 * The Follow_Up has now been encoded and transmitted. The Sync
+		 * bytes the glue is still holding must be exactly as handed over.
+		 */
+		if (memcmp(snapshot, d->buf, d->len) != 0) {
+			f->nested_saw_mutation = true;
+		}
+	}
+
+	if (rc != 0) {
+		return rc;
 	}
 	if (f->n >= FAKE_MAX_TX) {
 		f->overflow++;
 		return 0;
 	}
-	TEST_ASSERT_NOT_NULL(d->buf);
-	TEST_ASSERT_LESS_OR_EQUAL_size_t(PTP_MSG_MAX_LEN, d->len);
 
 	memcpy(f->tx[f->n].buf, d->buf, d->len);
 	f->tx[f->n].len = d->len;
@@ -1099,6 +1135,62 @@ static void test_foreign_timeout_re_elects_master(void)
 	TEST_ASSERT_EQUAL_INT(PTP_PS_PASSIVE, ptp_port_state(&r.c));
 }
 
+static void test_on_cadence_better_master_never_flaps(void)
+{
+	rig_t r;
+	ptp_cfg_t cfg;
+	foreign_spec_t s;
+	const ptp_counters_t *ctr;
+	unsigned int k;
+
+	/*
+	 * Regression for the tumbling-window defect. A better grandmaster
+	 * announcing exactly on cadence used to de-qualify every fourth
+	 * interval; Erbest emptied, this port re-elected itself, and the segment
+	 * got a second grandmaster transmitting Announce and Sync for an interval
+	 * at a time, over and over. Sixty seconds of a perfectly healthy peer
+	 * must produce exactly one transition and not one transmitted octet.
+	 */
+	ptp_cfg_defaults(&cfg);   /* announce 2 s, receipt timeout 6 s */
+	rig_init(&r, &cfg);
+	rig_locked(&r);
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_enable(&r.c, 0U));
+
+	spec_defaults(&s);
+	s.priority1 = 1U;         /* strictly better than our 128 */
+
+	for (k = 0U; k < 30U; k++) {
+		uint64_t at = 1000U + ((uint64_t)k * 2000U);
+		uint8_t buf[PTP_ANNOUNCE_LEN];
+		size_t len;
+		uint64_t t;
+
+		s.seq = (uint16_t)k;
+		len = build_announce(buf, &s);
+		TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&r.c, buf, len, 0U, at));
+
+		for (t = at; t < at + 2000U; t++) {
+			TEST_ASSERT_EQUAL_INT(0, ptp_port_step(&r.c, t));
+			if (k >= 1U) {
+				/* Qualified from the second Announce onward. */
+				TEST_ASSERT_EQUAL_INT(PTP_PS_PASSIVE,
+						      ptp_port_state(&r.c));
+			}
+		}
+	}
+
+	TEST_ASSERT_EQUAL_INT(PTP_PS_PASSIVE, ptp_port_state(&r.c));
+	TEST_ASSERT_EQUAL_size_t(0U, r.f.n);
+
+	ctr = ptp_port_counters(&r.c);
+	/* INITIALIZING -> LISTENING -> PASSIVE, and nothing after. */
+	TEST_ASSERT_EQUAL_UINT32(2U, ctr->state_changes);
+	TEST_ASSERT_EQUAL_UINT32(0U, ctr->foreign_expired);
+	TEST_ASSERT_EQUAL_UINT32(0U, ctr->announce_timeouts);
+	TEST_ASSERT_EQUAL_UINT32(30U, ctr->rx[PTP_MSG_ANNOUNCE]);
+	TEST_ASSERT_TRUE((ptp_port_alarms(&r.c) & PTP_ALARM_NOT_BEST_MASTER) != 0U);
+}
+
 static void test_fault_and_recovery(void)
 {
 	rig_t r;
@@ -1391,6 +1483,110 @@ static void test_missing_txts_is_counted_not_hidden(void)
 	TEST_ASSERT_EQUAL_INT(-ENOENT, ptp_on_sync_txts(&r.c, r.f.tx[0].seq, 1ULL));
 }
 
+static void test_nested_txts_does_not_alias_the_sync_buffer(void)
+{
+	rig_t r;
+	ptp_cfg_t cfg;
+	size_t si;
+	size_t fi;
+	const ptp_counters_t *ctr;
+
+	/*
+	 * A MAC that can read its own egress timestamp reports it from inside
+	 * the Sync transmit callback. The Follow_Up that releases must not be
+	 * encoded over the Sync the glue is still holding — the fake checks the
+	 * descriptor's bytes before and after the nested call.
+	 */
+	ptp_cfg_defaults(&cfg);
+	rig_init(&r, &cfg);
+	rig_locked(&r);
+	r.f.nested_ctx = &r.c;
+	r.f.nested_txts = true;
+	r.f.nested_ts = 1750000000123456789ULL;
+
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_enable(&r.c, 0U));
+	rig_run(&r, 0U, 6000U);
+
+	TEST_ASSERT_FALSE(r.f.nested_saw_mutation);
+	TEST_ASSERT_EQUAL_INT(0, r.f.nested_txts_rc);
+
+	si = find_tx(&r.f, (uint8_t)PTP_MSG_SYNC, 0U);
+	fi = find_tx(&r.f, (uint8_t)PTP_MSG_FOLLOW_UP, 0U);
+	TEST_ASSERT_NOT_EQUAL_size_t(SIZE_MAX, si);
+	TEST_ASSERT_NOT_EQUAL_size_t(SIZE_MAX, fi);
+
+	/* Documented ordering: the nested Follow_Up goes out first. */
+	TEST_ASSERT_TRUE(fi < si);
+
+	/* Both messages are intact and are what they claim to be. */
+	TEST_ASSERT_EQUAL_HEX8(0x00U, r.f.tx[si].buf[O_TYPE]);
+	TEST_ASSERT_EQUAL_size_t(PTP_TSMSG_LEN, r.f.tx[si].len);
+	TEST_ASSERT_TRUE((r.f.tx[si].buf[O_FLAGS] & 0x02U) != 0U); /* twoStep */
+	TEST_ASSERT_EQUAL_HEX8(0x08U, r.f.tx[fi].buf[O_TYPE]);
+	TEST_ASSERT_EQUAL_HEX8(2U, r.f.tx[fi].buf[O_CONTROL]);
+	TEST_ASSERT_EQUAL_HEX16(r.f.tx[si].seq, be16(&r.f.tx[fi].buf[O_SEQ]));
+
+	/* The Follow_Up carries the precise timestamp the callback reported. */
+	{
+		const uint8_t *ts = &r.f.tx[fi].buf[O_BODY_TS];
+		uint64_t sec = ((uint64_t)be16(ts) << 32) |
+			       ((uint64_t)ts[2] << 24) | ((uint64_t)ts[3] << 16) |
+			       ((uint64_t)ts[4] << 8) | (uint64_t)ts[5];
+		uint32_t ns = ((uint32_t)ts[6] << 24) | ((uint32_t)ts[7] << 16) |
+			      ((uint32_t)ts[8] << 8) | (uint32_t)ts[9];
+
+		TEST_ASSERT_EQUAL_UINT64(1750000000ULL, sec);
+		TEST_ASSERT_EQUAL_UINT32(123456789U, ns);
+	}
+
+	ctr = ptp_port_counters(&r.c);
+	TEST_ASSERT_EQUAL_UINT32(0U, ctr->followup_missed);
+	TEST_ASSERT_EQUAL_UINT32(0U, ctr->followup_orphaned);
+	TEST_ASSERT_EQUAL_UINT32(0U, ctr->txts_unmatched);
+	TEST_ASSERT_EQUAL_UINT32(ctr->tx[PTP_MSG_SYNC], ctr->tx[PTP_MSG_FOLLOW_UP]);
+	TEST_ASSERT_FALSE(r.c.sync_pending);
+}
+
+static void test_nested_txts_then_failing_sync_is_counted(void)
+{
+	rig_t r;
+	ptp_cfg_t cfg;
+	const ptp_counters_t *ctr;
+
+	/*
+	 * The awkward corner of the same path: the glue releases the Follow_Up
+	 * synchronously and only then reports the Sync as failed. The Follow_Up
+	 * is already on the wire with nothing to follow, so it is counted rather
+	 * than silently forgotten.
+	 */
+	ptp_cfg_defaults(&cfg);
+	rig_init(&r, &cfg);
+	rig_locked(&r);
+	r.f.nested_ctx = &r.c;
+	r.f.nested_txts = true;
+	r.f.nested_ts = 1750000000000000001ULL;
+	r.f.sync_rc = -EIO;
+
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_enable(&r.c, 0U));
+	rig_run(&r, 0U, 6000U);
+
+	TEST_ASSERT_FALSE(r.f.nested_saw_mutation);
+	TEST_ASSERT_EQUAL_INT(0, r.f.nested_txts_rc); /* the Follow_Up itself went */
+
+	ctr = ptp_port_counters(&r.c);
+	TEST_ASSERT_EQUAL_UINT32(1U, ctr->followup_orphaned);
+	TEST_ASSERT_EQUAL_UINT32(0U, ctr->followup_missed);
+	TEST_ASSERT_EQUAL_UINT32(1U, ctr->tx_errors);
+	TEST_ASSERT_EQUAL_UINT32(0U, ctr->tx[PTP_MSG_SYNC]);
+	TEST_ASSERT_EQUAL_UINT32(1U, ctr->tx[PTP_MSG_FOLLOW_UP]);
+	TEST_ASSERT_FALSE(r.c.sync_pending);
+
+	/* The Announce still went out; only the Sync failed. */
+	TEST_ASSERT_NOT_EQUAL_size_t(SIZE_MAX,
+		find_tx(&r.f, (uint8_t)PTP_MSG_ANNOUNCE, 0U));
+	TEST_ASSERT_EQUAL_size_t(SIZE_MAX, find_tx(&r.f, (uint8_t)PTP_MSG_SYNC, 0U));
+}
+
 static void test_sync_timestamp_falls_back_to_zero(void)
 {
 	rig_t r;
@@ -1552,6 +1748,87 @@ static void test_delay_req_negative_correction_and_unicast(void)
 	TEST_ASSERT_EQUAL_HEX8(0x77U, r.f.tx[idx].peer.clock_id.id[7]);
 }
 
+static void test_event_message_without_a_timestamp_is_rejected(void)
+{
+	rig_t r;
+	ptp_cfg_t cfg;
+	uint8_t req[PTP_TSMSG_LEN];
+	size_t len;
+	const ptp_counters_t *ctr;
+
+	/*
+	 * 0 is the value the contract tells the glue to pass for general
+	 * messages, so it is exactly what a miswired event path delivers. A
+	 * Delay_Resp built on it would carry receiveTimestamp 0, and the
+	 * requester would compute a path delay some decades negative — far worse
+	 * than no answer. Reject and count instead.
+	 */
+	ptp_cfg_defaults(&cfg);
+	rig_init(&r, &cfg);
+	rig_locked(&r);
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_enable(&r.c, 0U));
+	rig_run(&r, 0U, 6000U);
+	TEST_ASSERT_EQUAL_INT(PTP_PS_MASTER, ptp_port_state(&r.c));
+
+	len = build_delay_req(req, 0x77U, 42U, 5U, 0LL, false);
+	TEST_ASSERT_EQUAL_INT(-ENODATA, ptp_port_rx(&r.c, req, len, 0U, 6100U));
+
+	ctr = ptp_port_counters(&r.c);
+	TEST_ASSERT_EQUAL_UINT32(1U, ctr->rx_no_timestamp);
+	TEST_ASSERT_EQUAL_UINT32(1U, ctr->rx[PTP_MSG_DELAY_REQ]); /* it did arrive */
+	TEST_ASSERT_EQUAL_size_t(0U, count_tx(&r.f, (uint8_t)PTP_MSG_DELAY_RESP));
+
+	/* One nanosecond is enough to be a real timestamp. */
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&r.c, req, len, 1ULL, 6200U));
+	TEST_ASSERT_EQUAL_UINT32(1U, ctr->rx_no_timestamp);
+	TEST_ASSERT_EQUAL_size_t(1U, count_tx(&r.f, (uint8_t)PTP_MSG_DELAY_RESP));
+
+	/* The rule covers every event type, not just the one we answer. */
+	{
+		uint8_t buf[PTP_MSG_MAX_LEN];
+		static const uint8_t event_types[] = {
+			(uint8_t)PTP_MSG_SYNC,
+			(uint8_t)PTP_MSG_PDELAY_REQ,
+			(uint8_t)PTP_MSG_PDELAY_RESP,
+		};
+		size_t i;
+
+		for (i = 0U; i < ARRAY_LEN(event_types); i++) {
+			size_t n = ptp_msg_min_len(event_types[i]);
+
+			memset(buf, 0, sizeof(buf));
+			buf[O_TYPE] = event_types[i];
+			buf[O_VERSION] = 0x12U;
+			buf[O_LENGTH] = (uint8_t)(n >> 8);
+			buf[O_LENGTH + 1U] = (uint8_t)(n & 0xFFU);
+			buf[O_SRC_CLOCK + 7U] = 0xBBU;
+			buf[O_SRC_PORT + 1U] = 0x01U;
+
+			TEST_ASSERT_EQUAL_INT(-ENODATA,
+				ptp_port_rx(&r.c, buf, n, 0U, 6300U));
+		}
+		TEST_ASSERT_EQUAL_UINT32(1U + (uint32_t)ARRAY_LEN(event_types),
+					 ctr->rx_no_timestamp);
+	}
+
+	/* General messages are unaffected: 0 is the documented value there. */
+	{
+		uint8_t buf[PTP_MSG_MAX_LEN];
+		size_t n = ptp_msg_min_len((uint8_t)PTP_MSG_FOLLOW_UP);
+
+		memset(buf, 0, sizeof(buf));
+		buf[O_TYPE] = (uint8_t)PTP_MSG_FOLLOW_UP;
+		buf[O_VERSION] = 0x12U;
+		buf[O_LENGTH] = (uint8_t)(n >> 8);
+		buf[O_LENGTH + 1U] = (uint8_t)(n & 0xFFU);
+		buf[O_SRC_CLOCK + 7U] = 0xBBU;
+		buf[O_SRC_PORT + 1U] = 0x01U;
+
+		TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&r.c, buf, n, 0U, 6400U));
+	}
+	TEST_ASSERT_EQUAL_UINT32(1U + (uint32_t)3U, ctr->rx_no_timestamp);
+}
+
 static void test_delay_req_ignored_unless_master(void)
 {
 	rig_t r;
@@ -1567,7 +1844,7 @@ static void test_delay_req_ignored_unless_master(void)
 
 	/* LISTENING: §9.5.10 says only a master answers. */
 	len = build_delay_req(req, 0x77U, 1U, 1U, 0LL, false);
-	TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&r.c, req, len, 0U, 100U));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&r.c, req, len, 4242ULL, 100U));
 	TEST_ASSERT_EQUAL_size_t(0U, count_tx(&r.f, (uint8_t)PTP_MSG_DELAY_RESP));
 
 	ctr = ptp_port_counters(&r.c);
