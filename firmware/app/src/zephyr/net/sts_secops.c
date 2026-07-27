@@ -124,7 +124,8 @@ static K_SEM_DEFINE(g_done, 0, 1);
 
 /*
  * The hand-off critical section. Short and non-blocking by construction: it
- * covers a zeroize, a policy call and a k_sem_give(). It exists so the worker's
+ * covers a zeroize, a policy call and at most two k_sem_give()s — nothing that
+ * can sleep, so no caller's budget is spent inside it. It exists so the worker's
  * "publish" and a submitter's "give up" cannot both believe they won — the two
  * decisions are taken under it, so exactly one of them does.
  */
