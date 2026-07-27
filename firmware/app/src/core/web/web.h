@@ -185,7 +185,10 @@ void web_jw_khex(web_jw_t *w, const char *key, const uint8_t *p, size_t n);
  * @param out_len  Optional; receives the byte count (excluding the NUL).
  * @retval 0        Complete and well-formed.
  * @retval -ENOSPC  The buffer overflowed; @p out_len is the truncated length.
- * @retval -EPROTO  Unbalanced begin/end, or a key with no value.
+ * @retval -EPROTO  Unbalanced begin/end, a key with no value, a NULL key, two
+ *                  keys in a row, or nesting past WEB_JSON_DEPTH_MAX. All of
+ *                  these are caller bugs rather than bad input, so they are
+ *                  latched and reported once instead of asserting.
  * @retval -EINVAL  @p w is NULL.
  */
 int web_jw_finish(web_jw_t *w, size_t *out_len);

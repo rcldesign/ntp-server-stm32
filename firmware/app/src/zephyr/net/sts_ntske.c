@@ -64,7 +64,38 @@
  * a time. NTS-KE is rare and bursty — a client runs it once, then serves itself
  * cookies over NTP for the cookie lifetime — so serialising handshakes trades
  * negligible throughput for a bounded RAM footprint (one ~16 KB session, not
- * N). A per-handshake wall-clock cap keeps a stalled client off the slot.
+ * N). Concurrency is therefore structurally bounded at one; NTSKE_BACKLOG
+ * bounds what waits behind it and the kernel refuses the rest.
+ *
+ * ---------------------------------------------------------------------------
+ * Why the per-connection deadline needs a non-blocking socket to exist at all
+ * ---------------------------------------------------------------------------
+ *
+ * A Zephyr socket is blocking by default, so zsock_recv() inside bio_recv()
+ * waits K_FOREVER. mbedtls_ssl_handshake() then never returns to us, the
+ * deadline check after it is unreachable code, and one TCP connection that
+ * completes the handshake's first flight and stops writing parks this thread
+ * permanently.
+ *
+ * On this appliance that is not a stalled service, it is a reset. handle_conn()
+ * runs inline from ke_loop(), so a parked connection also stops this area's
+ * liveness feed; sts_liveness_stale_mask() goes stale at
+ * CONFIG_STS1000_LIVENESS_DEADLINE_MS, the supervisor withholds the external
+ * watchdog kick, the TPS3430 asserts WDO_N, and POE_KILL cold-cycles the board.
+ * The attacker reconnects and the box boot-loops (F4). Worse, the original
+ * handshake budget (8 s) was *longer* than the 5 s liveness deadline, so a
+ * merely slow but legitimate client did it too.
+ *
+ * Three things fix it together, and all three are needed:
+ *
+ *   1. SO_RCVTIMEO/SO_SNDTIMEO on the accepted socket, so a stalled peer turns
+ *      into MBEDTLS_ERR_SSL_WANT_READ and control comes back here. Preferred
+ *      over O_NONBLOCK because it paces the retry loop instead of spinning.
+ *   2. Liveness fed from inside every loop in handle_conn(), so the acceptor's
+ *      liveness no longer depends on any connection making progress.
+ *   3. A total connection budget comfortably inside the liveness deadline, so
+ *      even the pathological case closes the socket long before the supervisor
+ *      could notice.
  */
 
 #include <errno.h>
@@ -93,6 +124,15 @@ static struct {
 	bool exporter_available;
 } st;
 static struct k_spinlock st_lock;
+
+bool sts_ntske_supported(void)
+{
+#if defined(MBEDTLS_SSL_KEYING_MATERIAL_EXPORT)
+	return true;
+#else
+	return false;
+#endif
+}
 
 void sts_ntske_stats(sts_ntske_stats_t *out)
 {
@@ -125,9 +165,40 @@ void sts_ntske_stats(sts_ntske_stats_t *out)
 #define NTSKE_STACK_SIZE 8192
 #define NTSKE_PRIORITY 12
 #define NTSKE_BACKLOG 2
-#define NTSKE_HANDSHAKE_TIMEOUT_MS 8000
 #define NTSKE_REQ_MAX 2048U
 #define NTSKE_RSP_MAX NTSKE_RSP_RECOMMENDED
+
+/**
+ * Total wall clock one connection may consume — handshake, request and
+ * response together.
+ *
+ * Deliberately a fraction of CONFIG_STS1000_LIVENESS_DEADLINE_MS: the budget
+ * has to expire, the socket has to close, and this thread has to be back in
+ * ke_loop() well before the supervisor could conclude the area is wedged. A
+ * TLS 1.3 handshake to a P-256 server is one round trip, so 1.5 s is generous
+ * for any client that is actually trying.
+ */
+#define NTSKE_CONN_BUDGET_MS (CONFIG_STS1000_LIVENESS_DEADLINE_MS / 3)
+
+/*
+ * Both halves of the budget rule, checked at build time rather than trusted:
+ * the connection budget must leave the supervisor room, and the socket timeout
+ * must be short enough that one blocking call cannot overshoot the budget.
+ */
+BUILD_ASSERT(NTSKE_CONN_BUDGET_MS < CONFIG_STS1000_LIVENESS_DEADLINE_MS,
+	     "a connection may not outlive the liveness deadline");
+
+/**
+ * SO_RCVTIMEO/SO_SNDTIMEO on the accepted socket.
+ *
+ * Short enough that the deadline is honoured promptly and the liveness feed
+ * inside handle_conn() runs often, long enough that a healthy handshake almost
+ * never sees it.
+ */
+#define NTSKE_SOCK_TIMEOUT_MS 200
+
+BUILD_ASSERT(NTSKE_SOCK_TIMEOUT_MS * 4 < NTSKE_CONN_BUDGET_MS,
+	     "the socket timeout must be small beside the connection budget");
 
 /** ALPN protocol id required by RFC 8915 §4. */
 static const char *const alpn_list[] = { "ntske/1", NULL };
