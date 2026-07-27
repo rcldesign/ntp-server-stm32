@@ -28,6 +28,7 @@
 #include <zephyr/toolchain.h>
 
 #include "zephyr/sts_app.h"
+#include "storage/sts_store.h"
 
 __weak int sts_net_start(void)
 {
@@ -57,4 +58,32 @@ __weak bool sts_update_pending_confirm(void)
 __weak int sts_update_self_confirm(void)
 {
 	return 0;
+}
+
+/*
+ * PFI fast-save hooks. The console area's storage backend (src/zephyr/storage/)
+ * owns the strong definitions; these weak no-ops let the platform's PFI ISR,
+ * the discipline loop and the gnss path call them unconditionally, so a
+ * CONFIG_STS1000_CONSOLE=n image still links (nothing is persisted, which is
+ * the correct behaviour with no storage backend).
+ */
+__weak void sts_store_critical_flush_from_isr(void)
+{
+}
+
+__weak void sts_store_note_dac_code(uint16_t code)
+{
+	ARG_UNUSED(code);
+}
+
+__weak void sts_store_note_leap(int16_t current, int16_t pending, bool valid)
+{
+	ARG_UNUSED(current);
+	ARG_UNUSED(pending);
+	ARG_UNUSED(valid);
+}
+
+__weak void sts_store_note_log_cursor(uint32_t cursor)
+{
+	ARG_UNUSED(cursor);
 }

@@ -38,6 +38,13 @@ config STS1000_UI
 	  sequencer. Covers the ST7796 TFT, the FT6336 touch controller, the
 	  rotary encoder and the front-panel LEDs.
 
+# Area-owned tunables. Each area keeps its symbols in its own Kconfig so it can
+# add options without touching this file; they carry #if-defined fallbacks so
+# the build is correct even if these rsource lines are dropped. The net area
+# has no Kconfig of its own yet.
+rsource "src/zephyr/console/Kconfig"
+rsource "src/zephyr/ui/Kconfig"
+
 endmenu
 
 menu "STS1000 Meridian bring-up"

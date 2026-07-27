@@ -54,6 +54,7 @@
 #include "gnssmgr/gnssmgr.h"
 #include "quality/quality.h"
 #include "refsel/refsel.h"
+#include "storage/sts_store.h"
 
 LOG_MODULE_REGISTER(sts_disc, CONFIG_STS1000_LOG_LEVEL);
 
@@ -159,6 +160,14 @@ static void disc_write_dac(uint16_t code)
 
 	dt_state.last_dac_code = code;
 	dt_state.dac_written = true;
+
+	/*
+	 * Record the Vc for the PFI fast-save (storage/sts_store.h). Only the
+	 * latest code matters, so noting it on every change keeps the
+	 * volatile-critical set current for a power-fail that could land at any
+	 * instant. Cheap no-op when the console/storage backend is absent.
+	 */
+	sts_store_note_dac_code(code);
 }
 
 void sts_discipline_park(void)
@@ -462,6 +471,16 @@ static void disc_entry(void *p1, void *p2, void *p3)
 
 		disc_write_dac(out.dac_code);
 		disc_advance_expected();
+
+		/*
+		 * Record the leap state for the PFI fast-save. It rides in the
+		 * ancillary block the discipline loop copies into the published
+		 * quality (env.anc), sourced from gnssmgr; until the gnss thread
+		 * populates it this notes the "no leap known" default, which is
+		 * the correct pre-fix value. Cheap no-op with no storage backend.
+		 */
+		sts_store_note_leap(env.anc.leap_current_s,
+				    (int16_t)env.anc.leap_pending, env.anc.utc_valid);
 
 		disc_step_refsel(mono_ms, css);
 

@@ -36,6 +36,7 @@
 #include <zephyr/sys/atomic.h>
 
 #include "zephyr/platform/platform.h"
+#include "storage/sts_store.h"
 
 LOG_MODULE_REGISTER(sts_pfi, CONFIG_STS1000_LOG_LEVEL);
 
@@ -55,7 +56,15 @@ static void pfi_handler(const struct device *port, struct gpio_callback *cb,
 		return; /* already handled; the rails are on their way down */
 	}
 
+	/*
+	 * Freeze the OCXO actuator first (holds the last Vc), then kick the
+	 * console area's fast-save. sts_store_critical_flush_from_isr() only
+	 * schedules the flush onto the system work queue — it does not touch
+	 * flash here — so it is safe in this ISR and completes in the hold-up
+	 * window if the queue drains in time.
+	 */
 	sts_discipline_park();
+	sts_store_critical_flush_from_isr();
 }
 
 bool sts_pfi_fired(void)
