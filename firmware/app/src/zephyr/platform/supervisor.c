@@ -57,6 +57,7 @@ static const struct device *const rgb_pwm = DEVICE_DT_GET(RGB_PWM_NODE);
 
 static struct {
 	bool armed;         /* WDT_EN asserted (stage 9 complete) */
+	bool seq_eligible;  /* pwrseq reached RELAY_ELIGIBLE (stage 9) */
 	bool relay_on;
 	uint32_t kicks;
 	uint32_t kicks_withheld;
@@ -65,6 +66,11 @@ static struct {
 	uint32_t identify_until_ms;
 	bool ready;
 } super;
+
+void sts_supervisor_set_seq_eligible(bool eligible)
+{
+	super.seq_eligible = eligible;
+}
 
 /* ------------------------------------------------------------------ RGB -- */
 
@@ -132,7 +138,11 @@ static void relay_apply(bool eligible, const quality_block_t *q)
 	 */
 	bool serving = (q->stratum == QUALITY_STRATUM_PRIMARY) &&
 		       (q->lock_state == QUALITY_LOCK_LOCKED);
-	bool want = eligible && serving;
+	/* Three gates: pwrseq has reached stage 9 (seq_eligible), no
+	 * disqualifying alarm is active (eligible), and the clock is actually
+	 * serving. The sequence gate is what keeps K2 de-energized through
+	 * bring-up even if the OCXO locks early. */
+	bool want = super.seq_eligible && eligible && serving;
 
 	if (want == super.relay_on) {
 		return;
@@ -208,6 +218,14 @@ void sts_supervisor_step(uint32_t now_ms)
 	}
 
 	stale = sts_liveness_stale_mask(now_ms);
+
+	/* No kick until pwrseq has armed the watchdog (WDT_EN high). Before
+	 * that the TPS3430 is not watching, and kicking into a closed window
+	 * once armed is what a premature kick would risk. */
+	if (!super.armed) {
+		super.last_stale_mask = stale;
+		goto relay_rgb;
+	}
 
 	if (stale == 0U) {
 		wdt_kick_once();
