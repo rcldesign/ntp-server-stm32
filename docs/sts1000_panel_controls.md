@@ -226,7 +226,7 @@ NSS40300 PNP** emitter → collector = `PANEL_LEDS_P` (common anode) → **J17.2
 | Rail enable | `PANEL_LED_EN` = PC0 | R198 10 kΩ pull-**down** → RT9742 U55 EN active-high ⇒ default OFF |
 | Fault flag | `PANEL_LED_FAULT` = PF12 | U55 nFLG open-drain, R201 10 kΩ → 3V3_STM (renamed `_N`) |
 | Current monitor | INA228 **U54 @0x4C** | shunt **R199 150 mΩ** on the 5 V panel rail (±273.1 mA FS, 520.833 nA/LSB; `INA_ALERT_5V_PANEL` → PF13) |
-| Brightness PWM | `PANEL_LED_PWM` = PE0 (LPTIM2) | PE0 → R216 4.7 kΩ → **Q23 BC847W** base (R235 10 kΩ pull-down); Q23 collector → R217 820 Ω → Q22 base (R234 4.7 kΩ off-hold). Non-inverting: PE0 high → Q23 sat → Q22 on. Hi-Z reset ⇒ double default-OFF |
+| Brightness PWM | `PANEL_LED_PWM` = PE0 (software PWM) | PE0 → R216 4.7 kΩ → **Q23 BC847W** base (R235 10 kΩ pull-down); Q23 collector → R217 820 Ω → Q22 base (R234 4.7 kΩ off-hold). Non-inverting: PE0 high → Q23 sat → Q22 on. Hi-Z reset ⇒ double default-OFF (~100 Hz, 10-step duty from 1 kHz scan) |
 | Ballast | white R247–R252 = **91 Ω** (×6); red R253 = **150 Ω** | rail ≈4.7 V ⇒ ~17–18 mA/LED, all-on ≈130 mA |
 
 Shunt check: **19.8 mV at all-on ≈ 48 % of the INA228 ±40.96 mV FS** — inside the 50–75 % sizing band with
