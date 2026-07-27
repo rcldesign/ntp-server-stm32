@@ -56,6 +56,7 @@
 #include <zephyr/sys/atomic.h>
 
 #include "zephyr/platform/platform.h"
+#include "zephyr/platform/sts_super_policy.h"
 #include "zephyr/sts_app.h"
 
 #include "pwrseq/pwrseq.h"
@@ -184,13 +185,12 @@ static void relay_apply(bool eligible, const quality_block_t *q)
 	 * not a healthy grandmaster, and a locked box with a dead OCXO rail is
 	 * not one either.
 	 */
-	bool serving = (q->stratum == QUALITY_STRATUM_PRIMARY) &&
-		       (q->lock_state == QUALITY_LOCK_LOCKED);
 	/* Three gates: pwrseq has reached stage 9 (seq_eligible), no
 	 * disqualifying alarm is active (eligible), and the clock is actually
 	 * serving. The sequence gate is what keeps K2 de-energized through
-	 * bring-up even if the OCXO locks early. */
-	bool want = super.seq_eligible && eligible && serving;
+	 * bring-up even if the OCXO locks early. sts_super_policy.h holds the
+	 * conjunction so it is asserted rather than reasoned about. */
+	bool want = sts_super_relay_want(super.seq_eligible, eligible, q);
 
 	if (want == super.relay_on) {
 		return;
@@ -229,7 +229,7 @@ static void wdt_kick_once(void)
  */
 static uint32_t wdt_liveness(uint32_t now_ms)
 {
-	return (sts_liveness_stale_mask(now_ms) == 0U) ? PWRSEQ_LIVE_ALL : 0U;
+	return sts_super_wdt_liveness(sts_liveness_stale_mask(now_ms));
 }
 
 static void wdt_entry(void *p1, void *p2, void *p3)
@@ -364,7 +364,7 @@ void sts_supervisor_step(uint32_t now_ms)
 	 * Logging here rather than there is deliberate: the kicker holds a
 	 * cooperative priority and sts_log() is not something to run from one.
 	 */
-	if (super.armed && (stale != 0U) && (stale != super.last_stale_mask)) {
+	if (sts_super_stale_log(super.armed, stale, super.last_stale_mask)) {
 		for (uint32_t i = 0; i < sts_liveness_count(); i++) {
 			if ((stale & BIT(i)) != 0U) {
 				sts_log(LOGR_SUB_SYS, LOGR_CRIT,
@@ -381,15 +381,12 @@ void sts_supervisor_step(uint32_t now_ms)
 	 * ever happens say so at CRIT with the measured interval rather than
 	 * leaving an unexplained reboot loop for someone to reverse-engineer.
 	 */
-	if (super.wdt.violations != super.logged_violations) {
+	if (sts_super_violation_new(super.wdt.violations, super.logged_violations)) {
 		super.logged_violations = super.wdt.violations;
 		sts_log(LOGR_SUB_SYS, LOGR_CRIT,
 			"WDT kick %s the %u-%u ms window: %u total — the TPS3430 "
 			"will drive WDO_N and POE_KILL",
-			(super.wdt.last_verdict ==
-			 (uint8_t)PWRSEQ_WDT_INTERVAL_EARLY)
-				? "below"
-				: "above",
+			sts_super_violation_word(super.wdt.last_verdict),
 			PWRSEQ_WDT_WINDOW_MIN_MS, PWRSEQ_WDT_WINDOW_MAX_MS,
 			super.wdt.violations);
 	}
@@ -403,15 +400,9 @@ void sts_supervisor_step(uint32_t now_ms)
 
 	relay_apply(eligible, &q);
 
-	rgb_in.locked = (q.lock_state == QUALITY_LOCK_LOCKED) &&
-			(q.stratum == QUALITY_STRATUM_PRIMARY);
-	rgb_in.holdover = q.holdover;
-	rgb_in.warming = ((q.flags & QUALITY_FLAG_OCXO_WARM) == 0U) ||
-			 (q.lock_state == QUALITY_LOCK_ACQUIRING) ||
-			 (q.lock_state == QUALITY_LOCK_LOCKING);
-	rgb_in.any_fault = any_fault;
-	rgb_in.identify = (super.identify_until_ms != 0U) &&
-			  ((int32_t)(super.identify_until_ms - now_ms) > 0);
+	sts_super_rgb_in(&q, any_fault,
+			 sts_super_identify_active(super.identify_until_ms, now_ms),
+			 &rgb_in);
 
 	if (!rgb_in.identify) {
 		super.identify_until_ms = 0U;
@@ -429,8 +420,8 @@ void sts_supervisor_step(uint32_t now_ms)
 	 * the next boot, so confirming too early defeats the whole mechanism
 	 * and confirming never means one reboot loses the update.
 	 */
-	if (sts_update_pending_confirm() && stale == 0U && !any_fault &&
-	    q.lock_state == QUALITY_LOCK_LOCKED) {
+	if (sts_super_confirm_now(sts_update_pending_confirm(), stale, any_fault,
+				  q.lock_state)) {
 		if (sts_update_self_confirm() == 0) {
 			sts_log(LOGR_SUB_SYS, LOGR_NOTICE,
 				"running image confirmed (healthy)");

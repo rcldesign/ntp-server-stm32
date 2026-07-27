@@ -20,6 +20,11 @@
  *                         step a ONE-WAY hardware counter. The decode is of a
  *                         byte layout owned by another project, and the action
  *                         it drives cannot be undone on the part.
+ *   sts_ui_echo.h       — the front-panel button levels the MP mirror
+ *                         publishes, reconstructed from a droppable event
+ *                         stream. Get it wrong and a remote technician reads a
+ *                         permanently-held key on a panel nobody is touching,
+ *                         with nothing on the box to contradict it.
  *
  * Each header is deliberately free of Zephyr and MCUboot dependencies so it can
  * be compiled here. The staging tests model MCUboot's swap-using-move accept/
@@ -39,6 +44,7 @@
 #include "zephyr/console/sts_rollback.h"
 #include "zephyr/console/sts_stage_geom.h"
 #include "zephyr/sts_cfg_applier.h"
+#include "zephyr/ui/sts_ui_echo.h"
 
 /* ------------------------------------------------------------------------- */
 /* self-confirm gate (F2)                                                    */
@@ -910,6 +916,114 @@ static void test_witness_budget_arithmetic(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* panel input echo (sts_ui_echo.h)                                          */
+/* ------------------------------------------------------------------------- */
+
+/* The signal numbers this echo actually carries (core/fault fault_sig_t). */
+#define SIG_BUTTON_1 0U
+#define SIG_BUTTON_6 5U
+#define SIG_ENC_BUTTON 11U
+
+/* Ordinary press/release traffic reconstructs the level exactly. */
+static void test_echo_tracks_both_edges(void)
+{
+	sts_ui_echo_t e;
+
+	memset(&e, 0, sizeof(e));
+
+	sts_ui_echo_button(&e, SIG_BUTTON_1, true);
+	sts_ui_echo_button(&e, SIG_ENC_BUTTON, true);
+	TEST_ASSERT_TRUE(sts_ui_echo_is_down(&e, SIG_BUTTON_1));
+	TEST_ASSERT_TRUE(sts_ui_echo_is_down(&e, SIG_ENC_BUTTON));
+	TEST_ASSERT_EQUAL_UINT32((1U << SIG_BUTTON_1) | (1U << SIG_ENC_BUTTON),
+				 e.down);
+
+	sts_ui_echo_button(&e, SIG_BUTTON_1, false);
+	TEST_ASSERT_FALSE(sts_ui_echo_is_down(&e, SIG_BUTTON_1));
+	TEST_ASSERT_TRUE(sts_ui_echo_is_down(&e, SIG_ENC_BUTTON));
+
+	/* A quiet queue must never resync: a spurious clear would drop a
+	 * genuinely-held button out of the mirror every frame. */
+	TEST_ASSERT_FALSE(sts_ui_echo_sync(&e, 0U));
+	TEST_ASSERT_TRUE(sts_ui_echo_is_down(&e, SIG_ENC_BUTTON));
+	TEST_ASSERT_EQUAL_UINT32(0U, e.resyncs);
+}
+
+/*
+ * The defect this exists to prevent, reproduced end to end.
+ *
+ * Without the drop reconciliation, a release lost to the full queue latches its
+ * bit forever: the level is only ever cleared by an event that no longer
+ * arrives. A host on `mirror.get` then reads a permanently-held key and
+ * diagnoses a stuck button on a panel nobody is touching.
+ */
+static void test_echo_clears_a_phantom_when_a_release_is_dropped(void)
+{
+	sts_ui_echo_t e;
+
+	memset(&e, 0, sizeof(e));
+
+	/* Press lands, release is dropped on the way in. */
+	sts_ui_echo_button(&e, SIG_BUTTON_1, true);
+	TEST_ASSERT_TRUE(sts_ui_echo_is_down(&e, SIG_BUTTON_1));
+
+	/* Pre-fix behaviour, stated so a regression is unmistakable: nothing
+	 * else in the event stream can ever clear this bit. */
+	TEST_ASSERT_EQUAL_UINT32(1U << SIG_BUTTON_1, e.down);
+
+	TEST_ASSERT_TRUE(sts_ui_echo_sync(&e, 1U));
+	TEST_ASSERT_FALSE(sts_ui_echo_is_down(&e, SIG_BUTTON_1));
+	TEST_ASSERT_EQUAL_UINT32(0U, e.down);
+	TEST_ASSERT_EQUAL_UINT32(1U, e.resyncs);
+
+	/* One drop, one resync: the same count must not clear the echo again,
+	 * or a genuine press posted after the drop would never be reported. */
+	sts_ui_echo_button(&e, SIG_ENC_BUTTON, true);
+	TEST_ASSERT_FALSE(sts_ui_echo_sync(&e, 1U));
+	TEST_ASSERT_TRUE(sts_ui_echo_is_down(&e, SIG_ENC_BUTTON));
+	TEST_ASSERT_EQUAL_UINT32(1U, e.resyncs);
+}
+
+/* The lamp hold rides the same lossy stream, so the same clear must reach it —
+ * a stranded "held" leaves the whole panel LED string full-on indefinitely. */
+static void test_echo_resync_releases_the_lamp_hold(void)
+{
+	sts_ui_echo_t e;
+
+	memset(&e, 0, sizeof(e));
+
+	sts_ui_echo_button(&e, SIG_BUTTON_6, true);
+	e.lamp = true;
+
+	TEST_ASSERT_TRUE(sts_ui_echo_sync(&e, 7U));
+	TEST_ASSERT_FALSE(e.lamp);
+	TEST_ASSERT_EQUAL_UINT32(7U, e.drops_seen);
+
+	/* Only a *change* matters, so the counter's 2^32 wrap needs no special
+	 * case — the producer's total is never used as a magnitude. */
+	TEST_ASSERT_FALSE(sts_ui_echo_sync(&e, 7U));
+	TEST_ASSERT_TRUE(sts_ui_echo_sync(&e, 0U));
+	TEST_ASSERT_EQUAL_UINT32(2U, e.resyncs);
+}
+
+/* Defensive edges: no NULL deref, and a signal past the word is ignored rather
+ * than shifting out of range (UB) or aliasing bit 0. */
+static void test_echo_rejects_out_of_range_input(void)
+{
+	sts_ui_echo_t e;
+
+	memset(&e, 0, sizeof(e));
+
+	sts_ui_echo_button(NULL, SIG_BUTTON_1, true);
+	sts_ui_echo_button(&e, 32U, true);
+	sts_ui_echo_button(&e, 255U, true);
+	TEST_ASSERT_EQUAL_UINT32(0U, e.down);
+	TEST_ASSERT_FALSE(sts_ui_echo_is_down(&e, 32U));
+	TEST_ASSERT_FALSE(sts_ui_echo_is_down(NULL, SIG_BUTTON_1));
+	TEST_ASSERT_FALSE(sts_ui_echo_sync(NULL, 5U));
+}
+
+/* ------------------------------------------------------------------------- */
 
 int main(void)
 {
@@ -939,6 +1053,11 @@ int main(void)
 	RUN_TEST(test_witness_steps_are_bounded_and_one_way);
 	RUN_TEST(test_witness_converges_and_never_double_counts);
 	RUN_TEST(test_witness_budget_arithmetic);
+
+	RUN_TEST(test_echo_tracks_both_edges);
+	RUN_TEST(test_echo_clears_a_phantom_when_a_release_is_dropped);
+	RUN_TEST(test_echo_resync_releases_the_lamp_hold);
+	RUN_TEST(test_echo_rejects_out_of_range_input);
 
 	return UNITY_END();
 }

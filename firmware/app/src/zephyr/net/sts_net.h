@@ -350,7 +350,15 @@ void sts_snmp_notify(snmp_trap_t trap);
 
 void sts_snmp_stats(snmp_stats_t *out);
 
-/** USM counters. Zeroed when SNMPv3 is not running. */
+/**
+ * USM counters (RFC 3414 §5 usmStats plus local bookkeeping).
+ *
+ * Serves the snapshot the SNMP thread publishes once per poll pass, not a live
+ * read: `snmp_v3_ctx_t` carries the decrypt scratch and is single-threaded by
+ * contract, so nothing outside sts_snmp.c may call snmp_v3_stats_get() on it.
+ * Callable from any thread; at most one SNMP poll period stale. Zeroed while
+ * SNMPv3 is not running, and before the first publish.
+ */
 void sts_snmp_v3_stats(snmp_v3_stats_t *out);
 
 #ifdef __cplusplus

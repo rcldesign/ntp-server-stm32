@@ -168,6 +168,34 @@ typedef enum {
 	/* until the interleave pairing path has been proven in the glue.           */  \
 	U(NTP_INTERLEAVED,   0x0207, "ntp.interleaved", BOOL, CFG_F_RUNTIME_APPLY,             \
 	  0, 0, 1)                                                                             \
+	/* Leap-second smear (spec §15.2). NTP-only and OFF by default: the        */  \
+	/* appliance steps at the boundary, because a GPS-disciplined stratum-1    */  \
+	/* reference that smears is deliberately serving a UTC it knows to be      */  \
+	/* wrong, and the same box is a PTP grandmaster, where IEEE 1588 has no    */  \
+	/* smear concept at all. Turning this on makes the NTP service — and only  */  \
+	/* the NTP service — ramp the second in over the window below, and give up */  \
+	/* its stratum-1 claim (stratum 2, refid 'SMER', root dispersion grown by  */  \
+	/* the live deviation) for as long as the ramp runs.                       */  \
+	/*                                                                         */  \
+	/* CFG_F_REBOOT_REQUIRED, and honestly so: the CFG_G_NTP applier in        */  \
+	/* net/sts_net.c stages this group rather than reconfiguring a live        */  \
+	/* ntp_ctx_t, so sts_ntp.c reads both keys once at start. A leap is        */  \
+	/* announced about six months ahead; a restart to arm the smear is not a   */  \
+	/* schedule problem, and claiming a runtime apply the glue does not        */  \
+	/* perform would be.                                                       */  \
+	U(NTP_LEAP_SMEAR,    0x0208, "ntp.leap.smear",  BOOL, CFG_F_REBOOT_REQUIRED,           \
+	  0, 0, 1)                                                                             \
+	/* Smear window in seconds, ending AT the leap instant. 86400 (24 h) is    */  \
+	/* the industry convention and presents clients with a constant 11.574 ppm */  \
+	/* frequency offset. The 14400 floor keeps the ramp rate at or below       */  \
+	/* 69.4 ppm — about a seventh of the 500 ppm at which ntpd and chrony stop */  \
+	/* believing a source — and the 86400 ceiling equals the NTP leap          */  \
+	/* announcement window, so a maximum-length smear occupies exactly the     */  \
+	/* interval the server would otherwise have spent warning of the step.     */  \
+	/* Bounds enforced here AND clamped by ntp_init(); the shape and the       */  \
+	/* monotonicity argument live in core/quality (quality_leap_smear).        */  \
+	U(NTP_LEAP_SMEAR_S,  0x0209, "ntp.leap.smear.s", U32, CFG_F_REBOOT_REQUIRED,           \
+	  86400, 14400, 86400)                                                                 \
 	                                                                                       \
 	/* -- 0x03 nts ------------------------------------------------------------------ */  \
 	U(NTS_ENABLE,        0x0301, "nts.enable",      BOOL, CFG_F_REBOOT_REQUIRED,           \

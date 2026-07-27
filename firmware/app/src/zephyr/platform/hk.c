@@ -51,6 +51,7 @@
 #include <zephyr/sys/byteorder.h>
 
 #include "zephyr/platform/platform.h"
+#include "zephyr/platform/sts_fan_policy.h"
 #include "zephyr/sts_app.h"
 
 #include "cal/cal.h"
@@ -96,9 +97,15 @@ static const struct device *const i2c1 = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 
 /* ---- fan ----------------------------------------------------------------- */
 
+/*
+ * The duty-to-pulse conversion, the resting duty, the tach arithmetic and the
+ * ladder's actuator mapping live in sts_fan_policy.h — Zephyr-free, so the
+ * ARCHITECTURE.md §10.9 "resting state is full speed" invariant is asserted by
+ * tests/host/test_fan_policy.c rather than by inspection.
+ */
 #define FAN_PWM_NODE DT_NODELABEL(panel_pwm)
 #define FAN_PWM_CHANNEL 1  /* TIM15_CH1 on PE5 */
-#define FAN_PWM_PERIOD_NS (1000000000U / 25000U) /* 25 kHz */
+#define FAN_PWM_PERIOD_NS STS_FAN_PWM_PERIOD_NS /* 25 kHz */
 
 static const struct device *const fan_pwm = DEVICE_DT_GET(FAN_PWM_NODE);
 static const struct gpio_dt_spec fan_tach = STS_USER_GPIO(fan_tach_gpios);
@@ -668,27 +675,14 @@ static uint32_t hk_tach_rpm(uint32_t now_ms)
 
 	hk.tach_last_ms = now_ms;
 
-	if (dt_ms == 0U) {
-		return 0U;
-	}
-
-	/* Standard 4-wire fan: 2 tach pulses per revolution, and the callback
-	 * fires on one edge per pulse. */
-	return (uint32_t)(((uint64_t)edges * 60000ULL) / ((uint64_t)dt_ms * 2ULL));
+	return sts_fan_tach_rpm(edges, dt_ms);
 }
 
 static void hk_fan_set_duty(uint8_t duty_pct)
 {
-	uint32_t pulse_ns;
-	int rc;
+	int rc = pwm_set(fan_pwm, FAN_PWM_CHANNEL, FAN_PWM_PERIOD_NS,
+			 sts_fan_pulse_ns(duty_pct), 0);
 
-	if (duty_pct > 100U) {
-		duty_pct = 100U;
-	}
-
-	pulse_ns = ((uint32_t)duty_pct * FAN_PWM_PERIOD_NS) / 100U;
-
-	rc = pwm_set(fan_pwm, FAN_PWM_CHANNEL, FAN_PWM_PERIOD_NS, pulse_ns, 0);
 	if (rc != 0) {
 		LOG_ERR("FAN_PWM set %u%% failed (%d)", duty_pct, rc);
 	}
@@ -875,9 +869,13 @@ static void hk_sweep_1hz(uint32_t now_ms)
 
 static void hk_thermal_1hz(uint32_t now_ms)
 {
+	sts_fan_alarm_t alarms[3];
+	sts_fan_action_t act;
 	sts_hk_snapshot_t snap;
 	thermal_in_t in;
 	thermal_out_t out;
+	size_t n_alarms;
+	int rc;
 
 	(void)sts_hk_read(&snap);
 
@@ -915,23 +913,27 @@ static void hk_thermal_1hz(uint32_t now_ms)
 	in.fan_rpm = (uint16_t)MIN(hk_tach_rpm(now_ms), (uint32_t)UINT16_MAX);
 	in.rpm_valid = true;
 
-	if (thermal_step_1hz(&thermal, &in, &out) != 0) {
-		/* A loop that will not step is a loop that is not cooling;
-		 * ARCHITECTURE.md §10.9 says the resting state is full speed. */
-		hk_fan_set_duty(100U);
+	rc = thermal_step_1hz(&thermal, &in, &out);
+	sts_fan_policy_eval(rc, &out, &act);
+
+	/* Unconditional: the fail-safe path commands STS_FAN_DUTY_RESTING_PCT
+	 * rather than skipping the write, so a loop that will not step still
+	 * leaves the box cooling (ARCHITECTURE.md §10.9). */
+	hk_fan_set_duty(act.duty_pct);
+
+	if (act.loop_failed) {
 		return;
 	}
 
-	hk_fan_set_duty(out.duty_pct);
-
 	k_mutex_lock(&hk_mutex, K_FOREVER);
 	hk_cache.fan_rpm = in.fan_rpm;
-	hk_cache.fan_duty_pct = out.duty_pct;
+	hk_cache.fan_duty_pct = act.duty_pct;
 	k_mutex_unlock(&hk_mutex);
 
-	(void)sts_alarm_set(FAULT_ALARM_THERMAL_WARN, out.alarm_overtemp);
-	(void)sts_alarm_set(FAULT_ALARM_THERMAL_CRITICAL, out.request_poe_kill);
-	(void)sts_alarm_set(FAULT_ALARM_FAN_FAULT, out.fan_stall);
+	n_alarms = sts_fan_alarms(&act, alarms);
+	for (size_t i = 0; i < n_alarms; i++) {
+		(void)sts_alarm_set(alarms[i].id, alarms[i].active);
+	}
 
 	/*
 	 * Rungs 2 and 3 reach an actuator: pwrseq_build_input() picks these up and
@@ -939,8 +941,10 @@ static void hk_thermal_1hz(uint32_t now_ms)
 	 * climbing, commands POE_KILL. Annunciating alone was the whole of the
 	 * previous response, which meant the ladder had no bottom.
 	 */
-	atomic_set(&hk.thermal_shed_rb, out.request_rb_shed ? 1 : 0);
-	atomic_set(&hk.thermal_poe_kill, out.request_poe_kill ? 1 : 0);
+	if (act.latch_escalation) {
+		atomic_set(&hk.thermal_shed_rb, act.request_rb_shed ? 1 : 0);
+		atomic_set(&hk.thermal_poe_kill, act.request_poe_kill ? 1 : 0);
+	}
 }
 
 static void hk_entry(void *p1, void *p2, void *p3)
@@ -1009,7 +1013,7 @@ int sts_hk_start(void)
 	 * Full speed before the loop has an opinion. A fan that is not being
 	 * commanded must be running, not stopped (ARCHITECTURE.md §10.9).
 	 */
-	hk_fan_set_duty(100U);
+	hk_fan_set_duty(STS_FAN_DUTY_RESTING_PCT);
 
 	rc = gpio_pin_configure_dt(&fan_tach, GPIO_INPUT);
 	if (rc == 0) {

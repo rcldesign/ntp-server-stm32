@@ -52,6 +52,7 @@
 #include <zephyr/logging/log.h>
 
 #include "zephyr/platform/platform.h"
+#include "zephyr/platform/sts_rbguard.h"
 #include "zephyr/sts_app.h"
 
 #include "cfg/cfg.h"
@@ -70,17 +71,11 @@ LOG_MODULE_REGISTER(sts_pwrseq, CONFIG_STS1000_LOG_LEVEL);
 #define CFG_KEY_PWR_RB_WARMUP_S  0x0705U
 
 /*
- * Hard ceiling on the configurable VCC_RB limit, millivolts.
- *
- * The schema bounds PWR_RB_VMAX_MV only by its u16 type and the buck's own range
- * (4510..24450), so an operator could raise the "FE ceiling" to 24 V — above the
- * absolute maximum of the 15 V-class FE-5680A this board is built around — and the
- * measured<=vmax gate would then wave through a rail that destroys the FE. cfg
- * may lower the ceiling for a lower-voltage unit; it may never raise it past what
- * the hardware was designed for. Documented in docs/sts1000_vcc_rb_supply.md and
- * the CLAUDE.md digipot gotcha.
+ * The VCC_RB ceiling, the PG decode, the INA freshness conversion, the EXTREF
+ * band and the RB_LOCK polarity all live in sts_rbguard.h — Zephyr-free, so the
+ * envelope that stands between a config typo and a destroyed rubidium is
+ * asserted by tests/host/test_rbguard.c rather than by inspection.
  */
-#define PWR_RB_VMAX_MV_CEILING 15000U
 
 /* Supervisor gate that pwrseq's WDT_EN / RELAY_ELIGIBLE actions drive. */
 void sts_supervisor_set_seq_eligible(bool eligible);
@@ -127,31 +122,32 @@ static void pwrseq_load_cfg(pwrseq_cfg_t *cfg)
 	 * the wiper by voltage (rb_vmax_mv), not by a code ceiling.
 	 */
 	if (cfg_get_u64(sts_cfg(), CFG_KEY_PWR_RB_VMAX_MV, &v) == 0) {
-		uint32_t vmax = (v > (uint64_t)PWR_RB_VMAX_MV_CEILING)
-					? PWR_RB_VMAX_MV_CEILING
-					: (uint32_t)v;
 		int32_t need = pwrseq_rb_expected_mv(&cfg->rb_xfer,
 						     cfg->digipot_operating_code);
+		sts_rb_vmax_t d;
 
-		if (vmax != (uint32_t)v) {
+		sts_rb_vmax_decide(v, cfg->rb_vmax_mv, need, &d);
+
+		if (d.clamped) {
 			LOG_WRN("pwr.rb.vmax.mv %llu mV exceeds the %u mV hardware "
 				"ceiling; clamped",
-				(unsigned long long)v, PWR_RB_VMAX_MV_CEILING);
+				(unsigned long long)v, STS_RB_VMAX_MV_CEILING);
 		}
 		/*
 		 * A ceiling below the fixed operating setpoint would make
 		 * pwrseq_init() reject the whole configuration — and a sequencer
 		 * that never starts means no GPS, no display, no watchdog and no
 		 * relay, i.e. a config typo would brick the box far beyond the
-		 * rubidium. Refuse the value instead and keep the default.
+		 * rubidium. sts_rb_vmax_decide() refuses the value instead and
+		 * hands back the default.
 		 */
-		if ((need > 0) && (vmax < (uint32_t)need)) {
-			LOG_ERR("pwr.rb.vmax.mv %u mV is below the %d mV operating "
+		if (d.refused) {
+			LOG_ERR("pwr.rb.vmax.mv %llu mV is below the %d mV operating "
 				"setpoint; keeping the %u mV default",
-				vmax, need, cfg->rb_vmax_mv);
-		} else {
-			cfg->rb_vmax_mv = vmax;
+				(unsigned long long)v, need, d.vmax_mv);
 		}
+
+		cfg->rb_vmax_mv = d.vmax_mv;
 	}
 	/*
 	 * The PoE budget is a per-tick input (pwrseq_in_t.poe_granted_mw), not
@@ -164,49 +160,38 @@ static void pwrseq_load_cfg(pwrseq_cfg_t *cfg)
 
 /* ------------------------------------------------------------- inputs ----- */
 
-static uint8_t pwrseq_pg_mask(void)
+/*
+ * One locked read of the debounced bitmap, decoded outside the lock. Both
+ * consumers used to take the fault lock separately and call fault_asserted()
+ * ten times between them; one snapshot is both cheaper and self-consistent —
+ * the rails and the supercaps now describe the same instant.
+ */
+static uint32_t pwrseq_fault_snapshot(void)
 {
-	uint8_t mask = 0;
+	uint32_t asserted;
 
 	sts_fault_lock();
-	for (unsigned int n = 0; n < 8U; n++) {
-		/* FAULT_SIG_PG_3V3_GPS_LDO (16) is PG0; asserted = not-good. */
-		if (!fault_asserted(sts_fault(),
-				    (fault_sig_t)(FAULT_SIG_PG_3V3_GPS_LDO + n))) {
-			mask |= (uint8_t)PWRSEQ_PG(n);
-		}
-	}
+	asserted = fault_state(sts_fault());
 	sts_fault_unlock();
 
-	return mask;
-}
-
-static bool pwrseq_supercaps_charged(void)
-{
-	bool ok;
-
-	sts_fault_lock();
-	ok = !fault_asserted(sts_fault(), FAULT_SIG_BKP_STM_PG) &&
-	     !fault_asserted(sts_fault(), FAULT_SIG_BKP_GPS_PG);
-	sts_fault_unlock();
-
-	return ok;
+	return asserted;
 }
 
 static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms)
 {
 	sts_hk_snapshot_t hk;
 	quality_block_t q;
+	uint32_t faults;
 	uint16_t dp = 0;
 	uint32_t extref_hz = 0;
 	bool extref_valid = false;
 	bool extref_edges = false;
 	uint64_t policy = 1;
-	int32_t poe_mv = 0;
-	int32_t poe_ma = 0;
 
 	memset(in, 0, sizeof(*in));
 	in->mono_ms = now_ms;
+
+	faults = pwrseq_fault_snapshot();
 
 	(void)sts_hk_read(&hk);
 	(void)sts_quality_snapshot(&q);
@@ -242,18 +227,17 @@ static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms)
 		 * against a 250 ms tick meant a reading up to a second older than
 		 * the rail change it was supposed to observe.
 		 */
-		in->ina_age_ms[r] = hk.ina[r].valid
-					    ? (now_ms - hk.ina[r].age_ms)
-					    : UINT32_MAX;
+		in->ina_age_ms[r] = sts_rb_ina_age_ms(hk.ina[r].valid, now_ms,
+						      hk.ina[r].age_ms);
 	}
-	in->pg_mask = pwrseq_pg_mask();
+	in->pg_mask = sts_rb_pg_mask(faults);
 
 	in->ocxo_warm = (q.flags & QUALITY_FLAG_OCXO_WARM) != 0U;
 	in->ocxo_temp_stable = (q.flags & QUALITY_FLAG_OSC_TEMP_VALID) != 0U;
 
 	(void)cfg_get_u64(sts_cfg(), CFG_KEY_PWR_RB_POLICY, &policy);
 	in->rb_wanted = (policy != 0U);
-	in->supercaps_charged = pwrseq_supercaps_charged();
+	in->supercaps_charged = sts_rb_supercaps_charged(faults);
 
 	if (sts_digipot_get(&dp) == 0) {
 		in->digipot_readback = dp;
@@ -261,19 +245,16 @@ static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms)
 	}
 
 	in->rb_lock = sts_pwrseq_rb_lock();
-	in->extref_in_band = extref_valid && extref_hz >= 9999800U &&
-			     extref_hz <= 10000200U;
+	in->extref_in_band = sts_rb_extref_in_band(extref_hz, extref_valid);
 	if (gpio_is_ready_dt(&rb_ov_det)) {
 		in->rb_ov_det = gpio_pin_get_dt(&rb_ov_det) == 1;
 	}
 
 	(void)cfg_get_u64(sts_cfg(), CFG_KEY_PWR_POE_BUDGET_MW, &policy);
 	in->poe_granted_mw = (uint32_t)policy;
-	poe_mv = hk.ina[INA228_RAIL_POE].bus_uv / 1000;
-	poe_ma = hk.ina[INA228_RAIL_POE].current_ua / 1000;
-	if (hk.ina[INA228_RAIL_POE].valid && poe_mv > 0 && poe_ma > 0) {
-		in->poe_measured_mw = (uint32_t)(((int64_t)poe_mv * poe_ma) / 1000);
-	}
+	in->poe_measured_mw = sts_rb_poe_mw(hk.ina[INA228_RAIL_POE].valid,
+					    hk.ina[INA228_RAIL_POE].bus_uv,
+					    hk.ina[INA228_RAIL_POE].current_ua);
 
 	in->ui_wanted = IS_ENABLED(CONFIG_STS1000_UI);
 	in->liveness_ok = sts_liveness_stale_mask(now_ms) == 0U;
@@ -605,9 +586,6 @@ bool sts_pwrseq_rb_lock(void)
 	}
 
 	level = gpio_pin_get_dt(&rb_lock_in);
-	if (level < 0) {
-		return false;
-	}
 
 	/*
 	 * The opto (U48) inverts: FE lock line high -> LED on -> transistor on ->
@@ -615,11 +593,8 @@ bool sts_pwrseq_rb_lock(void)
 	 * cannot be assumed for a surplus FE variant, so it is a firmware bit,
 	 * commissioned per unit — not a hard-coded polarity.
 	 */
-	if (IS_ENABLED(CONFIG_STS1000_RB_LOCK_ACTIVE_LOW)) {
-		return level == 0;
-	}
-
-	return level == 1;
+	return sts_rb_lock_from_level(
+		level, IS_ENABLED(CONFIG_STS1000_RB_LOCK_ACTIVE_LOW));
 }
 
 void sts_pwrseq_ant_bias_request(bool on)

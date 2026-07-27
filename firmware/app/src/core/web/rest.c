@@ -1001,6 +1001,26 @@ int rest_encode_metrics(rest_ctx_t *c, char *out, size_t cap)
 		metric(&m, "sts_nts_served_total", (int64_t)sv.nts_served);
 		metric(&m, "sts_ntske_ok_total", (int64_t)sv.ntske_ok);
 		metric(&m, "sts_ntske_fail_total", (int64_t)sv.ntske_fail);
+		/*
+		 * SNMPv3 USM. Every one of these is a refused request, so a
+		 * non-zero rate is either a misconfigured manager or somebody
+		 * probing the interface — the counters an operator alerts on.
+		 * `authenticated` is the denominator that tells the two apart.
+		 */
+		metric(&m, "sts_snmp_v3_authenticated_total",
+		       (int64_t)sv.snmp_v3_authenticated);
+		metric(&m, "sts_snmp_v3_unknown_user_total",
+		       (int64_t)sv.snmp_v3_unknown_users);
+		metric(&m, "sts_snmp_v3_wrong_digest_total",
+		       (int64_t)sv.snmp_v3_wrong_digests);
+		metric(&m, "sts_snmp_v3_not_in_time_window_total",
+		       (int64_t)sv.snmp_v3_time_windows);
+		metric(&m, "sts_snmp_v3_decryption_error_total",
+		       (int64_t)sv.snmp_v3_decrypt_errors);
+		metric(&m, "sts_snmp_v3_unknown_engine_total",
+		       (int64_t)sv.snmp_v3_unknown_engines);
+		metric(&m, "sts_snmp_v3_unsupported_sec_level_total",
+		       (int64_t)sv.snmp_v3_bad_sec_levels);
 	}
 	if (have_pv(c) && PV(c)->alarms != NULL) {
 		metric(&m, "sts_alarms_active", (int64_t)PV(c)->alarms(PV(c)->u));

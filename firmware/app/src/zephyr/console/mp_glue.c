@@ -189,6 +189,46 @@ static uint8_t mirror_attr[MP_MIRROR_CELLS];
 static ui_hint_t mirror_hints[UI_SURF_MAX_HINTS];
 static bool mirror_valid;
 
+/*
+ * The engine's private copy of the published frame.
+ *
+ * prov_mirror() cannot hold mirror_lock across the encode: it is a provider
+ * callback, core/mp encodes *after* it returns, and the worker vtable has no
+ * release hook to unlock on the way back out. Handing core pointers into
+ * mirror_ch/mirror_attr therefore let mp_mirror_encode() read 1200 cells with
+ * the lock down, so a keyframe issued exactly as the ui thread published could
+ * carry the top half of frame N and the bottom half of N+1. Self-correcting on
+ * the next frame, but a torn keyframe is precisely the frame a host trusts.
+ *
+ * So the provider snapshots under the lock and hands core the snapshot. One
+ * buffer is enough because every entry into core/mp is serialised by mp_lock
+ * (F11) and both callers — m_mirror_get() and pump_mirror() — are inside it.
+ */
+static char mirror_snap_ch[MP_MIRROR_CELLS];
+static uint8_t mirror_snap_attr[MP_MIRROR_CELLS];
+static ui_hint_t mirror_snap_hints[UI_SURF_MAX_HINTS];
+
+/*
+ * Frames sts_mp_mirror_publish() did not accept, cumulative.
+ *
+ * `mp status` used to report mirror_valid plus the *encoder's* frame counts,
+ * and neither of those moves when a publish is refused — so "the mirror is
+ * healthy" and "every frame since boot was dropped" printed identically.
+ *
+ * `mirror_drops` is the designed case: the 5 ms lock timeout expired because
+ * the MP tick held it, which is normal at 10 Hz and self-healing.
+ * `mirror_rejects` must stay zero — it counts a frame refused for its geometry
+ * or a NULL surface, which for the ui area is a build error caught by the
+ * BUILD_ASSERT in sts_ui.c, and for any future publisher is a bug that would
+ * otherwise be perfectly silent.
+ *
+ * Atomic because sts_app.h advertises sts_mp_mirror_publish() as callable from
+ * any cooperative thread, and both increments sit outside mirror_lock by
+ * necessity — the contended path is the one that could not take it.
+ */
+static atomic_t mirror_drops;
+static atomic_t mirror_rejects;
+
 static char mp_serial[MP_CONFIRM_MAX];
 static const struct shell *mp_shell;
 
@@ -491,6 +531,9 @@ static int prov_ilk(void *user, mp_ilk_state_t *out)
 
 static int prov_mirror(void *user, mp_mirror_in_t *out)
 {
+	size_t cells;
+	uint8_t hints;
+
 	ARG_UNUSED(user);
 
 	/*
@@ -521,11 +564,32 @@ static int prov_mirror(void *user, mp_mirror_in_t *out)
 		(void)k_mutex_unlock(&mirror_lock);
 		return -ENOTSUP;
 	}
+
+	/*
+	 * Snapshot the cells here, not just the descriptor: core/mp reads them
+	 * after this returns, with the lock down (see mirror_snap_ch above).
+	 * sts_mp_mirror_publish() has already bounded both counts, so the clamps
+	 * are belt-and-braces against a future publisher rather than live checks.
+	 */
 	*out = mirror_frame;
-	out->ch = mirror_ch;
-	out->attr = mirror_attr;
-	out->hint = mirror_hints;
+	cells = (size_t)mirror_frame.rows * (size_t)mirror_frame.cols;
+	if (cells > MP_MIRROR_CELLS) {
+		cells = MP_MIRROR_CELLS;
+	}
+	hints = mirror_frame.hint_count;
+	if (hints > UI_SURF_MAX_HINTS) {
+		hints = (uint8_t)UI_SURF_MAX_HINTS;
+	}
+	memcpy(mirror_snap_ch, mirror_ch, cells);
+	memcpy(mirror_snap_attr, mirror_attr, cells);
+	memcpy(mirror_snap_hints, mirror_hints,
+	       (size_t)hints * sizeof(ui_hint_t));
 	(void)k_mutex_unlock(&mirror_lock);
+
+	out->ch = mirror_snap_ch;
+	out->attr = mirror_snap_attr;
+	out->hint = mirror_snap_hints;
+	out->hint_count = hints;
 	return 0;
 }
 
@@ -938,14 +1002,20 @@ void sts_mp_mirror_publish(const mp_mirror_in_t *frame)
 	size_t cells;
 
 	if ((frame == NULL) || (frame->ch == NULL) || (frame->attr == NULL)) {
+		(void)atomic_inc(&mirror_rejects);
 		return;
 	}
 	cells = (size_t)frame->rows * (size_t)frame->cols;
 	if ((cells == 0U) || (cells > MP_MIRROR_CELLS)) {
+		(void)atomic_inc(&mirror_rejects);
 		return;
 	}
 	if (k_mutex_lock(&mirror_lock, K_MSEC(5)) != 0) {
-		return; /* the tick has it; drop this frame rather than block ui */
+		/* The tick has it; drop this frame rather than block ui. Counted
+		 * so `mp status` can tell a live mirror from one that has been
+		 * dropping every frame — nothing else moves when this happens. */
+		(void)atomic_inc(&mirror_drops);
+		return;
 	}
 
 	mirror_frame = *frame;
@@ -1312,9 +1382,13 @@ static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 	 * this call site only picks a label, it does not go on to copy the cells
 	 * the flag vouches for.
 	 */
-	shell_print(sh, "mirror       %s (%u frames, %u keyframes)",
+	shell_print(sh,
+		    "mirror       %s (%u frames, %u keyframes, "
+		    "%u publish-drop, %u rejected)",
 		    mirror_valid ? "live" : "no frame yet (ui has not rendered)",
-		    mp.mirror.frames, mp.mirror.keyframes);
+		    mp.mirror.frames, mp.mirror.keyframes,
+		    (unsigned int)atomic_get(&mirror_drops),
+		    (unsigned int)atomic_get(&mirror_rejects));
 	shell_print(sh, "events       %u queued, %u dropped",
 		    (unsigned int)mp_stream_event_count(&mp.st),
 		    mp_stream_event_dropped(&mp.st));

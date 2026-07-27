@@ -293,6 +293,22 @@ uint32_t ntp_short_from_q16(uint64_t q16)
 	return (q16 > UINT64_C(0xFFFFFFFF)) ? UINT32_MAX : (uint32_t)q16;
 }
 
+uint64_t ntp_ts_from_tai_smeared(int64_t tai_ns, int32_t tai_minus_utc,
+				 int32_t smear_ns)
+{
+	/*
+	 * Subtract in the unsigned domain. The values that reach here in service
+	 * are ordinary (a TAI instant this century against a correction under a
+	 * second), but ntp_handle_request() is fuzzed with arbitrary inputs and a
+	 * signed overflow would be undefined behaviour rather than a wrong
+	 * answer. The wrap is harmless: ntp_ts_from_tai() truncates to the NTP
+	 * era immediately below.
+	 */
+	int64_t t = (int64_t)((uint64_t)tai_ns - (uint64_t)(int64_t)smear_ns);
+
+	return ntp_ts_from_tai(t, tai_minus_utc);
+}
+
 /* ------------------------------------------------------------ quality view */
 
 void ntp_quality_view_default(ntp_quality_view_t *q)
@@ -308,9 +324,18 @@ void ntp_quality_view_default(ntp_quality_view_t *q)
 	q->synchronized = false;
 }
 
+/** Saturating add in the NTP short (16.16 s) domain. */
+static uint32_t short_add_sat(uint32_t a, uint32_t b)
+{
+	uint64_t s = (uint64_t)a + (uint64_t)b;
+
+	return (s > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)s;
+}
+
 int ntp_quality_view_from_block(const quality_block_t *b, uint64_t now_tai_ns,
 				uint64_t now_mono_ms, bool time_traceable,
-				int8_t precision, ntp_quality_view_t *out)
+				int8_t precision, uint32_t smear_window_s,
+				ntp_quality_view_t *out)
 {
 	if (b == NULL || out == NULL) {
 		return -EINVAL;
@@ -346,8 +371,17 @@ int ntp_quality_view_from_block(const quality_block_t *b, uint64_t now_tai_ns,
 	out->synchronized = (b->stratum == (uint8_t)QUALITY_STRATUM_PRIMARY) &&
 			    time_traceable;
 
+	/*
+	 * Leap policy (spec §15.2). The model is core/quality's — a pure function
+	 * of this same block — so SNMP, the web plane and the console derive the
+	 * identical state from the snapshot they already hold. What is decided
+	 * *here*, and nowhere else, is whether it is applied and what it costs.
+	 */
+	(void)quality_leap_smear(b, smear_window_s, now_tai_ns, &out->smear);
+
 	out->leap = (uint8_t)NTP_LI_NONE;
-	if (b->leap_pending != 0 && now_tai_ns != 0U) {
+	if (out->smear.window_s == 0U && b->leap_pending != 0 &&
+	    now_tai_ns != 0U) {
 		uint64_t now_s = now_tai_ns / UINT64_C(1000000000);
 
 		if (b->leap_at_tai_s > now_s &&
@@ -356,6 +390,35 @@ int ntp_quality_view_from_block(const quality_block_t *b, uint64_t now_tai_ns,
 					    ? (uint8_t)NTP_LI_ADD
 					    : (uint8_t)NTP_LI_DEL;
 		}
+	}
+	/*
+	 * The gate above is on `window_s`, not on `smear.active`, and the
+	 * difference matters: a configured window shorter than the announcement
+	 * window would otherwise announce LI=1 for the hours before the ramp
+	 * starts and then withdraw it, which is exactly the contradiction
+	 * RFC 8633 §3.7.1 forbids. A server configured to smear announces no leap
+	 * at all — the smear IS its handling of the event.
+	 */
+
+	if (out->smear.active) {
+		int32_t off = out->smear.offset_ns;
+		int64_t mag = (off < 0) ? -(int64_t)off : (int64_t)off;
+
+		/*
+		 * Forfeit the primary claim for as long as the served timescale
+		 * is knowingly offset from UTC. Stratum 2 and 'SMER' rather than
+		 * stratum 16: see the reasoning in ntp.h — an "unsynchronised"
+		 * advertisement is discarded outright by RFC 5905 clients, and a
+		 * smear no client accepts is a step with extra steps.
+		 */
+		if (out->stratum == (uint8_t)QUALITY_STRATUM_PRIMARY) {
+			out->stratum = (uint8_t)NTP_STRATUM_SMEAR;
+		}
+		out->refid = NTP_REFID_SMER;
+
+		/* Publish the deviation as what it is: maximum error. */
+		out->root_disp_q16 = short_add_sat(
+			out->root_disp_q16, quality_ntp_short_from_ns(mag));
 	}
 
 	/*
@@ -393,6 +456,9 @@ void ntp_cfg_default(ntp_cfg_t *cfg)
 	cfg->kod_on_limit = true;
 	cfg->interleave = false; /* opt-in, RFC 9769 — see ntp_cfg_t.interleave */
 	cfg->serve_unsync = true;
+	/* Step, not smear (spec §15.2). Explicit rather than relying on the
+	 * memset above: this is a decision, not an uninitialised field. */
+	cfg->smear_window_s = 0U;
 }
 
 /* ------------------------------------------------------------------- parse */
@@ -641,6 +707,11 @@ int ntp_init(ntp_ctx_t *ctx, const ntp_cfg_t *cfg, const port_crypto_t *crypto,
 	}
 	ctx->cfg.client_burst = clamp_burst(ctx->cfg.client_burst);
 	ctx->cfg.global_burst = clamp_burst(ctx->cfg.global_burst);
+	/* One authority for the smear-window band; ntp_smear_window() reads it
+	 * back so the view and the datapath cannot be built against different
+	 * windows. A non-zero request never clamps to zero. */
+	ctx->cfg.smear_window_s =
+		quality_smear_window_clamp(ctx->cfg.smear_window_s);
 
 	/*
 	 * Fixed fallback for the client-identity key. Only reached when there is
@@ -681,6 +752,11 @@ int ntp_init(ntp_ctx_t *ctx, const ntp_cfg_t *cfg, const port_crypto_t *crypto,
 	ctx->g_tokens_ms = now_ms;
 	ctx->g_tokens_milli = ctx->cfg.global_burst * TOKEN_SCALE;
 	return 0;
+}
+
+uint32_t ntp_smear_window(const ntp_ctx_t *ctx)
+{
+	return (ctx == NULL) ? 0U : ctx->cfg.smear_window_s;
 }
 
 int ntp_set_ext_hook(ntp_ctx_t *ctx, const ntp_ext_hook_t *hook)
@@ -1025,6 +1101,7 @@ int ntp_handle_request(ntp_ctx_t *ctx, const ntp_rx_t *rx,
 	uint64_t org_out;
 	uint32_t refid;
 	uint32_t kod_refid = 0U;
+	int32_t smear_ns;
 	uint8_t li;
 	uint8_t stratum;
 	size_t budget;
@@ -1142,13 +1219,30 @@ int ntp_handle_request(ntp_ctx_t *ctx, const ntp_rx_t *rx,
 		mac_reserve = p.mac_len; /* response uses the same key and length */
 	}
 
-	/* --- 5. build ------------------------------------------------------ */
-	rx_ntp = ntp_ts_from_tai(rx->rx_tai_ns, q->tai_minus_utc); /* t6 */
+	/*
+	 * --- 5. build ------------------------------------------------------
+	 *
+	 * Every UTC-bearing field goes through the same leap-smear correction
+	 * (spec §15.2), which is 0 unless a smear is running — so this is
+	 * bit-identical to an unsmeared build in the default configuration. The
+	 * origin field is deliberately NOT corrected: it is the client's own
+	 * timestamp echoed back, on the client's timescale, not ours.
+	 *
+	 * The correction touches nothing but these three fields. It is not
+	 * applied to `rx->rx_tai_ns`, to `rx->tx_tai_ns`, or to anything the
+	 * discipline loop or the PTP clock can observe — this is a serving
+	 * policy, and a serving policy that reached the timebase would be a
+	 * timing fault.
+	 */
+	smear_ns = q->smear.offset_ns;
+	rx_ntp = ntp_ts_from_tai_smeared(rx->rx_tai_ns, q->tai_minus_utc,
+					 smear_ns); /* t6 */
 	ref_ntp = (q->ref_tai_ns != 0)
-			  ? ntp_ts_from_tai(q->ref_tai_ns, q->tai_minus_utc)
+			  ? ntp_ts_from_tai_smeared(q->ref_tai_ns,
+						    q->tai_minus_utc, smear_ns)
 			  : rx_ntp;
 	rec = rx_ntp;
-	xmt = ntp_ts_from_tai(rx->tx_tai_ns, q->tai_minus_utc);
+	xmt = ntp_ts_from_tai_smeared(rx->tx_tai_ns, q->tai_minus_utc, smear_ns);
 	org_out = p.xmt_ts; /* basic mode (RFC 5905): echo the client transmit */
 
 	/*

@@ -57,6 +57,7 @@
 #include <zephyr/app_version.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/reboot.h>
 
 #include "cfg/cfg.h"
@@ -66,6 +67,7 @@
 #include "ui/ui.h"
 #include "zephyr/sts_app.h"
 #include "zephyr/ui/sts_ui.h"
+#include "zephyr/ui/sts_ui_echo.h"
 
 LOG_MODULE_REGISTER(sts_ui, CONFIG_STS1000_LOG_LEVEL);
 
@@ -100,11 +102,20 @@ BUILD_ASSERT((size_t)(STS_UI_ROWS * STS_UI_COLS) <= (size_t)(20u * 60u),
 #define UI_INQ_DEPTH 16
 K_MSGQ_DEFINE(ui_inq, sizeof(sts_input_evt_t), UI_INQ_DEPTH, 4);
 
+/*
+ * Events sts_ui_post_input() could not enqueue, cumulative.
+ *
+ * Written by the io_scan thread (priority 11), read by the render thread, so it
+ * is an atomic rather than a plain word. It is the *only* evidence that the
+ * level state reconstructed below is incomplete — see sts_ui_echo.h for why the
+ * reconstruction is lossy and what the consumer does about it.
+ */
+static atomic_t ui_inq_drops;
+
 static struct k_thread ui_thread;
 static K_THREAD_STACK_DEFINE(ui_stack, STS_UI_RENDER_STACK);
 
 static int ui_liveness_id = -1;
-static bool lamp_on;
 
 /*
  * Input echo for the panel mirror (sts_app.h sts_mp_mirror_publish).
@@ -113,9 +124,14 @@ static bool lamp_on;
  * render tick both run there — so no lock is involved. These are the UI area's
  * own view of the scan it is fed; core/fault's debounced bitmap itself is behind
  * the platform's fault lock and is not exposed cross-area.
+ *
+ * `mirror_echo` carries the button levels and the lamp-test hold, both
+ * reconstructed from an event stream that can drop; sts_ui_echo_sync() below
+ * folds ui_inq_drops in once per frame and clears the echo whenever one was
+ * lost, so a dropped release cannot latch a phantom held key into the mirror.
  */
-static uint32_t mirror_buttons; /**< FAULT_SIG_BIT bitmap: PF0..PF6 + PF11 */
-static int32_t mirror_enc_pos;  /**< detents accumulated since encoder init */
+static sts_ui_echo_t mirror_echo;
+static int32_t mirror_enc_pos; /**< detents accumulated since encoder init */
 static uint16_t mirror_touch_x;
 static uint16_t mirror_touch_y;
 static uint32_t mirror_touch_ms; /**< 0 = no coordinate has ever been read */
@@ -171,19 +187,17 @@ static void handle_scan_event(const sts_input_evt_t *e)
 		uint8_t kind = button_press_kind(e->id);
 
 		/* Mirror echo: the scan posts press (1) and release (0) for every
-		 * FAULT_CLASS_BUTTON signal, so the bitmap tracks both edges. */
+		 * FAULT_CLASS_BUTTON signal, so the bitmap tracks both edges —
+		 * subject to the drop reconciliation in sts_ui_echo.h. */
 		if (e->id < (uint8_t)FAULT_SIG_COUNT) {
-			if (e->value != 0) {
-				mirror_buttons |= FAULT_SIG_BIT(e->id);
-			} else {
-				mirror_buttons &= ~FAULT_SIG_BIT(e->id);
-			}
+			sts_ui_echo_button(&mirror_echo, e->id, e->value != 0);
 		}
 
 		if (e->id == FAULT_SIG_BUTTON_6) {
 			/* LAMP is level: press = held, release = released. */
-			lamp_on = (e->value != 0);
-			ui_feed((uint8_t)UI_IN_LAMP, lamp_on ? 1 : 0, 0u, 0u);
+			mirror_echo.lamp = (e->value != 0);
+			ui_feed((uint8_t)UI_IN_LAMP, mirror_echo.lamp ? 1 : 0,
+				0u, 0u);
 		} else if (e->value != 0 && kind != (uint8_t)UI_IN_NONE) {
 			ui_feed(kind, 0, 0u, 0u); /* act on press only */
 		}
@@ -244,8 +258,17 @@ void sts_ui_post_input(const sts_input_evt_t *evt)
 	if (evt == NULL) {
 		return;
 	}
-	/* Drop-on-full: a stuck button must never delay the 1 kHz scan. */
-	(void)k_msgq_put(&ui_inq, evt, K_NO_WAIT);
+	/*
+	 * Drop-on-full: a stuck button must never delay the 1 kHz scan. Count
+	 * what was lost — k_msgq_put()'s own return code, not a separate
+	 * k_msgq_num_free_get() probe, because only the return code is exact
+	 * and free of a window between the check and the put. The render thread
+	 * reads this to decide whether its reconstructed level state can still
+	 * be trusted (sts_ui_echo.h).
+	 */
+	if (k_msgq_put(&ui_inq, evt, K_NO_WAIT) != 0) {
+		(void)atomic_inc(&ui_inq_drops);
+	}
 }
 
 /* ----------------------------------------------------------- action drain */
@@ -256,10 +279,11 @@ void sts_ui_post_input(const sts_input_evt_t *evt)
  * sts_app.h: sts_cfg() is not internally locked and the MCP engine, the shell
  * backend and the web plane write the same tree, so the STAGE must be bracketed
  * by sts_cfg_lock()/sts_cfg_unlock(). The lock is then RELEASED before
- * sts_cfg_commit(), which takes the mutex itself and dispatches appliers with it
- * down — holding it across the commit would run every applier inside the config
- * critical section (the lock is recursive, so it would not deadlock; it would
- * quietly park every other cfg user behind display and socket I/O).
+ * sts_cfg_commit(), which takes the mutex itself and then dispatches the
+ * appliers with it RELEASED again (sts_app.c drops it before the dispatch loop).
+ * Holding ours across the commit would undo exactly that: the mutex is recursive,
+ * so it would not deadlock — it would quietly run every applier inside the config
+ * critical section, parking every other cfg user behind display and socket I/O.
  */
 static void ui_cfg_persist(uint16_t id, uint64_t val)
 {
@@ -555,6 +579,43 @@ static void build_health(ui_health_t *h, const quality_block_t *q,
 /* -------------------------------------------------------------- panel mirror */
 
 /**
+ * Fold the scan queue's drop count into the input echo, once per render tick.
+ *
+ * Runs before ui_tick()/ui_render() rather than beside mirror_publish(), so the
+ * lamp release a lost edge implies is acted on in the *same* frame the mirror
+ * reports it in — otherwise the panel LED string would stay lit for one more
+ * tick than the mirror says it is.
+ *
+ * The counter is only ever compared, never trusted as a magnitude, so its 2^32
+ * wrap needs no handling (sts_ui_echo.h).
+ */
+static void echo_reconcile(void)
+{
+	bool was_lamp = mirror_echo.lamp;
+
+	if (!sts_ui_echo_sync(&mirror_echo,
+			      (uint32_t)atomic_get(&ui_inq_drops))) {
+		return;
+	}
+
+	if (was_lamp) {
+		/* The lost edge may have been this button's release. Command the
+		 * release rather than only forgetting it: the LAMP level drives
+		 * UI_ACTION_LAMP_TEST, and a stranded "held" leaves the whole
+		 * panel LED string full-on indefinitely. */
+		ui_feed((uint8_t)UI_IN_LAMP, 0, 0u, 0u);
+	}
+
+	LOG_WRN("panel input queue overflowed (%u events lost, %u resyncs); "
+		"button echo cleared",
+		(unsigned int)mirror_echo.drops_seen,
+		(unsigned int)mirror_echo.resyncs);
+	sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_WARN,
+		"panel input dropped (%u total); mirror button echo resynced",
+		(unsigned int)mirror_echo.drops_seen);
+}
+
+/**
  * Publish the just-rendered frame for the Maintenance Protocol panel mirror
  * (channel 0x0A / `mirror.get`).
  *
@@ -614,24 +675,38 @@ static void mirror_publish(uint64_t alarms)
 	 * ui_ctx_t::lamp_test except across a wake edge, where core consumes the
 	 * waking event; core exposes no ui_lamp_test(), and for a mirror of "what
 	 * the operator is doing to the box" the held key is the honest answer. */
-	f.lamp_test = lamp_on;
+	f.lamp_test = mirror_echo.lamp;
 
 	/* (b) indicators. */
 	f.panel_duty_pct = sts_panel_led_get();
 	/* sts_app.h: duty 0 drops PANEL_LED_EN (PC0) and any non-zero duty asserts
 	 * it, so the commanded duty IS the rail state — one writer, no readback. */
 	f.panel_rail_on = (f.panel_duty_pct != 0u);
-	/* PF12 (U55 RT9742 nFLG) is scanned signal 12, and alarm ids 0..31 mirror
-	 * fault_sig_t one-for-one (fault.h), so the alarm mask is the cross-area
-	 * view of that pin. @p alarms is the tick's single sts_alarms_active()
-	 * reading, shared with build_health() — that call takes the platform's
-	 * fault mutex, and the render path takes it once per frame, not twice. */
+	/*
+	 * The unmasked panel-LED fault ALARM, which is deliberately not the same
+	 * thing as "PF12 asserted".
+	 *
+	 * PF12 (U55 RT9742 nFLG) is scanned signal 12 and alarm ids 0..31 mirror
+	 * fault_sig_t one-for-one (fault.h), so the alarm mask is this area's only
+	 * cross-area view of that pin. But sts_alarms_active() is fault_alarms(),
+	 * which drops anything in core/fault's expected-off set, and pwrseq_exec.c
+	 * puts FAULT_SIG_PANEL_LED_FAULT there on every PANEL_LED_DIS. With the
+	 * rail deliberately gated off this therefore reports false while the pin
+	 * is asserted — the useful answer (a rail firmware turned off is not a
+	 * fault), and the reason mp_mirror.h documents the field as an alarm.
+	 *
+	 * @p alarms is the tick's single sts_alarms_active() reading, shared with
+	 * build_health() — that call takes the platform's fault mutex, and the
+	 * render path takes it once per frame, not twice.
+	 */
 	f.panel_fault = (alarms &
 			 FAULT_ALARM_BIT(FAULT_SIG_PANEL_LED_FAULT)) != 0u;
 	f.bl_permille = ui_backlight_permille(&g_ui);
 
-	/* (c) input echo. */
-	f.buttons_down = mirror_buttons;
+	/* (c) input echo. Reconciled against the scan-queue drop count by the
+	 * caller (echo_reconcile()) immediately before this runs, so a lost
+	 * release cannot present as a stuck key. */
+	f.buttons_down = mirror_echo.down;
 	f.enc_pos = mirror_enc_pos;
 	f.touch_x = mirror_touch_x;
 	f.touch_y = mirror_touch_y;
@@ -652,8 +727,10 @@ static void mirror_publish(uint64_t alarms)
  * this case — "every read that must not see a half-applied commit" — and taking
  * the mutex here is free, since an applier only runs on a commit.
  *
- * No deadlock: sts_cfg_commit(), sts_cfg_factory_reset() and
- * sts_cfg_register_store() all dispatch appliers with the mutex down.
+ * No deadlock, and not because the mutex is recursive: sts_cfg_commit(),
+ * sts_cfg_factory_reset() and sts_cfg_register_store() all release it before
+ * they dispatch, precisely so an applier may block on sockets, DNS or display
+ * I/O. Taking it here is therefore an ordinary, normally-uncontended acquire.
  */
 static void apply_ui_group(void *ctx, uint8_t group)
 {
@@ -718,6 +795,8 @@ static void ui_thread_entry(void *p1, void *p2, void *p3)
 			ui_health_t h;
 			uint64_t alarms;
 			int32_t detents = ui_input_encoder_delta();
+
+			echo_reconcile();
 
 			if (detents != 0) {
 				mirror_enc_pos += detents;

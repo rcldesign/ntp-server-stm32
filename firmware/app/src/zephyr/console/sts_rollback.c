@@ -190,7 +190,35 @@ int sts_rollback_check_staged(void)
 {
 	sts_rollback_staged_t verdict;
 	uint32_t staged = 0U;
+	uint32_t running = 0U;
 	int rc;
+
+	/*
+	 * Compare against slot 0's SIGNED counter, not the compiled-in
+	 * SECURITY_EPOCH.
+	 *
+	 * MCUboot compares the staged image's IMAGE_TLV_SEC_CNT against the
+	 * running image's, and this pre-flight exists solely to reach the same
+	 * verdict earlier and with logging. Using the compiled-in constant makes
+	 * that true only while the imgtool argument and the Kconfig agree — and
+	 * on a unit where the argument silently did not land, the two disagree
+	 * and the pre-flight answers a different question from the one MCUboot
+	 * will answer at the next boot. The configure-time check in
+	 * app/CMakeLists.txt makes that build hard to produce; it does not make
+	 * this comparison correct.
+	 */
+	rc = sts_rollback_slot_epoch(0U, &running);
+	if (rc != 0) {
+		/*
+		 * Refuse rather than fall back to SECURITY_EPOCH. A slot 0 whose
+		 * counter cannot be read is exactly the case where the constant
+		 * is least trustworthy, so substituting it would be guessing at
+		 * the moment guessing is most expensive.
+		 */
+		LOG_ERR("anti-rollback: slot 0 security counter unreadable "
+			"(%d); refusing to mark slot 1 pending", rc);
+		return -EIO;
+	}
 
 	rc = sts_rollback_slot_epoch(1U, &staged);
 	if ((rc != 0) && (rc != -ENOENT) && (rc != -EILSEQ)) {
@@ -201,7 +229,7 @@ int sts_rollback_check_staged(void)
 		return -EIO;
 	}
 
-	verdict = sts_rollback_staged_verdict(rc, staged, SECURITY_EPOCH);
+	verdict = sts_rollback_staged_verdict(rc, staged, running);
 	if (verdict == STS_ROLLBACK_STAGED_OK) {
 		LOG_INF("anti-rollback: staged image security epoch %u >= "
 			"running %u — acceptable",
@@ -212,7 +240,7 @@ int sts_rollback_check_staged(void)
 	LOG_ERR("anti-rollback: REFUSING the staged image (%s). Running epoch "
 		"%u, staged %s%u. MCUboot would erase it at the next boot with "
 		"its logging compiled out, so it is refused here instead.",
-		sts_rollback_staged_str(verdict), (unsigned int)SECURITY_EPOCH,
+		sts_rollback_staged_str(verdict), (unsigned int)running,
 		(rc == 0) ? "" : "n/a, rc ", (rc == 0) ? staged : (uint32_t)(-rc));
 	sts_log((uint8_t)LOGR_SUB_SYS, (uint8_t)LOGR_CRIT,
 		"anti-rollback refused a staged image: %s",

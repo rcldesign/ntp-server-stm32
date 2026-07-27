@@ -232,6 +232,23 @@ typedef struct {
 	char     fw_version[24];
 	char     model[16];
 	uint8_t  board_id[8];
+
+	/*
+	 * SNMPv3 USM refusal counters (RFC 3414 §5 usmStats).
+	 *
+	 * The evidence base for "somebody is working on the v3 interface": an
+	 * attacker guessing a USM user name, replaying outside the timeliness
+	 * window, or failing the digest increments exactly these. They are
+	 * exported as counters rather than folded into an alarm because the
+	 * useful signal is the *rate*, which only a poller can see.
+	 */
+	uint64_t snmp_v3_unknown_users;
+	uint64_t snmp_v3_wrong_digests;
+	uint64_t snmp_v3_time_windows;
+	uint64_t snmp_v3_decrypt_errors;
+	uint64_t snmp_v3_unknown_engines;
+	uint64_t snmp_v3_bad_sec_levels;
+	uint64_t snmp_v3_authenticated;
 } rest_services_t;
 
 /** One image slot. */

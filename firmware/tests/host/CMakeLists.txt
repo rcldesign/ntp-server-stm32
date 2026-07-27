@@ -135,6 +135,35 @@ module_deps(glue_policy)
 # here. It compiles no core module, hence the empty dependency list.
 module_deps(ppscorr)
 
+# The platform area's safety policy, all four in Zephyr-free headers beside
+# their .c for the same reason `ppscorr` is: these decisions are silent when
+# they are wrong and dangerous when silent, and none of them is reachable from a
+# host test through the .c, which is devicetree tables, timers and threads.
+#
+# `io_policy` (platform/sts_io_policy.h) — the 1 kHz scan's signal-to-pin split,
+# the ALERT-to-monitor lookup and the event dispatch. It resolves rails through
+# ina228_rail_tbl[] and names signals from core/fault, hence both edges.
+module_deps(io_policy   fault ina228 logring util)
+
+# `fan_policy` (platform/sts_fan_policy.h) — the fan actuator and the thermal
+# ladder's rungs 2 and 3. core/thermal decides the duty; this decides what
+# happens to it, including the ARCHITECTURE.md §10.9 invariant that the resting
+# state is full speed.
+module_deps(fan_policy  thermal fault util)
+
+# `super_policy` (platform/sts_super_policy.h) — the liveness AND-gate feeding
+# the TPS3430 kick, the holdover relay's three gates, the status-RGB inputs and
+# the §8.3 self-confirm trigger. The cadence arithmetic itself is core/pwrseq's
+# (pwrseq_wdt_service), already covered by the `pwrseq` suite.
+module_deps(super_policy pwrseq fault quality ina228 util)
+
+# `rbguard` (platform/sts_rbguard.h) — the stage-8 rubidium envelope: the
+# hardware ceiling on the configurable VCC_RB limit, the refusal of a ceiling
+# below the operating setpoint, the PG mask decode, the EXTREF band and the
+# RB_LOCK opto polarity. The root CLAUDE.md is explicit that an error here can
+# destroy the rubidium.
+module_deps(rbguard     pwrseq fault ina228 util)
+
 # `gnss_tee` is the same idea for the platform area's NMEA/UBX run classifier
 # (app/src/zephyr/platform/gnss_tee.h): the split that decides which of the
 # maintenance tool's two capture channels each received byte belongs to. It runs
@@ -144,6 +173,15 @@ module_deps(ppscorr)
 # technician's capture. Zephyr-free by construction, hence the empty dependency
 # list.
 module_deps(gnss_tee)
+
+# `smear_isolation` is an architecture-fitness test, not a unit test: it scans
+# the source tree to enforce that the spec §15.2 leap smear stays confined to
+# the NTP serving path — never the PTP grandmaster (IEEE 1588 has no smear
+# concept) and never the discipline loop. C has no module privacy and the PTP
+# glue transitively includes ntp/ntp.h, so the containment cannot be expressed
+# in the language; it is checked here instead. It compiles no core module, hence
+# the empty dependency list — it reads the sources, it does not link them.
+module_deps(smear_isolation)
 
 # `ntp_keys` is the same idea for the net area's key reconciliation
 # (app/src/zephyr/net/sts_ntp_keys.h): Zephyr-free by construction so the
@@ -343,6 +381,10 @@ foreach(test_src IN LISTS TEST_SOURCES)
     "${CORE_DIR}"
     "${APP_SRC_DIR}"
     "${CMAKE_CURRENT_LIST_DIR}/support")
+  # For suites that read the source tree rather than link it — see
+  # test_smear_isolation.c. Harmless everywhere else.
+  target_compile_definitions(${test_target} PRIVATE
+    STS_APP_SRC_DIR="${APP_SRC_DIR}")
   target_link_libraries(${test_target} PRIVATE unity sts_warnings sts_coverage)
 
   add_test(NAME ${suite_name} COMMAND ${test_target})

@@ -21,6 +21,12 @@
  * push the next one out — the period stays anchored to the timer, and a missed
  * slot is counted instead of silently stretching the debounce windows that
  * core/fault measures in wall time.
+ *
+ * Everything this file *decides* — the signal-to-port/bit split, the ALERT
+ * signal-to-monitor lookup, what each debounced event turns into, the overrun
+ * and dropped-event tests — lives in sts_io_policy.h, which is Zephyr-free and
+ * unit-tested on the host (tests/host/test_io_policy.c). What is left here is
+ * the devicetree, the ports, the thread and the pacing.
  */
 
 #include <errno.h>
@@ -32,13 +38,25 @@
 #include <zephyr/logging/log.h>
 
 #include "zephyr/platform/platform.h"
+#include "zephyr/platform/sts_io_policy.h"
 #include "zephyr/sts_app.h"
 
 LOG_MODULE_REGISTER(sts_io_scan, CONFIG_STS1000_LOG_LEVEL);
 
 #define IO_SCAN_STACK_SIZE 2048
 #define IO_SCAN_PRIO       11  /* ARCHITECTURE.md §6 */
-#define IO_SCAN_PERIOD_MS  1
+#define IO_SCAN_PERIOD_MS  STS_IO_SCAN_PERIOD_MS
+
+/*
+ * sts_io_policy.h re-declares the UI input types so it can stay free of
+ * sts_app.h (which pulls core/mp and core/cfg in for types nothing in the
+ * policy uses). These are what stop the copy drifting.
+ */
+BUILD_ASSERT((int)STS_IO_UI_BUTTON == (int)STS_INPUT_BUTTON);
+BUILD_ASSERT((int)STS_IO_UI_BUTTON_LONG == (int)STS_INPUT_BUTTON_LONG);
+BUILD_ASSERT((int)STS_IO_UI_BUTTON_REPEAT == (int)STS_INPUT_BUTTON_REPEAT);
+BUILD_ASSERT((int)STS_IO_UI_TOUCH == (int)STS_INPUT_TOUCH);
+BUILD_ASSERT((int)STS_IO_UI_PROX == (int)STS_INPUT_PROX);
 
 static const struct device *const gpiof = DEVICE_DT_GET(DT_NODELABEL(gpiof));
 static const struct device *const gpiog = DEVICE_DT_GET(DT_NODELABEL(gpiog));
@@ -51,7 +69,6 @@ static struct k_timer io_scan_timer;
 static struct {
 	uint32_t scans;
 	uint32_t overruns;
-	uint32_t evt_dropped_reported;
 	int liveness_id;
 } io_scan;
 
@@ -155,115 +172,36 @@ static int io_scan_configure_pins(void)
  * Event dispatch
  * -------------------------------------------------------------------------- */
 
-/*
- * Which of the nine monitors owns an ALERT signal.
- *
- * Resolved against ina228_rail_tbl[]'s own alert_port/alert_bit fields rather
- * than a second hand-written table, so the scan and the register map cannot
- * drift apart — the GPS monitor being at 0x4A and the panel monitor's alert
- * being the one on GPIOF are both facts this lookup inherits for free.
- */
-static int io_scan_ina_rail_for_sig(fault_sig_t sig, ina228_rail_t *out)
-{
-	uint8_t port;
-	uint8_t bit;
-
-	if (out == NULL || (unsigned int)sig >= FAULT_SIG_COUNT) {
-		return -EINVAL;
-	}
-
-	if ((unsigned int)sig < 16U) {
-		port = 'F';
-		bit = (uint8_t)sig;
-	} else {
-		port = 'G';
-		bit = (uint8_t)((unsigned int)sig - 16U);
-	}
-
-	for (size_t i = 0; i < INA228_RAIL_COUNT; i++) {
-		if (ina228_rail_tbl[i].alert_port == port &&
-		    ina228_rail_tbl[i].alert_bit == bit) {
-			*out = (ina228_rail_t)i;
-			return 0;
-		}
-	}
-
-	return -ENOENT;
-}
-
-static void io_scan_post_ui(uint8_t type, const fault_evt_t *evt, int16_t value)
-{
-	sts_input_evt_t ui = {
-		.type = type,
-		.id = evt->id,
-		.value = value,
-		.mono_ms = evt->mono_ms,
-	};
-
-	sts_ui_post_input(&ui);
-}
-
 static void io_scan_dispatch(const fault_evt_t *evt)
 {
-	switch (evt->type) {
-	case FAULT_EVT_BUTTON:
-		io_scan_post_ui(STS_INPUT_BUTTON, evt,
-				(evt->edge == FAULT_EDGE_ASSERT) ? 1 : 0);
-		break;
-	case FAULT_EVT_BUTTON_LONG:
-		io_scan_post_ui(STS_INPUT_BUTTON_LONG, evt, 1);
-		break;
-	case FAULT_EVT_BUTTON_REPEAT:
-		io_scan_post_ui(STS_INPUT_BUTTON_REPEAT, evt, 1);
-		break;
-	case FAULT_EVT_TOUCH:
-		if (evt->edge == FAULT_EDGE_ASSERT) {
-			io_scan_post_ui(STS_INPUT_TOUCH, evt, 1);
-		}
-		break;
-	case FAULT_EVT_PROX:
-		io_scan_post_ui(STS_INPUT_PROX, evt,
-				(evt->edge == FAULT_EDGE_ASSERT) ? 1 : 0);
-		break;
+	sts_io_dispatch_t plan;
 
-	case FAULT_EVT_INA_ALERT:
+	sts_io_dispatch_plan(evt->type, evt->id, evt->edge, &plan);
+
+	if (plan.post_ui) {
+		sts_input_evt_t ui = {
+			.type = (uint8_t)plan.ui_type,
+			.id = evt->id,
+			.value = plan.ui_value,
+			.mono_ms = evt->mono_ms,
+		};
+
+		sts_ui_post_input(&ui);
+	}
+
+	if (plan.ina_reread) {
+		sts_hk_request_ina(plan.ina_rail);
+	}
+
+	if (plan.log) {
 		/*
-		 * The ALERT pin says "something tripped"; only DIAG_ALRT says
-		 * what. Reading it here would put an I2C transaction inside the
-		 * 1 ms scan slot, so the housekeeping thread is asked to do it.
+		 * One call site for every event's log line: the message and its
+		 * severity are chosen together in the policy, so a recovery can
+		 * never acquire a failure's wording or level. Every template
+		 * takes exactly one %s, the signal name.
 		 */
-		if (evt->edge == FAULT_EDGE_ASSERT) {
-			ina228_rail_t rail;
-
-			if (io_scan_ina_rail_for_sig((fault_sig_t)evt->id, &rail) == 0) {
-				sts_hk_request_ina((uint8_t)rail);
-			}
-			sts_log(LOGR_SUB_PWR, LOGR_WARN, "INA228 ALERT: %s",
-				fault_sig_name((fault_sig_t)evt->id));
-		}
-		break;
-
-	case FAULT_EVT_PG_FAULT:
-		sts_log(LOGR_SUB_PWR, LOGR_ERR, "power-good lost: %s",
+		sts_log(plan.log_sub, plan.log_level, sts_io_msg_fmt(plan.msg),
 			fault_sig_name((fault_sig_t)evt->id));
-		break;
-	case FAULT_EVT_PG_RECOVER:
-		sts_log(LOGR_SUB_PWR, LOGR_NOTICE, "power-good restored: %s",
-			fault_sig_name((fault_sig_t)evt->id));
-		break;
-	case FAULT_EVT_EN_FAULT:
-		sts_log(LOGR_SUB_PWR,
-			(evt->edge == FAULT_EDGE_ASSERT) ? LOGR_ERR : LOGR_NOTICE,
-			"load switch %s %s", fault_sig_name((fault_sig_t)evt->id),
-			(evt->edge == FAULT_EDGE_ASSERT) ? "faulted" : "recovered");
-		break;
-	case FAULT_EVT_BKP_PG:
-		sts_log(LOGR_SUB_PWR, LOGR_NOTICE, "backup supply %s %s",
-			fault_sig_name((fault_sig_t)evt->id),
-			(evt->edge == FAULT_EDGE_ASSERT) ? "not good" : "good");
-		break;
-	default:
-		break;
 	}
 }
 
@@ -297,6 +235,7 @@ static void io_scan_entry(void *p1, void *p2, void *p3)
 	last_ms = k_uptime_get_32();
 
 	for (;;) {
+		sts_io_drop_action_t drop;
 		fault_evt_t evt;
 		uint32_t now_ms;
 		uint32_t dropped;
@@ -306,7 +245,7 @@ static void io_scan_entry(void *p1, void *p2, void *p3)
 		(void)k_sem_take(&io_scan_sem, K_FOREVER);
 
 		now_ms = k_uptime_get_32();
-		if ((now_ms - last_ms) > (IO_SCAN_PERIOD_MS + 1U)) {
+		if (sts_io_scan_overrun(now_ms, last_ms, IO_SCAN_PERIOD_MS)) {
 			io_scan.overruns++;
 		}
 		last_ms = now_ms;
@@ -348,13 +287,13 @@ static void io_scan_entry(void *p1, void *p2, void *p3)
 
 		sts_fault_lock();
 		dropped = fault_evt_dropped(sts_fault());
-		if (dropped != io_scan.evt_dropped_reported) {
+		sts_io_drop_action(dropped, &drop);
+		if (drop.clear) {
 			fault_evt_clear_dropped(sts_fault());
 		}
 		sts_fault_unlock();
 
-		if (dropped != io_scan.evt_dropped_reported) {
-			io_scan.evt_dropped_reported = dropped;
+		if (drop.log) {
 			sts_log(LOGR_SUB_PWR, LOGR_WARN,
 				"io_scan: %u fault events dropped", dropped);
 		}

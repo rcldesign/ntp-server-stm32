@@ -249,6 +249,62 @@ static snmp_v3_ctx_t v3;
 static uint8_t v3_engine_id[SNMP_V3_ENGINEID_MAX];
 static bool v3_ready;
 
+/*
+ * Published USM counter snapshot.
+ *
+ * The counters are the RFC 3414 §5 usmStats objects plus local bookkeeping —
+ * the whole evidence base for "someone is working on the v3 interface" — so
+ * they have to be readable from the management plane. They may NOT be read by
+ * calling snmp_v3_stats_get(&v3, ...) from a web worker: snmp_v3.h states that
+ * one context serves one thread (it carries the decrypt scratch), and the block
+ * above records that snmp_loop() is that thread. Reaching into `v3` from
+ * anywhere else would break the contract on the object that holds the keys.
+ *
+ * So the owning thread publishes a copy and everyone else reads the copy. The
+ * mutex is taken with K_FOREVER on both sides, which is safe to assert here and
+ * nowhere else in this file: the critical section is a single ~120-byte struct
+ * assignment with no I/O, no allocation and no nested lock, on either side. The
+ * double-buffer-and-publish-a-pointer trick used for `community` and
+ * `trap_user` does not apply — those publish one word, this is a struct — and a
+ * torn 64-bit counter read is exactly the kind of "the attack counter went
+ * backwards" artefact this exists to avoid.
+ */
+static K_MUTEX_DEFINE(v3_stats_lock);
+static snmp_v3_stats_t v3_stats_pub;
+
+/**
+ * Sum of the six RFC 3414 §5 usmStats objects in @p s.
+ *
+ * These six, and only these six, are the ones a Report PDU can carry and the
+ * ones that mean a request was refused by USM. `malformed` and `bad_sec_model`
+ * are excluded deliberately: a v1/v2c manager pointed at the wrong port trips
+ * them constantly and would drown the signal.
+ */
+static uint64_t usm_security_events(const snmp_v3_stats_t *s)
+{
+	return s->unsupported_sec_levels + s->not_in_time_windows +
+	       s->unknown_user_names + s->unknown_engine_ids +
+	       s->wrong_digests + s->decryption_errors;
+}
+
+/**
+ * Republish the USM counters, and hand the same reading back in @p out so the
+ * caller never has to read `v3_stats_pub` itself.
+ *
+ * **SNMP thread only**: it touches `v3`.
+ */
+static void v3_stats_publish(snmp_v3_stats_t *out)
+{
+	memset(out, 0, sizeof(*out));
+	if (v3_ready) {
+		(void)snmp_v3_stats_get(&v3, out);
+	}
+
+	(void)k_mutex_lock(&v3_stats_lock, K_FOREVER);
+	v3_stats_pub = *out;
+	(void)k_mutex_unlock(&v3_stats_lock);
+}
+
 /**
  * Monotonic base for snmpEngineTime, taken at snmp_v3_init().
  *
@@ -1476,6 +1532,8 @@ static void snmp_loop(void *a, void *b, void *c)
 {
 	uint64_t last_txn_ms = 0U;
 	uint64_t last_acl_log_ms = 0U;
+	uint64_t last_usm_log_ms = 0U;
+	uint64_t usm_logged = 0U;
 	uint32_t acl_logged = 0U;
 	bool cold_start_sent = false;
 
@@ -1485,6 +1543,7 @@ static void snmp_loop(void *a, void *b, void *c)
 
 	for (;;) {
 		struct zsock_pollfd fds[2];
+		snmp_v3_stats_t usm;
 		snmp_trap_t t;
 		uint64_t now;
 		int nfds = 0;
@@ -1534,6 +1593,12 @@ static void snmp_loop(void *a, void *b, void *c)
 			}
 		}
 
+		/* Republish the USM counters for the management plane, on the
+		 * one thread allowed to read the v3 context. Done straight after
+		 * the receive drain so a burst of refusals is visible on the very
+		 * next poll of /api/metrics rather than a poll period later. */
+		v3_stats_publish(&usm);
+
 		/* A coldStart is only meaningful once we can actually reach a
 		 * manager; defer it until the trap host resolves. */
 		if (!cold_start_sent && trap_resolved) {
@@ -1555,6 +1620,35 @@ static void snmp_loop(void *a, void *b, void *c)
 			LOG_WRN("net.mgmt.acl refused %u SNMP datagrams",
 				(unsigned int)(acl_refused - acl_logged));
 			acl_logged = acl_refused;
+		}
+
+		/*
+		 * USM refusals, on the same once-a-minute cadence and for a
+		 * stronger reason: unknown user names, wrong digests, stale time
+		 * windows and decryption errors are what a credential attack on
+		 * the v3 interface looks like, and a counter nobody reads is not
+		 * an alert. This goes to the log RING (sts_log), not only to
+		 * LOG_WRN, so it reaches /api/logs, the syslog sender and the MP
+		 * log channel rather than just a console nobody is attached to.
+		 */
+		{
+			uint64_t n = usm_security_events(&usm);
+
+			if ((n != usm_logged) &&
+			    ((now - last_usm_log_ms) >= 60000U)) {
+				last_usm_log_ms = now;
+				sts_log((uint8_t)LOGR_SUB_SEC,
+					(uint8_t)LOGR_WARN,
+					"SNMPv3 USM refused %u requests "
+					"(unknown-user %u, bad-digest %u, "
+					"time-window %u, decrypt %u)",
+					(unsigned int)(n - usm_logged),
+					(unsigned int)usm.unknown_user_names,
+					(unsigned int)usm.wrong_digests,
+					(unsigned int)usm.not_in_time_windows,
+					(unsigned int)usm.decryption_errors);
+				usm_logged = n;
+			}
 		}
 
 		while (trap_dequeue(&t)) {
@@ -1587,10 +1681,20 @@ void sts_snmp_v3_stats(snmp_v3_stats_t *out)
 	if (out == NULL) {
 		return;
 	}
-	memset(out, 0, sizeof(*out));
-	if (v3_ready) {
-		(void)snmp_v3_stats_get(&v3, out);
-	}
+	/*
+	 * The published snapshot, NOT snmp_v3_stats_get(&v3, ...). Callers are
+	 * web workers and the console; `v3` belongs to snmp_loop() alone
+	 * (snmp_v3.h, and the declaration block above). The snapshot is at most
+	 * one SNMP_POLL_MS stale, which for monotonic counters is not a
+	 * distinction any operator surface can act on.
+	 *
+	 * Zeroes before the SNMP thread has published once, and for the whole
+	 * run when SNMPv3 is off — both indistinguishable from "nothing has
+	 * happened yet", which is the truth in both cases.
+	 */
+	(void)k_mutex_lock(&v3_stats_lock, K_FOREVER);
+	*out = v3_stats_pub;
+	(void)k_mutex_unlock(&v3_stats_lock);
 }
 
 int sts_snmp_start(void)

@@ -97,6 +97,7 @@ extern "C" {
 /** Stratum values of interest (RFC 5905 §7.3). */
 #define NTP_STRATUM_KOD    0U  /* unspecified; refid carries a kiss code */
 #define NTP_STRATUM_PRIM   1U  /* primary reference (this server, locked) */
+#define NTP_STRATUM_SMEAR  2U  /* leap smear in progress: no longer primary */
 #define NTP_STRATUM_UNSYNC 16U /* unsynchronised */
 
 /** Reference identifiers, host order, written big-endian on the wire. */
@@ -106,6 +107,7 @@ extern "C" {
 
 #define NTP_REFID_GPS  NTP_REFID_MAKE('G', 'P', 'S', 0)    /* stratum-1 source */
 #define NTP_REFID_INIT NTP_REFID_MAKE('I', 'N', 'I', 'T')  /* not yet synced */
+#define NTP_REFID_SMER NTP_REFID_MAKE('S', 'M', 'E', 'R')  /* leap smear active */
 #define NTP_REFID_RATE NTP_REFID_MAKE('R', 'A', 'T', 'E')  /* KoD: rate exceeded */
 #define NTP_REFID_NTSN NTP_REFID_MAKE('N', 'T', 'S', 'N')  /* KoD: NTS NAK */
 #define NTP_REFID_DENY NTP_REFID_MAKE('D', 'E', 'N', 'Y')  /* KoD: access denied */
@@ -151,6 +153,26 @@ uint64_t ntp_ts_from_tai(int64_t tai_ns, int32_t tai_minus_utc);
  */
 uint32_t ntp_short_from_q16(uint64_t q16);
 
+/**
+ * ntp_ts_from_tai() with a leap-smear correction applied first.
+ *
+ * @param tai_ns         As ntp_ts_from_tai().
+ * @param tai_minus_utc  As ntp_ts_from_tai().
+ * @param smear_ns       quality_smear_t::offset_ns — **subtracted** from
+ *                       @p tai_ns before the conversion. 0 makes this exactly
+ *                       ntp_ts_from_tai(), which is why the whole datapath can
+ *                       call this unconditionally.
+ *
+ * Every UTC-bearing field of a response has to go through the same correction,
+ * or the exchange is self-inconsistent: a client that receives a smeared
+ * receive timestamp and an unsmeared transmit timestamp measures the smear
+ * offset as round-trip delay. That includes the *interleaved* transmit
+ * timestamp, which the platform converts separately in ntp_tx_complete() — see
+ * the smear field the glue carries in its pending-transmit table.
+ */
+uint64_t ntp_ts_from_tai_smeared(int64_t tai_ns, int32_t tai_minus_utc,
+				 int32_t smear_ns);
+
 /* ------------------------------------------------------------- quality view */
 
 /**
@@ -194,6 +216,18 @@ typedef struct {
 	bool holdover;
 	/** False → advertise LI=3, stratum 16, refid 'INIT' whatever else says. */
 	bool synchronized;
+	/**
+	 * Live leap-smear state (spec §15.2), or all-zero when smearing is off.
+	 *
+	 * Filled by ntp_quality_view_from_block() from the same snapshot the rest
+	 * of the view came from, so the header fields and the timestamp
+	 * correction can never describe different instants. `smear.offset_ns` is
+	 * already folded into the advertisement (see the degradation table at
+	 * ntp_quality_view_from_block()); the datapath applies it to the served
+	 * timestamps. Carried here rather than kept private so the glue can log
+	 * it and management surfaces can annunciate it.
+	 */
+	quality_smear_t smear;
 } ntp_quality_view_t;
 
 /** Fill @p q with the unsynchronised defaults (LI 3, stratum 16, precision −20). */
@@ -216,11 +250,49 @@ void ntp_quality_view_default(ntp_quality_view_t *q);
  * | leap            | `leap_pending` sign, and only inside NTP_LEAP_ANNOUNCE_WINDOW_S of `leap_at_tai_s`; LI 0 otherwise |
  * | ref_tai_ns      | `now_tai_ns` less the block's age, so it stops advancing in holdover and a client can see the staleness |
  * | synchronized    | stratum is primary **and** @p time_traceable |
+ * | smear           | quality_leap_smear() over the block, at @p smear_window_s |
+ *
+ * ### Leap smear (spec §15.2), when @p smear_window_s is non-zero
+ *
+ * Smearing is an NTP-only opt-in and it is **off by default**; a
+ * GPS-disciplined stratum-1 reference that smears is deliberately serving a
+ * UTC it knows to be wrong, and the same box is a PTP grandmaster, where IEEE
+ * 1588 has no smear concept and the grandmaster must step. Nothing in this
+ * function or below it can reach the PTP path: `ptp_quality_view_from_block()`
+ * projects the same block through its own function, which reads only
+ * `leap_pending` / `leap_at_tai_s` / `leap_current_s` / `utc_valid` — the
+ * un-smeared fields — and the correction itself is applied nowhere but in the
+ * three UTC-bearing header fields of an NTP response.
+ *
+ * Two things change while a window is configured, and a third while the ramp is
+ * actually running:
+ *
+ *  - **The leap is never announced.** LI stays 0 for the whole announcement
+ *    window, not merely for the ramp. RFC 8633 §3.7.1: a smearing server must
+ *    not set the leap indicator. Announcing a step and then smearing it away
+ *    is contradictory, and a client that implements both handles it worst.
+ *  - **The stratum-1 claim is forfeit while the ramp runs** — stratum 1
+ *    becomes NTP_STRATUM_SMEAR (2) and the reference identifier becomes
+ *    'SMER'. A server intentionally serving an offset UTC is not a traceable
+ *    primary reference, and for NTP the traceability assertion *is* stratum 1
+ *    with refid 'GPS'. It is deliberately not demoted to stratum 16: that
+ *    means "unsynchronised", RFC 5905 clients discard such a server outright,
+ *    and a smearing server the clients discard delivers no smear at all — they
+ *    fall back to something else and take the step, which is the exact outcome
+ *    the operator opted out of. Stratum 2 + 'SMER' keeps the server usable
+ *    while withdrawing the primary claim, and puts the state in front of every
+ *    operator on the network in `ntpq -p`.
+ *  - **Root dispersion grows by the instantaneous deviation.** The served
+ *    timescale is exactly |smear.offset_ns| away from UTC, and dispersion is
+ *    RFC 5905's maximum-error bound, so the deviation is added to it
+ *    (saturating). That is the same mechanism §3.6 uses for holdover, and it
+ *    is what makes a client's selection and combining algorithms weight this
+ *    server correctly instead of trusting it as if it were still exact.
  *
  * @param b              The snapshot to project. Not retained.
  * @param now_tai_ns     Current TAI nanoseconds; 0 when no time is available,
- *                       which suppresses the leap announcement and the
- *                       reference timestamp rather than inventing either.
+ *                       which suppresses the leap announcement, the smear and
+ *                       the reference timestamp rather than inventing any.
  * @param now_mono_ms    Current monotonic milliseconds, to age @p b.
  * @param time_traceable Whether the served timescale is actually traceable to
  *                       the primary reference. **This is a hard gate**: false
@@ -231,6 +303,10 @@ void ntp_quality_view_default(ntp_quality_view_t *q);
  *                       locked oscillator on an unplaced counter serves
  *                       confidently wrong time (F1).
  * @param precision      Clock precision as log2 seconds, for the header.
+ * @param smear_window_s Leap-smear window in seconds; 0 disables smearing
+ *                       entirely, which is the default and leaves every field
+ *                       below bit-identical to a build without the feature.
+ *                       Pass ntp_smear_window() so the clamp has one authority.
  * @param out            Receives the view.
  *
  * @retval 0        Success.
@@ -238,7 +314,8 @@ void ntp_quality_view_default(ntp_quality_view_t *q);
  */
 int ntp_quality_view_from_block(const quality_block_t *b, uint64_t now_tai_ns,
 				uint64_t now_mono_ms, bool time_traceable,
-				int8_t precision, ntp_quality_view_t *out);
+				int8_t precision, uint32_t smear_window_s,
+				ntp_quality_view_t *out);
 
 /* --------------------------------------------------------- parsed request */
 
@@ -471,13 +548,30 @@ typedef struct {
 	bool interleave;
 	/** Answer at all while unsynchronised (the reply carries LI 3 / stratum 16). */
 	bool serve_unsync;
+	/**
+	 * Leap-smear window in seconds; **0 (the default) means step**.
+	 *
+	 * The opt-in of spec §15.2, and NTP-only: nothing here is reachable from
+	 * the PTP grandmaster or from the discipline loop. A non-zero value is
+	 * clamped by ntp_init() into
+	 * [QUALITY_SMEAR_WINDOW_MIN_S, QUALITY_SMEAR_WINDOW_MAX_S] — never to 0,
+	 * so an operator who asked for a smear cannot be silently given a step.
+	 * Read it back with ntp_smear_window().
+	 *
+	 * What it costs while a ramp is running is not incidental: the server
+	 * gives up its stratum-1 claim and its 'GPS' reference identifier, and
+	 * grows root dispersion by the deviation it is deliberately introducing.
+	 * See ntp_quality_view_from_block().
+	 */
+	uint32_t smear_window_s;
 } ntp_cfg_t;
 
 /**
  * Defaults: 8 req/s burst 16 per client, 20000 req/s burst 40000 aggregate
  * (twice the spec §4.1 capacity target, so the global bucket is a safety valve
  * and not a policy), KoD on limit damped to 1 per second per client, interleave
- * OFF (opt-in — see ntp_cfg_t.interleave), serve while unsynchronised.
+ * OFF (opt-in — see ntp_cfg_t.interleave), serve while unsynchronised, leap
+ * smear OFF (step at the boundary — see ntp_cfg_t.smear_window_s).
  */
 void ntp_cfg_default(ntp_cfg_t *cfg);
 
@@ -715,6 +809,16 @@ int ntp_init(ntp_ctx_t *ctx, const ntp_cfg_t *cfg, const port_crypto_t *crypto,
  * @return The identity, or 0 when @p ctx or @p addr is NULL or @p addr_len is 0.
  */
 uint32_t ntp_client_id(const ntp_ctx_t *ctx, const void *addr, size_t addr_len);
+
+/**
+ * The effective leap-smear window in seconds after ntp_init()'s clamp; 0 when
+ * smearing is off (the default) or @p ctx is NULL.
+ *
+ * Feed it to ntp_quality_view_from_block() so the clamp is applied in exactly
+ * one place and the view can never be built against a window the datapath is
+ * not configured for.
+ */
+uint32_t ntp_smear_window(const ntp_ctx_t *ctx);
 
 /**
  * Install the response extension-field hook, or NULL to remove it. The hook

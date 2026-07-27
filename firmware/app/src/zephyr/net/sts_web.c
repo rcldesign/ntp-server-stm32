@@ -303,6 +303,7 @@ static int pv_services(void *u, rest_services_t *out)
 	sts_ntp_stats_t ns;
 	sts_ntske_stats_t ks;
 	snmp_stats_t ss;
+	snmp_v3_stats_t vs;
 	sts_ptp_stats_t ps;
 	sts_web_stats_t ws;
 
@@ -312,6 +313,15 @@ static int pv_services(void *u, rest_services_t *out)
 	sts_ntske_stats(&ks);
 	memset(&ss, 0, sizeof(ss));
 	sts_snmp_stats(&ss);
+	/*
+	 * The USM counters come through sts_snmp_v3_stats(), which serves the
+	 * SNMP thread's published snapshot. Calling snmp_v3_stats_get() on the
+	 * live context from this worker would violate snmp_v3.h's one-context-
+	 * one-thread rule (the context carries the decrypt scratch), so do not
+	 * "simplify" it back to a direct read.
+	 */
+	memset(&vs, 0, sizeof(vs));
+	sts_snmp_v3_stats(&vs);
 	sts_ptp_stats(&ps);
 	sts_web_stats(&ws);
 
@@ -323,6 +333,13 @@ static int pv_services(void *u, rest_services_t *out)
 	out->ntske_ok = ks.negotiations_ok;
 	out->ntske_fail = ks.handshakes_failed;
 	out->snmp_gets = (uint32_t)(ss.get + ss.getnext);
+	out->snmp_v3_unknown_users = vs.unknown_user_names;
+	out->snmp_v3_wrong_digests = vs.wrong_digests;
+	out->snmp_v3_time_windows = vs.not_in_time_windows;
+	out->snmp_v3_decrypt_errors = vs.decryption_errors;
+	out->snmp_v3_unknown_engines = vs.unknown_engine_ids;
+	out->snmp_v3_bad_sec_levels = vs.unsupported_sec_levels;
+	out->snmp_v3_authenticated = vs.authenticated;
 	out->web_requests = ws.requests;
 	out->ntp_running = ns.running;
 	out->nts_running = ks.running;

@@ -42,8 +42,15 @@
  * `PANEL_LED_EN` (PC0) and dimmed by one `PANEL_LED_PWM` (PE0/LPTIM2_CH2). They
  * are therefore not individually addressable in hardware, and `led_logical` is
  * the UI's *logical* lamp state (which control the UI considers active), not an
- * electrical readback. The electrical truth is `panel_rail_on` + `panel_duty_pct`
- * + `panel_fault` (PF12).
+ * electrical readback. The electrical truth is `panel_rail_on` +
+ * `panel_duty_pct` + `panel_fault` — the last of which is the *alarm* derived
+ * from PF12 rather than the pin itself; see its field comment.
+ *
+ * As-built note on (c): `buttons_down` is a level bitmap the producer
+ * reconstructs from a droppable event stream, not a read of the debounced scan.
+ * The producer clears it whenever it detects that an event was lost, so a
+ * transient false negative is possible and a latched false positive is not. Do
+ * not treat a bit that never sets as proof a button is unwired.
  */
 
 #ifndef STS1000_CORE_MP_MP_MIRROR_H_
@@ -104,7 +111,17 @@ typedef struct {
 	/* --- (b) indicators --------------------------------------------- */
 	bool panel_rail_on;     /**< PANEL_LED_EN (PC0) asserted */
 	uint8_t panel_duty_pct; /**< PANEL_LED_PWM (PE0) duty */
-	bool panel_fault;       /**< U55 nFLG (PF12) asserted */
+	/**
+	 * Unmasked panel-LED fault *alarm* — not a raw read of U55's nFLG (PF12).
+	 *
+	 * The producer takes it from the alarm aggregate, which suppresses any
+	 * scanned signal the power sequencer has marked expected-off, and the
+	 * panel-LED fault is marked exactly that whenever firmware has gated the
+	 * rail. A deliberately-dark panel therefore reports false here with the
+	 * pin asserted, which is the answer an operator wants; "the pin" is not
+	 * available to a host through this record.
+	 */
+	bool panel_fault;
 	uint16_t led_logical;   /**< UI logical lamp bitmap (see the header) */
 	uint16_t bl_permille;   /**< display backlight, 0..1000 */
 	uint8_t rgb_state;      /**< fault_rgb_state_t commanded pattern */
@@ -113,7 +130,10 @@ typedef struct {
 	uint8_t rgb_b;          /**< D5 blue duty (TIM4_CH3, PD14) */
 
 	/* --- (c) input echo -------------------------------------------- */
-	uint32_t buttons_down; /**< core/fault asserted bitmap, PF0..PF6 + PF11 */
+	/** Buttons the producer believes are held, PF0..PF6 + PF11, bit =
+	 *  fault_sig_t. Reconstructed from the scan's press/release events and
+	 *  cleared on a detected event loss — see the header note on (c). */
+	uint32_t buttons_down;
 	int32_t enc_pos;       /**< TIM1 quadrature position */
 	uint16_t touch_x;
 	uint16_t touch_y;

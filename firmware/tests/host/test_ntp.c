@@ -2156,17 +2156,21 @@ static void test_quality_view_from_block_gates_traceability(void)
 	b.root_delay_q16 = 0x100U;
 	b.root_disp_q16 = 0x1000U;
 
+	/* Window 0 throughout: this test is the STEP path, which is the shipped
+	 * default. Everything it asserts must stay true with smear compiled in
+	 * and switched off — that equivalence is the point of passing 0 here
+	 * rather than hiding it in a helper. */
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_quality_view_from_block(
 					       NULL, now_tai_ns, 1000U, true,
-					       -20, &v));
+					       -20, 0U, &v));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_quality_view_from_block(
 					       &b, now_tai_ns, 1000U, true, -20,
-					       NULL));
+					       0U, NULL));
 
 	/* --- untraceable: the honest advertisement --- */
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
 							    1000U, false, -20,
-							    &v));
+							    0U, &v));
 	TEST_ASSERT_FALSE(v.synchronized);
 	TEST_ASSERT_EQUAL_INT8(-20, v.precision);
 	TEST_ASSERT_EQUAL_INT32(TAI_OFFSET, v.tai_minus_utc);
@@ -2185,7 +2189,7 @@ static void test_quality_view_from_block_gates_traceability(void)
 	/* --- traceable: primary, as before --- */
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
 							    1000U, true, -20,
-							    &v));
+							    0U, &v));
 	TEST_ASSERT_TRUE(v.synchronized);
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_STRATUM_PRIM, v.stratum);
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_NONE, v.leap);
@@ -2203,23 +2207,23 @@ static void test_quality_view_from_block_gates_traceability(void)
 	b.stratum = (uint8_t)QUALITY_STRATUM_UNSYNC;
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
 							    1000U, true, -20,
-							    &v));
+							    0U, &v));
 	TEST_ASSERT_FALSE(v.synchronized);
 	b.stratum = (uint8_t)QUALITY_STRATUM_PRIMARY;
 
 	/* Reference timestamp = now less the block's age. */
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
 							    3000U, true, -20,
-							    &v));
+							    0U, &v));
 	TEST_ASSERT_EQUAL_INT64((int64_t)now_tai_ns - 2 * NS, v.ref_tai_ns);
 	/* A monotonic clock behind the block's stamp cannot age it. */
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
 							    500U, true, -20,
-							    &v));
+							    0U, &v));
 	TEST_ASSERT_EQUAL_INT64(0, v.ref_tai_ns);
 	/* No time at all: no reference timestamp invented. */
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, 0U, 3000U, true,
-							    -20, &v));
+							    -20, 0U, &v));
 	TEST_ASSERT_EQUAL_INT64(0, v.ref_tai_ns);
 
 	/* Leap announcement: only inside the window, and only with a time. */
@@ -2227,36 +2231,423 @@ static void test_quality_view_from_block_gates_traceability(void)
 	b.leap_at_tai_s = (now_tai_ns / (uint64_t)NS) + 3600U;
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
 							    1000U, true, -20,
-							    &v));
+							    0U, &v));
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_ADD, v.leap);
 	b.leap_pending = -1;
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
 							    1000U, true, -20,
-							    &v));
+							    0U, &v));
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_DEL, v.leap);
 	/* Beyond the 24 h window, and already past, both announce nothing. */
 	b.leap_at_tai_s = (now_tai_ns / (uint64_t)NS) + NTP_LEAP_ANNOUNCE_WINDOW_S
 			  + 10U;
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
 							    1000U, true, -20,
-							    &v));
+							    0U, &v));
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_NONE, v.leap);
 	b.leap_at_tai_s = (now_tai_ns / (uint64_t)NS) - 1U;
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
 							    1000U, true, -20,
-							    &v));
+							    0U, &v));
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_NONE, v.leap);
 	b.leap_at_tai_s = (now_tai_ns / (uint64_t)NS) + 3600U;
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, 0U, 1000U, true,
-							    -20, &v));
+							    -20, 0U, &v));
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_NONE, v.leap);
 
 	/* Holdover is carried through untouched, informationally. */
 	b.holdover = true;
 	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
 							    1000U, true, -20,
-							    &v));
+							    0U, &v));
 	TEST_ASSERT_TRUE(v.holdover);
+}
+
+/* ------------------------------------------------------------- leap smear */
+
+/*
+ * Spec §15.2. The model (shape, monotonicity, exact termination) belongs to
+ * core/quality and is pinned in test_quality.c; what is tested here is the NTP
+ * *policy* built on it — what the server gives up while it smears, what it
+ * stops saying, and which bytes on the wire move.
+ *
+ * The leap is placed 100000 s after the 2024 reference instant, so a
+ * full-length 86400 s window opens 13600 s after it and every sample below is
+ * an exact hand-computable offset from the event.
+ */
+#define SMEAR_LEAP_TAI_S ((uint64_t)(UNIX_2024 + TAI_OFFSET) + 100000U)
+#define SMEAR_WIN_S 86400U
+
+/** TAI ns @p before seconds ahead of the leap. */
+static uint64_t smear_at(int64_t before)
+{
+	return (uint64_t)((int64_t)SMEAR_LEAP_TAI_S - before) * (uint64_t)NS;
+}
+
+/** A locked stratum-1 block with a leap pending at SMEAR_LEAP_TAI_S. */
+static void smear_block(quality_block_t *b, int8_t pending)
+{
+	quality_block_init(b);
+	b->stratum = (uint8_t)QUALITY_STRATUM_PRIMARY;
+	b->lock_state = (uint8_t)QUALITY_LOCK_LOCKED;
+	b->refid = NTP_REFID_GPS;
+	b->leap_current_s = TAI_OFFSET;
+	b->utc_valid = true;
+	b->updated_mono_ms = 1000U;
+	b->root_delay_q16 = 0x100U;
+	b->root_disp_q16 = 0x1000U;
+	b->leap_pending = pending;
+	b->leap_at_tai_s = SMEAR_LEAP_TAI_S;
+}
+
+/**
+ * Smear off is the shipped default, and it must be indistinguishable from a
+ * build that has never heard of smearing.
+ *
+ * Asserted against ntp_ts_from_tai() — the pre-existing conversion, untouched
+ * by this change — rather than against a recorded byte array, so the reference
+ * cannot drift with the code under test.
+ */
+static void test_smear_off_changes_nothing(void)
+{
+	uint8_t req[NTP_HDR_LEN];
+	uint8_t out[NTP_PKT_MAX];
+	quality_block_t b;
+	ntp_quality_view_t v;
+	ntp_rx_t rx;
+	ntp_result_t res;
+	size_t len;
+	int64_t rx_tai;
+
+	smear_block(&b, 1);
+
+	/* Deep inside what WOULD be the ramp, had one been configured. */
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(
+					 &b, smear_at(3600), 1000U, true, -20,
+					 0U, &v));
+
+	/* No smear state at all. */
+	TEST_ASSERT_FALSE(v.smear.active);
+	TEST_ASSERT_EQUAL_INT32(0, v.smear.offset_ns);
+	TEST_ASSERT_EQUAL_UINT32(0U, v.smear.window_s);
+
+	/* The step path intact: still primary, still 'GPS', dispersion
+	 * untouched, and the leap still ANNOUNCED via the LI bits. */
+	TEST_ASSERT_TRUE(v.synchronized);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_STRATUM_PRIM, v.stratum);
+	TEST_ASSERT_EQUAL_HEX32(NTP_REFID_GPS, v.refid);
+	TEST_ASSERT_EQUAL_HEX32(0x1000U, v.root_disp_q16);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_ADD, v.leap);
+
+	/* And the served timestamps are the plain conversion, to the LSB. */
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+	memset(&rx, 0, sizeof(rx));
+	rx.pkt = req;
+	rx.len = len;
+	rx.client_id = 0x900U;
+	rx_tai = (int64_t)smear_at(3600);
+	rx.rx_tai_ns = rx_tai;
+	rx.tx_tai_ns = rx_tai + 20000;
+	rx.now_ms = 0;
+
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &v, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_ADD,
+				(uint8_t)((out[0] >> 6) & 0x03U));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_STRATUM_PRIM, out[1]);
+	TEST_ASSERT_EQUAL_HEX32(NTP_REFID_GPS, bytes_get_be32(&out[12]));
+	TEST_ASSERT_EQUAL_HEX64(ntp_ts_from_tai(rx_tai, TAI_OFFSET),
+				bytes_get_be64(&out[32]));
+	TEST_ASSERT_EQUAL_HEX64(ntp_ts_from_tai(rx_tai + 20000, TAI_OFFSET),
+				bytes_get_be64(&out[40]));
+
+	/* ntp_ts_from_tai_smeared() with a zero correction IS ntp_ts_from_tai(),
+	 * which is what lets the datapath apply it unconditionally. */
+	TEST_ASSERT_EQUAL_HEX64(ntp_ts_from_tai(rx_tai, TAI_OFFSET),
+				ntp_ts_from_tai_smeared(rx_tai, TAI_OFFSET, 0));
+}
+
+/** The window is clamped once, in ntp_init(), and read back from there. */
+static void test_smear_window_clamped_by_init(void)
+{
+	ntp_cfg_t cfg;
+
+	TEST_ASSERT_EQUAL_UINT32(0U, ntp_smear_window(NULL));
+
+	ntp_cfg_default(&cfg);
+	TEST_ASSERT_EQUAL_UINT32(0U, cfg.smear_window_s); /* step by default */
+
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	TEST_ASSERT_EQUAL_UINT32(0U, ntp_smear_window(&g_ctx));
+
+	/* Under the floor: clamped UP, never silently back to "step". */
+	cfg.smear_window_s = 60U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	TEST_ASSERT_EQUAL_UINT32(QUALITY_SMEAR_WINDOW_MIN_S,
+				 ntp_smear_window(&g_ctx));
+
+	cfg.smear_window_s = UINT32_MAX;
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	TEST_ASSERT_EQUAL_UINT32(QUALITY_SMEAR_WINDOW_MAX_S,
+				 ntp_smear_window(&g_ctx));
+
+	cfg.smear_window_s = SMEAR_WIN_S;
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	TEST_ASSERT_EQUAL_UINT32(SMEAR_WIN_S, ntp_smear_window(&g_ctx));
+}
+
+/**
+ * The load-bearing consequence: while smearing, the server is not a traceable
+ * primary reference and must stop claiming to be one.
+ */
+static void test_smear_forfeits_the_stratum1_claim(void)
+{
+	quality_block_t b;
+	ntp_quality_view_t v;
+
+	smear_block(&b, 1);
+
+	/* Before the ramp opens: configured, but nothing given up yet. */
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(
+					 &b, smear_at((int64_t)SMEAR_WIN_S + 10),
+					 1000U, true, -20, SMEAR_WIN_S, &v));
+	TEST_ASSERT_FALSE(v.smear.active);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_STRATUM_PRIM, v.stratum);
+	TEST_ASSERT_EQUAL_HEX32(NTP_REFID_GPS, v.refid);
+	TEST_ASSERT_EQUAL_HEX32(0x1000U, v.root_disp_q16);
+
+	/* Halfway through the ramp: 43200/86400 == exactly 0.5 s of deviation. */
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(
+					 &b, smear_at((int64_t)SMEAR_WIN_S / 2),
+					 1000U, true, -20, SMEAR_WIN_S, &v));
+	TEST_ASSERT_TRUE(v.smear.active);
+	TEST_ASSERT_EQUAL_INT32(500000000, v.smear.offset_ns);
+
+	/* Stratum 1 withdrawn, 'GPS' withdrawn. */
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_STRATUM_SMEAR, v.stratum);
+	TEST_ASSERT_EQUAL_HEX32(NTP_REFID_SMER, v.refid);
+	/* Deliberately NOT stratum 16: the server stays usable, or the smear
+	 * reaches nobody and the clients step anyway. */
+	TEST_ASSERT_NOT_EQUAL_UINT8((uint8_t)NTP_STRATUM_UNSYNC, v.stratum);
+	TEST_ASSERT_TRUE(v.synchronized);
+
+	/* Root dispersion grows by the deviation: 0.5 s is 32768 in 16.16, on
+	 * top of the block's own 0x1000. */
+	TEST_ASSERT_EQUAL_HEX32(0x1000U + 32768U, v.root_disp_q16);
+	/* Root delay is a path property and is NOT touched. */
+	TEST_ASSERT_EQUAL_HEX32(0x100U, v.root_delay_q16);
+
+	/* After the event: everything restored, immediately. */
+	b.leap_pending = 0;
+	b.leap_current_s = TAI_OFFSET + 1;
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(
+					 &b, smear_at(-1), 1000U, true, -20,
+					 SMEAR_WIN_S, &v));
+	TEST_ASSERT_FALSE(v.smear.active);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_STRATUM_PRIM, v.stratum);
+	TEST_ASSERT_EQUAL_HEX32(NTP_REFID_GPS, v.refid);
+	TEST_ASSERT_EQUAL_HEX32(0x1000U, v.root_disp_q16);
+}
+
+/**
+ * A smearing server never announces the leap (RFC 8633 §3.7.1). Announcing a
+ * step and then smearing it away is contradictory, and a client that handles
+ * both handles it worst.
+ */
+static void test_smear_never_announces_a_step(void)
+{
+	/* Include a window SHORTER than the announcement window: the hours
+	 * between the announcement opening and the ramp starting are exactly
+	 * where a naive "suppress while active" gate would still announce. */
+	static const uint32_t wins[] = { QUALITY_SMEAR_WINDOW_MIN_S,
+					 SMEAR_WIN_S };
+	static const int64_t at[] = { 90000, (int64_t)SMEAR_WIN_S + 1,
+				      (int64_t)SMEAR_WIN_S, 43200, 3600, 1 };
+	quality_block_t b;
+	ntp_quality_view_t v;
+	size_t i;
+	size_t j;
+	int8_t dir;
+
+	for (dir = 1; dir >= -1; dir = (int8_t)(dir - 2)) {
+		smear_block(&b, dir);
+
+		/* Baseline: with smear off, these instants DO announce, so the
+		 * assertions below are testing suppression and not an
+		 * accidentally-empty announcement window. */
+		TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(
+						 &b, smear_at(3600), 1000U,
+						 true, -20, 0U, &v));
+		TEST_ASSERT_EQUAL_UINT8((dir > 0) ? (uint8_t)NTP_LI_ADD
+						  : (uint8_t)NTP_LI_DEL,
+					v.leap);
+
+		for (i = 0U; i < ARRAY_LEN(wins); i++) {
+			for (j = 0U; j < ARRAY_LEN(at); j++) {
+				TEST_ASSERT_EQUAL_INT(
+					0, ntp_quality_view_from_block(
+						   &b, smear_at(at[j]), 1000U,
+						   true, -20, wins[i], &v));
+				TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_NONE,
+							v.leap);
+			}
+		}
+	}
+}
+
+/** The correction reaches the wire, on every UTC-bearing field and no others. */
+static void test_smear_moves_the_served_timestamps(void)
+{
+	uint8_t req[NTP_HDR_LEN];
+	uint8_t out[NTP_PKT_MAX];
+	quality_block_t b;
+	ntp_quality_view_t v;
+	ntp_rx_t rx;
+	ntp_result_t res;
+	size_t len;
+	int64_t rx_tai;
+	const uint64_t client_xmt = 0x1122334455667788ULL;
+
+	smear_block(&b, 1);
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(
+					 &b, smear_at((int64_t)SMEAR_WIN_S / 2),
+					 1000U, true, -20, SMEAR_WIN_S, &v));
+	TEST_ASSERT_EQUAL_INT32(500000000, v.smear.offset_ns);
+
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, client_xmt,
+			   0U);
+	memset(&rx, 0, sizeof(rx));
+	rx.pkt = req;
+	rx.len = len;
+	rx.client_id = 0x901U;
+	rx_tai = (int64_t)smear_at((int64_t)SMEAR_WIN_S / 2);
+	rx.rx_tai_ns = rx_tai;
+	rx.tx_tai_ns = rx_tai + 20000;
+	rx.now_ms = 0;
+
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &v, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+
+	/* Receive and transmit are held back by exactly half a second — the
+	 * plain conversion of an instant 0.5 s earlier. */
+	TEST_ASSERT_EQUAL_HEX64(ntp_ts_from_tai(rx_tai - 500000000, TAI_OFFSET),
+				bytes_get_be64(&out[32]));
+	TEST_ASSERT_EQUAL_HEX64(
+		ntp_ts_from_tai(rx_tai + 20000 - 500000000, TAI_OFFSET),
+		bytes_get_be64(&out[40]));
+	/* Reference too: one timescale for the whole header. */
+	TEST_ASSERT_EQUAL_HEX64(
+		ntp_ts_from_tai(v.ref_tai_ns - 500000000, TAI_OFFSET),
+		bytes_get_be64(&out[16]));
+
+	/* The ORIGIN is the client's own timestamp echoed back on the CLIENT's
+	 * timescale. Correcting it would corrupt the client's delay
+	 * calculation, so it must come back untouched. */
+	TEST_ASSERT_EQUAL_HEX64(client_xmt, bytes_get_be64(&out[24]));
+
+	/* A delete runs the other way: the served instant leads. */
+	smear_block(&b, -1);
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(
+					 &b, smear_at((int64_t)SMEAR_WIN_S / 2),
+					 1000U, true, -20, SMEAR_WIN_S, &v));
+	TEST_ASSERT_EQUAL_INT32(-500000000, v.smear.offset_ns);
+	rx.client_id = 0x902U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &v, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_HEX64(ntp_ts_from_tai(rx_tai + 500000000, TAI_OFFSET),
+				bytes_get_be64(&out[32]));
+}
+
+/**
+ * End-to-end monotonicity, at the wire.
+ *
+ * test_quality.c proves the model never retreats; this proves the property
+ * survives everything ntp_handle_request() does on top of it — the era
+ * truncation, the transmit-distinctness nudge, and the leap_current_s step at
+ * the event. Sweeps the whole window in 977 s steps plus the two boundaries.
+ */
+static void test_smear_wire_timestamps_never_go_backwards(void)
+{
+	uint8_t req[NTP_HDR_LEN];
+	uint8_t out[NTP_PKT_MAX];
+	ntp_cfg_t cfg;
+	quality_block_t b;
+	int8_t dir;
+	size_t len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+
+	/* Buckets off: this test is about timestamps, and a Kiss-o'-Death
+	 * carries none. */
+	ntp_cfg_default(&cfg);
+	cfg.client_rate = 0U;
+	cfg.global_rate = 0U;
+	cfg.smear_window_s = SMEAR_WIN_S;
+
+	for (dir = 1; dir >= -1; dir = (int8_t)(dir - 2)) {
+		uint64_t prev_rec = 0U;
+		uint64_t prev_xmt = 0U;
+		int64_t t;
+		unsigned int n = 0U;
+
+		TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+		TEST_ASSERT_EQUAL_UINT32(SMEAR_WIN_S,
+					 ntp_smear_window(&g_ctx));
+		smear_block(&b, dir);
+
+		/* From a window before the ramp to an hour past the event. */
+		for (t = (int64_t)SMEAR_WIN_S * 2; t >= -3600; t -= 977) {
+			ntp_quality_view_t v;
+			ntp_rx_t rx;
+			ntp_result_t res;
+			uint64_t rec;
+			uint64_t xmt;
+			int64_t rx_tai = (int64_t)smear_at(t);
+
+			/* The receiver steps its standing offset at the event;
+			 * the ramp exists to have already absorbed it. */
+			if (t <= 0) {
+				b.leap_pending = 0;
+				b.leap_current_s = (int16_t)(TAI_OFFSET + dir);
+			}
+
+			TEST_ASSERT_EQUAL_INT(
+				0, ntp_quality_view_from_block(
+					   &b, (uint64_t)rx_tai, 1000U, true,
+					   -20, SMEAR_WIN_S, &v));
+
+			memset(&rx, 0, sizeof(rx));
+			rx.pkt = req;
+			rx.len = len;
+			rx.client_id = 0xA00U;
+			rx.rx_tai_ns = rx_tai;
+			rx.tx_tai_ns = rx_tai + 20000;
+			rx.now_ms = (int64_t)n;
+
+			TEST_ASSERT_EQUAL_INT(
+				0, ntp_handle_request(&g_ctx, &rx, &v, out,
+						      sizeof(out), &res));
+			TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+
+			rec = bytes_get_be64(&out[32]);
+			xmt = bytes_get_be64(&out[40]);
+			if (n != 0U) {
+				/* No client ever reads an earlier instant than
+				 * one it has already been given. */
+				TEST_ASSERT_TRUE(rec >= prev_rec);
+				TEST_ASSERT_TRUE(xmt >= prev_xmt);
+			}
+			prev_rec = rec;
+			prev_xmt = xmt;
+			n++;
+		}
+		/* (2*86400 + 3600)/977 + 1 == 181 samples; a sweep that covered
+		 * nothing would satisfy every assertion above. */
+		TEST_ASSERT_EQUAL_UINT(181U, n);
+	}
+
+	/* Leave the shared context as setUp() built it. */
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, NULL, &g_port, 0));
 }
 
 /* -------------------------------------------------------------------- fuzz */
@@ -2452,6 +2843,12 @@ int main(void)
 	RUN_TEST(test_transmit_field_is_distinct_per_response);
 	RUN_TEST(test_client_id_is_keyed);
 	RUN_TEST(test_quality_view_from_block_gates_traceability);
+	RUN_TEST(test_smear_off_changes_nothing);
+	RUN_TEST(test_smear_window_clamped_by_init);
+	RUN_TEST(test_smear_forfeits_the_stratum1_claim);
+	RUN_TEST(test_smear_never_announces_a_step);
+	RUN_TEST(test_smear_moves_the_served_timestamps);
+	RUN_TEST(test_smear_wire_timestamps_never_go_backwards);
 	RUN_TEST(test_random_input_never_crashes);
 	return UNITY_END();
 }

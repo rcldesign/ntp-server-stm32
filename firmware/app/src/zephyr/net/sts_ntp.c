@@ -132,6 +132,18 @@ LOG_MODULE_REGISTER(sts_ntp, CONFIG_STS1000_LOG_LEVEL);
 /** A pending entry older than this will never be matched; reclaim it. */
 #define TX_PENDING_TTL_MS 250U
 
+/**
+ * How often the leap smear re-announces itself while it is running, ms.
+ *
+ * The smear is entered and left with a warning apiece, but a 24-hour window is
+ * long enough that an operator who attaches to the log tail in hour nine would
+ * otherwise see nothing at all — while the appliance is, by design, serving a
+ * UTC it knows to be wrong and is no longer claiming stratum 1. Fifteen minutes
+ * is often enough that any log window catches it and rare enough (96 lines over
+ * a full window) that it cannot crowd anything out.
+ */
+#define SMEAR_LOG_PERIOD_MS 900000U
+
 /* Static: ntp_ctx_t carries a 256-way client table and is far too large to
  * live on a 4 kB thread stack. */
 static ntp_ctx_t ntp;
@@ -168,6 +180,7 @@ static struct {
 	uint32_t xl_token;     /* RFC 9769 interleave pairing token (core) */
 	uint32_t seq;          /* arming order, for oldest-first eviction */
 	int32_t tai_minus_utc; /* the offset the response was built with */
+	int32_t smear_ns;      /* the leap-smear correction it was built with */
 	bool used;
 } tx_pending[TX_PENDING_SLOTS];
 static uint32_t tx_pending_seq;
@@ -206,6 +219,25 @@ static void load_cfg(ntp_cfg_t *c)
 
 	c->kod_on_limit = sts_net_cfg_bool(CFG_ID_NTP_KOD_ENABLE, true);
 	c->interleave = sts_net_cfg_bool(CFG_ID_NTP_INTERLEAVED, true);
+
+	/*
+	 * Leap smear (spec §15.2): two keys, one meaning. The enable is the
+	 * opt-in and the window is the shape; core/ntp models "off" as a zero
+	 * window, so the two collapse here rather than inside the datapath.
+	 * ntp_init() clamps whatever comes out into the permitted band, and
+	 * ntp_smear_window() reads back the clamped value, so the projection and
+	 * the datapath cannot disagree about what is configured.
+	 *
+	 * Read once at start, like every other ntp.* key: the CFG_G_NTP applier
+	 * stages this group (net/sts_net.c) rather than reconfiguring a running
+	 * ntp_ctx_t, and both keys are flagged CFG_F_REBOOT_REQUIRED to say so.
+	 */
+	c->smear_window_s =
+		sts_net_cfg_bool(CFG_ID_NTP_LEAP_SMEAR, false)
+			? (uint32_t)sts_net_cfg_u64(
+				  CFG_ID_NTP_LEAP_SMEAR_S,
+				  (uint64_t)QUALITY_SMEAR_WINDOW_DEFAULT_S)
+			: 0U;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -411,7 +443,66 @@ static void quality_view(ntp_quality_view_t *v)
 	(void)ntp_quality_view_from_block(&q, now_tai_ns, sts_mono_ms(),
 					  sts_ptpclk_traceable() &&
 						  !sts_time_is_fallback(),
-					  NTP_PRECISION_LOG2, v);
+					  NTP_PRECISION_LOG2,
+					  ntp_smear_window(&ntp), v);
+}
+
+/**
+ * Annunciate the leap smear (spec §15.2).
+ *
+ * Called once per poll iteration — at least every 500 ms — rather than from
+ * quality_view(), which runs per datagram and would turn a flood into a log
+ * flood. The state is recomputed here from a fresh snapshot through the same
+ * pure model core/ntp used, so the line an operator reads and the correction
+ * the datapath applied cannot describe different things.
+ *
+ * Loud on purpose. While this is running the appliance is deliberately serving
+ * a UTC that is not UTC and has withdrawn its stratum-1 claim; that is an
+ * operator-visible state change, not a debug detail, so it is LOG_WRN.
+ */
+static void smear_annunciate(void)
+{
+	static bool was_active;
+	static uint64_t last_log_ms;
+	quality_block_t q;
+	quality_smear_t s;
+	uint64_t now_tai_ns = 0U;
+	uint64_t now_ms;
+
+	if (ntp_smear_window(&ntp) == 0U) {
+		return; /* stepping: nothing to say, ever */
+	}
+	if (sts_quality_snapshot(&q) != 0) {
+		return;
+	}
+	(void)sts_time_tai_ns(&now_tai_ns);
+	if (quality_leap_smear(&q, ntp_smear_window(&ntp), now_tai_ns, &s) != 0) {
+		return;
+	}
+
+	now_ms = sts_mono_ms();
+
+	if (s.active && !was_active) {
+		LOG_WRN("NTP leap smear STARTED: %s second over %u s, %u s to the "
+			"event. NTP now serves a deliberately offset UTC and "
+			"drops to stratum %u refid 'SMER'; PTP is unaffected and "
+			"steps at the boundary",
+			(s.direction > 0) ? "inserting a" : "deleting a",
+			(unsigned int)s.window_s, (unsigned int)s.remaining_s,
+			(unsigned int)NTP_STRATUM_SMEAR);
+		last_log_ms = now_ms;
+	} else if (!s.active && was_active) {
+		LOG_WRN("NTP leap smear ENDED: served time is true UTC again and "
+			"the stratum-1 claim is restored");
+	} else if (s.active && (now_ms - last_log_ms) >= SMEAR_LOG_PERIOD_MS) {
+		LOG_WRN("NTP leap smear active: offset %d ns, %u s remaining; "
+			"stratum %u refid 'SMER'", (int)s.offset_ns,
+			(unsigned int)s.remaining_s,
+			(unsigned int)NTP_STRATUM_SMEAR);
+		last_log_ms = now_ms;
+	}
+
+	was_active = s.active;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -466,7 +557,8 @@ static uint32_t client_id_of(const struct sockaddr *sa)
  * opportunity is the correct failure.
  */
 static void tx_pending_add(uint64_t xmt_field, uint32_t client_id,
-			   uint32_t xl_token, int32_t tai_minus_utc)
+			   uint32_t xl_token, int32_t tai_minus_utc,
+			   int32_t smear_ns)
 {
 	uint64_t now_ms = sts_mono_ms();
 	bool dup = false;
@@ -515,6 +607,7 @@ static void tx_pending_add(uint64_t xmt_field, uint32_t client_id,
 			tx_pending[slot].client_id = client_id;
 			tx_pending[slot].xl_token = xl_token;
 			tx_pending[slot].tai_minus_utc = tai_minus_utc;
+			tx_pending[slot].smear_ns = smear_ns;
 			tx_pending[slot].seq = ++tx_pending_seq;
 			tx_pending[slot].used = true;
 		}
@@ -531,6 +624,7 @@ static void on_tx_timestamp(uint64_t xmt_field, uint64_t tai_ns)
 	uint32_t client_id = 0U;
 	uint32_t xl_token = 0U;
 	int32_t tai_minus_utc = 0;
+	int32_t smear_ns = 0;
 	unsigned int matches = 0U;
 	size_t i;
 
@@ -556,6 +650,7 @@ static void on_tx_timestamp(uint64_t xmt_field, uint64_t tai_ns)
 			client_id = tx_pending[hit].client_id;
 			xl_token = tx_pending[hit].xl_token;
 			tai_minus_utc = tx_pending[hit].tai_minus_utc;
+			smear_ns = tx_pending[hit].smear_ns;
 			tx_pending[hit].used = false;
 		} else if (matches > 1U) {
 			for (i = 0U; i < TX_PENDING_SLOTS; i++) {
@@ -578,6 +673,17 @@ static void on_tx_timestamp(uint64_t xmt_field, uint64_t tai_ns)
 	 * TAI-UTC offset (ntp_ts_from_tai subtracts it). Passing 0 would shift
 	 * the interleaved reply by the whole leap-second offset.
 	 *
+	 * The same argument covers the leap smear (spec §15.2), which is why the
+	 * response's correction is carried in the pending entry rather than
+	 * re-derived here. Reporting an unsmeared t3 beside a smeared t1/t2 would
+	 * hand the client the smear offset as if it were round-trip delay — up to
+	 * a full second of it — and it would do so only in interleaved mode, on
+	 * the one path whose whole purpose is sub-microsecond accuracy. Re-reading
+	 * the live smear instead of the stored one would be almost right and
+	 * occasionally very wrong: this callback runs after sendto(), so a
+	 * response built in the last milliseconds of the window would be paired
+	 * with a correction taken after the ramp closed.
+	 *
 	 * The RFC 9769 pairing token (res.xl_token) is passed straight through so
 	 * core can reject a response a later request already superseded. Note it
 	 * is *not* protection against a wrong wire-match — see the scan above.
@@ -588,7 +694,8 @@ static void on_tx_timestamp(uint64_t xmt_field, uint64_t tai_ns)
 	 * interleave with a request being handled.
 	 */
 	if (ntp_tx_complete(&ntp, client_id, xl_token,
-			    ntp_ts_from_tai((int64_t)tai_ns, tai_minus_utc)) ==
+			    ntp_ts_from_tai_smeared((int64_t)tai_ns,
+						    tai_minus_utc, smear_ns)) ==
 	    0) {
 		gstat.txts_matched++;
 	}
@@ -741,7 +848,7 @@ static bool serve_one(int fd)
 	 * != 0): a KoD, or interleave-disabled, carries no token. */
 	if (res.action == NTP_ACT_RESPOND) {
 		tx_pending_add(res.xmt, rx.client_id, res.xl_token,
-			       qv.tai_minus_utc);
+			       qv.tai_minus_utc, qv.smear.offset_ns);
 	}
 	return true;
 }
@@ -807,6 +914,8 @@ static void ntp_loop(void *a, void *b, void *c)
 			}
 		}
 
+		smear_annunciate();
+
 		if (nts_enabled) {
 			(void)nts_keyring_tick(sts_net_keyring(),
 					       (int64_t)sts_mono_ms());
@@ -865,6 +974,22 @@ int sts_ntp_start(void)
 	if (rc != 0) {
 		LOG_ERR("ntp_init: %d", rc);
 		return rc;
+	}
+
+	/*
+	 * Announced at start, not only when the ramp begins: the operator who
+	 * armed this may be six months and several reboots away from the leap,
+	 * and "this box will stop claiming stratum 1 for a day" is something the
+	 * boot log should say every time, not once.
+	 */
+	if (ntp_smear_window(&ntp) != 0U) {
+		LOG_WRN("NTP leap smear ARMED: %u s window ending at the leap "
+			"(requested %u s). For that window NTP will serve an "
+			"offset UTC at stratum %u refid 'SMER' and will NOT set "
+			"the leap indicator. PTP still steps at the boundary",
+			(unsigned int)ntp_smear_window(&ntp),
+			(unsigned int)cfg.smear_window_s,
+			(unsigned int)NTP_STRATUM_SMEAR);
 	}
 
 	/*

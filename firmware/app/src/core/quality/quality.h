@@ -339,6 +339,165 @@ float quality_holdover_err_ns(const quality_holdover_model_t *m, float t_s,
 float quality_holdover_time_to_ns(const quality_holdover_model_t *m, float dt_c,
 				  float threshold_ns);
 
+/* --------------------------------------------------------------- leap smear */
+
+/**
+ * Leap-second smear model (spec §15.2) — the *shape*, not the policy.
+ *
+ * This is the leap-second counterpart of the holdover model above: a pure
+ * function of the published §3.8 block, computing no policy of its own. Whether
+ * a smear is applied at all, and what a service gives up while it is, is
+ * decided by the consuming service — today only `core/ntp`. The model lives
+ * here for the same reason the holdover growth curve does: it is derived from
+ * the block's own fields (@ref quality_block_t::leap_pending,
+ * @ref quality_block_t::leap_at_tai_s), so every management surface can
+ * recompute exactly what the server is doing from the snapshot it already
+ * reads, with no second publisher and no field for `disc` to fill.
+ *
+ * **Shape: a linear ramp over a window that ENDS at the leap instant.**
+ *
+ * Written out, with `L` the leap instant, `W` the window and `u = (t − (L−W))/W`
+ * the ramp phase, the served timescale during the window is
+ *
+ *     served(t) = TAI(t) − leap_current_s − sign · u
+ *
+ * where `sign` is +1 for an insert and −1 for a delete. At `u = 0` that is
+ * exactly the pre-leap UTC; at `u → 1` it is exactly the post-leap UTC, which
+ * is what @ref quality_block_t::leap_current_s becomes the moment the event
+ * fires. The served timescale is therefore continuous across the leap — the
+ * whole point — and back on true UTC from the leap instant onwards.
+ *
+ * Three properties follow, and all three are load-bearing:
+ *
+ *  1. **Monotonic, by construction.** The correction is `elapsed_ns / W_s`, an
+ *     integer division: non-decreasing in elapsed time, and bounded above by
+ *     1e9 − 1 ns. Served time therefore advances at `1 ∓ 1/W` s/s, which over
+ *     the permitted window range is between 0.99993 and 1.00007 — a client can
+ *     never read an earlier instant than one it has already read. No table, no
+ *     polynomial, no floating point, nothing to round the wrong way.
+ *
+ *     Stated exactly, because the difference matters at the nanosecond the
+ *     division ticks: during an *insert* the served instant is non-decreasing
+ *     and **stalls for exactly one nanosecond every W nanoseconds** — t gains
+ *     1 ns and the correction gains 1 ns with it. That is quantisation, not a
+ *     defect: a timescale running at 0.99993 ns per ns cannot be expressed in
+ *     integer nanoseconds except by occasionally skipping one, and any other
+ *     shape has the same floor. A *delete* runs the correction the other way
+ *     and is strictly increasing throughout. Neither ever reverses, which is
+ *     the property clients depend on; test_quality.c pins both, including the
+ *     stall count, at nanosecond resolution.
+ *  2. **It terminates exactly.** At `elapsed = W` the correction is exactly
+ *     1e9 ns, so the ramp has absorbed precisely one second by the instant
+ *     `leap_current_s` moves. There is no residue to step away afterwards.
+ *  3. **It is computable from a snapshot alone.** A window *centred* on the
+ *     leap (the Google/AWS convention) spends half its length after the event,
+ *     by which time `leap_pending` is 0 and `leap_at_tai_s` is meaningless —
+ *     reconstructing the post-half would need `disc` to retain the past leap
+ *     and publish it. A leading window needs nothing that is not already in
+ *     the block, so the NTP thread, SNMP, the web UI and the console all derive
+ *     the identical state and cannot disagree.
+ *
+ * The price of (3) is the peak deviation from true UTC: a leading window drifts
+ * to 1 s just before the event, where a centred window stays inside ±0.5 s. The
+ * trade is deliberate — a leading window is wrong for the same *total* number
+ * of second-seconds, is finished the moment the leap fires rather than half an
+ * announce-window later, and never depends on state that has already expired.
+ *
+ * A linear ramp, rather than a raised cosine, for the same reason: it is what
+ * every deployed smearing service emits, so client servos are tuned for it; a
+ * constant `1/W` frequency offset (11.574 ppm at the default window) is a
+ * number an operator can verify with one `chronyc tracking` reading; and it is
+ * exactly monotone in integer arithmetic, where a cosine would need a table
+ * and a rounding argument to make the same guarantee.
+ */
+
+/**
+ * Shortest permitted smear window, seconds (4 h).
+ *
+ * The bound is a client-tolerance one, not an arbitrary round number. The ramp
+ * presents itself to every client as a constant frequency offset of `1/W`;
+ * at 14400 s that is 69.4 ppm, about a seventh of the 500 ppm at which ntpd
+ * (`NTP_MAXFREQ`) and chrony (`maxdrift`) stop believing a source, leaving the
+ * rest of the budget for the client's own oscillator error. A much shorter
+ * window would be monotone and would still terminate exactly, and would still
+ * push some clients out of capture range.
+ */
+#define QUALITY_SMEAR_WINDOW_MIN_S UINT32_C(14400)
+
+/**
+ * Longest permitted smear window, seconds (24 h).
+ *
+ * Equal to the NTP leap-announcement window (NTP_LEAP_ANNOUNCE_WINDOW_S), which
+ * is not a coincidence: at the maximum the smear occupies exactly the interval
+ * over which the server would otherwise have been announcing the leap, so
+ * "smearing" and "would have warned" are one interval rather than two. It also
+ * bounds how long a smearing server spends off its stratum-1 claim.
+ */
+#define QUALITY_SMEAR_WINDOW_MAX_S UINT32_C(86400)
+
+/** Default window, seconds: 24 h, the industry convention, 11.574 ppm. */
+#define QUALITY_SMEAR_WINDOW_DEFAULT_S UINT32_C(86400)
+
+/** Live smear state derived by quality_leap_smear(). */
+typedef struct {
+	/** A smear is in progress right now. All other fields describe it. */
+	bool active;
+	/** +1 for an insert, −1 for a delete, 0 when not active. */
+	int8_t direction;
+	/**
+	 * The correction, nanoseconds, in [−(1e9 − 1), +(1e9 − 1)].
+	 *
+	 * Sign convention: **subtract this from a TAI instant** before applying
+	 * the TAI−UTC offset. Positive for an insert (the served timescale is
+	 * held back), negative for a delete (it is run ahead). 0 when inactive,
+	 * so an unconditional subtraction is a no-op outside the window.
+	 */
+	int32_t offset_ns;
+	/** Seconds elapsed into the window. */
+	uint32_t elapsed_s;
+	/** Seconds remaining until the leap, i.e. until the ramp completes. */
+	uint32_t remaining_s;
+	/**
+	 * Effective window after clamping, seconds; 0 means smearing is not
+	 * configured at all. Set even when @ref active is false, so a caller can
+	 * distinguish "configured, not yet in the window" from "switched off" —
+	 * a distinction NTP needs, because a server configured to smear must not
+	 * announce the leap even before the ramp starts.
+	 */
+	uint32_t window_s;
+} quality_smear_t;
+
+/**
+ * Clamp a requested smear window into the permitted band.
+ *
+ * @param window_s  Requested window; 0 means "no smearing".
+ * @return          0 for 0, otherwise @p window_s clamped into
+ *                  [QUALITY_SMEAR_WINDOW_MIN_S, QUALITY_SMEAR_WINDOW_MAX_S].
+ *                  A non-zero request never clamps to 0: an operator who asked
+ *                  for a smear gets a safe one, never a silent step.
+ */
+uint32_t quality_smear_window_clamp(uint32_t window_s);
+
+/**
+ * Evaluate the smear model against a §3.8 snapshot.
+ *
+ * Pure: no state, no side effects, safe to call from any thread on a snapshot
+ * it already holds (ARCHITECTURE.md §10 invariant 10 — no timing lock is taken,
+ * because none is needed).
+ *
+ * @param b           Snapshot to evaluate. Not retained.
+ * @param window_s    Requested window, clamped internally; 0 disables.
+ * @param now_tai_ns  Current TAI nanoseconds; 0 means "no time", which yields
+ *                    an inactive result rather than an invented ramp phase.
+ * @param out         Receives the state; zeroed first, so every field is
+ *                    defined on every return path.
+ *
+ * @retval 0        @p out is populated (possibly inactive).
+ * @retval -EINVAL  @p out is NULL, or @p b is NULL.
+ */
+int quality_leap_smear(const quality_block_t *b, uint32_t window_s,
+		       uint64_t now_tai_ns, quality_smear_t *out);
+
 /* ------------------------------------------------------------------- misc */
 
 /**

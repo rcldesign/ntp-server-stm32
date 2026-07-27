@@ -183,7 +183,12 @@ static void test_schema_group_census(void)
 		uint8_t group;
 		uint16_t expect;
 	} census[] = {
-		{ CFG_G_NET, 9 },   { CFG_G_NTP, 7 },  { CFG_G_NTS, 4 },
+		/* 7 -> 9: ntp.leap.smear (0x0208) and ntp.leap.smear.s
+		 * (0x0209), the spec §15.2 leap-smear opt-in and its window.
+		 * Purely additive, both defaulting to the existing behaviour
+		 * (smear off = step), so CFG_SCHEMA_VERSION does not move and
+		 * no migration is owed. */
+		{ CFG_G_NET, 9 },   { CFG_G_NTP, 9 },  { CFG_G_NTS, 4 },
 		{ CFG_G_PTP, 10 },  { CFG_G_GNSS, 7 }, { CFG_G_TIMING, 8 },
 		{ CFG_G_POWER, 5 }, { CFG_G_UI, 3 },   { CFG_G_LOG, 5 },
 		/* 61 -> 63: sec.operator.pw (0x0A3E) and sec.viewer.pw (0x0A3F)
@@ -211,8 +216,8 @@ static void test_schema_group_census(void)
 		total = (uint16_t)(total + n);
 	}
 
-	TEST_ASSERT_EQUAL_size_t(138U, cfg_key_count());
-	TEST_ASSERT_EQUAL_UINT16(138U, total); /* no key outside a known group */
+	TEST_ASSERT_EQUAL_size_t(140U, cfg_key_count());
+	TEST_ASSERT_EQUAL_UINT16(140U, total); /* no key outside a known group */
 }
 
 static void test_schema_is_sorted_and_well_formed(void)

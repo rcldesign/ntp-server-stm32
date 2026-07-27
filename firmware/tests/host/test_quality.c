@@ -697,6 +697,495 @@ static void test_names(void)
 	TEST_ASSERT_EQUAL_STRING("invalid", quality_ref_name(99u));
 }
 
+/* --------------------------------------------------------------- leap smear */
+
+/*
+ * Provenance for this group: the expectations are hand-evaluations of the
+ * closed form printed in quality.h — served(t) = TAI − leap_current_s − sign·u
+ * over a window that ENDS at the leap — not round-trips through the
+ * implementation. The monotonicity sweep is the exception and is deliberately
+ * so: it asserts a property (never decreasing, ever) rather than a value, which
+ * is the only honest way to test "a client must never see time run backwards".
+ */
+
+/* A leap at TAI 1 800 000 000 s, i.e. an arbitrary instant well clear of the
+ * epoch and of any 32-bit boundary. */
+#define SMEAR_LEAP_TAI_S UINT64_C(1800000000)
+#define SMEAR_NS_PER_S UINT64_C(1000000000)
+
+static void smear_block(quality_block_t *b, int8_t pending)
+{
+	quality_block_init(b);
+	b->stratum = (uint8_t)QUALITY_STRATUM_PRIMARY;
+	b->utc_valid = true;
+	b->leap_current_s = 37;
+	b->leap_pending = pending;
+	b->leap_at_tai_s = SMEAR_LEAP_TAI_S;
+}
+
+/** TAI ns @p secs before the leap. */
+static uint64_t smear_now_ns(int64_t secs_before_leap)
+{
+	return (uint64_t)((int64_t)SMEAR_LEAP_TAI_S - secs_before_leap) *
+	       SMEAR_NS_PER_S;
+}
+
+static void test_smear_window_clamp(void)
+{
+	/* Zero is "no smear" and must never clamp up into one. */
+	TEST_ASSERT_EQUAL_UINT32(0u, quality_smear_window_clamp(0u));
+
+	/* A non-zero request never clamps DOWN to zero: an operator who asked
+	 * for a smear must not be silently handed a step. */
+	TEST_ASSERT_EQUAL_UINT32(QUALITY_SMEAR_WINDOW_MIN_S,
+				 quality_smear_window_clamp(1u));
+	TEST_ASSERT_EQUAL_UINT32(QUALITY_SMEAR_WINDOW_MIN_S,
+				 quality_smear_window_clamp(
+					 QUALITY_SMEAR_WINDOW_MIN_S - 1u));
+
+	TEST_ASSERT_EQUAL_UINT32(QUALITY_SMEAR_WINDOW_MIN_S,
+				 quality_smear_window_clamp(
+					 QUALITY_SMEAR_WINDOW_MIN_S));
+	TEST_ASSERT_EQUAL_UINT32(43200u, quality_smear_window_clamp(43200u));
+	TEST_ASSERT_EQUAL_UINT32(QUALITY_SMEAR_WINDOW_MAX_S,
+				 quality_smear_window_clamp(
+					 QUALITY_SMEAR_WINDOW_MAX_S));
+	TEST_ASSERT_EQUAL_UINT32(QUALITY_SMEAR_WINDOW_MAX_S,
+				 quality_smear_window_clamp(
+					 QUALITY_SMEAR_WINDOW_MAX_S + 1u));
+	TEST_ASSERT_EQUAL_UINT32(QUALITY_SMEAR_WINDOW_MAX_S,
+				 quality_smear_window_clamp(UINT32_MAX));
+
+	/* The default has to sit inside the band it is the default for. */
+	TEST_ASSERT_EQUAL_UINT32(QUALITY_SMEAR_WINDOW_DEFAULT_S,
+				 quality_smear_window_clamp(
+					 QUALITY_SMEAR_WINDOW_DEFAULT_S));
+	TEST_ASSERT_TRUE(QUALITY_SMEAR_WINDOW_MIN_S <
+			 QUALITY_SMEAR_WINDOW_MAX_S);
+}
+
+static void test_smear_off_is_inert(void)
+{
+	quality_block_t b;
+	quality_smear_t s;
+
+	smear_block(&b, 1);
+
+	/* Window 0: the shipped default. Nothing active, nothing configured. */
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, 0u, smear_now_ns(3600),
+						    &s));
+	TEST_ASSERT_FALSE(s.active);
+	TEST_ASSERT_EQUAL_INT32(0, s.offset_ns);
+	TEST_ASSERT_EQUAL_INT8(0, s.direction);
+	TEST_ASSERT_EQUAL_UINT32(0u, s.window_s);
+
+	/* Configured, but no leap pending. */
+	b.leap_pending = 0;
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, 86400u,
+						    smear_now_ns(3600), &s));
+	TEST_ASSERT_FALSE(s.active);
+	TEST_ASSERT_EQUAL_INT32(0, s.offset_ns);
+	/* ...but window_s still reports the configuration, which is what lets
+	 * NTP suppress the leap announcement for the whole announce window. */
+	TEST_ASSERT_EQUAL_UINT32(86400u, s.window_s);
+}
+
+static void test_smear_window_boundaries(void)
+{
+	const uint32_t w = 86400u;
+	quality_block_t b;
+	quality_smear_t s;
+
+	smear_block(&b, 1);
+
+	/* One second before the window opens: announced, not yet ramping. */
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, w,
+						    smear_now_ns((int64_t)w + 1),
+						    &s));
+	TEST_ASSERT_FALSE(s.active);
+	TEST_ASSERT_EQUAL_INT32(0, s.offset_ns);
+
+	/* Exactly at the opening edge: active, and the correction is still 0,
+	 * so the served timescale is continuous with the un-smeared time. */
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, w,
+						    smear_now_ns((int64_t)w), &s));
+	TEST_ASSERT_TRUE(s.active);
+	TEST_ASSERT_EQUAL_INT32(0, s.offset_ns);
+	TEST_ASSERT_EQUAL_UINT32(0u, s.elapsed_s);
+	TEST_ASSERT_EQUAL_UINT32(w, s.remaining_s);
+	TEST_ASSERT_EQUAL_INT8(1, s.direction);
+
+	/* Halfway: exactly half a second, by hand — 43200/86400 = 0.5. */
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, w,
+						    smear_now_ns((int64_t)w / 2),
+						    &s));
+	TEST_ASSERT_TRUE(s.active);
+	TEST_ASSERT_EQUAL_INT32(500000000, s.offset_ns);
+	TEST_ASSERT_EQUAL_UINT32(43200u, s.elapsed_s);
+	TEST_ASSERT_EQUAL_UINT32(43200u, s.remaining_s);
+
+	/* One nanosecond before the leap: 999 999 999 ns, one LSB short of the
+	 * full second, which is exactly what makes the handover seamless — one
+	 * nanosecond later leap_current_s carries the whole second instead. */
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(
+					 &b, w,
+					 SMEAR_LEAP_TAI_S * SMEAR_NS_PER_S - 1u,
+					 &s));
+	TEST_ASSERT_TRUE(s.active);
+	TEST_ASSERT_EQUAL_INT32(999999999, s.offset_ns);
+
+	/* The leap instant itself: the ramp is over. leap_current_s is the
+	 * authority from here on, and the block's pending flag is stale. */
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(
+					 &b, w,
+					 SMEAR_LEAP_TAI_S * SMEAR_NS_PER_S, &s));
+	TEST_ASSERT_FALSE(s.active);
+	TEST_ASSERT_EQUAL_INT32(0, s.offset_ns);
+
+	/* And well past it. */
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, w, smear_now_ns(-3600),
+						    &s));
+	TEST_ASSERT_FALSE(s.active);
+}
+
+static void test_smear_ramp_completes_exactly(void)
+{
+	/* Every permitted window must absorb exactly one second and no more:
+	 * the correction one nanosecond before the leap is 1e9 − 1 ns, so
+	 * leap_current_s takes over with no residue and no overshoot. Sample
+	 * the whole legal range, including both bounds. */
+	static const uint32_t wins[] = { QUALITY_SMEAR_WINDOW_MIN_S, 21600u,
+					 43200u, 50000u, 71999u,
+					 QUALITY_SMEAR_WINDOW_MAX_S };
+	quality_block_t b;
+	quality_smear_t s;
+	size_t i;
+
+	for (i = 0u; i < (sizeof(wins) / sizeof(wins[0])); i++) {
+		const uint32_t w = wins[i];
+
+		smear_block(&b, 1);
+		TEST_ASSERT_EQUAL_INT(
+			0, quality_leap_smear(
+				   &b, w,
+				   SMEAR_LEAP_TAI_S * SMEAR_NS_PER_S - 1u, &s));
+		TEST_ASSERT_TRUE(s.active);
+		TEST_ASSERT_EQUAL_INT32(999999999, s.offset_ns);
+
+		/* Mirror for a delete: same magnitude, opposite sign. */
+		smear_block(&b, -1);
+		TEST_ASSERT_EQUAL_INT(
+			0, quality_leap_smear(
+				   &b, w,
+				   SMEAR_LEAP_TAI_S * SMEAR_NS_PER_S - 1u, &s));
+		TEST_ASSERT_TRUE(s.active);
+		TEST_ASSERT_EQUAL_INT32(-999999999, s.offset_ns);
+		TEST_ASSERT_EQUAL_INT8(-1, s.direction);
+	}
+}
+
+static void test_smear_rate_is_the_documented_one(void)
+{
+	/* The ramp presents itself to a client as a constant frequency offset
+	 * of 1/W. Check it as a rate rather than as a value: one second of
+	 * elapsed time must move the correction by exactly 1e9/W nanoseconds
+	 * (11574 ns at the default window — 11.574 ppm). */
+	const uint32_t w = QUALITY_SMEAR_WINDOW_DEFAULT_S;
+	quality_block_t b;
+	quality_smear_t a;
+	quality_smear_t c;
+
+	smear_block(&b, 1);
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, w, smear_now_ns(40000),
+						    &a));
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, w, smear_now_ns(39999),
+						    &c));
+	TEST_ASSERT_EQUAL_INT32(1000000000 / (int32_t)w,
+				c.offset_ns - a.offset_ns);
+	TEST_ASSERT_EQUAL_INT32(11574, c.offset_ns - a.offset_ns);
+}
+
+static void test_smear_served_time_never_goes_backwards(void)
+{
+	/*
+	 * The property the whole feature stands on: a client must never read an
+	 * earlier instant than one it has already read, anywhere in the event.
+	 *
+	 * Sweep the entire window at the SHORTEST permitted length — the worst
+	 * case, because the ramp rate is highest there — from a full window
+	 * before it opens to an hour after the leap, and assert at every step
+	 * that the served instant does not decrease. Both directions: a delete
+	 * runs the correction the other way, and a sign slip shows up on only
+	 * one of them.
+	 *
+	 * What is served is the full expression, not just the ramp:
+	 *
+	 *     served = TAI − leap_current_s − smear_offset
+	 *
+	 * and `leap_current_s` is emphatically NOT a constant across the event —
+	 * it is the term that carries the whole second at the leap instant, and
+	 * the ramp exists precisely to cancel it. So the sweep models what the
+	 * receiver actually publishes: `leap_pending` set and the old offset
+	 * before the event, `leap_pending` cleared and the new offset from the
+	 * event onwards. Omitting that term makes the test pass for an insert
+	 * and fail for a delete, for a reason that is entirely the test's.
+	 *
+	 * That also makes this the end-to-end check that the ramp lands exactly:
+	 * the correction reaching 1e9 − 1 ns at the last nanosecond of the
+	 * window is what makes the served instant continuous when
+	 * `leap_current_s` jumps a full second. A ramp that finished short, long
+	 * or early would show up here as a discontinuity at the boundary.
+	 *
+	 * The step is 977 ms: coprime with the second so the sweep does not land
+	 * on second boundaries, and fine enough that 14400 s takes ~14700
+	 * samples. A burst of nanosecond-spaced samples follows, across the
+	 * quantisation boundary the integer division creates, where a coarse
+	 * sweep would step straight over a one-nanosecond jog.
+	 */
+	const uint32_t w = QUALITY_SMEAR_WINDOW_MIN_S;
+	const uint64_t start_ns =
+		(SMEAR_LEAP_TAI_S - (uint64_t)w) * SMEAR_NS_PER_S;
+	const uint64_t end_ns = SMEAR_LEAP_TAI_S * SMEAR_NS_PER_S;
+	int dir;
+
+	for (dir = 1; dir >= -1; dir -= 2) {
+		quality_block_t b;
+		quality_smear_t s;
+		int64_t prev_served = INT64_MIN;
+		int64_t prev_off = INT64_MIN;
+		uint64_t t;
+		unsigned int samples = 0u;
+		unsigned int active_samples = 0u;
+
+		smear_block(&b, (int8_t)dir);
+
+		/* Start one full window early and end one hour late, so the
+		 * inactive shoulders are in the sweep too: the transitions in
+		 * and out of the ramp are where a discontinuity would live. */
+		for (t = start_ns - (uint64_t)w * SMEAR_NS_PER_S;
+		     t < end_ns + 3600u * SMEAR_NS_PER_S; t += 977000000u) {
+			int64_t served;
+
+			/* Model the receiver: at the event the pending flag
+			 * clears and the standing offset takes the step. */
+			if (t >= end_ns) {
+				b.leap_pending = 0;
+				b.leap_current_s = (int16_t)(37 + dir);
+			}
+
+			TEST_ASSERT_EQUAL_INT(0,
+					      quality_leap_smear(&b, w, t, &s));
+			if (s.active) {
+				active_samples++;
+				/* The correction itself never retreats, and
+				 * never exceeds the one second it exists to
+				 * absorb. */
+				TEST_ASSERT_TRUE((int64_t)s.offset_ns * dir >=
+						 prev_off);
+				prev_off = (int64_t)s.offset_ns * dir;
+				TEST_ASSERT_TRUE(s.offset_ns * dir >= 0);
+				TEST_ASSERT_TRUE(s.offset_ns * dir <=
+						 999999999);
+			}
+
+			/* What a client actually reads. */
+			served = (int64_t)t -
+				 (int64_t)b.leap_current_s * (int64_t)SMEAR_NS_PER_S -
+				 (int64_t)s.offset_ns;
+			TEST_ASSERT_TRUE(served > prev_served);
+			prev_served = served;
+			samples++;
+		}
+		/*
+		 * Guards against a vacuous pass. A monotonicity sweep that
+		 * swept nothing, or that never entered the ramp, would satisfy
+		 * every assertion in the loop above, so both counts are pinned
+		 * to what the loop bounds arithmetically have to produce:
+		 * (2*w + 3600) s of span and w s of ramp, both at 0.977 s per
+		 * step — 33163 samples of which 14740 are active. Checked as
+		 * ranges, since the exact figure depends on where the step
+		 * lands relative to the boundaries.
+		 */
+		TEST_ASSERT_UINT_WITHIN(50u, 33163u, samples);
+		TEST_ASSERT_UINT_WITHIN(50u, 14740u, active_samples);
+
+		/*
+		 * Nanosecond-resolution sweep across one interior division
+		 * boundary. The coarse sweep above steps in units of ~0.977 s
+		 * and cannot see a one-nanosecond jog; this can, and it pins
+		 * the exact quantisation behaviour rather than an approximation
+		 * of it.
+		 *
+		 * The correction ticks once every W nanoseconds of elapsed
+		 * time. The sweep is centred on elapsed = W * 500000, which is
+		 * an exact multiple of W, so the range −2000..+2000 ns contains
+		 * exactly one tick and the next is 14400 ns away, well outside.
+		 *
+		 * At that tick the served instant does not advance: t gains one
+		 * nanosecond and the insert correction gains one nanosecond
+		 * with it. That is a STALL, not a reversal, and it is
+		 * unavoidable in any integer representation — the served
+		 * timescale runs at 0.99993 ns per ns, and integer nanoseconds
+		 * cannot express a fractional advance except by occasionally
+		 * skipping one. A delete runs the correction the other way, so
+		 * it gains 2 ns at the tick and never stalls at all.
+		 */
+		prev_served = INT64_MIN;
+		{
+			unsigned int stalls = 0u;
+			bool first = true;
+
+			/* The coarse loop left the block in its post-event
+			 * state; put the pending leap back for this sweep. */
+			smear_block(&b, (int8_t)dir);
+
+			for (t = start_ns + (uint64_t)w * 500000u - 2000u;
+			     t <= start_ns + (uint64_t)w * 500000u + 2000u;
+			     t++) {
+				int64_t served;
+
+				TEST_ASSERT_EQUAL_INT(
+					0, quality_leap_smear(&b, w, t, &s));
+				TEST_ASSERT_TRUE(s.active);
+				/* Deep inside the window, so leap_current_s is
+				 * genuinely constant and drops out. */
+				served = (int64_t)t - (int64_t)s.offset_ns;
+
+				if (!first) {
+					/* The property that matters: a client
+					 * can never read an earlier instant
+					 * than one it has already read. */
+					TEST_ASSERT_TRUE(served >= prev_served);
+					if (served == prev_served) {
+						stalls++;
+					}
+				}
+				first = false;
+				prev_served = served;
+			}
+			/* Exactly the one tick the arithmetic predicts — no
+			 * more (which would mean the ramp is running fast) and,
+			 * for an insert, no fewer (which would mean the sweep
+			 * missed the boundary and proved nothing). */
+			TEST_ASSERT_EQUAL_UINT((dir > 0) ? 1u : 0u, stalls);
+		}
+	}
+}
+
+static void test_smear_hands_over_to_the_leap_seamlessly(void)
+{
+	/*
+	 * The acceptance criterion "the ramp reaches exactly the full second by
+	 * the window's end", checked where it actually has to hold: across the
+	 * single nanosecond at which the ramp stops and `leap_current_s` takes
+	 * over the whole second.
+	 *
+	 * served = TAI − leap_current_s − offset. One nanosecond before the
+	 * event the ramp has absorbed 1e9 − 1 ns of the coming step; at the
+	 * event it has absorbed none and the standing offset has moved by 1e9.
+	 * If those two do not sum to the same thing, the appliance steps at the
+	 * boundary — which is precisely what smearing exists to avoid — and the
+	 * size of the step is how much the ramp under- or over-shot.
+	 *
+	 * Worked through, the served instant advances across that nanosecond by
+	 *
+	 *   insert:  (L − 38e9) − (L − 1 − 37e9 − 999999999) = 0
+	 *   delete:  (L − 36e9) − (L − 1 − 37e9 + 999999999) = 2
+	 *
+	 * against 1 ns of real time. Those are the exact values asserted below,
+	 * and they are not a fudge: the handover IS the ramp's final division
+	 * tick, so it shows the same ±1 ns integer quantisation as every other
+	 * tick (documented at quality.h's monotonicity property — an insert
+	 * stalls one nanosecond per tick, a delete gains two). What matters is
+	 * that the discontinuity is bounded by one nanosecond and is never
+	 * negative; a ramp that finished short would show up here as a step of
+	 * up to a full second.
+	 *
+	 * Every permitted window must land it, not just the default.
+	 */
+	static const uint32_t wins[] = { QUALITY_SMEAR_WINDOW_MIN_S, 21600u,
+					 43200u, 60001u,
+					 QUALITY_SMEAR_WINDOW_MAX_S };
+	const uint64_t leap_ns = SMEAR_LEAP_TAI_S * SMEAR_NS_PER_S;
+	size_t i;
+	int dir;
+
+	for (i = 0u; i < (sizeof(wins) / sizeof(wins[0])); i++) {
+		for (dir = 1; dir >= -1; dir -= 2) {
+			quality_block_t b;
+			quality_smear_t before;
+			quality_smear_t after;
+			int64_t served_before;
+			int64_t served_after;
+
+			/* One nanosecond before: still ramping, old offset. */
+			smear_block(&b, (int8_t)dir);
+			TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, wins[i],
+								   leap_ns - 1u,
+								   &before));
+			TEST_ASSERT_TRUE(before.active);
+			served_before = (int64_t)(leap_ns - 1u) -
+					(int64_t)b.leap_current_s *
+						(int64_t)SMEAR_NS_PER_S -
+					(int64_t)before.offset_ns;
+
+			/* At the event: ramp done, offset stepped. */
+			b.leap_pending = 0;
+			b.leap_current_s = (int16_t)(37 + dir);
+			TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, wins[i],
+								   leap_ns,
+								   &after));
+			TEST_ASSERT_FALSE(after.active);
+			TEST_ASSERT_EQUAL_INT32(0, after.offset_ns);
+			served_after = (int64_t)leap_ns -
+				       (int64_t)b.leap_current_s *
+					       (int64_t)SMEAR_NS_PER_S -
+				       (int64_t)after.offset_ns;
+
+			/* No step, at any window length, in either direction:
+			 * one nanosecond of real time buys 0 or 2 ns of served
+			 * time, never a jump and never a reversal. */
+			TEST_ASSERT_EQUAL_INT64((dir > 0) ? 0 : 2,
+						served_after - served_before);
+			TEST_ASSERT_TRUE(served_after >= served_before);
+		}
+	}
+}
+
+static void test_smear_rejects_nonsense_and_null(void)
+{
+	quality_block_t b;
+	quality_smear_t s;
+
+	smear_block(&b, 1);
+
+	TEST_ASSERT_EQUAL_INT(-EINVAL, quality_leap_smear(&b, 86400u, 1u, NULL));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      quality_leap_smear(NULL, 86400u, 1u, &s));
+	/* Even on the NULL-block path the output is fully defined. */
+	TEST_ASSERT_FALSE(s.active);
+	TEST_ASSERT_EQUAL_INT32(0, s.offset_ns);
+
+	/* No time: no ramp phase invented. */
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, 86400u, 0u, &s));
+	TEST_ASSERT_FALSE(s.active);
+
+	/*
+	 * A receiver reporting an event inside the first window-length of the
+	 * TAI epoch is reporting nonsense. It must not wrap the window start
+	 * into a colossal unsigned value and hand back a bogus ramp.
+	 */
+	b.leap_at_tai_s = 10u;
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, 86400u,
+						    5u * SMEAR_NS_PER_S, &s));
+	TEST_ASSERT_FALSE(s.active);
+	TEST_ASSERT_EQUAL_INT32(0, s.offset_ns);
+
+	b.leap_at_tai_s = 0u;
+	TEST_ASSERT_EQUAL_INT(0, quality_leap_smear(&b, 86400u, 1u, &s));
+	TEST_ASSERT_FALSE(s.active);
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -732,6 +1221,15 @@ int main(void)
 	RUN_TEST(test_holdover_inverse_quadratic_agrees_with_the_forward_model);
 	RUN_TEST(test_holdover_inverse_is_accurate_when_drift_dominates);
 	RUN_TEST(test_holdover_inverse_never_and_null);
+
+	RUN_TEST(test_smear_window_clamp);
+	RUN_TEST(test_smear_off_is_inert);
+	RUN_TEST(test_smear_window_boundaries);
+	RUN_TEST(test_smear_ramp_completes_exactly);
+	RUN_TEST(test_smear_rate_is_the_documented_one);
+	RUN_TEST(test_smear_served_time_never_goes_backwards);
+	RUN_TEST(test_smear_hands_over_to_the_leap_seamlessly);
+	RUN_TEST(test_smear_rejects_nonsense_and_null);
 
 	RUN_TEST(test_sqrtf_known_values);
 	RUN_TEST(test_sqrtf_matches_a_double_newton_reference);

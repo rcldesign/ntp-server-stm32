@@ -249,6 +249,96 @@ float quality_holdover_time_to_ns(const quality_holdover_model_t *m, float dt_c,
 	return INFINITY;
 }
 
+/* --------------------------------------------------------------- leap smear */
+
+uint32_t quality_smear_window_clamp(uint32_t window_s)
+{
+	if (window_s == 0u) {
+		return 0u;
+	}
+	if (window_s < QUALITY_SMEAR_WINDOW_MIN_S) {
+		return QUALITY_SMEAR_WINDOW_MIN_S;
+	}
+	if (window_s > QUALITY_SMEAR_WINDOW_MAX_S) {
+		return QUALITY_SMEAR_WINDOW_MAX_S;
+	}
+	return window_s;
+}
+
+int quality_leap_smear(const quality_block_t *b, uint32_t window_s,
+		       uint64_t now_tai_ns, quality_smear_t *out)
+{
+	uint64_t now_s;
+	uint64_t start_s;
+	uint64_t elapsed_ns;
+	uint64_t offset_ns;
+	uint32_t w;
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	memset(out, 0, sizeof(*out));
+	if (b == NULL) {
+		return -EINVAL;
+	}
+
+	w = quality_smear_window_clamp(window_s);
+	out->window_s = w;
+
+	if (w == 0u || b->leap_pending == 0 || now_tai_ns == 0u) {
+		return 0;
+	}
+	/* A receiver reporting an event inside the first W seconds of the TAI
+	 * epoch is reporting nonsense; refusing it here is what keeps the
+	 * `leap_at_tai_s - w` below from wrapping into a colossal window. */
+	if (b->leap_at_tai_s < (uint64_t)w) {
+		return 0;
+	}
+
+	now_s = now_tai_ns / NS_PER_S;
+	if (now_s >= b->leap_at_tai_s) {
+		/* The event has fired (or the block is stale and still carries a
+		 * pending flag for a past event). Either way the ramp is over and
+		 * leap_current_s is the authority again. */
+		return 0;
+	}
+	if ((b->leap_at_tai_s - now_s) > (uint64_t)w) {
+		return 0; /* announced, but the ramp has not started */
+	}
+
+	start_s = b->leap_at_tai_s - (uint64_t)w;
+
+	/*
+	 * Elapsed time is accumulated as whole seconds plus the sub-second
+	 * remainder rather than as `now_tai_ns - start_s * NS_PER_S`, because
+	 * the latter multiplies an unvalidated receiver-supplied second count
+	 * by 1e9. Here every term is bounded: `now_s - start_s` is under w
+	 * (≤ 86400) by the two tests above, and the remainder is under 1e9.
+	 */
+	elapsed_ns = (now_s - start_s) * NS_PER_S + (now_tai_ns % NS_PER_S);
+
+	/*
+	 * The whole ramp, in one exact integer division.
+	 *
+	 * offset = 1e9 * elapsed_ns / (w * 1e9) = elapsed_ns / w. Non-decreasing
+	 * in elapsed_ns (floor of a monotone linear function), and bounded by
+	 * (w*1e9 - 1)/w = 1e9 - 1, so the correction reaches a full second only
+	 * in the limit — at which instant the window closes and leap_current_s
+	 * has moved. The two meet with no gap: at elapsed = w*1e9 - 1 ns the
+	 * served time is (TAI + 1 ns) - leap_current_s - (1e9 - 1) ns, which is
+	 * exactly the post-leap value one nanosecond later.
+	 */
+	offset_ns = elapsed_ns / (uint64_t)w;
+
+	out->active = true;
+	out->direction = (b->leap_pending > 0) ? (int8_t)1 : (int8_t)-1;
+	out->offset_ns = (b->leap_pending > 0) ? (int32_t)offset_ns
+					       : -(int32_t)offset_ns;
+	out->elapsed_s = (uint32_t)(now_s - start_s);
+	out->remaining_s = (uint32_t)(b->leap_at_tai_s - now_s);
+	return 0;
+}
+
 /* ------------------------------------------------------------------- misc */
 
 float quality_sqrtf(float x)
