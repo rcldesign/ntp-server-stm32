@@ -1815,15 +1815,33 @@ static void test_tx_failure_is_reported(void)
 	TEST_ASSERT_TRUE((ptp_port_alarms(&r.c) & PTP_ALARM_TX_ERROR) == 0U);
 	TEST_ASSERT_GREATER_THAN_UINT32(0U, ctr->tx[PTP_MSG_ANNOUNCE]);
 
-	/* A Follow_Up that cannot be sent reports the transmit error upward. */
+	/*
+	 * A Sync that the interface refused arms no Follow_Up: there is no
+	 * egress timestamp coming for a frame that never left.
+	 */
 	r.f.tx_rc = -EIO;
-	{
-		size_t si = find_tx(&r.f, (uint8_t)PTP_MSG_SYNC, 0U);
+	rig_run(&r, 8101U, 9200U);
+	TEST_ASSERT_FALSE(r.c.sync_pending);
 
+	/* But a Sync that went out and a Follow_Up that cannot: error upward. */
+	{
+		size_t si;
+		uint16_t seq;
+		uint32_t errs_before;
+
+		r.f.tx_rc = 0;
+		rig_run(&r, 9201U, 10300U);
+		si = find_tx(&r.f, (uint8_t)PTP_MSG_SYNC,
+			     count_tx(&r.f, (uint8_t)PTP_MSG_SYNC) - 1U);
 		TEST_ASSERT_NOT_EQUAL_size_t(SIZE_MAX, si);
-		rig_run(&r, 8101U, 9200U);
-		TEST_ASSERT_EQUAL_INT(-EIO,
-			ptp_on_sync_txts(&r.c, r.c.sync_pending_seq, 1ULL));
+		seq = r.f.tx[si].seq;
+		TEST_ASSERT_TRUE(r.c.sync_pending);
+
+		errs_before = ctr->tx_errors;
+		r.f.tx_rc = -EIO;
+		TEST_ASSERT_EQUAL_INT(-EIO, ptp_on_sync_txts(&r.c, seq, 1ULL));
+		TEST_ASSERT_EQUAL_UINT32(errs_before + 1U, ctr->tx_errors);
+		TEST_ASSERT_TRUE((ptp_port_alarms(&r.c) & PTP_ALARM_TX_ERROR) != 0U);
 	}
 }
 
