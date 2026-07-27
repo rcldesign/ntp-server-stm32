@@ -873,17 +873,18 @@ static void test_a_rail_just_outside_the_window_is_still_rejected(void)
 	model_t m;
 
 	/*
-	 * Operating expected is 14 249 mV (code 500); the ±5 % window is
-	 * [13537, 14961]. The measured<=vmax gate (15 000) does not bite inside
-	 * this band, so these boundaries isolate the window check itself.
+	 * Operating expected is 14 250 mV (code 500, VCTRL 1535 mV); the ±5 %
+	 * window (tol 713) is [13537, 14963]. The measured<=vmax gate (15 000)
+	 * does not bite inside this band, so these boundaries isolate the window
+	 * check itself.
 	 */
 	model_init(&m, NULL);
-	m.force_op_rail_mv = 14962; /* one past the top edge */
+	m.force_op_rail_mv = 14964; /* one past the top edge */
 	run_out(&m, 100U, 200U);
 	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 
 	model_init(&m, NULL);
-	m.force_op_rail_mv = 14961; /* exactly the top edge */
+	m.force_op_rail_mv = 14963; /* exactly the top edge */
 	run_out(&m, 100U, 200U);
 	expect_present(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
