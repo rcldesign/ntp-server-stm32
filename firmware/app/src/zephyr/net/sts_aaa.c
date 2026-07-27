@@ -42,13 +42,35 @@
  * TLS for LDAP
  * ---------------------------------------------------------------------------
  *
- * `sec.ldap.mode` selects plain (389), StartTLS or LDAPS (636). The two TLS
- * modes are compiled only when Zephyr's TLS socket option is available
- * (CONFIG_NET_SOCKETS_SOCKOPT_TLS); the project does not enable the TLS 1.3
- * stack by default (see the block at the end of conf/net.conf), so a build
- * without it reports LDAPS/StartTLS as unavailable rather than silently binding
- * in the clear. Falling back to plaintext would send the bind password over the
- * wire, which is exactly the failure the operator selected TLS to avoid.
+ * `sec.ldap.mode` selects plain (389), StartTLS or LDAPS (636).
+ *
+ * CONFIG_NET_SOCKETS_SOCKOPT_TLS and CONFIG_TLS_CREDENTIALS ARE SET in every
+ * image this project builds: app/conf/web.conf turns them on for HTTPS, Kconfig
+ * symbols are global, and app/CMakeLists.txt globs every conf fragment into
+ * every build. So the TLS blocks below are compiled in today — the `#if` is a
+ * guard for a hypothetical HTTPS-less build, not a description of the shipped
+ * one. (An older comment here claimed the opposite, and pointed at the
+ * commented-out block at the end of conf/net.conf; that block is NTS-KE's
+ * mbedTLS *user-config header*, which is a separate and still-open item.)
+ *
+ * LDAPS therefore needs a trust anchor, not a Kconfig change. The whole
+ * decision — which transport, and what is missing when there is none — is in
+ * net/sts_ldap_ca.h, together with the reasoning for each branch. In outline:
+ *
+ *   mode 0   plain TCP;
+ *   mode 1   refused. Zephyr's TLS is a socket *type* chosen at socket() time,
+ *            not an in-place upgrade, so the StartTLS ExtendedRequest has
+ *            nowhere to go. Refused BEFORE the socket, because probing a
+ *            directory to learn which flavour of impossible applies is an
+ *            outbound connection an unauthenticated login attempt should not
+ *            get to make;
+ *   mode 2   a TLS socket armed with TLS_SEC_TAG_LIST (the operator's anchor)
+ *            and TLS_HOSTNAME (`sec.ldap.host`), refused before the socket when
+ *            no anchor is installed.
+ *
+ * None of the three ever falls back to plaintext: binding in the clear would
+ * send the bind password over the wire, which is exactly the failure the
+ * operator selected TLS to avoid.
  */
 
 #include <errno.h>
@@ -59,17 +81,26 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/net/socket.h>
 
+#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
+#include <zephyr/fs/fs.h>
+#include <zephyr/net/tls_credentials.h>
+
+#include <mbedtls/x509_crt.h>
+#endif
+
 #include "auth/auth.h"
 #include "auth/ldap.h"
 #include "auth/radius.h"
 #include "auth/tacacs.h"
 #include "cfg/cfg.h"
 #include "net/sts_aaa.h"
+#include "net/sts_ldap_ca.h"
 #include "net/sts_net.h"
 /* sts_store.h is the one header this area takes from another (its own comment
  * declares it a public façade): it is where the net area gets its port_crypto_t
  * rather than standing up a second mbedTLS binding. */
 #include "storage/sts_store.h"
+#include "web/web.h" /* web_hex_encode / web_span_copy, as sts_cert.c uses them */
 #include "zephyr/sts_app.h"
 
 LOG_MODULE_REGISTER(sts_aaa, CONFIG_STS1000_LOG_LEVEL);
@@ -566,6 +597,390 @@ static int do_tacacs(const char *user, const char *secret, uint8_t *out_role)
 }
 
 /* ------------------------------------------------------------------------- */
+/* LDAP trust anchor                                                         */
+/* ------------------------------------------------------------------------- */
+/*
+ * The operator-installed CA that makes `sec.ldap.mode = 2` able to complete a
+ * handshake at all. sts_ldap_ca.h carries the reasoning; this is the storage
+ * and the Zephyr binding.
+ *
+ * Modelled on sts_cert.c: a PEM file under /lfs/tls, loaded once into a
+ * file-scope buffer and handed to tls_credential_add(). The buffer must be
+ * file-scope and must outlive every socket that uses the tag, because
+ * tls_credential_add() stores the POINTER — subsys/net/lib/tls_credentials/
+ * tls_credentials.c copies nothing. That is also why ldap_ca_forget() deletes
+ * the credential entry BEFORE it zeroes the buffer.
+ *
+ * Everything below runs under g_lock, which is what keeps do_ldap() — the only
+ * reader of the credential — out of the buffer while it changes.
+ */
+
+#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
+
+/* +1 for the NUL: mbedTLS detects PEM by the trailing NUL inside the length it
+ * is given, and Zephyr passes cred->len straight through to it. */
+static char g_ca_pem[STS_LDAP_CA_PEM_MAX + 1U];
+static size_t g_ca_len;
+static bool g_ca_ready;
+static bool g_ca_persisted;
+/** /lfs has already been consulted once; a missing file is not re-read. */
+static bool g_ca_scanned;
+static char g_ca_subject[72];
+static char g_ca_not_after[24];
+static char g_ca_fp[68];
+
+static int ca_file_read(char *buf, size_t cap, size_t *out_len)
+{
+	struct fs_file_t f;
+	ssize_t n;
+	int rc;
+
+	if (!sts_fs_ready()) {
+		return -EROFS;
+	}
+	fs_file_t_init(&f);
+	rc = fs_open(&f, STS_LDAP_CA_PATH, FS_O_READ);
+	if (rc != 0) {
+		return rc;
+	}
+	n = fs_read(&f, buf, cap);
+	(void)fs_close(&f);
+	if (n < 0) {
+		return (int)n;
+	}
+	*out_len = (size_t)n;
+	return 0;
+}
+
+static int ca_file_write(const char *buf, size_t len)
+{
+	struct fs_file_t f;
+	ssize_t n;
+	int rc;
+
+	if (!sts_fs_ready()) {
+		return -EROFS;
+	}
+	rc = fs_mkdir(STS_LDAP_CA_DIR);
+	if (rc != 0 && rc != -EEXIST) {
+		LOG_WRN("mkdir %s: %d", STS_LDAP_CA_DIR, rc);
+	}
+	fs_file_t_init(&f);
+	rc = fs_open(&f, STS_LDAP_CA_PATH, FS_O_CREATE | FS_O_WRITE | FS_O_TRUNC);
+	if (rc != 0) {
+		return rc;
+	}
+	n = fs_write(&f, buf, len);
+	if (n >= 0) {
+		rc = fs_sync(&f);
+	}
+	(void)fs_close(&f);
+	if (n < 0) {
+		return (int)n;
+	}
+	if ((size_t)n != len) {
+		return -EIO;
+	}
+	return rc;
+}
+
+/** Drop the anchor from the credential store, then from RAM. Order matters. */
+static void ldap_ca_forget(void)
+{
+	(void)tls_credential_delete(STS_LDAP_CA_SEC_TAG,
+				    TLS_CREDENTIAL_CA_CERTIFICATE);
+	memset(g_ca_pem, 0, sizeof(g_ca_pem));
+	g_ca_len = 0U;
+	g_ca_ready = false;
+	g_ca_persisted = false;
+	g_ca_subject[0] = '\0';
+	g_ca_not_after[0] = '\0';
+	g_ca_fp[0] = '\0';
+}
+
+/** Subject DN, expiry and DER fingerprint of the first certificate. */
+static void ldap_ca_describe(const mbedtls_x509_crt *crt)
+{
+	const port_crypto_t *cr = sts_port_crypto();
+	uint8_t digest[32];
+
+	if (mbedtls_x509_dn_gets(g_ca_subject, sizeof(g_ca_subject),
+				 &crt->subject) < 0) {
+		g_ca_subject[0] = '\0';
+	}
+	(void)snprintf(g_ca_not_after, sizeof(g_ca_not_after),
+		       "%04d-%02d-%02dT%02d:%02d:%02dZ", crt->valid_to.year,
+		       crt->valid_to.mon, crt->valid_to.day, crt->valid_to.hour,
+		       crt->valid_to.min, crt->valid_to.sec);
+
+	g_ca_fp[0] = '\0';
+	if (cr != NULL && cr->sha256 != NULL &&
+	    cr->sha256(cr->ctx, crt->raw.p, crt->raw.len, digest) == 0) {
+		(void)web_hex_encode(digest, sizeof(digest), g_ca_fp,
+				     sizeof(g_ca_fp));
+	}
+}
+
+/**
+ * Validate @p pem and, if it is good, make it the live anchor. Touches no file.
+ *
+ * The screening in sts_ldap_ca_check() runs on the CALLER's buffer, so an
+ * operator's bad paste is refused before the live anchor is disturbed. Only an
+ * X.509 defect that survives the framing check can cost the previous anchor,
+ * and the header explains why that outcome is preferred to a stale one.
+ */
+static int ldap_ca_adopt(const char *pem, size_t len)
+{
+	mbedtls_x509_crt crt;
+	sts_ldap_ca_verdict_t v;
+	int rc;
+
+	v = sts_ldap_ca_check(pem, len);
+	if (v != STS_LDAP_CA_OK) {
+		LOG_ERR("ldap ca: refused — %s", sts_ldap_ca_reason(v));
+		switch (v) {
+		case STS_LDAP_CA_TOO_BIG:
+			return -EFBIG;
+		case STS_LDAP_CA_HAS_KEY:
+			return -EPERM;
+		default:
+			return -EBADMSG;
+		}
+	}
+
+	ldap_ca_forget();
+	memcpy(g_ca_pem, pem, len);
+	g_ca_pem[len] = '\0';
+	g_ca_len = len;
+
+	mbedtls_x509_crt_init(&crt);
+	/* +1: mbedTLS decides PEM-vs-DER by the NUL at the end of the span. A
+	 * positive return is a PARTIAL parse (that many blocks failed), which is
+	 * not good enough for a trust anchor. */
+	rc = mbedtls_x509_crt_parse(&crt, (const unsigned char *)g_ca_pem,
+				    g_ca_len + 1U);
+	if (rc != 0) {
+		if (rc > 0) {
+			LOG_ERR("ldap ca: %d certificate block(s) did not parse",
+				rc);
+		} else {
+			LOG_ERR("ldap ca: x509 parse -0x%04x", (unsigned int)-rc);
+		}
+		mbedtls_x509_crt_free(&crt);
+		ldap_ca_forget();
+		return -EBADMSG;
+	}
+	ldap_ca_describe(&crt);
+	mbedtls_x509_crt_free(&crt);
+
+	rc = tls_credential_add(STS_LDAP_CA_SEC_TAG, TLS_CREDENTIAL_CA_CERTIFICATE,
+				g_ca_pem, g_ca_len + 1U);
+	if (rc != 0) {
+		LOG_ERR("ldap ca: tls_credential_add: %d", rc);
+		ldap_ca_forget();
+		return rc;
+	}
+	g_ca_ready = true;
+	return 0;
+}
+
+/** Read the persisted anchor, once. Sets g_ca_scanned whatever the outcome. */
+static void ldap_ca_load(void)
+{
+	char buf[STS_LDAP_CA_PEM_MAX];
+	size_t n = 0U;
+	int rc;
+
+	if (!sts_fs_ready()) {
+		return; /* not scanned: /lfs may still mount */
+	}
+	g_ca_scanned = true;
+
+	rc = ca_file_read(buf, sizeof(buf), &n);
+	if (rc != 0) {
+		if (rc != -ENOENT) {
+			LOG_WRN("ldap ca: %s unreadable (%d)", STS_LDAP_CA_PATH,
+				rc);
+		}
+		return;
+	}
+	if (ldap_ca_adopt(buf, n) != 0) {
+		LOG_ERR("ldap ca: %s is unusable; LDAPS will refuse until a "
+			"good anchor is installed",
+			STS_LDAP_CA_PATH);
+		return;
+	}
+	g_ca_persisted = true;
+	LOG_INF("ldap ca: %s loaded (%s, expires %s)", STS_LDAP_CA_PATH,
+		g_ca_subject, g_ca_not_after);
+}
+
+/**
+ * Is an anchor live? Loads it lazily the first time /lfs is available, so this
+ * does not depend on sts_aaa_start() running after the volume is mounted.
+ *
+ * Caller must hold g_lock.
+ */
+static bool ldap_ca_ready(void)
+{
+	if (!g_ca_scanned) {
+		ldap_ca_load();
+	}
+	return g_ca_ready;
+}
+
+int sts_aaa_ldap_ca_info(sts_aaa_ldap_ca_t *out)
+{
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	memset(out, 0, sizeof(*out));
+
+	k_mutex_lock(&g_lock, K_FOREVER);
+	out->present = ldap_ca_ready();
+	out->persisted = g_ca_persisted;
+	(void)web_span_copy(out->subject, sizeof(out->subject), g_ca_subject,
+			    strlen(g_ca_subject));
+	(void)web_span_copy(out->not_after, sizeof(out->not_after),
+			    g_ca_not_after, strlen(g_ca_not_after));
+	(void)web_span_copy(out->sha256_fp, sizeof(out->sha256_fp), g_ca_fp,
+			    strlen(g_ca_fp));
+	k_mutex_unlock(&g_lock);
+	return 0;
+}
+
+int sts_aaa_ldap_ca_install(const char *pem, size_t len)
+{
+	char subject[sizeof(g_ca_subject)];
+	char fp[sizeof(g_ca_fp)];
+	int rc;
+
+	k_mutex_lock(&g_lock, K_FOREVER);
+	rc = ldap_ca_adopt(pem, len);
+	if (rc != 0) {
+		/* Nothing is live now, so nothing on /lfs should claim to be:
+		 * leaving the old file behind would resurrect the rejected
+		 * operator's previous anchor at the next boot. */
+		if (sts_fs_ready()) {
+			int frc = fs_unlink(STS_LDAP_CA_PATH);
+
+			if (frc != 0 && frc != -ENOENT) {
+				LOG_WRN("unlink %s: %d", STS_LDAP_CA_PATH, frc);
+			}
+		}
+		g_ca_scanned = true;
+		k_mutex_unlock(&g_lock);
+		return rc;
+	}
+
+	g_ca_scanned = true;
+	g_ca_persisted = (ca_file_write(g_ca_pem, g_ca_len) == 0);
+	if (!g_ca_persisted) {
+		LOG_WRN("ldap ca: accepted and live, but NOT persisted; it is "
+			"gone at the next reboot");
+		rc = -EROFS;
+	}
+	(void)web_span_copy(subject, sizeof(subject), g_ca_subject,
+			    strlen(g_ca_subject));
+	(void)web_span_copy(fp, sizeof(fp), g_ca_fp, strlen(g_ca_fp));
+	k_mutex_unlock(&g_lock);
+
+	sts_log((uint8_t)LOGR_SUB_SEC, (uint8_t)LOGR_NOTICE,
+		"ldap ca installed: %s (sha256 %s)", subject, fp);
+	return rc;
+}
+
+int sts_aaa_ldap_ca_erase(void)
+{
+	int rc = 0;
+
+	k_mutex_lock(&g_lock, K_FOREVER);
+	ldap_ca_forget();
+	g_ca_scanned = true; /* erased on purpose: do not lazily reload it */
+	if (sts_fs_ready()) {
+		int frc = fs_unlink(STS_LDAP_CA_PATH);
+
+		/* -ENOENT is the desired end state, not a failure. */
+		if (frc != 0 && frc != -ENOENT) {
+			LOG_ERR("unlink %s: %d", STS_LDAP_CA_PATH, frc);
+			rc = -EIO;
+		}
+	}
+	k_mutex_unlock(&g_lock);
+	return rc;
+}
+
+/**
+ * Arm a mode-2 socket: the anchor, and the name the certificate must carry.
+ *
+ * TLS_PEER_VERIFY is deliberately absent. Zephyr leaves verify_level at -1
+ * unless it is set, and mbedTLS's client default is then
+ * MBEDTLS_SSL_VERIFY_REQUIRED — which is what this wants. Setting it explicitly
+ * would only create the opportunity to set it wrong, and there is no "verify
+ * none" escape hatch here on purpose: an unverified LDAPS bind hands the
+ * directory password to whoever answered the TCP connection.
+ *
+ * TLS_HOSTNAME matters as much as the anchor. Without it sockets_tls.c calls
+ * mbedtls_ssl_set_hostname(ssl, "") and the handshake checks only that SOME
+ * certificate the CA ever issued was presented — including one for a different
+ * host, which an attacker inside the CA's namespace can obtain legitimately.
+ * The name is `sec.ldap.host` verbatim: if the operator configured a bare IP,
+ * the server certificate needs a matching iPAddress SAN, and if it has none the
+ * handshake fails closed rather than silently skipping the check.
+ */
+static int ldap_tls_arm(int fd)
+{
+	static const sec_tag_t tags[] = { STS_LDAP_CA_SEC_TAG };
+
+	if (zsock_setsockopt(fd, SOL_TLS, TLS_SEC_TAG_LIST, tags,
+			     sizeof(tags)) < 0) {
+		LOG_ERR("ldap: TLS_SEC_TAG_LIST: %d", errno);
+		return -EHOSTUNREACH;
+	}
+	if (zsock_setsockopt(fd, SOL_TLS, TLS_HOSTNAME, g_ldap.host,
+			     strlen(g_ldap.host) + 1U) < 0) {
+		LOG_ERR("ldap: TLS_HOSTNAME: %d", errno);
+		return -EHOSTUNREACH;
+	}
+	return 0;
+}
+
+#else /* !CONFIG_NET_SOCKETS_SOCKOPT_TLS */
+
+/*
+ * No TLS socket layer, so no anchor can be used. The entry points still exist
+ * because the REST provider table binds them unconditionally; each reports the
+ * build limitation rather than pretending to have stored something.
+ */
+static bool ldap_ca_ready(void)
+{
+	return false;
+}
+
+int sts_aaa_ldap_ca_info(sts_aaa_ldap_ca_t *out)
+{
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	memset(out, 0, sizeof(*out));
+	return -ENOTSUP;
+}
+
+int sts_aaa_ldap_ca_install(const char *pem, size_t len)
+{
+	ARG_UNUSED(pem);
+	ARG_UNUSED(len);
+	return -ENOTSUP;
+}
+
+int sts_aaa_ldap_ca_erase(void)
+{
+	return 0;
+}
+
+#endif /* CONFIG_NET_SOCKETS_SOCKOPT_TLS */
+
+/* ------------------------------------------------------------------------- */
 /* LDAP                                                                      */
 /* ------------------------------------------------------------------------- */
 
@@ -714,6 +1129,7 @@ static int do_ldap(const char *user, const char *secret, uint8_t *out_role)
 	struct sockaddr_storage dst;
 	socklen_t dst_len = 0U;
 	char user_dn[DN_MAX + AUTH_USER_MAX + 2U];
+	sts_ldap_go_t go;
 	uint32_t msgid = 1U;
 	int fd = -1;
 	int rc;
@@ -729,67 +1145,52 @@ static int do_ldap(const char *user, const char *secret, uint8_t *out_role)
 		return -EHOSTUNREACH;
 	}
 
-#if !defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
-	if (g_ldap_cfg.mode != 0U) {
-		/* Binding in the clear when the operator asked for TLS would
-		 * put the bind password on the wire. Refuse instead. */
-		LOG_ERR("ldap: mode %u needs TLS support in this build",
-			g_ldap_cfg.mode);
+	/*
+	 * The transport is decided BEFORE the resolver and the socket, so a
+	 * configuration that cannot work costs nothing and — the point of the
+	 * exercise — reports the missing thing rather than an mbedTLS error code
+	 * from a handshake that never had a chance. Never falls back to
+	 * plaintext: sts_ldap_go_opens_socket() is false for every refusal.
+	 */
+	go = sts_ldap_transport(g_ldap_cfg.mode,
+				IS_ENABLED(CONFIG_NET_SOCKETS_SOCKOPT_TLS),
+				ldap_ca_ready());
+	if (!sts_ldap_go_opens_socket(go)) {
+		LOG_ERR("ldap: mode %u refused: %s", g_ldap_cfg.mode,
+			sts_ldap_go_reason(go));
 		return -EHOSTUNREACH;
 	}
-#endif
 
 	rc = resolve(g_ldap.host, g_ldap.port, SOCK_STREAM, &dst, &dst_len);
 	if (rc != 0) {
 		return rc;
 	}
 
-#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
-	if (g_ldap_cfg.mode == 2U) {
-		fd = zsock_socket(dst.ss_family, SOCK_STREAM, IPPROTO_TLS_1_2);
-	} else {
-		fd = zsock_socket(dst.ss_family, SOCK_STREAM, IPPROTO_TCP);
-	}
-#else
-	fd = zsock_socket(dst.ss_family, SOCK_STREAM, IPPROTO_TCP);
-#endif
+	/*
+	 * IPPROTO_TLS_1_2 names the socket *type*, not a version floor: Zephyr's
+	 * protocol_check() maps every IPPROTO_TLS_1_* to IPPROTO_TCP and keeps
+	 * the value only so getsockopt(TLS_PROTOCOL_VERSION) can report it. The
+	 * negotiated version comes from the mbedTLS Kconfig, which conf/web.conf
+	 * pins to 1.3 only. sts_web.c opens its listener the same way.
+	 */
+	fd = zsock_socket(dst.ss_family, SOCK_STREAM,
+			  sts_ldap_go_is_tls(go) ? IPPROTO_TLS_1_2 : IPPROTO_TCP);
 	if (fd < 0) {
 		return -EHOSTUNREACH;
 	}
+#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
+	if (sts_ldap_go_is_tls(go) && ldap_tls_arm(fd) != 0) {
+		(void)zsock_close(fd);
+		return -EHOSTUNREACH;
+	}
+#endif
 	set_timeout(fd, g_ldap.timeout_ms);
+	/* For a TLS socket this also runs the handshake, inline on this thread —
+	 * which is what sizes STS_AAA_WORKER_STACK in sts_secops.c. */
 	if (zsock_connect(fd, (struct sockaddr *)&dst, dst_len) < 0) {
 		(void)zsock_close(fd);
 		return -EHOSTUNREACH;
 	}
-
-#if defined(CONFIG_NET_SOCKETS_SOCKOPT_TLS)
-	if (g_ldap_cfg.mode == 1U) {
-		ldap_result_t r;
-		size_t tx_len = 0U;
-		size_t rx_len = 0U;
-
-		/*
-		 * StartTLS: the ExtendedRequest goes over the plain connection
-		 * and the socket is upgraded afterwards. Zephyr's TLS is a
-		 * socket *type*, not an upgrade, so this cannot be completed
-		 * without a socket-layer facility the platform does not offer.
-		 * Refuse rather than continue in the clear.
-		 */
-		if (ldap_build_starttls(msgid, g_tx, sizeof(g_tx), &tx_len) ==
-			    0 &&
-		    ldap_xchg(fd, tx_len, &rx_len) == 0 &&
-		    ldap_parse_result(g_rx, rx_len, LDAP_OP_EXTENDED_RESPONSE,
-				      &r) == 0 &&
-		    r.code == LDAP_RES_SUCCESS) {
-			LOG_ERR("ldap: StartTLS accepted but this socket layer "
-				"cannot upgrade in place; use LDAPS (mode 2)");
-		} else {
-			LOG_ERR("ldap: StartTLS refused by the server");
-		}
-		(void)zsock_close(fd);
-		return -EHOSTUNREACH;
-	}
-#endif
 
 	/* The user's own bind is the authentication. */
 	rc = ldap_bind(fd, msgid++, user_dn, secret);
@@ -1012,6 +1413,17 @@ int sts_aaa_start(void)
 	/* Now pull the real configuration in, which also picks up the local
 	 * credential blob and the backend chain. */
 	sts_aaa_reapply();
+
+	/*
+	 * The LDAPS trust anchor. Best-effort on purpose: a /lfs that is not
+	 * mounted yet is not an error here, because ldap_ca_ready() retries the
+	 * load the first time mode 2 is actually used. Doing it now anyway means
+	 * the boot log names the anchor next to the mode it serves, instead of
+	 * the operator discovering at the first login that there is none.
+	 */
+	k_mutex_lock(&g_lock, K_FOREVER);
+	(void)ldap_ca_ready();
+	k_mutex_unlock(&g_lock);
 
 	LOG_INF("AAA ready");
 	return 0;

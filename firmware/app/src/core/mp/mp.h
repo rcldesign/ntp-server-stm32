@@ -19,6 +19,7 @@
  *   streams         mp_stream.h  CBOR telemetry / PPS / log / event records
  *   diagnostics     mp_diag.h    named tests with progress and results
  *   panel mirror    mp_mirror.h  live front-panel replica (project requirement)
+ *   firmware update fwupd.h      the `fw.*` methods, over the mp_fwupd_t port
  *
  * Threading and budget (FMT §10). Core never takes a lock and never reads
  * hardware: it consumes snapshot structs the glue fills, which is what keeps the
@@ -65,6 +66,7 @@
 #include <stdint.h>
 
 #include "cfg/cfg.h"
+#include "fwupd/fwupd.h"
 #include "logring/logring.h"
 #include "mp/mp_diag.h"
 #include "mp/mp_frame.h"
@@ -174,6 +176,67 @@ typedef int (*mp_obj_read_fn)(void *user, size_t obj, mp_val_t *out);
 /** Momentarily assert @p obj for @p ms milliseconds. */
 typedef int (*mp_pulse_fn)(void *user, size_t obj, uint32_t ms);
 
+/* ---------------------------------------------------------- firmware update */
+
+/** Everything the `fw.*` replies report about the orchestrator in one read. */
+typedef struct {
+	fwupd_event_t progress;      /**< comp/state/reason/done/total/rc */
+	char before[FWUPD_VER_LEN];  /**< version read before the update */
+	char after[FWUPD_VER_LEN];   /**< version read back after it */
+	uint32_t allow;              /**< fwupd_cfg_t::allow, bit per component */
+	uint32_t chunk_max;          /**< largest chunk `fw.data` will accept */
+	uint32_t chunks_duplicate;
+	uint32_t chunks_rejected;
+	uint32_t sessions;
+	uint32_t sessions_ok;
+	uint32_t sessions_failed;
+} mp_fw_status_t;
+
+/**
+ * The multi-IC firmware-update orchestrator (`core/fwupd`), reached through a
+ * port rather than as a bare `fwupd_ctx_t *`.
+ *
+ * The indirection buys exactly one thing, and it is load-bearing: the
+ * orchestrator has **two** drivers on **two** threads — the `fw.*` handlers here
+ * (console RX thread, inside the engine lock) and the platform's periodic
+ * `fwupd_step()` (console supervisor). `fwupd_ctx_t` is no more internally
+ * synchronised than `mp_ctx_t` is, so somebody has to serialise them, and core
+ * never takes a lock (mp.h threading block). The glue therefore owns one mutex
+ * and wraps each call below in it; the only nesting is engine lock -> fwupd
+ * lock, never the reverse, so the order cannot invert.
+ *
+ * Every member may be NULL only by leaving the whole port NULL: a partially
+ * filled port is a programming error the handlers do not defend against beyond
+ * the usual MP_E_NOTSUP.
+ */
+typedef struct {
+	/**
+	 * Rows [@p first, @p first + @p max) of the component inventory.
+	 *
+	 * @param n      Receives the rows written.
+	 * @param total  Receives FWUPD_COMP__COUNT, so the caller can page.
+	 *
+	 * The board is probed when @p first is 0; later pages are served from
+	 * that snapshot, so walking the inventory reads each component once.
+	 */
+	int (*inventory)(void *ctx, size_t first, fwupd_inv_row_t *out,
+			 size_t max, size_t *n, size_t *total);
+	/** fwupd_begin(): guards, allow-list, QUERY and PREPARE. */
+	int (*begin)(void *ctx, uint8_t comp, const fwupd_req_t *req);
+	/** fwupd_data(): one chunk; @p next_off is always set. */
+	int (*data)(void *ctx, uint32_t off, const uint8_t *d, size_t len,
+		    uint32_t *next_off);
+	/** fwupd_end(): length + SHA-256, then VERIFY and RESTORE. */
+	int (*end)(void *ctx);
+	/** fwupd_abort() then fwupd_reset(): RESTORE runs, state returns to IDLE. */
+	int (*abort)(void *ctx);
+	/** fwupd_reset(): acknowledge a finished session. -EBUSY while one runs. */
+	int (*reset)(void *ctx);
+	/** Snapshot for the reply. Never fails on a wired port. */
+	int (*status)(void *ctx, mp_fw_status_t *out);
+	void *ctx;
+} mp_fwupd_t;
+
 /* ------------------------------------------------------------------- wiring */
 
 /**
@@ -255,6 +318,31 @@ typedef struct {
 		    uint8_t *out_role);
 	void *auth_user;
 
+	/* --- passthrough (host -> device) ---------------------------------- */
+	/**
+	 * Put host-supplied bytes on the port behind a passthrough channel
+	 * (0x06 SMP, 0x07 GNSS/USART3, 0x08 rubidium/UART7).
+	 *
+	 * Optional; without it the host->device direction of those channels
+	 * answers -ENOTSUP and only the device->host tee runs. Core does not own
+	 * any UART, so this is the whole seam: it decides *whether* the bytes may
+	 * flow (the channel must be a passthrough, and its tunnel object must be
+	 * held open by a live override lease — FMT §5.5), and the glue decides
+	 * where they go.
+	 *
+	 * Called from mp_input()'s context with the engine lock held, so it must
+	 * be bounded: see the burst limit in the glue.
+	 *
+	 * @retval >=0  Accepted.
+	 * @retval <0   Refused; counted in `raw_rx_refused`.
+	 */
+	int (*raw_tx)(void *user, uint8_t ch, const uint8_t *data, size_t len);
+	void *raw_tx_user;
+
+	/* --- firmware update ----------------------------------------------- */
+	/** The multi-IC orchestrator; NULL makes every `fw.*` method MP_E_NOTSUP. */
+	const mp_fwupd_t *fwupd;
+
 	/** Reboot / stay-in-bootloader. Modes as port_image_t::reboot. */
 	const port_image_t *img;
 
@@ -301,6 +389,25 @@ typedef struct {
 /** Longest `data` detail an error reply carries. */
 #define MP_ERR_DATA_MAX 96U
 
+/**
+ * Host->device octets one passthrough frame may carry.
+ *
+ * Not a buffer size — nothing is copied — but a **time** bound. Both sinks
+ * behind channels 0x07 and 0x08 are `uart_poll_out()` loops, and they run on
+ * the console RX thread with the engine lock held, so the burst is how long a
+ * host can stop the service tick from getting that lock. 128 octets is 33 ms at
+ * the receiver's 38400 and 133 ms at the rubidium's 9600 — at most one missed
+ * tick pass per frame, comfortably inside the STS_MP_TICK_MISS_MAX run the
+ * dead-man budget allows.
+ *
+ * It is a real limit rather than a chunking loop because these tunnels are an
+ * interactive maintenance path — a UBX config message, an FE-5680A command —
+ * and bulk images go through `fw.*`, which is offset-driven and resumable.
+ * A longer frame is refused whole and counted: truncating a byte stream aimed
+ * at a bootloader would corrupt it silently.
+ */
+#define MP_TUNNEL_TX_MAX 128U
+
 /* --------------------------------------------------------------------- ctx */
 
 typedef struct {
@@ -338,6 +445,29 @@ typedef struct {
 	/* cached manifest content hash */
 	uint32_t manifest_hash;
 
+	/*
+	 * Manifest indices of the three tunnel objects, resolved once at
+	 * mp_init(). A held lease on one of them is what "the tunnel is open"
+	 * means, and it is the gate on inbound passthrough bytes; resolving the
+	 * id by string on every received frame would put a linear manifest walk
+	 * on the byte path. -1 when the object is not in the manifest.
+	 */
+	int obj_gnss_tunnel;
+	int obj_rb_tunnel;
+	int obj_smp_tunnel;
+
+	/*
+	 * The firmware-update transfer's owner.
+	 *
+	 * fw.begin records the session that passed the guard; fw.data and fw.end
+	 * refuse any other. A takeover opens a new session id, so an update
+	 * cannot be continued — still less completed — by whoever arrived after
+	 * the operator who authorised it. Zero means no transfer is open.
+	 */
+	uint32_t fw_sid;
+	uint8_t fw_comp;  /**< fwupd_comp_t of the open transfer */
+	uint8_t fw_guard; /**< mp_guard_t that authorised it */
+
 	/* cfg export/import cursors, one of each per session */
 	cfg_export_t cfg_ex;
 	bool cfg_ex_active;
@@ -353,6 +483,9 @@ typedef struct {
 	uint32_t tx_errors;
 	uint32_t mode_enters;
 	uint32_t mode_exits;
+	/** Host->device passthrough: octets handed to a port, and refusals. */
+	uint32_t raw_rx_bytes;
+	uint32_t raw_rx_refused;
 } mp_ctx_t;
 
 /* --------------------------------------------------------------- lifecycle */

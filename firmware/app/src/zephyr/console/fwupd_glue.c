@@ -44,6 +44,33 @@
  *
  * gnssmgr_fw_enter()/gnssmgr_fw_exit() already exist in core (this change added
  * them) and already do the config-restore half of spec §8.5.
+ *
+ * ---------------------------------------------------------------------------
+ * Threading: one mutex, and why it has to be here
+ * ---------------------------------------------------------------------------
+ *
+ * The orchestrator has two drivers on two threads, exactly as the MP engine
+ * does:
+ *
+ *   RPC    console RX thread (the shell bypass) -> mp_rpc.c's `fw.*` handlers
+ *          -> the mp_fwupd_t port below, inside mp_glue.c's engine lock;
+ *   step   console supervisor, prio 14 -> sts_fwupd_step() every 250 ms, which
+ *          is what enforces core/fwupd's step and transfer-idle timeouts;
+ *   shell  `sts fw ...`, console RX thread.
+ *
+ * `fwupd_ctx_t` is no more internally synchronised than `mp_ctx_t` is, and core
+ * never takes a lock, so `g.lock` is taken by **every** entry point in this file
+ * that touches `g.fw`. The RPC path therefore nests engine lock -> `g.lock`, and
+ * nothing ever takes them the other way round: sts_fwupd_step() takes only
+ * `g.lock`, and nothing under it calls back into the MP engine. That is the
+ * whole reason mp_wiring_t carries an mp_fwupd_t port rather than a bare
+ * `fwupd_ctx_t *` — the pointer would put core's calls outside any lock.
+ *
+ * sts_fwupd_step() tries the lock with K_NO_WAIT and skips the pass on
+ * contention. Not a preference: sts_console.c's BUILD_ASSERT budgets exactly one
+ * lock wait per supervisor pass (sts_mp_tick()'s), and adding a second would
+ * push the override dead-man's worst-case revert past MP_TICK_MAX_MS. A skipped
+ * step costs 250 ms against timeouts measured in tens of seconds.
  */
 
 #include <errno.h>
@@ -59,6 +86,7 @@
 #include "console/sts_console.h"
 #include "console/sts_rollback.h"
 #include "fwupd/fwupd.h"
+#include "mp/mp.h"
 #include "fwupd/rb_fwupd.h"
 #include "fwupd/ubx_fwupd.h"
 #include "port/port_crypto.h"
@@ -127,7 +155,41 @@ static struct {
 	struct k_mutex lock;
 	/* STM32 staging cursor, so transfer() can be offset-driven. */
 	uint32_t stm_erased_to;
+	/*
+	 * The inventory snapshot the paged MP reply walks.
+	 *
+	 * Filled by a `from: 0` page and served from here afterwards, so paging
+	 * eleven components probes the board once instead of three times — the
+	 * rows behind it are identity reads on real buses. `inv_n` is 0 until the
+	 * first page, which is why a mid-list page with no snapshot refills it
+	 * rather than serving zeroes.
+	 */
+	fwupd_inv_row_t inv[FWUPD_COMP__COUNT];
+	size_t inv_n;
 } g;
+
+/**
+ * Take the orchestrator lock, or report that it is busy.
+ *
+ * K_FOREVER on the RPC path is correct — the caller is a console request and has
+ * nothing better to do — but the supervisor's step must never wait, so the
+ * timeout is a parameter rather than a policy baked in here.
+ */
+static int fw_lock(k_timeout_t t)
+{
+	if (!g.ready) {
+		return -ENODEV;
+	}
+	if (k_is_in_isr()) {
+		return -EBUSY;
+	}
+	return (k_mutex_lock(&g.lock, t) == 0) ? 0 : -EBUSY;
+}
+
+static void fw_unlock(void)
+{
+	(void)k_mutex_unlock(&g.lock);
+}
 
 /* ===================================================================== *
  *  STM32_APP — delegate to the existing MCUboot slot engine
@@ -741,8 +803,267 @@ rb_ctx_t *sts_fwupd_rb_ctx(void)
 
 int sts_fwupd_step(void)
 {
-	if (!g.ready) {
-		return -ENODEV;
+	int rc;
+
+	/*
+	 * K_NO_WAIT. See the threading block: sts_console.c's BUILD_ASSERT
+	 * budgets one lock wait per supervisor pass and sts_mp_tick() already
+	 * spends it. Contention here means a console request is inside the
+	 * orchestrator right now, which is the one situation in which nothing
+	 * needs pumping.
+	 */
+	rc = fw_lock(K_NO_WAIT);
+	if (rc != 0) {
+		return rc;
 	}
-	return fwupd_step(&g.fw, (uint64_t)k_uptime_get());
+	rc = fwupd_step(&g.fw, (uint64_t)k_uptime_get());
+	fw_unlock();
+	return rc;
+}
+
+/* ===================================================================== *
+ *  The MP control plane's port (mp.h mp_fwupd_t)
+ *
+ *  One thin locked wrapper per orchestrator call. Nothing here decides
+ *  anything: the guards, the allow-list and the state machine are core's, and
+ *  duplicating any of them at the seam would give the device two answers.
+ * ===================================================================== */
+
+static int mpfw_inventory(void *ctx, size_t first, fwupd_inv_row_t *out,
+			  size_t max, size_t *n, size_t *total)
+{
+	size_t avail;
+	size_t take;
+	int rc;
+
+	ARG_UNUSED(ctx);
+
+	if ((out == NULL) || (n == NULL) || (total == NULL)) {
+		return -EINVAL;
+	}
+	*n = 0U;
+	*total = (size_t)FWUPD_COMP__COUNT;
+
+	rc = fw_lock(K_FOREVER);
+	if (rc != 0) {
+		return rc;
+	}
+
+	if ((first == 0U) || (g.inv_n == 0U)) {
+		size_t got = 0U;
+
+		/*
+		 * -ENOSPC only means the caller's array was short; the array here
+		 * is FWUPD_COMP__COUNT long, so it cannot happen and a non-zero
+		 * return is a real failure.
+		 */
+		rc = fwupd_inventory(&g.fw, g.inv, ARRAY_SIZE(g.inv), &got);
+		if (rc != 0) {
+			g.inv_n = 0U;
+			fw_unlock();
+			return rc;
+		}
+		g.inv_n = got;
+	}
+
+	avail = (first < g.inv_n) ? (g.inv_n - first) : 0U;
+	take = (avail < max) ? avail : max;
+	if (take != 0U) {
+		(void)memcpy(out, &g.inv[first], take * sizeof(out[0]));
+	}
+	*n = take;
+	*total = g.inv_n;
+	fw_unlock();
+	return 0;
+}
+
+static int mpfw_begin(void *ctx, uint8_t comp, const fwupd_req_t *req)
+{
+	int rc;
+
+	ARG_UNUSED(ctx);
+
+	rc = fw_lock(K_FOREVER);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = fwupd_begin(&g.fw, comp, req, (uint64_t)k_uptime_get());
+	fw_unlock();
+	return rc;
+}
+
+static int mpfw_data(void *ctx, uint32_t off, const uint8_t *d, size_t len,
+		     uint32_t *next_off)
+{
+	int rc;
+
+	ARG_UNUSED(ctx);
+
+	rc = fw_lock(K_FOREVER);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = fwupd_data(&g.fw, off, d, len, next_off, (uint64_t)k_uptime_get());
+	fw_unlock();
+	return rc;
+}
+
+static int mpfw_end(void *ctx)
+{
+	int rc;
+
+	ARG_UNUSED(ctx);
+
+	rc = fw_lock(K_FOREVER);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = fwupd_end(&g.fw, (uint64_t)k_uptime_get());
+	fw_unlock();
+	return rc;
+}
+
+static int mpfw_abort(void *ctx)
+{
+	int rc;
+
+	ARG_UNUSED(ctx);
+
+	rc = fw_lock(K_FOREVER);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = fwupd_abort(&g.fw, (uint64_t)k_uptime_get());
+	/* fwupd_abort() leaves the session in DONE/FAILED so the reason is
+	 * readable; the caller asked to be rid of it, so return to IDLE too. */
+	if (rc == 0) {
+		(void)fwupd_reset(&g.fw);
+	}
+	fw_unlock();
+	return rc;
+}
+
+static int mpfw_reset(void *ctx)
+{
+	int rc;
+
+	ARG_UNUSED(ctx);
+
+	rc = fw_lock(K_FOREVER);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = fwupd_reset(&g.fw);
+	fw_unlock();
+	return rc;
+}
+
+static int mpfw_status(void *ctx, mp_fw_status_t *out)
+{
+	int rc;
+
+	ARG_UNUSED(ctx);
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	(void)memset(out, 0, sizeof(*out));
+
+	rc = fw_lock(K_FOREVER);
+	if (rc != 0) {
+		return rc;
+	}
+	(void)fwupd_progress(&g.fw, &out->progress);
+	(void)snprintk(out->before, sizeof(out->before), "%s",
+		       fwupd_version_before(&g.fw));
+	(void)snprintk(out->after, sizeof(out->after), "%s",
+		       fwupd_version_after(&g.fw));
+	out->allow = g.fw.cfg.allow;
+	out->chunk_max = FWUPD_CHUNK_MAX;
+	{
+		/*
+		 * The active target's own ceiling when there is one, so `fw.data`
+		 * advertises the limit that will actually be enforced rather than
+		 * the orchestrator's outer bound.
+		 */
+		uint8_t comp = out->progress.comp;
+
+		if ((comp < (uint8_t)FWUPD_COMP__COUNT) && g.fw.target_set[comp] &&
+		    (g.fw.target[comp].chunk_max != NULL)) {
+			uint32_t m =
+				g.fw.target[comp].chunk_max(g.fw.target[comp].user);
+
+			if ((m != 0U) && (m < out->chunk_max)) {
+				out->chunk_max = m;
+			}
+		}
+	}
+	out->chunks_duplicate = g.fw.chunks_duplicate;
+	out->chunks_rejected = g.fw.chunks_rejected;
+	out->sessions = g.fw.sessions;
+	out->sessions_ok = g.fw.sessions_ok;
+	out->sessions_failed = g.fw.sessions_failed;
+	fw_unlock();
+	return 0;
+}
+
+const mp_fwupd_t *sts_fwupd_mp_port(void)
+{
+	static const mp_fwupd_t port = {
+		.inventory = mpfw_inventory,
+		.begin = mpfw_begin,
+		.data = mpfw_data,
+		.end = mpfw_end,
+		.abort = mpfw_abort,
+		.reset = mpfw_reset,
+		.status = mpfw_status,
+		.ctx = NULL,
+	};
+
+	return g.ready ? &port : NULL;
+}
+
+/* ===================================================================== *
+ *  Locked read accessors for the shell
+ * ===================================================================== */
+
+int sts_fwupd_inventory(fwupd_inv_row_t *out, size_t max, size_t *n)
+{
+	int rc;
+
+	if ((out == NULL) || (n == NULL)) {
+		return -EINVAL;
+	}
+	*n = 0U;
+
+	rc = fw_lock(K_FOREVER);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = fwupd_inventory(&g.fw, out, max, n);
+	fw_unlock();
+	return rc;
+}
+
+int sts_fwupd_query(uint8_t comp, char *out, size_t cap)
+{
+	int rc;
+
+	if ((out == NULL) || (cap == 0U)) {
+		return -EINVAL;
+	}
+	out[0] = '\0';
+
+	rc = fw_lock(K_FOREVER);
+	if (rc != 0) {
+		return rc;
+	}
+	rc = fwupd_query(&g.fw, comp, out, cap);
+	fw_unlock();
+	return rc;
+}
+
+int sts_fwupd_status(mp_fw_status_t *out)
+{
+	return mpfw_status(NULL, out);
 }

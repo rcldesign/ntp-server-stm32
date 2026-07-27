@@ -122,6 +122,18 @@ static sts_gnss_pulse_evidence_t evidence;
 static K_MUTEX_DEFINE(snap_mutex);
 
 /*
+ * The sky view: the per-satellite records core/gnssmgr deliberately discards.
+ *
+ * gnssmgr.h is explicit that it reduces NAV-SAT to a counted summary and that
+ * "the skyplot iterates the frame itself". This is where that iteration lands.
+ * Its own mutex rather than snap_mutex: the discipline thread takes snap_mutex
+ * on the PPS edge, and a 10 Hz render tick from priority 15 has no business
+ * being anywhere near that lock.
+ */
+static sts_gnss_sky_t sky;
+static K_MUTEX_DEFINE(sky_mutex);
+
+/*
  * Operator-request mailbox (sts_app.h "GNSS operator requests").
  *
  * A spinlock, not a mutex: the producers are management threads at priority 12
@@ -629,6 +641,106 @@ static void gnss_drain_tunnel(void)
 	}
 }
 
+/* ========================================================================= */
+/* sky view (UBX-NAV-SAT -> the §6.3 skyplot)                                */
+/* ========================================================================= */
+
+/**
+ * Cache the receiver's geodetic position for the skyplot's declination model.
+ *
+ * Only from a fix the receiver itself vouches for: `gnss_fix_ok` is the
+ * DOP/accuracy mask having passed, and `invalid_llh` marks a longitude/latitude
+ * the receiver knows is meaningless. A declination computed from a bad fix
+ * rotates the plot confidently and wrongly, which is the outcome §6.3 exists to
+ * prevent — so a rejected fix leaves `pos_valid` as it was rather than clearing
+ * it. A fixed-site grandmaster does not move, so the last good position stays
+ * true even while the receiver is struggling.
+ */
+static void gnss_note_position(const ubx_nav_pvt_t *pvt)
+{
+	if (!pvt->gnss_fix_ok || pvt->invalid_llh) {
+		return;
+	}
+
+	k_mutex_lock(&sky_mutex, K_FOREVER);
+	sky.lat_1e7 = pvt->lat_1e7;
+	sky.lon_1e7 = pvt->lon_1e7;
+	sky.pos_valid = true;
+	k_mutex_unlock(&sky_mutex);
+}
+
+/**
+ * Cache one UBX-NAV-SAT frame's per-satellite records.
+ *
+ * Every record is kept, unfiltered: deciding which satellites are worth
+ * plotting is display policy and lives in the UI area
+ * (ui/sts_sky_policy.h sts_sky_sv_from_ubx()), which is where it can be
+ * host-tested. This function's only job is to get the frame across the area
+ * seam without tearing.
+ *
+ * A frame carrying more than STS_GNSS_SKY_MAX_SV records is TRUNCATED, not
+ * dropped: the F9T can report well over 32 with four constellations enabled,
+ * and 32 markers already saturates a 160-pixel plot. The truncation is by the
+ * receiver's own ordering, which is not signal strength — but the alternative
+ * is a sort on the priority-6 GNSS thread, and the UI already ranks by C/N0 for
+ * the table view.
+ */
+static void gnss_note_sky(const ubx_msg_t *m, uint64_t rx_mono_ms)
+{
+	ubx_nav_sat_iter_t it;
+	ubx_nav_sat_sv_t sv;
+	sts_gnss_sv_t staged[STS_GNSS_SKY_MAX_SV];
+	uint8_t n = 0U;
+
+	if (ubx_nav_sat_begin(m, &it) != 0) {
+		return;
+	}
+	while ((n < (uint8_t)STS_GNSS_SKY_MAX_SV) &&
+	       (ubx_nav_sat_next(&it, &sv) == 1)) {
+		staged[n].gnss_id = sv.gnss_id;
+		staged[n].sv_id = sv.sv_id;
+		staged[n].cno_dbhz = sv.cno_dbhz;
+		staged[n].elev_deg = sv.elev_deg;
+		staged[n].azim_deg = sv.azim_deg;
+		staged[n].used = sv.used;
+		n++;
+	}
+
+	/* Staged outside the lock: the iteration is bounded but it is still a
+	 * loop, and this mutex is taken by the 10 Hz render tick. */
+	k_mutex_lock(&sky_mutex, K_FOREVER);
+	memcpy(sky.sv, staged, (size_t)n * sizeof(staged[0]));
+	if (n < (uint8_t)STS_GNSS_SKY_MAX_SV) {
+		memset(&sky.sv[n], 0,
+		       ((size_t)STS_GNSS_SKY_MAX_SV - n) * sizeof(sky.sv[0]));
+	}
+	sky.count = n;
+	sky.itow_ms = it.itow_ms;
+	sky.mono_ms = rx_mono_ms;
+	k_mutex_unlock(&sky_mutex);
+}
+
+int sts_gnss_sky(sts_gnss_sky_t *out)
+{
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	/*
+	 * Bounded, unlike the writer's K_FOREVER: the reader is the
+	 * lowest-priority thread in the system and a render tick that cannot
+	 * have the lock should skip the frame rather than wait behind a GNSS
+	 * thread that is mid-parse. Zeroed on failure so a caller that ignores
+	 * the return code draws an empty sky rather than a stack frame.
+	 */
+	if (k_mutex_lock(&sky_mutex, K_MSEC(5)) != 0) {
+		memset(out, 0, sizeof(*out));
+		return -EBUSY;
+	}
+	*out = sky;
+	k_mutex_unlock(&sky_mutex);
+	return 0;
+}
+
 static void gnss_drain_rx(void)
 {
 	bool tee_on;
@@ -696,7 +808,10 @@ static void gnss_drain_rx(void)
 				gs.pvt_itow_ms = pvt.itow_ms;
 				gs.pvt_rx_mono_ms = rx_mono_ms;
 				gs.have_pvt = true;
+				gnss_note_position(&pvt);
 			}
+		} else if (ubx_msg_is(&m, UBX_CLASS_NAV, UBX_ID_NAV_SAT)) {
+			gnss_note_sky(&m, rx_mono_ms);
 		}
 
 		(void)gnssmgr_on_msg(&mgr, &m, rx_mono_ms);

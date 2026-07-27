@@ -66,8 +66,18 @@
 #include "quality/quality.h"
 #include "ui/ui.h"
 #include "zephyr/sts_app.h"
+#include "zephyr/ui/sts_factory_policy.h"
 #include "zephyr/ui/sts_ui.h"
 #include "zephyr/ui/sts_ui_echo.h"
+
+/*
+ * The factory-reset key wipe is a net-area implementation
+ * (src/zephyr/net/sts_web.c). Declared WEAK rather than reached through
+ * net/sts_secops.h, exactly as console/sts_mcp.c declares it and as sts_web.c
+ * declares sts_dfu_port(): with CONFIG_STS1000_NET=n the symbol resolves to
+ * NULL, the panel reports the reset as config-only, and the image still links.
+ */
+extern int sts_sec_factory_wipe(void) __attribute__((weak));
 
 LOG_MODULE_REGISTER(sts_ui, CONFIG_STS1000_LOG_LEVEL);
 
@@ -360,6 +370,25 @@ static void handle_action(const ui_action_t *a)
 		sys_reboot(SYS_REBOOT_WARM);
 		break;
 	case UI_ACTION_FACTORY_RESET: {
+		/*
+		 * Both halves, in the order sts_factory_policy.h fixes, then the
+		 * reboot unconditionally.
+		 *
+		 * The panel plane used to run only the first half, so a factory
+		 * reset driven from the front panel left the persisted TLS server
+		 * key, its certificate and the ACME account key on /lfs and every
+		 * outstanding web session valid — while reporting a clean unit.
+		 * The web plane (sts_web.c pv_factory_reset) and the MCP plane
+		 * (sts_mcp.c mcp_cfg_factory_reset) always did both; this is the
+		 * third plane catching up to them, and
+		 * tests/host/test_factory_policy.c now fails if any of the three
+		 * regresses.
+		 */
+		sts_factory_steps_t st = {
+			.cfg_reset_ok = false,
+			.wipe_linked = (sts_sec_factory_wipe != NULL),
+			.wipe_ok = false,
+		};
 		int rc;
 
 		sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_WARN,
@@ -372,13 +401,52 @@ static void handle_action(const ui_action_t *a)
 		 * there first). The bare core call reset the tree and told nobody.
 		 */
 		rc = sts_cfg_factory_reset();
+		st.cfg_reset_ok = (rc == 0);
 		if (rc != 0) {
 			sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_ERR,
-				"factory reset returned %d", rc);
+				"factory reset: config reset returned %d", rc);
 		}
-		(void)sts_panel_led_set(0u);
-		k_sleep(K_MSEC(50));
-		sys_reboot(SYS_REBOOT_COLD);
+
+		/*
+		 * AFTER the config reset, because that is what runs the appliers
+		 * that push the emptied credential keys into the subsystems
+		 * holding RAM copies of them (net/sts_secops.h). Run even when the
+		 * config reset failed: failures accumulate, they do not
+		 * short-circuit — a half-wiped unit reported as clean is the
+		 * outcome this whole path exists to prevent.
+		 */
+		if (st.wipe_linked) {
+			rc = sts_sec_factory_wipe();
+			st.wipe_ok = (rc == 0);
+			if (rc != 0) {
+				sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_ERR,
+					"factory reset: key wipe returned %d",
+					rc);
+			}
+		} else {
+			LOG_WRN("no net area in this image: factory reset is "
+				"config-only, TLS key material is not erased");
+			sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_WARN,
+				"factory reset is config-only; no key wipe in "
+				"this image");
+		}
+
+		if (sts_factory_result(&st) != 0) {
+			sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_ERR,
+				"factory reset INCOMPLETE; do not treat this "
+				"unit as decommissioned");
+		}
+
+		/*
+		 * Unconditional. The reboot is what clears RAM-only key material
+		 * and mints the replacement TLS identity, so it is load-bearing
+		 * even — especially — when a step above failed.
+		 */
+		if (sts_factory_should_reboot(&st)) {
+			(void)sts_panel_led_set(0u);
+			k_sleep(K_MSEC(50)); /* let the log lines drain */
+			sys_reboot(SYS_REBOOT_COLD);
+		}
 		break;
 	}
 	default:

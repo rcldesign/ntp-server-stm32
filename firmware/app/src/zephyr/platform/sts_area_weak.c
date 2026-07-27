@@ -258,6 +258,29 @@ __weak void sts_mp_tunnel_stats(uint32_t *gnss, uint32_t *rb, uint32_t *nmea,
 	}
 }
 
+/* No engine means no tunnel, so there is nothing that may drive the port. */
+__weak int sts_mp_tunnel_write(uint8_t ch, const uint8_t *data, size_t len)
+{
+	ARG_UNUSED(ch);
+	ARG_UNUSED(data);
+	ARG_UNUSED(len);
+	return -ENOTSUP;
+}
+
+__weak void sts_mp_tunnel_tx_stats(uint32_t *gnss, uint32_t *rb,
+				   uint32_t *refused)
+{
+	if (gnss != NULL) {
+		*gnss = 0U;
+	}
+	if (rb != NULL) {
+		*rb = 0U;
+	}
+	if (refused != NULL) {
+		*refused = 0U;
+	}
+}
+
 __weak void sts_mp_tunnel_drain(void)
 {
 }

@@ -20,6 +20,7 @@
 #include "mcp/mcp.h"
 #include "fwupd/fwupd.h"
 #include "fwupd/rb_fwupd.h"
+#include "mp/mp.h"
 #include "port/port_image.h"
 
 #ifdef __cplusplus
@@ -206,7 +207,49 @@ fwupd_ctx_t *sts_fwupd_ctx(void);
 /** The FE-5680A client context, or NULL before sts_fwupd_init(). */
 rb_ctx_t *sts_fwupd_rb_ctx(void);
 
-/** Pump an open update session. Call from the console/maintenance thread. */
+/**
+ * Pump an open update session and enforce core/fwupd's timeouts.
+ *
+ * The console supervisor calls it every pass. It is bounded by construction:
+ * with no session open it is one predicate, and none of this board's targets
+ * registers a `poll` callback, so the work is timeout arithmetic plus — on the
+ * one path that can fire from here — core/fwupd's guaranteed RESTORE.
+ *
+ * Tries the orchestrator lock with **K_NO_WAIT** and skips the pass on
+ * contention, because sts_console.c's BUILD_ASSERT budgets exactly one lock wait
+ * per supervisor pass and sts_mp_tick() already spends it.
+ *
+ * @retval 0        Stepped (or there was nothing to do).
+ * @retval -ENODEV  sts_fwupd_init() has not run.
+ * @retval -EBUSY   A console request holds the orchestrator; skipped.
+ */
 int sts_fwupd_step(void);
+
+/**
+ * The orchestrator as the MP control plane's port (mp.h), or NULL before
+ * sts_fwupd_init().
+ *
+ * Every entry point takes this area's orchestrator mutex, which is why core gets
+ * a port and not a `fwupd_ctx_t *`: the `fw.*` handlers run on the console RX
+ * thread and sts_fwupd_step() on the supervisor, and `fwupd_ctx_t` is not
+ * internally synchronised. See the threading block in fwupd_glue.c.
+ */
+const mp_fwupd_t *sts_fwupd_mp_port(void);
+
+/**
+ * Whole component inventory, for the shell. Locked; thread context only.
+ *
+ * @retval 0        Written; @p n rows.
+ * @retval -ENOSPC  @p max was below FWUPD_COMP__COUNT; @p n rows were still
+ *                  written, so a short buffer truncates rather than fails.
+ * @retval -ENODEV  Not initialised.
+ */
+int sts_fwupd_inventory(fwupd_inv_row_t *out, size_t max, size_t *n);
+
+/** One component's running version/identity, for the shell. Locked. */
+int sts_fwupd_query(uint8_t comp, char *out, size_t cap);
+
+/** Orchestrator progress, policy and counters, for the shell. Locked. */
+int sts_fwupd_status(mp_fw_status_t *out);
 
 #endif /* STS1000_ZEPHYR_CONSOLE_STS_CONSOLE_H_ */

@@ -228,6 +228,46 @@ typedef enum {
 	  0, 0, 2)                                                                             \
 	U(PTP_TWO_STEP,      0x040A, "ptp.twostep",     BOOL, CFG_F_RUNTIME_APPLY,             \
 	  1, 0, 1)                                                                             \
+	/* IEEE 1588-2019 Annex P integrity, the AUTHENTICATION TLV (spec §4.4). Purely      */ \
+	/* additive, so CFG_SCHEMA_VERSION does not move.                                    */ \
+	/*                                                                                    */ \
+	/* `ptp.icv.policy` DEFAULTS TO OFF (0), unlike ptp_icv_cfg_defaults(), and that     */ \
+	/* difference is deliberate: core's default is what a caller that has already        */ \
+	/* decided to use the feature should start from, while a grandmaster shipping with   */ \
+	/* it armed would begin signing to peers that cannot verify. 1 = verify-if-present,  */ \
+	/* 2 = require. Arming also needs a key: with `ptp.icv.key` empty the engine is       */ \
+	/* attached but inert (TX emits nothing, RX accepts unsigned) — see                  */ \
+	/* net/sts_ptp_icv_policy.h, which owns the arming decision.                          */ \
+	U(PTP_ICV_POLICY,    0x040B, "ptp.icv.policy",  U8,   CFG_F_RUNTIME_APPLY,             \
+	  0, 0, 2)                                                                             \
+	/* 0 = HMAC-SHA-256 truncated to 128 bits (the §16.14 mandatory suite), 1 = the full */ \
+	/* 256-bit tag.                                                                       */ \
+	U(PTP_ICV_SUITE,     0x040C, "ptp.icv.suite",   U8,   CFG_F_RUNTIME_APPLY,             \
+	  0, 0, 1)                                                                             \
+	/* Security Parameters Pointer and keyID of the association used for transmit and    */ \
+	/* recognised on receive.                                                             */ \
+	U(PTP_ICV_SPP,       0x040D, "ptp.icv.spp",     U8,   CFG_F_RUNTIME_APPLY,             \
+	  0, 0, 255)                                                                           \
+	U(PTP_ICV_KEY_ID,    0x040E, "ptp.icv.keyid",   U32,  CFG_F_RUNTIME_APPLY,             \
+	  0, 0, 0xFFFFFFFFU)                                                                   \
+	/* The integrity key. Key material, so CFG_F_SECRET|CFG_F_NOEXPORT exactly as the    */ \
+	/* NTP MAC keys and the SNMPv3 auth/priv keys are: never in an export, never read    */ \
+	/* back over any channel, and zeroized by a factory reset along with every other     */ \
+	/* CFG_F_SECRET blob — the PTP group's applier then pushes the emptied key into the  */ \
+	/* running engine, so the RAM copy goes with it rather than waiting for the reboot.  */ \
+	/* Empty (the default) means the feature cannot arm.                                  */ \
+	B(PTP_ICV_KEY,       0x040F, "ptp.icv.key",                                            \
+	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                                 \
+	/* Emit sequenceNo on TX and enforce the per-peer sliding window on RX. The width    */ \
+	/* INCLUDES the highest accepted value, so 1 means strictly increasing.               */ \
+	U(PTP_ICV_REPLAY,    0x0410, "ptp.icv.replay",  BOOL, CFG_F_RUNTIME_APPLY,             \
+	  1, 0, 1)                                                                             \
+	U(PTP_ICV_WINDOW,    0x0411, "ptp.icv.window",  U8,   CFG_F_RUNTIME_APPLY,             \
+	  16, 1, 32)                                                                           \
+	/* Zero correctionField and messageTypeSpecific before hashing, so the ICV survives  */ \
+	/* a transparent clock. Both ends must agree; a mismatch is a 100 % failure rate.     */ \
+	U(PTP_ICV_MASK_MUT,  0x0412, "ptp.icv.maskmut", BOOL, CFG_F_RUNTIME_APPLY,             \
+	  1, 0, 1)                                                                             \
 	                                                                                       \
 	/* -- 0x05 gnss ----------------------------------------------------------------- */  \
 	U(GNSS_CONSTEL,      0x0501, "gnss.constel",    U8,   CFG_F_RUNTIME_APPLY,             \
@@ -512,7 +552,36 @@ typedef enum {
 	F(CAL_TEMPCO_PPB_C,  0x0C0C, "cal.tempco",            CFG_F_RUNTIME_APPLY|CFG_F_CAL,   \
 	  0.0f, -100.0f, 100.0f)                                                               \
 	U(CAL_DAC_CENTER,    0x0C0D, "cal.dac.center",  U16,  CFG_F_RUNTIME_APPLY|CFG_F_CAL,   \
-	  2048, 0, 4095)
+	  2048, 0, 4095)                                                                       \
+	/* E-compass §10.4 hard/soft-iron fit, for the skyplot's true-north rotation         */ \
+	/* (spec §6.3). Hard-iron offsets are in the magnetometer's own milligauss; the      */ \
+	/* soft-iron scales are Q12 per axis (4096 = unity). `cal.mag.ref` is the expected   */ \
+	/* field magnitude in milligauss (Earth is 250-650 mG) and doubles as the "the fit   */ \
+	/* has been performed" flag: 0 leaves the plot in GNSS-north behind the "north       */ \
+	/* unverified" badge, which is what an uncommissioned unit MUST show. Purely          */ \
+	/* additive, so CFG_SCHEMA_VERSION does not move.                                     */ \
+	I(CAL_MAG_OFF_X,     0x0C0E, "cal.mag.off.x",         CFG_F_RUNTIME_APPLY|CFG_F_CAL,  \
+	  0, -30000, 30000)                                                                    \
+	I(CAL_MAG_OFF_Y,     0x0C0F, "cal.mag.off.y",         CFG_F_RUNTIME_APPLY|CFG_F_CAL,  \
+	  0, -30000, 30000)                                                                    \
+	I(CAL_MAG_OFF_Z,     0x0C10, "cal.mag.off.z",         CFG_F_RUNTIME_APPLY|CFG_F_CAL,  \
+	  0, -30000, 30000)                                                                    \
+	U(CAL_MAG_SCL_X,     0x0C11, "cal.mag.scl.x",   U16,  CFG_F_RUNTIME_APPLY|CFG_F_CAL,  \
+	  4096, 2048, 8192)                                                                    \
+	U(CAL_MAG_SCL_Y,     0x0C12, "cal.mag.scl.y",   U16,  CFG_F_RUNTIME_APPLY|CFG_F_CAL,  \
+	  4096, 2048, 8192)                                                                    \
+	U(CAL_MAG_SCL_Z,     0x0C13, "cal.mag.scl.z",   U16,  CFG_F_RUNTIME_APPLY|CFG_F_CAL,  \
+	  4096, 2048, 8192)                                                                    \
+	U(CAL_MAG_FIELD_REF, 0x0C14, "cal.mag.ref",     U16,  CFG_F_RUNTIME_APPLY|CFG_F_CAL,  \
+	  0, 0, 1000)                                                                          \
+	/* Site magnetic declination in tenths of a degree, east positive, taken once at     */ \
+	/* commissioning from a WMM/IGRF calculator. A fixed-site grandmaster never moves,   */ \
+	/* so this is both the most accurate and the most honest source. 32767 is the        */ \
+	/* sentinel "not commissioned", which falls back to the centred-dipole model         */ \
+	/* (accurate to 10-15 deg) and marks the rotation approximate; a real declination    */ \
+	/* is bounded by +-1800.                                                              */ \
+	I(CAL_DECLINATION_DDEG, 0x0C15, "cal.decl.ddeg",      CFG_F_RUNTIME_APPLY|CFG_F_CAL,  \
+	  32767, -1800, 32767)
 
 /* ------------------------------------------------- generated declarations */
 

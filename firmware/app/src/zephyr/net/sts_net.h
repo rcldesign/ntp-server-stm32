@@ -292,16 +292,31 @@ int sts_ptp_start(void);
 
 typedef struct {
 	ptp_counters_t counters;
+	/** Annex-P integrity engine counters; all zero while it is off. */
+	ptp_icv_counters_t icv;
 	uint8_t port_state;
 	uint32_t alarms;
 	uint8_t clock_class;
 	uint8_t clock_accuracy;
 	uint8_t domain;
 	uint8_t transport;
+	/** sts_ptp_icv_state_t: off / armed-no-key / armed / refused. */
+	uint8_t icv_state;
 	bool running;
 } sts_ptp_stats_t;
 
 void sts_ptp_stats(sts_ptp_stats_t *out);
+
+/**
+ * Re-plan Annex-P integrity from the current `ptp.icv.*` configuration and
+ * apply it to the running engine.
+ *
+ * Called from the CFG_G_PTP applier. This is what makes the feature arm, re-key
+ * and disarm without a reboot — and what makes a factory reset overwrite the
+ * key held inside the live ptp_icv_ctx_t rather than leaving it in RAM until
+ * the reboot lands. A no-op when PTP is not running.
+ */
+void sts_ptp_reload_icv(void);
 
 /* ------------------------------------------------------------------------- */
 /* sts_netmgmt.c — DHCP / static addressing / mDNS / link events (priority 10)*/

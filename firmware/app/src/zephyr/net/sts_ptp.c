@@ -64,6 +64,22 @@
  * The same table enforces logMinDelayReqInterval per requester (§9.5.11 lets the
  * responder ignore requests above the announced rate), so a single source cannot
  * turn its own request rate into our transmit rate.
+ *
+ * ---------------------------------------------------------------------------
+ * Annex-P integrity (spec §4.4)
+ * ---------------------------------------------------------------------------
+ *
+ * core/ptp's AUTHENTICATION-TLV engine is attached HERE and nowhere else: the
+ * port calls ptp_icv_append() / ptp_icv_verify() unconditionally but only acts
+ * on them once ptp_port_set_icv() has given it a context, and this file is the
+ * only place that owns one. Without that binding the whole feature was
+ * unreachable — see net/sts_ptp_icv_policy.h, which owns the arming decision.
+ *
+ * The context is created at start and re-planned on every CFG_G_PTP commit
+ * (sts_ptp_reload_icv(), called from sts_net_on_cfg()), so an operator arms,
+ * re-keys and disarms without a reboot — and so a factory reset's applier
+ * fan-out overwrites the key held in RAM instead of leaving it there until the
+ * reboot. Default is OFF: `ptp.icv.policy` ships 0.
  */
 
 #include <errno.h>
@@ -77,8 +93,12 @@
 #include <zephyr/net/ptp_time.h>
 #include <zephyr/net/socket.h>
 
+#include <mbedtls/platform_util.h>
+
 #include "cfg/cfg.h"
 #include "net/sts_net.h"
+#include "net/sts_ptp_icv_policy.h"
+#include "storage/sts_store.h"
 #include "util/bytes.h"
 #include "zephyr/sts_app.h"
 
@@ -119,6 +139,23 @@ static ptp_port_ctx_t port;
 static ptp_cfg_t port_cfg;
 static bool running;
 static uint8_t transport;
+
+/*
+ * Annex-P integrity context.
+ *
+ * A file-scope object rather than an embedded ptp_port_ctx_t member because
+ * ptp.h is explicit that a port which never uses integrity should not pay for
+ * the key table and the scratch buffer. Only this file's engine_lock-holding
+ * paths touch it: ptp_port_rx()/ptp_port_step() reach it through port.icv while
+ * holding the lock, and sts_ptp_reload_icv() takes the same lock to re-plan it.
+ */
+static ptp_icv_ctx_t icv;
+/** True once ptp_icv_init() has succeeded; the port may hold a pointer to it. */
+static bool icv_ready;
+/** True while ptp_port_ctx_t::icv points at @ref icv. */
+static bool icv_attached;
+/** Last planner verdict, for the log line and the published statistics. */
+static uint8_t icv_state = (uint8_t)STS_PTP_ICV_OFF;
 
 /**
  * One recent Delay_Req source.
@@ -168,6 +205,169 @@ static int tai_ns_cb(void *ctx, uint64_t *out_ns)
 {
 	ARG_UNUSED(ctx);
 	return sts_time_tai_ns(out_ns);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Annex-P integrity                                                         */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Read the `ptp.icv.*` keys into a planner input.
+ *
+ * @p w is filled completely, key material included, so the caller MUST zeroize
+ * it before it goes out of scope.
+ */
+static void icv_read_want(sts_ptp_icv_want_t *w)
+{
+	size_t klen = 0U;
+
+	memset(w, 0, sizeof(*w));
+	w->policy = (uint8_t)sts_net_cfg_u64(CFG_ID_PTP_ICV_POLICY, 0U);
+	w->suite = (uint8_t)sts_net_cfg_u64(CFG_ID_PTP_ICV_SUITE, 0U);
+	w->spp = (uint8_t)sts_net_cfg_u64(CFG_ID_PTP_ICV_SPP, 0U);
+	w->key_id = (uint32_t)sts_net_cfg_u64(CFG_ID_PTP_ICV_KEY_ID, 0U);
+	w->replay_protect = sts_net_cfg_bool(CFG_ID_PTP_ICV_REPLAY, true);
+	w->replay_window = (uint8_t)sts_net_cfg_u64(CFG_ID_PTP_ICV_WINDOW, 16U);
+	w->mask_mutable = sts_net_cfg_bool(CFG_ID_PTP_ICV_MASK_MUT, true);
+
+	/*
+	 * cfg_get_bytes() refuses any length past the caller's capacity, so an
+	 * over-long blob leaves klen 0 (unarmed) rather than truncating the key
+	 * to something that would authenticate nothing while looking installed.
+	 */
+	if (cfg_get_bytes(sts_cfg(), (uint16_t)CFG_ID_PTP_ICV_KEY, w->key,
+			  sizeof(w->key), &klen) != 0) {
+		klen = 0U;
+	}
+	w->key_len = klen;
+}
+
+/**
+ * Re-plan the integrity engine and attach or detach it.
+ *
+ * Caller MUST hold @ref engine_lock: this rewrites the configuration the RX and
+ * TX paths are reading through port.icv, and flips the pointer itself.
+ *
+ * @return true when the state changed and the caller should log it.
+ */
+static bool icv_apply_locked(void)
+{
+	sts_ptp_icv_want_t want;
+	ptp_icv_cfg_t cfg;
+	sts_ptp_icv_plan_t plan;
+	uint8_t prev = icv_state;
+	int rc;
+
+	icv_read_want(&want);
+	sts_ptp_icv_plan(&want, &cfg, &plan);
+	mbedtls_platform_zeroize(&want, sizeof(want));
+
+	if (icv_ready && (plan.attach == icv_attached) &&
+	    (memcmp(&icv.cfg, &cfg, sizeof(cfg)) == 0)) {
+		/*
+		 * Nothing moved. Every CFG_G_PTP commit lands here, and most of
+		 * them are about priorities or intervals — resetting the replay
+		 * windows for those would make an unrelated edit briefly accept
+		 * a replayed sequence number from every peer.
+		 *
+		 * The comparison is exact: both structures were produced by
+		 * ptp_icv_cfg_defaults(), which memsets, so the padding is zero
+		 * on both sides and memcmp() cannot report a spurious
+		 * difference.
+		 */
+		mbedtls_platform_zeroize(&cfg, sizeof(cfg));
+		icv_state = plan.state;
+		return icv_state != prev;
+	}
+
+	if (!icv_ready) {
+		const port_crypto_t *crypto = sts_port_crypto();
+
+		/*
+		 * First arm. ptp_icv_init() copies the configuration and the
+		 * crypto vtable and zeroes everything else; it needs
+		 * hmac_sha256, which portz_crypto.c always provides.
+		 */
+		if (crypto == NULL || crypto->hmac_sha256 == NULL) {
+			mbedtls_platform_zeroize(&cfg, sizeof(cfg));
+			if (plan.attach) {
+				icv_state = (uint8_t)STS_PTP_ICV_REFUSED;
+				LOG_ERR("Annex-P integrity needs HMAC-SHA-256 "
+					"from the crypto port; staying off");
+			}
+			return icv_state != prev;
+		}
+		rc = ptp_icv_init(&icv, &cfg, crypto);
+		if (rc != 0) {
+			mbedtls_platform_zeroize(&cfg, sizeof(cfg));
+			icv_state = (uint8_t)STS_PTP_ICV_REFUSED;
+			LOG_ERR("ptp_icv_init: %d", rc);
+			return icv_state != prev;
+		}
+		icv_ready = true;
+	} else {
+		/*
+		 * Replace the configuration in place. This is also the
+		 * zeroization step: ptp_icv_set_cfg() overwrites the whole
+		 * ptp_icv_cfg_t, key table included, so a disarming plan
+		 * (factory reset, emptied `ptp.icv.key`, refused edit) removes
+		 * the RAM copy rather than leaving it until the reboot.
+		 */
+		rc = ptp_icv_set_cfg(&icv, &cfg);
+		if (rc != 0) {
+			mbedtls_platform_zeroize(&cfg, sizeof(cfg));
+			/* Fail closed: detach rather than keep serving with a
+			 * configuration the operator has replaced. */
+			(void)ptp_port_set_icv(&port, NULL);
+			icv_attached = false;
+			icv_state = (uint8_t)STS_PTP_ICV_REFUSED;
+			LOG_ERR("ptp_icv_set_cfg: %d; integrity detached", rc);
+			return icv_state != prev;
+		}
+	}
+	mbedtls_platform_zeroize(&cfg, sizeof(cfg));
+
+	/*
+	 * The configuration really changed, so every peer's replay history is
+	 * stale: a re-key restarts sequence numbers, and an old window would
+	 * reject the new association's first messages as replays.
+	 */
+	ptp_icv_reset_peers(&icv);
+
+	(void)ptp_port_set_icv(&port, plan.attach ? &icv : NULL);
+	icv_attached = plan.attach;
+	icv_state = plan.state;
+	return icv_state != prev;
+}
+
+/**
+ * Re-read `ptp.icv.*` and apply it to the running engine.
+ *
+ * Called from the CFG_G_PTP applier (net/sts_net.c), i.e. on the committing
+ * thread with the cfg mutex released. Safe before the PTP thread exists and
+ * safe when PTP is disabled — both leave @ref running false and there is
+ * nothing to reconfigure.
+ */
+void sts_ptp_reload_icv(void)
+{
+	bool changed;
+
+	if (!running) {
+		return;
+	}
+
+	k_mutex_lock(&engine_lock, K_FOREVER);
+	changed = icv_apply_locked();
+	k_mutex_unlock(&engine_lock);
+
+	if (!changed) {
+		return;
+	}
+	LOG_INF("Annex-P integrity: %s",
+		sts_ptp_icv_state_name(icv_state));
+	sts_log((uint8_t)LOGR_SUB_PTP, (uint8_t)LOGR_NOTICE,
+		"PTP Annex-P integrity %s",
+		sts_ptp_icv_state_name(icv_state));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -773,6 +973,21 @@ static void publish_stats_locked(void)
 	s.domain = port_cfg.domain;
 	s.transport = transport;
 
+	/*
+	 * Annex-P integrity. The counters are the only way an operator can tell
+	 * "no peer signs" from "every peer signs and every ICV fails", and the
+	 * two look identical from the port's own counters (rx_icv_rejected
+	 * covers all of it). Copied here under engine_lock with everything else.
+	 */
+	s.icv_state = icv_state;
+	if (icv_ready) {
+		const ptp_icv_counters_t *ic = ptp_icv_counters(&icv);
+
+		if (ic != NULL) {
+			s.icv = *ic;
+		}
+	}
+
 	memset(&cq, 0, sizeof(cq));
 	if (ptp_clock_quality_from_view(&port_cfg, &port.quality, &cq) == 0) {
 		s.clock_class = cq.clock_class;
@@ -956,6 +1171,17 @@ int sts_ptp_start(void)
 			return rc;
 		}
 	}
+
+	/*
+	 * Arm (or leave off) Annex-P integrity before the thread exists, so the
+	 * very first Announce is signed if the operator asked for that. No lock
+	 * is strictly needed here — nothing else can reach the port yet — but
+	 * taking it keeps one code path for start and for reload.
+	 */
+	k_mutex_lock(&engine_lock, K_FOREVER);
+	(void)icv_apply_locked();
+	k_mutex_unlock(&engine_lock);
+	LOG_INF("Annex-P integrity: %s", sts_ptp_icv_state_name(icv_state));
 
 	(void)net_addr_pton(AF_INET, "224.0.1.129", &mc4);
 	(void)net_addr_pton(AF_INET6, "ff0e::181", &mc6);

@@ -74,6 +74,7 @@
 #include "ina228/ina228.h"
 #include "mcp/mcp.h"
 #include "mcp/mcp_wire.h"
+#include "net/sts_aaa.h"
 #include "net/sts_net.h"
 #include "net/sts_secops.h"
 #include "net/sts_web.h"
@@ -584,6 +585,16 @@ static int pv_reboot(void *u, uint8_t mode)
  *      /lfs, the ACME account key, the Zephyr credential-store entries, and the
  *      in-RAM PEM buffers — sts_cert_reset(). This is the one place sts_cert.c's
  *      deliberate persistence is reversed.
+ *   4b. The LDAPS trust anchor — sts_aaa_ldap_ca_erase(). It is NOT a secret,
+ *      which is exactly why the decision to erase it needs stating: what it is
+ *      is the operator's answer to "which directory may tell this box who its
+ *      administrators are". A wiped unit that still trusts the previous
+ *      operator's CA has kept the most consequential half of an AAA
+ *      configuration whose other half — the `sec.ldap.*` keys in (1) — has just
+ *      been cleared, leaving a trust decision with nothing left to explain it.
+ *      It also lives in /lfs/tls beside the material in (4) and was installed
+ *      the same way, through the same admin-only route, so treating the two
+ *      differently would be the surprise. Erase.
  *   5. Everything that lives only in RAM — the NTS cookie master keyring
  *      (src/zephyr/net/sts_net.c), the per-boot NTS-KE server key, mbedTLS and
  *      PSA volatile keys — by REBOOTING. That reboot is not a convenience: it
@@ -650,10 +661,15 @@ int sts_sec_factory_wipe(void)
 	if (sts_cert_reset() != 0) {
 		rc = -EIO;
 	}
+	/* The operator's LDAPS trust anchor — see (4b) above. */
+	if (sts_aaa_ldap_ca_erase() != 0) {
+		rc = -EIO;
+	}
 
 	sts_log((uint8_t)LOGR_SUB_SEC, (uint8_t)LOGR_ALERT,
 		"factory reset: key material zeroized (credentials, sessions, "
-		"TLS identity); rebooting to clear RAM-only keys");
+		"TLS identity, LDAPS trust anchor); rebooting to clear RAM-only "
+		"keys");
 	return rc;
 }
 
@@ -958,6 +974,40 @@ static int pv_csr(void *u, const char *subject, char *out, size_t cap,
 	return sts_cert_csr(subject, out, cap, out_len);
 }
 
+/*
+ * The LDAPS trust anchor lives in the AAA area, not here — sts_aaa.c owns the
+ * socket that consumes it. These two are the same shape as the certificate
+ * providers above so the router's error contract is one contract, and they are
+ * bound unconditionally: sts_aaa.c answers -ENOTSUP in a build with no TLS
+ * socket layer, which the route turns into a 501 that says so.
+ */
+static int pv_ldap_ca_info(void *u, rest_trust_t *out)
+{
+	sts_aaa_ldap_ca_t ca;
+	int rc;
+
+	ARG_UNUSED(u);
+	rc = sts_aaa_ldap_ca_info(&ca);
+	if (rc != 0) {
+		return rc;
+	}
+	out->present = ca.present;
+	out->persisted = ca.persisted;
+	(void)web_span_copy(out->subject, sizeof(out->subject), ca.subject,
+			    strlen(ca.subject));
+	(void)web_span_copy(out->not_after, sizeof(out->not_after),
+			    ca.not_after, strlen(ca.not_after));
+	(void)web_span_copy(out->sha256_fp, sizeof(out->sha256_fp),
+			    ca.sha256_fp, strlen(ca.sha256_fp));
+	return 0;
+}
+
+static int pv_ldap_ca_install(void *u, const char *pem, size_t len)
+{
+	ARG_UNUSED(u);
+	return sts_aaa_ldap_ca_install(pem, len);
+}
+
 static void providers_bind(void)
 {
 	memset(&providers, 0, sizeof(providers));
@@ -979,6 +1029,8 @@ static void providers_bind(void)
 	providers.cert_info = pv_cert_info;
 	providers.cert_install = pv_cert_install;
 	providers.csr_make = pv_csr;
+	providers.ldap_ca_info = pv_ldap_ca_info;
+	providers.ldap_ca_install = pv_ldap_ca_install;
 	if (sts_dfu_port != NULL) {
 		providers.fw_info = pv_fw_info;
 		providers.fw_begin = pv_fw_begin;

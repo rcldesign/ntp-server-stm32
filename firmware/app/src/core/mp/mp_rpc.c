@@ -422,6 +422,15 @@ typedef int (*handler_fn)(mp_ctx_t *c, const mp_json_t *p, int params,
 			  mp_jw_t *w);
 
 /**
+ * Abort any open firmware transfer and forget its owner.
+ *
+ * Forward-declared because the session and mode machinery below has to call it
+ * and it belongs with the rest of the `fw.*` code, not above it. Defined in the
+ * firmware-update section.
+ */
+static void fw_abandon(mp_ctx_t *c);
+
+/**
  * Largest raw cfg-transfer chunk one `cfg.import` request may carry.
  *
  * Published in `hello.limits.cfg_chunk` so a host does not have to guess. It
@@ -429,6 +438,28 @@ typedef int (*handler_fn)(mp_ctx_t *c, const mp_json_t *p, int params,
  * constant rather than the size of the whole import stream.
  */
 #define MP_CFG_CHUNK_MAX 384U
+
+/**
+ * Largest image chunk one `fw.data` request may carry, before base64.
+ *
+ * Bounds the two stack buffers in m_fw_data() — 512 raw plus 684 of base64 —
+ * and is published in `hello.limits.fw_chunk`. It sits under FWUPD_CHUNK_MAX
+ * (1024) on purpose: the base64 expansion of a full 1024-byte chunk plus the
+ * JSON envelope is 1.4 kB of request against a 2 kB receive payload, which
+ * leaves no room for the `sid`/`off` members to grow, and 1.7 kB of handler
+ * stack on the console RX thread is more than this area budgets.
+ */
+#define MP_FW_CHUNK_MAX 512U
+
+/**
+ * Inventory rows one `fw.inventory` page carries.
+ *
+ * The inventory is paged for the same reason the manifest is: eleven rows of
+ * name + designator + prose "how it is read" + a 40-character version comfortably
+ * exceed MP_REPLY_MAX, and a reply that does not fit is answered as an internal
+ * error rather than truncated. Four rows is about 1 kB of reply.
+ */
+#define MP_FW_INV_PAGE 4U
 
 /* ------------------------------------------------------------------- hello */
 
@@ -494,6 +525,14 @@ static int m_hello(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	(void)mp_jw_kv_u64(w, "lease_ttl_max_ms", MP_LEASE_TTL_MAX_MS);
 	(void)mp_jw_kv_u64(w, "g3_hold_ms", MP_G3_HOLD_MS);
 	(void)mp_jw_kv_u64(w, "cfg_chunk", MP_CFG_CHUNK_MAX);
+	(void)mp_jw_kv_u64(w, "fw_chunk", MP_FW_CHUNK_MAX);
+	(void)mp_jw_kv_u64(w, "fw_inv_page", MP_FW_INV_PAGE);
+	/*
+	 * The host->device burst a passthrough channel accepts in one frame.
+	 * Advertised because the refusal is silent — a passthrough frame draws no
+	 * reply — so a host that guessed would lose bytes without being told.
+	 */
+	(void)mp_jw_kv_u64(w, "tunnel_tx", MP_TUNNEL_TX_MAX);
 	(void)mp_jw_kv_bool(w, "batch", false);
 	(void)mp_jw_obj_close(w);
 
@@ -508,6 +547,12 @@ static int m_hello(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	(void)mp_jw_str(w, "log");
 	if (c->w.img != NULL) {
 		(void)mp_jw_str(w, "sys");
+	}
+	if (c->w.fwupd != NULL) {
+		(void)mp_jw_str(w, "fwupd");
+	}
+	if (c->w.raw_tx != NULL) {
+		(void)mp_jw_str(w, "tunnel_tx");
 	}
 	(void)mp_jw_arr_close(w);
 
@@ -716,7 +761,12 @@ static int m_session_open(mp_ctx_t *c, const mp_json_t *p, int params,
 		return mp_map_errno(rc);
 	}
 
-	/* A new session starts from a clean stream and cfg-transfer state. */
+	/*
+	 * A new session starts from a clean stream, cfg-transfer and firmware
+	 * state. A takeover inherits nothing (§5.3), least of all a half-written
+	 * image somebody else's typed serial authorised.
+	 */
+	fw_abandon(c);
 	mp_stream_unsub_all(&c->st);
 	c->cfg_ex_active = false;
 	c->cfg_im_active = false;
@@ -789,6 +839,9 @@ static int m_session_close(mp_ctx_t *c, const mp_json_t *p, int params,
 		mp_fail(c, MP_E_NO_SESSION, "sid");
 		return MP_E_NO_SESSION;
 	}
+	/* Same reasoning as mp_mode_exit(): a transfer the closing session
+	 * authorised has nobody left to finish it, and RESTORE is owed. */
+	fw_abandon(c);
 	mp_stream_unsub_all(&c->st);
 	c->cfg_ex_active = false;
 	c->cfg_im_active = false;
@@ -2087,6 +2140,15 @@ static int m_sys_status(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	(void)mp_jw_kv_u64(w, "dropped", mp_stream_event_dropped(&c->st));
 	(void)mp_jw_obj_close(w);
 
+	/* Host->device passthrough. A refused frame draws no reply, so this is
+	 * the only place a host learns it was refused. */
+	(void)mp_jw_key(w, "tunnel_rx");
+	(void)mp_jw_obj_open(w);
+	(void)mp_jw_kv_u64(w, "bytes", c->raw_rx_bytes);
+	(void)mp_jw_kv_u64(w, "refused", c->raw_rx_refused);
+	(void)mp_jw_kv_u64(w, "burst_max", MP_TUNNEL_TX_MAX);
+	(void)mp_jw_obj_close(w);
+
 	(void)mp_jw_key(w, "mirror");
 	(void)mp_jw_obj_open(w);
 	(void)mp_jw_kv_u64(w, "frames", c->mirror.frames);
@@ -2193,6 +2255,714 @@ static int m_mirror_get(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	return 0;
 }
 
+/* =========================================================== firmware update
+ *
+ * FMT §9. One lifecycle for every updatable IC on the board, over six methods:
+ *
+ *   fw.inventory   every component, updatable or not, paged
+ *   fw.begin       open a transfer: guard, allow-list, QUERY, PREPARE
+ *   fw.data        one chunk, offset-driven and resumable
+ *   fw.end         length + SHA-256, then VERIFY and RESTORE
+ *   fw.confirm     keep what was installed (MCUboot self-confirm, §8.3)
+ *   fw.revert      undo: abort a live transfer, or unstage a pending swap
+ *
+ * Guard classes come from FMT §5.2 and are **not** uniform across targets:
+ *
+ *   STM32 application  G2 — typed device serial. Destructive, but MCUboot's
+ *                      signature check and automatic revert sit behind it, so
+ *                      the worst case is a boot cycle.
+ *   GNSS, rubidium     G3 — typed phrase + hold. These reprogram a soldered or
+ *                      cabled peripheral with no signature check and no way
+ *                      back; FMT §5.2 lists "GNSS/Rb firmware flash" in G3 by
+ *                      name.
+ *
+ * mp_ovr_guard() supplies the role floor for free — operator at G1, admin at G2
+ * and G3 — so the escalation the tool sees is the same one every other mutating
+ * method uses. On top of it, `core/fwupd`'s own allow bitmap decides which
+ * components may be started at all, and it permits only the STM32 image out of
+ * the box: passing a G3 phrase does not make a component updatable that the
+ * device was not commissioned to update.
+ */
+
+/** The guard class FMT §5.2 assigns to reprogramming @p comp. */
+static uint8_t fw_guard_for(uint8_t comp)
+{
+	return (comp == (uint8_t)FWUPD_COMP_STM32_APP) ? (uint8_t)MP_GUARD_G2
+						       : (uint8_t)MP_GUARD_G3;
+}
+
+/** The role a session must already hold to drive a @p guard-class action. */
+static uint8_t fw_role_floor(uint8_t guard)
+{
+	return (guard == (uint8_t)MP_GUARD_G1) ? (uint8_t)MP_ROLE_OPERATOR
+					       : (uint8_t)MP_ROLE_ADMIN;
+}
+
+/**
+ * Resolve and range-check the `target` param.
+ *
+ * @retval >=0  fwupd_comp_t.
+ * @retval -1   Missing, not a number, or out of range; the error is latched.
+ */
+static int p_fw_target(mp_ctx_t *c, const mp_json_t *p, int params)
+{
+	uint32_t v = 0U;
+
+	if (p_get(p, params, "target") < 0) {
+		mp_fail(c, MP_E_BAD_PARAMS, "target");
+		return -1;
+	}
+	if (p_u32(p, params, "target", 0U, &v) != 0) {
+		mp_fail(c, MP_E_BAD_PARAMS, "target");
+		return -1;
+	}
+	if (v >= (uint32_t)FWUPD_COMP__COUNT) {
+		mp_fail(c, MP_E_RANGE, "target");
+		return -1;
+	}
+	return (int)v;
+}
+
+/** Decode exactly 64 lower- or upper-case hex digits into 32 octets. */
+static int hex32(const char *s, uint8_t out[32])
+{
+	size_t i;
+
+	if (s == NULL) {
+		return -EINVAL;
+	}
+	for (i = 0U; i < 64U; i++) {
+		char ch = s[i];
+		uint8_t nib;
+
+		if ((ch >= '0') && (ch <= '9')) {
+			nib = (uint8_t)(ch - '0');
+		} else if ((ch >= 'a') && (ch <= 'f')) {
+			nib = (uint8_t)((ch - 'a') + 10);
+		} else if ((ch >= 'A') && (ch <= 'F')) {
+			nib = (uint8_t)((ch - 'A') + 10);
+		} else {
+			return -EINVAL;
+		}
+		if ((i & 1U) == 0U) {
+			out[i / 2U] = (uint8_t)(nib << 4);
+		} else {
+			out[i / 2U] |= nib;
+		}
+	}
+	/* Exactly 64: a longer digest string is a different digest. */
+	return (s[64] == '\0') ? 0 : -EINVAL;
+}
+
+/** Forget the transfer's ownership record. */
+static void fw_forget(mp_ctx_t *c)
+{
+	c->fw_sid = 0U;
+	c->fw_comp = 0U;
+	c->fw_guard = (uint8_t)MP_GUARD_G0;
+}
+
+/**
+ * Abandon any open transfer, from a path that is not `fw.revert`.
+ *
+ * Leaving MP mode, closing the session and a dead-man link drop all land here.
+ * A tool that walks away mid-flash must not leave a component in the state
+ * PREPARE put it in — that is the same property `mp_ovr_revert_all()` gives
+ * overrides, and core/fwupd's finish() guarantees RESTORE runs exactly once.
+ */
+static void fw_abandon(mp_ctx_t *c)
+{
+	if ((c->w.fwupd == NULL) || (c->fw_sid == 0U)) {
+		fw_forget(c);
+		return;
+	}
+	if (c->w.fwupd->abort != NULL) {
+		(void)c->w.fwupd->abort(c->w.fwupd->ctx);
+	}
+	fw_forget(c);
+}
+
+/** Write the shared `progress` member of every `fw.*` reply. */
+static void fw_emit_progress(mp_jw_t *w, const mp_fw_status_t *st)
+{
+	(void)mp_jw_key(w, "progress");
+	(void)mp_jw_obj_open(w);
+	(void)mp_jw_kv_u64(w, "target", st->progress.comp);
+	(void)mp_jw_kv_str(w, "component", fwupd_comp_name(st->progress.comp));
+	(void)mp_jw_kv_str(w, "state", fwupd_state_name(st->progress.state));
+	(void)mp_jw_kv_str(w, "reason", fwupd_end_name(st->progress.reason));
+	(void)mp_jw_kv_u64(w, "done", st->progress.done);
+	(void)mp_jw_kv_u64(w, "total", st->progress.total);
+	(void)mp_jw_kv_u64(w, "permille", st->progress.permille);
+	(void)mp_jw_kv_i64(w, "rc", st->progress.rc);
+	(void)mp_jw_kv_str(w, "version_before",
+			   (st->before[0] != '\0') ? st->before : NULL);
+	(void)mp_jw_kv_str(w, "version_after",
+			   (st->after[0] != '\0') ? st->after : NULL);
+	(void)mp_jw_obj_close(w);
+}
+
+/** Fetch the orchestrator snapshot; latches MP_E_IO and returns -1 on failure. */
+static int fw_status(mp_ctx_t *c, mp_fw_status_t *st)
+{
+	(void)memset(st, 0, sizeof(*st));
+	if ((c->w.fwupd->status == NULL) ||
+	    (c->w.fwupd->status(c->w.fwupd->ctx, st) != 0)) {
+		mp_fail(c, MP_E_IO, "status");
+		return -1;
+	}
+	return 0;
+}
+
+/**
+ * Common preamble: the port must be wired, and the caller must own the transfer
+ * that `fw.begin` opened.
+ *
+ * The session check is deliberately doubled. guard_or_fail() already refuses a
+ * `sid` that is not the live session's, so the explicit comparison against
+ * `fw_sid` catches the case it cannot see: a *takeover* closed the authorising
+ * session and opened a new one with the same privileges, and whoever arrived
+ * afterwards must not be able to finish somebody else's flash.
+ *
+ * @retval 0   Permitted; @p out_sid holds the caller's session id.
+ * @retval <0  Refused, error latched; the value is the MP error code.
+ */
+static int fw_owner_or_fail(mp_ctx_t *c, const mp_json_t *p, int params,
+			    mp_jw_t *w, uint32_t *out_sid)
+{
+	uint32_t sid = 0U;
+	int g;
+
+	if (c->w.fwupd == NULL) {
+		mp_fail(c, MP_E_NOTSUP, "fwupd");
+		return MP_E_NOTSUP;
+	}
+	if (c->fw_sid == 0U) {
+		mp_fail(c, MP_E_STATE, "no transfer");
+		return MP_E_STATE;
+	}
+
+	/*
+	 * G1 rather than the transfer's own class: the typed serial and the
+	 * phrase-plus-hold were spent authorising `fw.begin`, and re-demanding
+	 * them per chunk would make a G3 arm — which is single-use by
+	 * construction — unusable for the thing it exists to gate. What this
+	 * still enforces on every chunk is the part that can go stale: a live
+	 * session, a fresh keepalive, an asserted link, and the role floor.
+	 */
+	g = guard_or_fail(c, (uint8_t)MP_GUARD_G1, p, params, 0U, 0U, w);
+	if (g != 0) {
+		/* An arm cannot happen at G1; a positive return is impossible. */
+		return c->err_code;
+	}
+
+	(void)p_u32(p, params, "sid", 0U, &sid);
+	if (sid != c->fw_sid) {
+		mp_fail(c, MP_E_NO_SESSION, "not the transfer owner");
+		return MP_E_NO_SESSION;
+	}
+	if (mp_ovr_session_role(&c->ovr) < fw_role_floor(c->fw_guard)) {
+		mp_fail(c, MP_E_ROLE, mp_guard_name(c->fw_guard));
+		return MP_E_ROLE;
+	}
+	*out_sid = sid;
+	return 0;
+}
+
+/* ------------------------------------------------------------ fw.inventory */
+
+static int m_fw_inventory(mp_ctx_t *c, const mp_json_t *p, int params,
+			  mp_jw_t *w)
+{
+	fwupd_inv_row_t rows[MP_FW_INV_PAGE];
+	mp_fw_status_t st;
+	uint32_t from = 0U;
+	size_t n = 0U;
+	size_t total = 0U;
+	size_t i;
+	int rc;
+
+	if ((c->w.fwupd == NULL) || (c->w.fwupd->inventory == NULL)) {
+		mp_fail(c, MP_E_NOTSUP, "fwupd");
+		return MP_E_NOTSUP;
+	}
+	if (p_u32(p, params, "from", 0U, &from) != 0) {
+		mp_fail(c, MP_E_BAD_PARAMS, "from");
+		return MP_E_BAD_PARAMS;
+	}
+	if (from > (uint32_t)FWUPD_COMP__COUNT) {
+		mp_fail(c, MP_E_RANGE, "from");
+		return MP_E_RANGE;
+	}
+
+	/*
+	 * G0. FMT §5.1: observation is free, and the inventory is what the tool
+	 * renders before anyone logs in — a board whose component list needs a
+	 * credential is a board whose operator cannot tell what is wrong with it.
+	 * The reads behind it are identity reads through each target's
+	 * query_version(), which is also what the housekeeping sweep does.
+	 */
+	rc = c->w.fwupd->inventory(c->w.fwupd->ctx, (size_t)from, rows,
+				   (size_t)MP_FW_INV_PAGE, &n, &total);
+	if (rc != 0) {
+		mp_fail(c, mp_map_errno(rc), "inventory");
+		return mp_map_errno(rc);
+	}
+	if (fw_status(c, &st) != 0) {
+		return MP_E_IO;
+	}
+
+	(void)mp_jw_obj_open(w);
+	(void)mp_jw_kv_u64(w, "total", total);
+	(void)mp_jw_kv_u64(w, "from", from);
+	(void)mp_jw_kv_u64(w, "count", n);
+	(void)mp_jw_kv_u64(w, "next", (uint64_t)from + (uint64_t)n);
+	(void)mp_jw_kv_bool(w, "done", ((size_t)from + n) >= total);
+	(void)mp_jw_kv_u64(w, "chunk_max", st.chunk_max);
+	(void)mp_jw_kv_u64(w, "image_max", FWUPD_IMAGE_MAX);
+	fw_emit_progress(w, &st);
+
+	(void)mp_jw_key(w, "components");
+	(void)mp_jw_arr_open(w);
+	for (i = 0U; i < n; i++) {
+		const fwupd_comp_desc_t *d = rows[i].desc;
+		uint8_t comp = (d != NULL) ? d->comp : 0U;
+
+		(void)mp_jw_obj_open(w);
+		(void)mp_jw_kv_u64(w, "id", comp);
+		(void)mp_jw_kv_str(w, "name", (d != NULL) ? d->name : "?");
+		(void)mp_jw_kv_str(w, "designator",
+				   (d != NULL) ? d->designator : NULL);
+		(void)mp_jw_kv_bool(w, "updatable",
+				    (d != NULL) && d->updatable);
+		/*
+		 * `updatable` is what the board provides; `allowed` is what this
+		 * unit is commissioned to do. The tool needs both, or it offers a
+		 * button that always refuses.
+		 */
+		(void)mp_jw_kv_bool(w, "allowed",
+				    (st.allow & (1UL << comp)) != 0UL);
+		(void)mp_jw_kv_str(w, "guard", mp_guard_name(fw_guard_for(comp)));
+		(void)mp_jw_kv_u64(w, "count", (d != NULL) ? d->count : 0U);
+		(void)mp_jw_kv_str(w, "version_how",
+				   (d != NULL) ? d->version_how : NULL);
+		(void)mp_jw_kv_str(w, "version",
+				   rows[i].version_valid ? rows[i].version : NULL);
+		(void)mp_jw_kv_bool(w, "present", rows[i].present);
+		(void)mp_jw_kv_i64(w, "rc", rows[i].last_rc);
+		(void)mp_jw_obj_close(w);
+	}
+	(void)mp_jw_arr_close(w);
+	(void)mp_jw_obj_close(w);
+	return 0;
+}
+
+/* ---------------------------------------------------------------- fw.begin */
+
+static int m_fw_begin(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
+{
+	char sha_hex[65];
+	fwupd_req_t req;
+	mp_fw_status_t st;
+	int target;
+	uint32_t size = 0U;
+	uint32_t sid = 0U;
+	uint8_t guard;
+	int g;
+	int rc;
+
+	if ((c->w.fwupd == NULL) || (c->w.fwupd->begin == NULL)) {
+		mp_fail(c, MP_E_NOTSUP, "fwupd");
+		return MP_E_NOTSUP;
+	}
+
+	target = p_fw_target(c, p, params);
+	if (target < 0) {
+		return c->err_code;
+	}
+	guard = fw_guard_for((uint8_t)target);
+
+	if (p_u32(p, params, "size", 0U, &size) != 0) {
+		mp_fail(c, MP_E_BAD_PARAMS, "size");
+		return MP_E_BAD_PARAMS;
+	}
+	if ((size == 0U) || (size > FWUPD_IMAGE_MAX)) {
+		mp_fail(c, MP_E_RANGE, "size");
+		return MP_E_RANGE;
+	}
+
+	(void)memset(&req, 0, sizeof(req));
+	if (p_str(p, params, "sha256", sha_hex, sizeof(sha_hex)) <= 0) {
+		mp_fail(c, MP_E_BAD_PARAMS, "sha256");
+		return MP_E_BAD_PARAMS;
+	}
+	if (hex32(sha_hex, req.sha256) != 0) {
+		mp_fail(c, MP_E_BAD_PARAMS, "sha256 must be 64 hex digits");
+		return MP_E_BAD_PARAMS;
+	}
+	if (p_str(p, params, "expect", req.expect_version,
+		  sizeof(req.expect_version)) < 0) {
+		mp_fail(c, MP_E_BAD_PARAMS, "expect");
+		return MP_E_BAD_PARAMS;
+	}
+	req.magic = FWUPD_MAGIC;
+	req.size = size;
+
+	/*
+	 * The G3 arm is bound to the *component*, so an arm taken for the GNSS
+	 * receiver cannot be completed as a rubidium flash. 220 is clear of
+	 * sys.reboot's 200..202 and sys.bootloader's 210.
+	 */
+	g = guard_or_fail(c, guard, p, params, 0U,
+			  (uint8_t)(220U + (unsigned int)target), w);
+	if (g != 0) {
+		return (g > 0) ? 0 : c->err_code;
+	}
+	(void)p_u32(p, params, "sid", 0U, &sid);
+
+	rc = c->w.fwupd->begin(c->w.fwupd->ctx, (uint8_t)target, &req);
+	if (rc != 0) {
+		int code = mp_map_errno(rc);
+
+		/*
+		 * -EACCES is the allow bitmap: the component is updatable in
+		 * principle and this unit is not commissioned to update it. That
+		 * is firmware policy refusing, which is what MP_E_VETO means, and
+		 * mp_map_errno() already says so — the reason string is what tells
+		 * the tool to stop offering the button.
+		 */
+		mp_fail(c, code,
+			(rc == -EACCES) ? "component not permitted"
+					: ((rc == -ENOTSUP) ? "no update path"
+							    : "begin"));
+		return code;
+	}
+
+	c->fw_sid = sid;
+	c->fw_comp = (uint8_t)target;
+	c->fw_guard = guard;
+
+	if (fw_status(c, &st) != 0) {
+		return MP_E_IO;
+	}
+
+	if (c->w.log != NULL) {
+		char line[96];
+		size_t n = 0U;
+
+		n = str_app(line, sizeof(line), n, "fw.begin ");
+		n = str_app(line, sizeof(line), n,
+			    fwupd_comp_name((uint8_t)target));
+		n = str_app(line, sizeof(line), n, " by ");
+		(void)str_app(line, sizeof(line), n,
+			      (mp_ovr_session_user(&c->ovr)[0] != '\0')
+				      ? mp_ovr_session_user(&c->ovr)
+				      : "<anonymous>");
+		(void)logr_puts(c->w.log, (uint8_t)LOGR_WARN,
+				(uint8_t)LOGR_SUB_MCP, mp_now(c), line);
+	}
+
+	(void)mp_jw_obj_open(w);
+	(void)mp_jw_kv_u64(w, "target", (uint64_t)target);
+	(void)mp_jw_kv_str(w, "guard", mp_guard_name(guard));
+	(void)mp_jw_kv_u64(w, "chunk_max", st.chunk_max);
+	(void)mp_jw_kv_u64(w, "size", size);
+	fw_emit_progress(w, &st);
+	(void)mp_jw_obj_close(w);
+	return 0;
+}
+
+/* ----------------------------------------------------------------- fw.data */
+
+static int m_fw_data(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
+{
+	uint8_t raw[MP_FW_CHUNK_MAX];
+	char b64[MP_B64_LEN(MP_FW_CHUNK_MAX) + 4U];
+	uint32_t sid = 0U;
+	uint32_t off = 0U;
+	uint32_t next = 0U;
+	mp_fw_status_t st;
+	int n;
+	int rc;
+
+	rc = fw_owner_or_fail(c, p, params, w, &sid);
+	if (rc != 0) {
+		return rc;
+	}
+	if (c->w.fwupd->data == NULL) {
+		mp_fail(c, MP_E_NOTSUP, "fwupd");
+		return MP_E_NOTSUP;
+	}
+
+	if (p_get(p, params, "off") < 0) {
+		mp_fail(c, MP_E_BAD_PARAMS, "off");
+		return MP_E_BAD_PARAMS;
+	}
+	if (p_u32(p, params, "off", 0U, &off) != 0) {
+		/* A negative or >32-bit offset is a range error, not a parse
+		 * error: p_u32() has already distinguished them. */
+		mp_fail(c, MP_E_RANGE, "off");
+		return MP_E_RANGE;
+	}
+
+	/*
+	 * p_str() empties the buffer when the value does not fit, so an
+	 * over-long chunk reads as absent rather than as an unterminated string;
+	 * both land on the refusal below.
+	 */
+	if (p_str(p, params, "data", b64, sizeof(b64)) <= 0) {
+		mp_fail(c, MP_E_BAD_PARAMS, "data");
+		return MP_E_BAD_PARAMS;
+	}
+	n = mp_b64_decode(b64, strlen(b64), raw, sizeof(raw));
+	if (n < 0) {
+		mp_fail(c, MP_E_BAD_PARAMS, "base64");
+		return MP_E_BAD_PARAMS;
+	}
+	if (n == 0) {
+		mp_fail(c, MP_E_BAD_PARAMS, "empty chunk");
+		return MP_E_BAD_PARAMS;
+	}
+
+	rc = c->w.fwupd->data(c->w.fwupd->ctx, off, raw, (size_t)n, &next);
+	if (fw_status(c, &st) != 0) {
+		return MP_E_IO;
+	}
+	if (rc != 0) {
+		int code = mp_map_errno(rc);
+
+		/*
+		 * A refusal still carries `next_off`, because that is the whole
+		 * point of it: the orchestrator refuses a gap or a partial overlap
+		 * rather than trimming it, and the tool needs to know where to
+		 * rewind to. A target error has already ended the session, which
+		 * `progress.state` reports.
+		 */
+		mp_fail(c, code, (rc == -EPROTO) ? "offset" : "chunk");
+		if ((rc != -EINVAL) && (rc != -EPROTO) && (rc != -ENOSPC) &&
+		    (rc != -EPERM)) {
+			/*
+			 * A target error or a hash-stream failure has already run
+			 * finish(), so the session is over and no further chunk can
+			 * be accepted. The recoverable refusals — a bad length, a
+			 * gap, a chunk past the end — leave the transfer open at
+			 * `next_off` so the tool can rewind.
+			 */
+			fw_forget(c);
+		}
+		return code;
+	}
+
+	(void)mp_jw_obj_open(w);
+	(void)mp_jw_kv_u64(w, "off", off);
+	(void)mp_jw_kv_u64(w, "len", (uint64_t)n);
+	(void)mp_jw_kv_u64(w, "next_off", next);
+	/* A retransmit wholly inside what is already written advances nothing. */
+	(void)mp_jw_kv_bool(w, "duplicate", next != (off + (uint32_t)n));
+	fw_emit_progress(w, &st);
+	(void)mp_jw_obj_close(w);
+	return 0;
+}
+
+/* ------------------------------------------------------------------ fw.end */
+
+static int m_fw_end(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
+{
+	mp_fw_status_t st;
+	uint32_t sid = 0U;
+	int rc;
+
+	rc = fw_owner_or_fail(c, p, params, w, &sid);
+	if (rc != 0) {
+		return rc;
+	}
+	if (c->w.fwupd->end == NULL) {
+		mp_fail(c, MP_E_NOTSUP, "fwupd");
+		return MP_E_NOTSUP;
+	}
+
+	rc = c->w.fwupd->end(c->w.fwupd->ctx);
+
+	/*
+	 * The transfer is over either way — fwupd_end() runs VERIFY and RESTORE
+	 * on success and finish() on every failure — so the ownership record goes
+	 * now. What is left is a DONE or FAILED session the tool acknowledges
+	 * with fw.confirm or fw.revert.
+	 */
+	fw_forget(c);
+
+	if (fw_status(c, &st) != 0) {
+		return MP_E_IO;
+	}
+	if (rc != 0) {
+		int code = mp_map_errno(rc);
+
+		mp_fail(c, code,
+			(rc == -EBADMSG) ? fwupd_end_name(st.progress.reason)
+					 : "end");
+		return code;
+	}
+
+	(void)mp_jw_obj_open(w);
+	(void)mp_jw_kv_bool(w, "ok",
+			    st.progress.state == (uint8_t)FWUPD_ST_DONE);
+	fw_emit_progress(w, &st);
+	(void)mp_jw_obj_close(w);
+	return 0;
+}
+
+/* -------------------------------------------------------------- fw.confirm */
+
+static int m_fw_confirm(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
+{
+	mp_fw_status_t st;
+	bool image = false;
+	int target;
+	int g;
+	int rc;
+
+	if (c->w.fwupd == NULL) {
+		mp_fail(c, MP_E_NOTSUP, "fwupd");
+		return MP_E_NOTSUP;
+	}
+	target = p_fw_target(c, p, params);
+	if (target < 0) {
+		return c->err_code;
+	}
+
+	/*
+	 * G2 — the typed device serial, not G3.
+	 *
+	 * Confirming is what disarms MCUboot's automatic revert (spec §8.3): the
+	 * unit stops being able to fall back to the image that was running an
+	 * hour ago. That is a hardware-risk act in FMT §5.2's sense, and it is
+	 * also the *safe* direction for the peripherals, where confirming only
+	 * acknowledges a finished session. One class for both keeps the tool's
+	 * escalation predictable.
+	 */
+	g = guard_or_fail(c, (uint8_t)MP_GUARD_G2, p, params, 0U, 0U, w);
+	if (g != 0) {
+		return (g > 0) ? 0 : c->err_code;
+	}
+
+	if (target == (int)FWUPD_COMP_STM32_APP) {
+		if ((c->w.img == NULL) || (c->w.img->confirm_active == NULL)) {
+			mp_fail(c, MP_E_NOTSUP, "image port");
+			return MP_E_NOTSUP;
+		}
+		rc = c->w.img->confirm_active(c->w.img->ctx);
+		if (rc != 0) {
+			mp_fail(c, mp_map_errno(rc), "confirm");
+			return mp_map_errno(rc);
+		}
+		image = true;
+	}
+
+	/*
+	 * Acknowledge a finished session so the orchestrator returns to IDLE.
+	 * -EBUSY means one is still running, which is not a reason to refuse the
+	 * MCUboot confirm that has already happened; the state in the reply says
+	 * so. -EINVAL from an unwired reset is the same.
+	 */
+	if (c->w.fwupd->reset != NULL) {
+		(void)c->w.fwupd->reset(c->w.fwupd->ctx);
+	}
+	if (fw_status(c, &st) != 0) {
+		return MP_E_IO;
+	}
+
+	(void)mp_jw_obj_open(w);
+	(void)mp_jw_kv_u64(w, "target", (uint64_t)target);
+	(void)mp_jw_kv_bool(w, "confirmed", true);
+	(void)mp_jw_kv_bool(w, "image_confirmed", image);
+	fw_emit_progress(w, &st);
+	(void)mp_jw_obj_close(w);
+	return 0;
+}
+
+/* --------------------------------------------------------------- fw.revert */
+
+/**
+ * The stop button, and deliberately the cheapest of the six to reach.
+ *
+ * G1, one class below `fw.begin`'s cheapest form. An operator who can see a
+ * transfer going wrong must be able to end it without hunting for the device
+ * serial, and every outcome here is the safe direction: abort runs core/fwupd's
+ * RESTORE, and unstaging a pending swap leaves the running image alone. The
+ * only thing it can deny is somebody else's staged update, which needs an
+ * authenticated operator session to do and costs a re-upload.
+ */
+static int m_fw_revert(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
+{
+	mp_fw_status_t st;
+	bool aborted = false;
+	bool unstaged = false;
+	int target;
+	int g;
+	int rc;
+
+	if (c->w.fwupd == NULL) {
+		mp_fail(c, MP_E_NOTSUP, "fwupd");
+		return MP_E_NOTSUP;
+	}
+	target = p_fw_target(c, p, params);
+	if (target < 0) {
+		return c->err_code;
+	}
+	g = guard_or_fail(c, (uint8_t)MP_GUARD_G1, p, params, 0U, 0U, w);
+	if (g != 0) {
+		return (g > 0) ? 0 : c->err_code;
+	}
+
+	if (fw_status(c, &st) != 0) {
+		return MP_E_IO;
+	}
+
+	/* A live transfer is aborted whatever target the caller named: there is
+	 * only ever one, and refusing on a mismatched target would leave the
+	 * operator holding a stop button wired to nothing. */
+	if ((st.progress.state != (uint8_t)FWUPD_ST_IDLE) &&
+	    (st.progress.state != (uint8_t)FWUPD_ST_DONE) &&
+	    (st.progress.state != (uint8_t)FWUPD_ST_FAILED)) {
+		if (c->w.fwupd->abort == NULL) {
+			mp_fail(c, MP_E_NOTSUP, "abort");
+			return MP_E_NOTSUP;
+		}
+		(void)c->w.fwupd->abort(c->w.fwupd->ctx);
+		aborted = true;
+	}
+	fw_forget(c);
+
+	if ((c->w.fwupd->reset != NULL) && !aborted) {
+		(void)c->w.fwupd->reset(c->w.fwupd->ctx);
+	}
+
+	if ((target == (int)FWUPD_COMP_STM32_APP) && !aborted) {
+		if ((c->w.img == NULL) || (c->w.img->request_revert == NULL)) {
+			mp_fail(c, MP_E_NOTSUP, "image port");
+			return MP_E_NOTSUP;
+		}
+		rc = c->w.img->request_revert(c->w.img->ctx);
+		if (rc != 0) {
+			mp_fail(c, mp_map_errno(rc), "revert");
+			return mp_map_errno(rc);
+		}
+		unstaged = true;
+	}
+
+	if (fw_status(c, &st) != 0) {
+		return MP_E_IO;
+	}
+
+	(void)mp_jw_obj_open(w);
+	(void)mp_jw_kv_u64(w, "target", (uint64_t)target);
+	(void)mp_jw_kv_bool(w, "aborted", aborted);
+	(void)mp_jw_kv_bool(w, "unstaged", unstaged);
+	fw_emit_progress(w, &st);
+	(void)mp_jw_obj_close(w);
+	return 0;
+}
+
 /* ------------------------------------------------------------ method table */
 
 static const struct {
@@ -2222,6 +2992,12 @@ static const struct {
 	{ "cfg.export", m_cfg_export },
 	{ "cfg.import", m_cfg_import },
 	{ "log.fetch", m_log_fetch },
+	{ "fw.inventory", m_fw_inventory },
+	{ "fw.begin", m_fw_begin },
+	{ "fw.data", m_fw_data },
+	{ "fw.end", m_fw_end },
+	{ "fw.confirm", m_fw_confirm },
+	{ "fw.revert", m_fw_revert },
 	{ "sys.reboot", m_sys_reboot },
 	{ "sys.bootloader", m_sys_bootloader },
 	{ "sys.mode", m_sys_mode },
@@ -2478,6 +3254,85 @@ int mp_rpc_handle(mp_ctx_t *c, const uint8_t *msg, size_t len, const char **out,
 
 /* ================================================================ lifecycle */
 
+/**
+ * The manifest index whose lease means "the tunnel behind @p ch is open", or -1.
+ *
+ * Resolved once at mp_init(); see the cache in mp_ctx_t.
+ */
+static int tunnel_obj(const mp_ctx_t *c, uint8_t ch)
+{
+	switch (ch) {
+	case MP_CH_GNSS_PASS:
+		return c->obj_gnss_tunnel;
+	case MP_CH_RB_PASS:
+		return c->obj_rb_tunnel;
+	case MP_CH_SMP:
+		return c->obj_smp_tunnel;
+	default:
+		return -1;
+	}
+}
+
+/**
+ * Host->device bytes on a passthrough channel (FMT §5.5).
+ *
+ * The gate is the **override lease**, not a subscription. `gnss.tunnel`,
+ * `ref.rb.tunnel` and `sys.smp.tunnel` are G2 objects whose apply callback is
+ * what stands the port down in the platform, so a held lease is the only state
+ * in the system that says firmware is not a second writer. Testing the lease
+ * here — rather than a flag the glue keeps — means the dead-man closes the
+ * inbound direction at exactly the moment it closes the port: when the lease
+ * reverts, the very next frame is refused, with no second copy of the truth to
+ * fall out of step.
+ *
+ * Channels 0x02 and 0x03 are read-only tees of traffic the receiver is
+ * generating. They are refused here rather than silently ignored, because a host
+ * writing to them believes it is talking to the GNSS receiver.
+ *
+ * Refusals are counted and dropped. A passthrough frame carries no request id
+ * and draws no reply, so there is nothing to answer with; `sys.status` and
+ * `mp status` are where a host finds out.
+ */
+static int raw_in(mp_ctx_t *c, uint8_t ch, const uint8_t *msg, size_t len)
+{
+	const mp_lease_t *l;
+	int obj;
+	int rc;
+
+	obj = tunnel_obj(c, ch);
+	if (obj < 0) {
+		c->raw_rx_refused++;
+		return -ENOTSUP;
+	}
+	if (c->w.raw_tx == NULL) {
+		c->raw_rx_refused++;
+		return -ENOTSUP;
+	}
+	l = mp_ovr_lease(&c->ovr, (size_t)obj);
+	if ((l == NULL) || (l->value == 0)) {
+		c->raw_rx_refused++;
+		return -EPERM;
+	}
+	if (len == 0U) {
+		return 0;
+	}
+	if (len > MP_TUNNEL_TX_MAX) {
+		/* Refused whole: a truncated burst aimed at a bootloader is a
+		 * corrupted command, not a short one. `hello.limits.tunnel_tx`
+		 * is how the host was told. */
+		c->raw_rx_refused++;
+		return -EMSGSIZE;
+	}
+
+	rc = c->w.raw_tx(c->w.raw_tx_user, ch, msg, len);
+	if (rc < 0) {
+		c->raw_rx_refused++;
+		return rc;
+	}
+	c->raw_rx_bytes += (uint32_t)len;
+	return 0;
+}
+
 /** Frame-layer callback: a complete inbound message on some channel. */
 static int on_msg(void *user, uint8_t ch, const uint8_t *msg, size_t len)
 {
@@ -2486,13 +3341,7 @@ static int on_msg(void *user, uint8_t ch, const uint8_t *msg, size_t len)
 	size_t rlen = 0U;
 
 	if (ch != MP_CH_CONTROL) {
-		/*
-		 * Inbound bytes on a tunnel channel are the host writing to a
-		 * peripheral. Core does not own those UARTs, so the glue
-		 * registers its own handler by wrapping this one; unhandled
-		 * channels are counted and dropped rather than guessed at.
-		 */
-		return -ENOTSUP;
+		return raw_in(c, ch, msg, len);
 	}
 
 	if (mp_rpc_handle(c, msg, len, &reply, &rlen) != 0) {
@@ -2577,6 +3426,15 @@ int mp_init(mp_ctx_t *c, const mp_wiring_t *w)
 	c->w = *w;
 	c->mode = (uint8_t)MP_MODE_SHELL;
 
+	/*
+	 * The three tunnel objects, resolved once. mp_obj_find() is a linear walk
+	 * over the manifest and raw_in() runs per received frame; a missing object
+	 * caches as -1, which reads as "no such tunnel" rather than as index 0.
+	 */
+	c->obj_gnss_tunnel = mp_obj_find("gnss.tunnel");
+	c->obj_rb_tunnel = mp_obj_find("ref.rb.tunnel");
+	c->obj_smp_tunnel = mp_obj_find("sys.smp.tunnel");
+
 	rc = mp_frame_rx_init(&c->rx, w->reasm, w->reasm_n, on_msg, c);
 	if (rc != 0) {
 		return rc;
@@ -2645,7 +3503,9 @@ int mp_mode_exit(mp_ctx_t *c)
 		return 0;
 	}
 
-	/* Leaving MP mode must not leave the board commanded. */
+	/* Leaving MP mode must not leave the board commanded — nor leave a
+	 * component sitting in whatever state PREPARE put it in. */
+	fw_abandon(c);
 	(void)mp_ovr_revert_all(&c->ovr, (uint8_t)MP_OVR_EV_RELEASE,
 				"left MP mode", mp_now(c));
 	if (c->ovr.sess.id != 0U) {

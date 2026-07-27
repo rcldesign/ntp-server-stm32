@@ -63,6 +63,61 @@ int sts_aaa_stats(auth_stats_t *out);
 int sts_aaa_remote(void *ctx, uint8_t backend, const char *user,
 		   const char *secret, uint8_t *out_role);
 
+/* -------------------------------------------------- the LDAPS trust anchor */
+
+/**
+ * The installed LDAP trust anchor, as the management surfaces describe it.
+ *
+ * Field widths match rest_cert_t's, so the REST encoder copies rather than
+ * reformats. `subject` is the FIRST certificate's subject DN when the blob
+ * holds more than one — the set is registered whole, and naming the first is
+ * enough for an operator to recognise which anchor is loaded.
+ */
+typedef struct {
+	bool present;   /**< a parsed anchor is registered */
+	bool persisted; /**< it survives a reboot (i.e. /lfs took it) */
+	char subject[72];
+	char not_after[24];
+	char sha256_fp[68]; /**< lowercase hex of the first certificate's DER */
+} sts_aaa_ldap_ca_t;
+
+/**
+ * Describe the installed LDAP trust anchor.
+ *
+ * @retval 0        @p out is filled; `present` says whether there is one.
+ * @retval -EINVAL  @p out is NULL.
+ * @retval -ENOTSUP This build has no TLS socket layer, so LDAPS cannot run.
+ */
+int sts_aaa_ldap_ca_info(sts_aaa_ldap_ca_t *out);
+
+/**
+ * Install an operator-supplied trust anchor: one or more PEM CERTIFICATE
+ * blocks, validated, persisted to /lfs and registered under
+ * STS_LDAP_CA_SEC_TAG.
+ *
+ * Fail-hard rather than fail-stale: an anchor that is refused leaves NO anchor
+ * installed, so `sec.ldap.mode = 2` then refuses with "no LDAP CA installed"
+ * instead of quietly continuing to trust the previous one while the operator
+ * has been told the new one was rejected. Losing the anchor costs LDAP logins,
+ * not access — the chain still falls through to the local admin account.
+ *
+ * @retval 0        Installed and live.
+ * @retval -EBADMSG Not a usable PEM certificate (see sts_ldap_ca_check()).
+ * @retval -EFBIG   Larger than STS_LDAP_CA_PEM_MAX.
+ * @retval -EPERM   The blob carries private-key material.
+ * @retval -EROFS   Accepted and live, but /lfs could not persist it.
+ * @retval -ENOTSUP This build has no TLS socket layer.
+ */
+int sts_aaa_ldap_ca_install(const char *pem, size_t len);
+
+/**
+ * Erase the trust anchor: the credential entry, the RAM copy and the /lfs file.
+ *
+ * Called by the factory-reset sweep (sts_sec_factory_wipe()). @retval 0 also
+ * covers "there was nothing to erase".
+ */
+int sts_aaa_ldap_ca_erase(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -170,9 +170,23 @@ void sts_net_on_cfg(uint8_t group)
 		sts_ntp_reload_keys();
 		sts_atecc_reapply();
 		break;
+	case CFG_G_PTP:
+		/*
+		 * One exception to the "staged; effective on restart" rule
+		 * below: the `ptp.icv.*` Annex-P keys apply live.
+		 *
+		 * They have to. `ptp.icv.key` is CFG_F_SECRET, so a factory
+		 * reset clears it in the tree — and the documented contract for
+		 * secret zeroization is that each subsystem's RAM copy goes with
+		 * it via this applier fan-out, not that it waits for the reboot.
+		 * Re-planning here also lets an operator arm, re-key and disarm
+		 * integrity without restarting the grandmaster.
+		 */
+		sts_ptp_reload_icv();
+		LOG_INF("cfg group 0x%02x staged; effective on restart", group);
+		break;
 	case CFG_G_NTP:
 	case CFG_G_NTS:
-	case CFG_G_PTP:
 		/*
 		 * These are almost all CFG_F_REBOOT_REQUIRED (nts.enable,
 		 * ptp.enable/transport/profile, ...) or feed core contexts that

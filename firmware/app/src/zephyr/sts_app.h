@@ -463,6 +463,81 @@ int sts_gnss_request_survey(bool start);
  */
 int sts_gnss_set_fixed_ecef(int64_t x_cm, int64_t y_cm, int64_t z_cm);
 
+/* ---- GNSS sky view (per-satellite az/el/CN0 for the §6.3 skyplot) -------- */
+/*
+ * core/gnssmgr deliberately keeps no per-satellite records — it reduces
+ * UBX-NAV-SAT to a counted summary (gnssmgr.h), because the discipline loop and
+ * the quality block only ever need the counts. The skyplot needs the records
+ * themselves, so the GNSS thread caches the last frame here and this is where
+ * it crosses the area seam.
+ *
+ * A snapshot, not a pointer: the gnss thread (priority 6) rewrites the cache
+ * once a second and the UI renders at 10 Hz from priority 15, so a reader
+ * holding a pointer would tear. The copy is under a bounded mutex, like
+ * sts_health_snapshot().
+ *
+ * `mono_ms` is when the frame was DECODED. A consumer that cares whether the
+ * sky is current MUST age it; a receiver that has stopped talking leaves the
+ * last good frame in place, which is the right thing to draw for a second or
+ * two and the wrong thing to draw for an hour.
+ */
+#define STS_GNSS_SKY_MAX_SV 32u
+
+typedef struct {
+	uint8_t gnss_id;  /* UBX: 0 GPS, 1 SBAS, 2 GAL, 3 BDS, 5 QZSS, 6 GLO */
+	uint8_t sv_id;    /* receiver-scoped satellite id */
+	uint8_t cno_dbhz;
+	int8_t  elev_deg; /* -90..90; 0 when the receiver does not know */
+	int16_t azim_deg; /* 0..360; 0 when the receiver does not know */
+	bool    used;     /* in the navigation/timing solution */
+} sts_gnss_sv_t;
+
+typedef struct {
+	uint8_t       count;   /* valid entries in sv[] */
+	sts_gnss_sv_t sv[STS_GNSS_SKY_MAX_SV];
+	uint32_t      itow_ms; /* iTOW of the NAV-SAT frame */
+	uint64_t      mono_ms; /* sts_mono_ms() at decode; 0 = never received */
+
+	/* Last known geodetic position, for the skyplot's declination model.
+	 * Carried here rather than in a second getter because the two are read
+	 * together, once per rendered frame. */
+	bool    pos_valid;
+	int32_t lat_1e7;
+	int32_t lon_1e7;
+} sts_gnss_sky_t;
+
+/* Fill @p out from the GNSS thread's cache.
+ *
+ * @retval 0        Written. `count` may be 0 and `mono_ms` may be 0.
+ * @retval -EINVAL  @p out is NULL.
+ * @retval -EBUSY   The cache lock was held past the caller's patience; @p out
+ *                  is zeroed. A render tick may simply skip the frame. */
+int sts_gnss_sky(sts_gnss_sky_t *out);
+
+/* ---- e-compass (IIS2MDC magnetometer + LIS2DH12 accelerometer) ----------- */
+/*
+ * Sampled by the housekeeping sweep and consumed by the UI area's skyplot to
+ * rotate the plot to true north (spec §6.3, §10.4). Raw sensor output with no
+ * hard/soft-iron correction applied — the calibration lives in cfg group 0x0C
+ * and is applied by the consumer, so a recalibration takes effect without the
+ * sampling path knowing anything about it.
+ *
+ * Axes are the board's: +x right, +y up the front panel, +z out of the board
+ * face. The board is mounted vertically, so +z is horizontal in service and
+ * tilt compensation is mandatory rather than optional.
+ */
+typedef struct {
+	int32_t  mag_mgauss[3]; /* IIS2MDC, milligauss */
+	int32_t  acc_mg[3];     /* LIS2DH12, milli-g */
+	bool     valid;         /* both parts answered on the last sweep */
+	uint32_t mono_ms;       /* sts_mono_ms() of that sweep */
+} sts_ecompass_t;
+
+/* Fill @p out from the housekeeping cache. Returns 0, or -EINVAL for NULL.
+ * `valid` is false — not an error — when the parts are absent or the sweep has
+ * not run yet, which is what puts the skyplot's "north unverified" badge up. */
+int sts_ecompass(sts_ecompass_t *out);
+
 /* ---- config ------------------------------------------------------------- */
 /* The single live cfg context (loaded before any area starts). Never NULL
  * once sts_platform_init() has returned.

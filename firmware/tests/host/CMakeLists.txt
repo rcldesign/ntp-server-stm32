@@ -101,13 +101,16 @@ module_deps(auth     util)
 # (ina228_shunt_cal_trim); core/cal owns the plausibility policy on top of it,
 # and reusing the codec keeps one implementation of the formula.
 module_deps(cal      ina228 util)
-# `mp` (the Maintenance Protocol, FMT device side) adds one edge to the
-# ARCHITECTURE.md §4 map: `ina228`, for the nine-monitor rail table the
+# `mp` (the Maintenance Protocol, FMT device side) adds two edges to the
+# ARCHITECTURE.md §4 map. `ina228`, for the nine-monitor rail table the
 # capability manifest publishes (name, designator, address, shunt) rather than
-# copying. It also includes ui/ui.h and port/port_image.h for *types only* — no
-# ui symbol is referenced, so `ui` is deliberately not a link dependency and
-# stays out of these suites' coverage.
-module_deps(mp       util cfg logring quality ina228)
+# copying; and `fwupd`, because FMT §3.2 puts the six `fw.*` methods on the MP
+# control plane — mp_rpc.c drives the orchestrator through the mp_fwupd_t port
+# and renders its state/component/reason names. `fwupd` carries `ubx` with it.
+# mp also includes ui/ui.h and port/port_image.h for *types only* — no ui symbol
+# is referenced, so `ui` is deliberately not a link dependency and stays out of
+# these suites' coverage.
+module_deps(mp       util cfg logring quality ina228 fwupd)
 
 # A module may own several focused suites. Each suite name needs its own entry
 # naming the module it belongs to. `util` is split across four because CRC,
@@ -212,6 +215,18 @@ module_deps(ntp_keys ntp util quality)
 # hence the empty dependency list.
 module_deps(secops_policy)
 
+# `ldap_ca` is the same idea for the net area's LDAPS transport decision
+# (app/src/zephyr/net/sts_ldap_ca.h): which socket `sec.ldap.mode` opens, and
+# what is missing when it opens none. It is Zephyr-free because the failure it
+# guards against is silent in both directions — mode 2 used to open a TLS socket
+# that could never complete a handshake (no CA, no hostname, mbedTLS's client
+# default of VERIFY_REQUIRED), and the one way to make that worse is a refusal
+# path that falls through to a cleartext bind and puts the directory password on
+# the wire. It compiles no core module, hence the empty dependency list; it
+# includes core/web/rest.h only through zephyr/net/sts_web.h, for the sec-tag
+# collision check, and links nothing from it.
+module_deps(ldap_ca)
+
 # The Wave-4c security cluster. `core/auth` holds the AAA chain plus the RADIUS,
 # TACACS+ and LDAP codecs, so all four suites compile the same source set; the
 # LDAP codec has no suite of its own and is covered from test_auth.c, next to
@@ -231,6 +246,21 @@ module_deps(mp_override mp)
 module_deps(mp_manifest mp)
 module_deps(mp_stream   mp)
 module_deps(mp_mirror   mp)
+# `mp_fw` is the six FMT §9 `fw.*` methods: the paged inventory, the per-target
+# guard class, the allow-list refusal, the offset arithmetic of a resumable
+# chunked transfer and the abort paths. It drives the real core/fwupd through
+# the mp_fwupd_t port rather than a model, because the property that matters —
+# restore() once per prepare() on every exit — is core/fwupd's and the seam
+# between the two is where a missed abort would live.
+module_deps(mp_fw       mp)
+
+# `mp_tunnel_policy` (app/src/zephyr/console/sts_mp_tunnel_policy.h) is the
+# console area's host->device passthrough routing decision: which port a channel
+# names, whether its tunnel is open, and the burst bound that keeps a blocking
+# uart_poll_out() from holding the engine lock past the service tick's budget.
+# Zephyr-free by construction so the refusals can be tested here, hence the
+# empty dependency list.
+module_deps(mp_tunnel_policy)
 
 # `ptp` is split by layer: the wire codecs, the best-master algorithm and the
 # port state machine are independent enough to fail independently.

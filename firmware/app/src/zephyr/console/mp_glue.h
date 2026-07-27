@@ -265,9 +265,32 @@ bool sts_mp_tunnel_rb_open(void);
 int sts_mp_tunnel_set_gnss(bool open);
 int sts_mp_tunnel_set_rb(bool open);
 
+/**
+ * Put a host-supplied burst on the port behind a passthrough channel.
+ *
+ * The host->device half of channels 0x07 and 0x08. Core reaches it through
+ * mp_wiring_t::raw_tx, having already established that the channel's tunnel
+ * object holds a live override lease — i.e. that firmware has been stood down on
+ * that UART (FMT §5.5). This function checks the same thing again from the
+ * platform's side and refuses anything longer than MP_TUNNEL_TX_MAX.
+ *
+ * **Called with the engine lock held**, and it blocks for one character time per
+ * octet on a `uart_poll_out()` loop. That is why the burst is bounded; see the
+ * budget argument in mp_tunnel.c's header.
+ *
+ * @retval >=0        Octets written.
+ * @retval -ENOTSUP   Not a writable passthrough channel.
+ * @retval -EPERM     The tunnel is not open (or the platform says it is not).
+ * @retval -EMSGSIZE  Over MP_TUNNEL_TX_MAX; nothing was written.
+ */
+int sts_mp_tunnel_write(uint8_t ch, const uint8_t *data, size_t len);
+
 /** Tee byte counts, for `mp status` and the support bundle. */
 void sts_mp_tunnel_stats(uint32_t *gnss, uint32_t *rb, uint32_t *nmea,
 			 uint32_t *ubx, uint32_t *dropped);
+
+/** Host->device passthrough counts: octets written per port, and refusals. */
+void sts_mp_tunnel_tx_stats(uint32_t *gnss, uint32_t *rb, uint32_t *refused);
 
 /**
  * Empty the tee staging ring onto the wire.

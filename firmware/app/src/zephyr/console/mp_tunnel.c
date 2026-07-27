@@ -6,7 +6,10 @@
  *
  * Channels 0x02/0x03 are read-only tees of the GNSS receiver's NMEA and UBX
  * traffic; 0x07 and 0x08 are bidirectional passthroughs to the ZED-F9T on USART3
- * and the FE-5680A on UART7.
+ * and the FE-5680A on UART7. Both directions are wired: the device->host tee is
+ * the staging ring below, and the host->device write is sts_mp_tunnel_write(),
+ * which core reaches through mp_wiring_t::raw_tx once the channel's override
+ * lease says the port has been stood down.
  *
  * The safety rule (FMT §5.5) is the whole reason this is a separate file: while a
  * tunnel is open, firmware must not drive that port, and the reference it feeds
@@ -70,11 +73,34 @@
  *     tunnel, not a terminal;
  *   - loss. The ring is CONFIG_STS1000_MP_TEE_RING bytes and drops the newest on
  *     overflow, counted in `mp status`. A tee that back-pressured its producer
- *     would be a console request throttling the timing path;
- *   - the host->device direction of 0x07/0x08 is still not wired: core/mp does
- *     not dispatch inbound bytes on a passthrough channel to a sink, so
- *     sts_gnss_uart_raw_tx() and rb_serial_tunnel_write() have no caller here.
- *     The tunnels carry device->host today.
+ *     would be a console request throttling the timing path.
+ *
+ * ---------------------------------------------------------------------------
+ * The host->device direction (a fourth side, and the only synchronous one)
+ * ---------------------------------------------------------------------------
+ *
+ * sts_mp_tunnel_write() runs on the console RX thread **inside the engine
+ * lock**: core calls it straight out of the frame decoder, because a
+ * passthrough frame has no reply to defer behind. Both sinks it reaches —
+ * sts_gnss_uart_raw_tx() and rb_serial_tunnel_write() — are uart_poll_out()
+ * loops, so the call costs one character time per octet and the burst length is
+ * therefore a *time* bound on how long the host can keep sts_mp_tick() out of
+ * the engine. MP_TUNNEL_TX_MAX (128) is 33 ms at the receiver's 38400 and
+ * 133 ms at the rubidium's 9600: at most one missed tick pass per frame, inside
+ * the STS_MP_TICK_MISS_MAX run the dead-man budget tolerates. Core enforces the
+ * bound before it calls; this file enforces it again, because a sink that
+ * assumes its caller checked is one refactor from a stall.
+ *
+ * It is deliberately *not* staged through a ring like the other direction. The
+ * ring exists because its producers are an ISR and the priority-6 GNSS thread,
+ * neither of which may block; this producer is the console, which may. Staging
+ * would add a console pass of latency to an interactive path and a second
+ * ordering problem for no safety gain — the timing path is not on this side of
+ * the tunnel at all, since opening one suspends the receiver.
+ *
+ * Nothing here reverses the FMT §5.5 contract: the gate is the same override
+ * lease that stood the port down, tested by core in mp_rpc.c's raw_in() so
+ * there is exactly one record of who owns the UART.
  */
 
 #include <zephyr/kernel.h>
@@ -88,6 +114,7 @@
 #include <zephyr/sys/util.h>
 
 #include "console/mp_glue.h"
+#include "console/sts_mp_tunnel_policy.h"
 #include "fault/fault.h"
 #include "util/ring.h"
 #include "zephyr/platform/platform.h"
@@ -163,6 +190,12 @@ static atomic_t tee_rb_bytes = ATOMIC_INIT(0);
 static atomic_t tee_nmea_bytes = ATOMIC_INIT(0);
 static atomic_t tee_ubx_bytes = ATOMIC_INIT(0);
 static atomic_t tee_dropped = ATOMIC_INIT(0);
+
+/* Host->device. Same treatment for the same reason: `mp status` reads them from
+ * the shell thread, the writer is whichever thread carried the frame in. */
+static atomic_t tx_gnss_bytes = ATOMIC_INIT(0);
+static atomic_t tx_rb_bytes = ATOMIC_INIT(0);
+static atomic_t tx_refused = ATOMIC_INIT(0);
 
 /** The staging ring, and the spinlock that serialises its two producers. */
 static uint8_t tee_ring_buf[MP_TEE_RING_BYTES];
@@ -498,6 +531,96 @@ void sts_mp_tunnel_drain(void)
 			(void)atomic_add(&tee_dropped, (atomic_val_t)n);
 		}
 		(void)ring_discard(&tee_ring, TEE_HDR + n);
+	}
+}
+
+/* -------------------------------------------------------- host -> device */
+
+/**
+ * Put a host-supplied burst on the port behind @p ch.
+ *
+ * Called from core (mp_wiring_t::raw_tx) with the engine lock held, only after
+ * core has confirmed that @p ch names a passthrough whose tunnel object holds a
+ * live override lease. The checks below are therefore the second of two: this
+ * file is the one that knows which UART a channel names and what the platform
+ * says about it, and a sink that trusts its caller to have checked is one
+ * refactor away from writing into a port firmware still owns.
+ *
+ * -EPERM from a sink is the platform's own version of the same refusal —
+ * sts_gnss_uart_raw_tx() answers it unless the receiver is suspended, and
+ * rb_serial_tunnel_write() unless a tunnel holds UART7 — so a lease that somehow
+ * outlived the stand-down still cannot reach the wire.
+ *
+ * @retval >=0        Octets written.
+ * @retval -ENOTSUP   Not a writable passthrough channel, or no platform sink.
+ * @retval -EPERM     The tunnel is not open.
+ * @retval -EMSGSIZE  Longer than MP_TUNNEL_TX_MAX; nothing was written.
+ * @retval <0         Whatever the sink returned.
+ */
+int sts_mp_tunnel_write(uint8_t ch, const uint8_t *data, size_t len)
+{
+	sts_mp_tx_act_t act;
+	int rc;
+
+	if ((data == NULL) && (len != 0U)) {
+		return -EINVAL;
+	}
+
+	act = sts_mp_tunnel_tx_decide(ch, sts_mp_tunnel_gnss_open(),
+				      sts_mp_tunnel_rb_open(), len,
+				      (size_t)MP_TUNNEL_TX_MAX);
+	switch (act) {
+	case STS_MP_TX_GNSS:
+		rc = sts_gnss_uart_raw_tx(data, len);
+		break;
+	case STS_MP_TX_RB:
+		rc = rb_serial_tunnel_write(data, len);
+		break;
+	case STS_MP_TX_NOTHING:
+		return 0;
+	case STS_MP_TX_REFUSE_CHANNEL:
+		(void)atomic_inc(&tx_refused);
+		return -ENOTSUP;
+	case STS_MP_TX_REFUSE_CLOSED:
+		(void)atomic_inc(&tx_refused);
+		return -EPERM;
+	case STS_MP_TX_REFUSE_OVERSIZE:
+	default:
+		(void)atomic_inc(&tx_refused);
+		LOG_WRN("MP tunnel 0x%02x: %u-octet burst over the %u limit; "
+			"refused whole",
+			(unsigned int)ch, (unsigned int)len,
+			(unsigned int)MP_TUNNEL_TX_MAX);
+		return -EMSGSIZE;
+	}
+
+	if (rc < 0) {
+		(void)atomic_inc(&tx_refused);
+		LOG_WRN("MP tunnel 0x%02x write failed: %d", (unsigned int)ch, rc);
+		return rc;
+	}
+
+	/*
+	 * The sinks disagree on their success value — sts_gnss_uart_raw_tx()
+	 * returns the count, rb_serial_tunnel_write() returns 0 — and both are
+	 * all-or-nothing poll-out loops, so the burst length is the honest count.
+	 */
+	(void)atomic_add((act == STS_MP_TX_GNSS) ? &tx_gnss_bytes : &tx_rb_bytes,
+			 (atomic_val_t)len);
+	return (int)len;
+}
+
+/** Host->device byte counts, for `mp status`. Lock-free. */
+void sts_mp_tunnel_tx_stats(uint32_t *gnss, uint32_t *rb, uint32_t *refused)
+{
+	if (gnss != NULL) {
+		*gnss = (uint32_t)atomic_get(&tx_gnss_bytes);
+	}
+	if (rb != NULL) {
+		*rb = (uint32_t)atomic_get(&tx_rb_bytes);
+	}
+	if (refused != NULL) {
+		*refused = (uint32_t)atomic_get(&tx_refused);
 	}
 }
 

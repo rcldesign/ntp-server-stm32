@@ -303,6 +303,22 @@ typedef struct {
 	char     acme_detail[64];
 } rest_cert_t;
 
+/**
+ * A trust anchor this box uses as a CLIENT, i.e. a CA it verifies somebody
+ * else's certificate against. Today that is the LDAPS issuer.
+ *
+ * Deliberately not rest_cert_t: that type describes the server identity this
+ * box PRESENTS, and half its fields (key type, ACME state, self-signed) are
+ * meaningless for an anchor. Two directions of TLS, two types.
+ */
+typedef struct {
+	bool present;
+	bool persisted; /**< survives a reboot */
+	char subject[72];
+	char not_after[24];
+	char sha256_fp[68]; /**< lowercase hex of the DER SHA-256 */
+} rest_trust_t;
+
 /** Reference-override modes for POST /timing/reference. */
 typedef enum {
 	REST_REF_AUTO = 0,
@@ -385,6 +401,17 @@ typedef struct {
 	int (*cert_install)(void *u, const char *pem, size_t len);
 	int (*csr_make)(void *u, const char *subject, char *out, size_t cap,
 			size_t *out_len);
+
+	/*
+	 * The LDAPS trust anchor (spec §9.4). ldap_ca_install() error contract:
+	 *   -EBADMSG  not a PEM certificate                      -> 422
+	 *   -EFBIG    larger than the device's anchor buffer      -> 413
+	 *   -EPERM    the blob carries private-key material       -> 422
+	 *   -EROFS    accepted and live, but not persisted        -> 200 + note
+	 *   -ENOTSUP  this build cannot do TLS at all             -> 501
+	 */
+	int (*ldap_ca_info)(void *u, rest_trust_t *out);
+	int (*ldap_ca_install)(void *u, const char *pem, size_t len);
 
 	void *u;
 } rest_providers_t;
