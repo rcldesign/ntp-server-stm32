@@ -920,9 +920,22 @@ int sts_aaa_check(const char *user, const char *secret, uint8_t *out_role)
 	auth_out_t out;
 	int rc;
 
+	/*
+	 * Fail closed before anything else. An unstarted context holds a zeroed
+	 * auth_ctx_t (no crypto port, no chain), so this is the difference between
+	 * "AAA is down, nobody can log in" and "AAA is down, so the caller reads
+	 * an uninitialised role out of *out_role". The role is cleared on this
+	 * path too, honouring the header's contract that *out_role is
+	 * AUTH_ROLE_NONE unless the return value is 0 — a caller that trusted its
+	 * own stack garbage would be the whole bug.
+	 */
+	if (out_role != NULL) {
+		*out_role = (uint8_t)AUTH_ROLE_NONE;
+	}
 	if (!g_started) {
 		return -EHOSTUNREACH;
 	}
+	memset(&out, 0, sizeof(out));
 	rc = auth_check(&g_auth, user, secret, sts_mono_ms(), &out);
 	if (out_role != NULL) {
 		*out_role = out.role;

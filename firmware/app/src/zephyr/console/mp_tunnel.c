@@ -11,10 +11,25 @@
  * The safety rule (FMT §5.5) is the whole reason this is a separate file: while a
  * tunnel is open, firmware must not drive that port, and the reference it feeds
  * becomes **suspect**. Opening one is therefore a guarded override on
- * `gnss.tunnel` / `ref.rb.tunnel`, and the open flag is published here so the
- * GNSS and reference managers can stand down and stop trusting what they last
- * heard. Core reports `reference_suspect` in the override reply; this file is
- * what makes it true.
+ * `gnss.tunnel` / `ref.rb.tunnel`. Core reports `reference_suspect` in the
+ * override reply; this file is what makes it true.
+ *
+ * GNSS (0x07): the receiver is genuinely stood down. Opening the tunnel calls
+ * sts_gnss_uart_suspend() (sts_app.h), which stops the UBX parser and gnssmgr
+ * from consuming the port and parks gnssmgr in GNSSMGR_ST_FW_UPDATE, so firmware
+ * is not a second writer and a configuration retry cannot be aimed at whatever
+ * the host is talking to. The RX ISR keeps filling the ring, which is what
+ * sts_gnss_uart_raw_rx() drains, and sts_gnss_uart_raw_tx() only works inside a
+ * suspended session — so the suspend is a prerequisite for the tunnel to carry
+ * host->device bytes at all, not merely a courtesy. Closing resumes and re-runs
+ * the configuration walk. The TAMPER alarm annunciates the whole window.
+ *
+ * Rb (0x08): NOT stood down. platform/rb_serial.c does have an equivalent
+ * (rb_serial_tunnel_open/close), but it is declared in the platform area's
+ * private platform.h and demands an ISR-context byte-sink callback rather than a
+ * bare suspend, so wiring it needs a byte pump this area does not have. The Rb
+ * path therefore keeps its alarm-only behaviour and says so; see
+ * sts_mp_tunnel_set_rb().
  *
  * A tunnel is *not* a subscription: it is opened by the override and closed by
  * releasing it, by the dead-man, or by leaving MP mode — all of which arrive here
@@ -61,33 +76,84 @@ bool sts_mp_tunnel_rb_open(void)
  * Open or close the GNSS tunnel.
  *
  * Called from core's apply callback once the G2 guard and the interlocks have
- * passed. Raising the suspect flag is the *first* thing done on open and the last
- * undone on close, so there is no window in which bytes are being diverted while
- * the reference is still believed.
+ * passed. Raising the suspect state is the *first* thing done on open and the
+ * last undone on close, so there is no window in which bytes are being diverted
+ * while the reference is still believed.
+ *
+ * Balance. `tunnel_gnss` is the single record of who owns USART3, and it is
+ * advanced only after the platform has agreed:
+ *
+ *   - a repeated set to the same state early-returns, so suspend/resume are
+ *     never called twice in a row;
+ *   - a FAILED open leaves `tunnel_gnss` false and does NOT resume (nothing was
+ *     suspended), so the tee stays shut and the next open retries cleanly;
+ *   - a failed CLOSE still clears `tunnel_gnss` and still clears the alarm: the
+ *     host has released the override either way, and refusing to close would
+ *     leave the port owned by a tunnel nobody can reach. The failure is logged at
+ *     error level, and gnssmgr's own config walk recovers the receiver.
+ *
+ * -ENOTSUP from a build with no platform GNSS thread (fwupd_glue.c's __weak
+ * fallbacks) is not treated as a failure to open: there is no receiver driving
+ * the port, so there is nothing to stand down.
  */
 int sts_mp_tunnel_set_gnss(bool open)
 {
+	int rc;
+
 	if (tunnel_gnss == open) {
 		return 0;
 	}
-	tunnel_gnss = open;
 
-	/*
-	 * TODO(platform): the GNSS manager has to be told to stand down, and
-	 * `refsel` to treat the receiver as untrusted for the duration. Neither
-	 * is reachable from the console area — it needs one entry point in
-	 * src/zephyr/sts_app.h (e.g. sts_gnss_suspend(bool)). Until it exists the
-	 * tunnel still carries bytes and the alarm below is the operator's
-	 * warning, but firmware keeps reading the port concurrently.
-	 */
-	(void)sts_alarm_set(FAULT_ALARM_TAMPER, open);
-	sts_log(LOGR_SUB_GNSS, open ? LOGR_WARN : LOGR_NOTICE,
-		"MP GNSS tunnel %s; reference %s", open ? "open" : "closed",
-		open ? "SUSPECT" : "trusted");
+	if (open) {
+		rc = sts_gnss_uart_suspend();
+		if ((rc != 0) && (rc != -ENOTSUP)) {
+			/* Firmware still owns the port: refuse rather than let two
+			 * writers share USART3 (FMT §5.5). */
+			sts_log(LOGR_SUB_GNSS, LOGR_ERR,
+				"MP GNSS tunnel refused: receiver stand-down failed (%d)",
+				rc);
+			return rc;
+		}
+		tunnel_gnss = true;
+		(void)sts_alarm_set(FAULT_ALARM_TAMPER, true);
+		sts_log(LOGR_SUB_GNSS, LOGR_WARN,
+			"MP GNSS tunnel open; receiver stood down, reference SUSPECT");
+		return 0;
+	}
+
+	tunnel_gnss = false;
+	rc = sts_gnss_uart_resume();
+	if ((rc != 0) && (rc != -ENOTSUP)) {
+		sts_log(LOGR_SUB_GNSS, LOGR_ERR,
+			"MP GNSS tunnel closed but receiver resume failed (%d)", rc);
+	}
+	(void)sts_alarm_set(FAULT_ALARM_TAMPER, false);
+	sts_log(LOGR_SUB_GNSS, LOGR_NOTICE,
+		"MP GNSS tunnel closed; receiver resumed, reference trusted again");
 	return 0;
 }
 
-/** Open or close the rubidium serial tunnel. Same contract as the GNSS one. */
+/**
+ * Open or close the rubidium serial tunnel.
+ *
+ * Alarm-and-flag only, unlike the GNSS path: firmware keeps reading UART7 while
+ * this is open. That is a deliberate stop, not an oversight.
+ * platform/rb_serial.c does expose a suspend/resume pair — rb_serial_tunnel_open()
+ * / rb_serial_tunnel_close(), which take the port away from rb_serial_ops() and
+ * make its transmit path answer -EBUSY — but it cannot be wired from here:
+ *
+ *   1. it is declared in src/zephyr/platform/platform.h, which is private to the
+ *      platform area (ARCHITECTURE.md §2), so it needs an sts_app.h entry point;
+ *   2. rb_serial_tunnel_open() takes a mandatory callback that the UART7 ISR
+ *      invokes for every received octet. The only useful thing to do with those
+ *      octets is sts_mp_tee_rb(), which reaches mp_stream_raw() and the console
+ *      UART — not ISR-safe, and it mutates engine state shared with the shell
+ *      bypass. Wiring it properly needs a ring plus a drain on the MP tick, i.e.
+ *      a byte pump, which is a larger change than a stand-down.
+ *
+ * Until that exists the Rb reference is annunciated as suspect and the operator
+ * is warned, which is what the log line below says — no more.
+ */
 int sts_mp_tunnel_set_rb(bool open)
 {
 	if (tunnel_rb == open) {
@@ -95,10 +161,9 @@ int sts_mp_tunnel_set_rb(bool open)
 	}
 	tunnel_rb = open;
 
-	/* TODO(platform): as above, for the FE-5680A reader on UART7. */
 	sts_log(LOGR_SUB_TIMING, open ? LOGR_WARN : LOGR_NOTICE,
-		"MP Rb tunnel %s; reference %s", open ? "open" : "closed",
-		open ? "SUSPECT" : "trusted");
+		"MP Rb tunnel %s; reference %s (firmware still reads UART7)",
+		open ? "open" : "closed", open ? "SUSPECT" : "trusted");
 	return 0;
 }
 

@@ -12,14 +12,17 @@
  *      (so every other area's sts_time_tai_ns() is answered from hardware);
  *   3. brings up the shared NTS master-key ring;
  *   4. registers the NET and PTP status sub-encoders and the cfg appliers for
- *      every group this area owns (net, ntp, nts, ptp, snmp, log);
- *   5. starts the service threads in priority order and, last, the PTP-clock
+ *      every group this area owns (net, ntp, nts, ptp, snmp, log, sec);
+ *   5. starts the shared AAA authority, before anything can take a login;
+ *   6. starts the service threads in priority order and, last, the PTP-clock
  *      servo.
  *
  * The cfg-applier fan-out lives here: this area registers ONE applier per group
  * with the platform and dispatches the group id to whichever service(s) care,
  * so no service has to know it shares group 0x09 (log) with, say, a future
- * audit-log consumer.
+ * audit-log consumer. (sts_web.c predates that rule and registers its own
+ * CFG_G_SEC applier; the registry allows several subscribers per group, so the
+ * two coexist — see the CFG_G_SEC case for who owns what.)
  */
 
 #include <errno.h>
@@ -32,7 +35,9 @@
 
 #include "cfg/cfg.h"
 #include "mcp/mcp_wire.h"
+#include "net/sts_aaa.h"
 #include "net/sts_net.h"
+#include "storage/sts_atecc.h"
 #include "storage/sts_store.h"
 #include "util/bytes.h"
 #include "zephyr/sts_app.h"
@@ -139,6 +144,31 @@ void sts_net_on_cfg(uint8_t group)
 		break;
 	case CFG_G_LOG:
 		sts_syslog_reapply();
+		break;
+	case CFG_G_SEC:
+		/*
+		 * 0x0A had no applier at all, so all 57 security keys — most of
+		 * them flagged CFG_F_RUNTIME_APPLY — applied to nothing until the
+		 * next reboot. Four consumers, in the order that makes a partly
+		 * applied set least surprising: authority first, then the
+		 * surfaces that answer with it.
+		 *
+		 * sts_web.c and sts_console.c register their own CFG_G_SEC
+		 * appliers (the registry supports several subscribers per group);
+		 * this one deliberately covers only what they do not — the AAA
+		 * chain, the SNMP security keys, the NTP MAC table and the
+		 * secure element.
+		 *
+		 * The CFG_F_REBOOT_REQUIRED keys in this group (the SNMPv3 users
+		 * and engine keys, sec.atecc.*) are NOT forced live here: cfg
+		 * already reports the group in `reboot_groups`, and
+		 * re-initialising a live USM engine would clear every localised
+		 * key it holds.
+		 */
+		sts_aaa_reapply();
+		sts_snmp_on_cfg_sec();
+		sts_ntp_reload_keys();
+		sts_atecc_reapply();
 		break;
 	case CFG_G_NTP:
 	case CFG_G_NTS:
@@ -362,6 +392,20 @@ int sts_net_start(void)
 	(void)sts_cfg_register_applier(CFG_G_PTP, cfg_applier, NULL);
 	(void)sts_cfg_register_applier(CFG_G_SNMP, cfg_applier, NULL);
 	(void)sts_cfg_register_applier(CFG_G_LOG, cfg_applier, NULL);
+	(void)sts_cfg_register_applier(CFG_G_SEC, cfg_applier, NULL);
+
+	/*
+	 * AAA before any management surface can take a login, and before the
+	 * service threads exist: sts_aaa_check() is the single authority the web
+	 * server, the MCP channel and the shell share, and one that has never been
+	 * started cannot answer. Non-fatal — an unavailable chain must fall back to
+	 * the local account, never block bring-up; core/auth's own contract makes
+	 * "no backend could answer" a denial, so degrading here is safe.
+	 */
+	if (sts_aaa_start() != 0) {
+		LOG_WRN("AAA unavailable; management logins fall back to the local "
+			"account only");
+	}
 
 	keyring_start();
 

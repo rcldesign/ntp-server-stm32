@@ -2306,8 +2306,41 @@ static int glue_commit(void *user, cfg_commit_res_t *res)
 	return rc;
 }
 
-/* Re-wire the engine with the glue hooks installed. */
-static void wire_up_with_glue(void)
+/*
+ * sts_cfg_factory_reset()'s shape: take the section, reset the whole tree,
+ * release, and only then dispatch — for EVERY group, not just the ones a commit
+ * would have staged, because a factory reset rewrote every key.
+ */
+static uint32_t g_freset_calls;
+static int      g_freset_depth_seen;
+
+static int glue_factory_reset(void *user)
+{
+	int rc;
+
+	(void)user;
+	g_freset_calls++;
+	g_freset_depth_seen = g_lock_depth;
+
+	glue_lock(NULL);
+	rc = cfg_factory_reset(&g_cfg);
+	glue_unlock(NULL);
+
+	/* -EIO is "RAM tree reset, at least one store erase failed": the running
+	 * system really did change, so the appliers still run. */
+	if (rc != 0 && rc != -EIO) {
+		return rc;
+	}
+
+	for (uint8_t g = 0U; g < (uint8_t)STS_TEST_APPLY_MAX; g++) {
+		glue_note_group(g);
+	}
+	return rc;
+}
+
+/* Re-wire the engine with the glue hooks installed. @p factory selects whether
+ * the factory-reset delegate is supplied, so the NULL fallback is reachable. */
+static void wire_up_with_glue_opt(bool factory)
 {
 	mcp_wiring_t w;
 
@@ -2321,6 +2354,8 @@ static void wire_up_with_glue(void)
 	g_applied_n = 0U;
 	g_validate_calls = 0U;
 	g_validate_depth_seen = -1;
+	g_freset_calls = 0U;
+	g_freset_depth_seen = -1;
 
 	TEST_ASSERT_EQUAL_INT(0,
 		cfg_set_validate_hook(&g_cfg, glue_validate, NULL));
@@ -2333,6 +2368,7 @@ static void wire_up_with_glue(void)
 	w.cfg_lock = glue_lock;
 	w.cfg_unlock = glue_unlock;
 	w.cfg_commit_cb = glue_commit;
+	w.cfg_factory_cb = factory ? glue_factory_reset : NULL;
 	w.log = &g_log;
 	w.status_cb = status_cb;
 	w.diag_cb = diag_cb;
@@ -2350,6 +2386,13 @@ static void wire_up_with_glue(void)
 	g_lock_max_depth = 0;
 	g_validate_calls = 0U;
 	g_validate_depth_seen = -1;
+	g_freset_calls = 0U;
+	g_freset_depth_seen = -1;
+}
+
+static void wire_up_with_glue(void)
+{
+	wire_up_with_glue_opt(true);
 }
 
 static bool applied_contains(uint8_t group)
@@ -2457,6 +2500,91 @@ static void test_cfg_import_runs_the_glue_appliers(void)
 	TEST_ASSERT_TRUE(applied_contains(CFG_G_TIMING));
 	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_TIM_TAU_S, &u));
 	TEST_ASSERT_EQUAL_UINT64(815U, u);
+}
+
+/*
+ * FACTORY_RESET is a whole-tree commit and has to reach the glue too.
+ *
+ * It used to call core cfg_factory_reset() directly. The tree went back to
+ * defaults, NVS was erased, the response said OK — and every subsystem carried on
+ * with the configuration it had been handed before the reset until somebody
+ * rebooted the unit. Same defect class as the commit path, wider blast radius.
+ */
+static void test_factory_reset_runs_the_glue_appliers(void)
+{
+	uint8_t req[4];
+	uint64_t u = 0U;
+
+	wire_up_with_glue();
+
+	/* A non-default value to reset away from, committed the ordinary way. */
+	wire_set_tau(815U);
+	(void)feed_req(MCP_CMD_CFG_COMMIT, NULL, 0U);
+	expect_status(MCP_CMD_CFG_COMMIT, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_TIM_TAU_S, &u));
+	TEST_ASSERT_EQUAL_UINT64(815U, u);
+
+	g_applied_n = 0U;
+	g_lock_max_depth = 0;
+
+	bytes_put_le32(req, MCP_FACTORY_MAGIC);
+	(void)feed_req(MCP_CMD_FACTORY_RESET, req, 4U);
+	expect_status(MCP_CMD_FACTORY_RESET, g_seq, (uint8_t)MCP_OK);
+
+	/* The delegate ran, exactly once. */
+	TEST_ASSERT_EQUAL_UINT32(1U, g_freset_calls);
+
+	/* And OUTSIDE the cfg critical section: it re-takes the mutex itself and
+	 * then dispatches appliers that may block, so the engine must drop the
+	 * section around it (and must therefore never nest the lock). */
+	TEST_ASSERT_EQUAL_INT(0, g_freset_depth_seen);
+	TEST_ASSERT_EQUAL_INT(1, g_lock_max_depth);
+	TEST_ASSERT_EQUAL_INT(0, g_lock_depth);
+
+	/* Every group was told, not just the ones a commit would have staged. */
+	TEST_ASSERT_EQUAL_size_t((size_t)STS_TEST_APPLY_MAX, g_applied_n);
+	TEST_ASSERT_TRUE(applied_contains(CFG_G_TIMING));
+	TEST_ASSERT_TRUE(applied_contains(CFG_G_NET));
+	TEST_ASSERT_TRUE(applied_contains(CFG_G_UI));
+
+	/* It really reset: the key is back to its schema default. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_TIM_TAU_S, &u));
+	TEST_ASSERT_EQUAL_UINT64(200U, u);
+
+	/* And the session did not survive its own credential store. */
+	TEST_ASSERT_FALSE(mcp_authenticated(&g_mcp));
+}
+
+/* The NULL fallback still works: no delegate means a bare cfg_factory_reset(),
+ * which resets the tree and — this is the whole point of the delegate — tells no
+ * subscriber anything. */
+static void test_factory_reset_without_a_delegate_still_resets(void)
+{
+	uint8_t req[4];
+	uint64_t u = 0U;
+
+	wire_up_with_glue_opt(false);
+
+	wire_set_tau(815U);
+	(void)feed_req(MCP_CMD_CFG_COMMIT, NULL, 0U);
+	expect_status(MCP_CMD_CFG_COMMIT, g_seq, (uint8_t)MCP_OK);
+
+	g_applied_n = 0U;
+	g_lock_max_depth = 0;
+
+	bytes_put_le32(req, MCP_FACTORY_MAGIC);
+	(void)feed_req(MCP_CMD_FACTORY_RESET, req, 4U);
+	expect_status(MCP_CMD_FACTORY_RESET, g_seq, (uint8_t)MCP_OK);
+
+	TEST_ASSERT_EQUAL_UINT32(0U, g_freset_calls);
+	TEST_ASSERT_EQUAL_size_t(0U, g_applied_n); /* nobody was told */
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_TIM_TAU_S, &u));
+	TEST_ASSERT_EQUAL_UINT64(200U, u);
+
+	/* The bare path runs inside the section the engine already holds, and the
+	 * engine still never nests it. */
+	TEST_ASSERT_EQUAL_INT(1, g_lock_max_depth);
+	TEST_ASSERT_EQUAL_INT(0, g_lock_depth);
 }
 
 /*
@@ -2592,6 +2720,8 @@ int main(void)
 
 	RUN_TEST(test_cfg_commit_runs_the_glue_appliers);
 	RUN_TEST(test_cfg_import_runs_the_glue_appliers);
+	RUN_TEST(test_factory_reset_runs_the_glue_appliers);
+	RUN_TEST(test_factory_reset_without_a_delegate_still_resets);
 	RUN_TEST(test_cfg_requests_hold_the_glue_lock);
 	RUN_TEST(test_init_rejects_a_half_wired_cfg_lock);
 

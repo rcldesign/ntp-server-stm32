@@ -20,6 +20,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/toolchain.h>
 
 #include "zephyr/sts_app.h"
 #include "zephyr/sts_cfg_applier.h"
@@ -469,6 +470,39 @@ int sts_cfg_commit(cfg_commit_res_t *res)
 	return rc;
 }
 
+int sts_cfg_factory_reset(void)
+{
+	int rc;
+
+	k_mutex_lock(&sts_cfg_mutex, K_FOREVER);
+	rc = cfg_factory_reset(&sts_cfg_ctx);
+	k_mutex_unlock(&sts_cfg_mutex);
+
+	/*
+	 * Same rule as sts_cfg_commit(): -EIO is "the live tree was reset but some
+	 * store erases failed", and a live tree that changed has to be announced.
+	 * Only a hard rejection, where nothing was applied, skips the dispatch.
+	 */
+	if (!sts_cfg_commit_applied(rc)) {
+		LOG_ERR("cfg: factory reset failed (%d); appliers not run", rc);
+		return rc;
+	}
+
+	/*
+	 * A commit dispatches only the groups it staged; a factory reset rewrote
+	 * every key, so every registered group is told — the same full sweep
+	 * sts_cfg_register_store() does once the real store is in place. Dispatched
+	 * with the mutex RELEASED, because an applier may block on sockets, DNS or
+	 * display I/O (sts_app.h).
+	 */
+	for (uint8_t g = 0; g < STS_CFG_GROUP_MAX; g++) {
+		sts_cfg_apply_group(g);
+	}
+
+	LOG_WRN("cfg: factory reset applied; every group re-applied");
+	return rc;
+}
+
 /* ========================================================================= */
 /* liveness registry                                                         */
 /* ========================================================================= */
@@ -908,6 +942,26 @@ int sts_status_encode(uint8_t group, uint8_t *buf, size_t cap)
 		/* No platform-side source. The net area registers these. */
 		return -ENOTSUP;
 	}
+}
+
+/* ========================================================================= */
+/* panel mirror                                                              */
+/* ========================================================================= */
+
+/*
+ * __weak no-op for the ui -> console seam. The console area's mp_glue.c carries
+ * the strong definition, but it is compiled only under CONFIG_STS1000_CONSOLE
+ * while the ui area (the caller) is gated on CONFIG_STS1000_UI, so UI=y with
+ * CONSOLE=n must still link. It lives here rather than in
+ * platform/sts_area_weak.c with the other area fallbacks only because
+ * sts_area_weak.c is outside this change's file boundary; both files are
+ * unconditionally compiled (see app/CMakeLists.txt), so the override behaves
+ * identically. Dropping the frame is the correct no-op: with no MP engine there
+ * is no mirror to feed.
+ */
+__weak void sts_mp_mirror_publish(const mp_mirror_in_t *frame)
+{
+	ARG_UNUSED(frame);
 }
 
 /* ========================================================================= */

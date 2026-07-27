@@ -25,6 +25,10 @@
 #include "quality/quality.h"
 #include "cfg/cfg.h"
 #include "logring/logring.h"
+/* mp_mirror_in_t crosses the ui -> console seam below (sts_mp_mirror_publish).
+ * It is a plain data struct; pulling it in here does not couple any area to
+ * core/mp's engine. */
+#include "mp/mp_mirror.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -106,6 +110,35 @@ typedef struct {
  * source exists in this build/boot, -EINVAL when @p out is NULL. */
 int sts_gnss_wallclock(sts_gnss_wallclock_t *out);
 
+/* ---- GNSS USART3 seam (receiver flash sessions and MP passthrough) ------- */
+/* Hand USART3 over to something that is not the GNSS manager.
+ *
+ * The platform area (src/zephyr/platform/gnss.c) owns USART3: the RX ISR, the
+ * UBX parser and the gnssmgr instance. Two consumers need the port instead —
+ * core/fwupd's receiver flash loader and the Maintenance Protocol's GNSS
+ * passthrough tunnel (FMT §5.5) — and both need firmware to stop driving it
+ * first, or two writers interleave frames onto one wire and gnssmgr keeps
+ * trusting bytes that are no longer its receiver's.
+ *
+ * While SUSPENDED: the RX ISR still fills the ring, so raw_rx() can drain it,
+ * but nothing feeds the UBX parser or gnssmgr, and gnssmgr sits in
+ * GNSSMGR_ST_FW_UPDATE so a configuration retry can never be aimed at a flash
+ * loader. raw_tx() and set_baud() are refused (-EPERM) outside a suspended
+ * session. resume() re-runs gnssmgr's configuration walk.
+ *
+ * Both suspend() and resume() are idempotent: calling either when already in
+ * that state returns 0 without touching anything, so callers can be balanced by
+ * construction. -ENODEV when the GNSS thread never started.
+ *
+ * The console area (fwupd_glue.c) carries __weak no-ops returning -ENOTSUP, so a
+ * build without the platform GNSS thread links and honestly reports that the
+ * transport does not exist. */
+int sts_gnss_uart_suspend(void);
+int sts_gnss_uart_resume(void);
+int sts_gnss_uart_raw_tx(const uint8_t *buf, size_t len);
+int sts_gnss_uart_raw_rx(uint8_t *buf, size_t cap);
+int sts_gnss_uart_set_baud(uint32_t baud);
+
 /* ---- config ------------------------------------------------------------- */
 /* The single live cfg context (loaded before any area starts). Never NULL
  * once sts_platform_init() has returned.
@@ -175,6 +208,26 @@ int sts_cfg_register_applier(uint8_t group, sts_cfg_apply_fn fn, void *ctx);
  * because the running system really did change. Only a validation or
  * cross-field rejection (nothing applied) skips them. */
 int sts_cfg_commit(cfg_commit_res_t *res);
+
+/* Factory-reset the config tree and run the appliers for every registered
+ * group, so no subsystem keeps running pre-reset configuration.
+ *
+ * Areas must use this rather than calling cfg_factory_reset() directly, for the
+ * same reason they must use sts_cfg_commit() rather than cfg_commit(): the bare
+ * core call rewrites the tree and erases the store while every subsystem carries
+ * on with the configuration it was handed before the reset, until the next
+ * reboot. A factory reset touches every key, so EVERY registered group is
+ * dispatched, not just the ones a commit would have staged.
+ *
+ * Takes sts_cfg_mutex for the reset and releases it before dispatching, exactly
+ * as sts_cfg_commit() does — so this must NOT be called with the lock held.
+ * Groups whose keys are flagged reboot-required stay reboot-required; the point
+ * is that the runtime-apply groups take effect immediately.
+ *
+ * Returns cfg_factory_reset()'s result. -EIO means "the live tree was reset but
+ * at least one store erase failed"; the appliers still run, because the running
+ * system really did change. */
+int sts_cfg_factory_reset(void);
 
 /* ---- logging ------------------------------------------------------------ */
 logr_t *sts_logring(void);
@@ -299,6 +352,28 @@ int sts_panel_led_set(uint8_t duty_pct);
 
 /* Last commanded duty, 0..100. */
 uint8_t sts_panel_led_get(void);
+
+/* ---- panel mirror (ui area produces, console area consumes) -------------- */
+/* Publish the front-panel frame the Maintenance Protocol mirrors: the rendered
+ * text-tile surface, the indicator state and the live input echo (channel 0x0A
+ * and the `mirror.get` RPC).
+ *
+ * The UI area calls this after each ui_render(); the console area implements it
+ * (src/zephyr/console/mp_glue.c). It crosses the seam here rather than through
+ * mp_glue.h because that header is private to the console area
+ * (ARCHITECTURE.md §2) — the same arrangement as sts_ui_post_input() in the
+ * other direction, with a __weak no-op so a CONFIG_STS1000_CONSOLE=n image
+ * links and simply mirrors nothing.
+ *
+ * The frame is DEEP-COPIED: @p frame->ch / ->attr / ->hint are read before this
+ * returns and never retained, so the caller may reuse its render surface
+ * immediately and may pass an mp_mirror_in_t living on its stack.
+ *
+ * Non-blocking by contract. The implementation takes a short mutex shared with
+ * the MP tick and DROPS the frame rather than waiting, because the ui thread is
+ * the lowest-priority thread in the system and must never be parked behind the
+ * console. Callable from any cooperative thread, not from an ISR. */
+void sts_mp_mirror_publish(const mp_mirror_in_t *frame);
 
 /* ---- DFU / image state (console area implements, others read) ----------- */
 bool sts_update_pending_confirm(void);  /* true while running unconfirmed */

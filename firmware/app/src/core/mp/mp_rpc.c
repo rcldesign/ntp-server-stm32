@@ -63,9 +63,57 @@ const char *mp_err_msg(int code)
 		return "vetoed by firmware";
 	case MP_E_IO:
 		return "device error";
+	case MP_E_AUTH:
+		return "authentication failed";
+	case MP_E_LOCKED:
+		return "locked out";
+	case MP_E_ROLE:
+		return "insufficient role";
 	default:
 		return "error";
 	}
+}
+
+/**
+ * Wipe a credential buffer.
+ *
+ * Written through a volatile pointer because a plain memset() over a buffer that
+ * is about to leave scope is a dead store the compiler is entitled to delete —
+ * which is exactly how a password survives in a stack frame.
+ */
+static void wipe(void *p, size_t n)
+{
+	volatile uint8_t *q = (volatile uint8_t *)p;
+
+	while (n != 0U) {
+		*q = 0U;
+		q++;
+		n--;
+	}
+}
+
+/**
+ * Append @p s to @p buf at @p w, bounded by @p cap, always NUL-terminating.
+ *
+ * Hand-rolled because core/mp links no stdio (mp_json.h's contract) and the two
+ * audit lines below are the only formatting this file needs.
+ *
+ * @return The new write index, which saturates at cap-1.
+ */
+static size_t str_app(char *buf, size_t cap, size_t w, const char *s)
+{
+	if ((buf == NULL) || (cap == 0U)) {
+		return 0U;
+	}
+	if (s != NULL) {
+		while ((*s != '\0') && ((w + 1U) < cap)) {
+			buf[w] = *s;
+			w++;
+			s++;
+		}
+	}
+	buf[w] = '\0';
+	return w;
 }
 
 void mp_fail(mp_ctx_t *c, int code, const char *what)
@@ -207,7 +255,13 @@ static int p_bool(const mp_json_t *p, int params, const char *key, bool dflt,
 	return 0;
 }
 
-/** Optional string param; @p out is emptied when absent. */
+/**
+ * Optional string param; @p out is emptied when absent.
+ *
+ * @retval 1        Present and decoded.
+ * @retval 0        Absent; @p out is "".
+ * @retval -EINVAL  Present but not a string, or longer than @p cap; @p out is "".
+ */
 static int p_str(const mp_json_t *p, int params, const char *key, char *out,
 		 size_t cap)
 {
@@ -218,6 +272,16 @@ static int p_str(const mp_json_t *p, int params, const char *key, char *out,
 		return 0;
 	}
 	if (mp_json_str(p, t, out, cap) < 0) {
+		/*
+		 * mp_json_str() leaves the buffer *unterminated* when the decoded
+		 * string does not fit (it returns -ENOSPC before writing the
+		 * NUL), and most callers here ignore the return value and treat
+		 * `out` as a C string regardless. Emptying it is what keeps an
+		 * over-long param from turning into a read past the array — the
+		 * `confirm` and `phrase` buffers in guard_or_fail() are adjacent
+		 * MP_CONFIRM_MAX frames and were the concrete case.
+		 */
+		out[0] = '\0';
 		return -EINVAL;
 	}
 	return 1;
@@ -300,6 +364,11 @@ static int guard_or_fail(mp_ctx_t *c, uint8_t guard, const mp_json_t *p,
 	case MP_GC_STALE:
 		mp_fail(c, MP_E_NO_SESSION, mp_gc_name((uint8_t)gc));
 		return -1;
+	case MP_GC_NEED_ROLE:
+		/* Distinct from "no session" and from an interlock veto: the tool
+		 * has to be able to say "log in as admin", not "try again". */
+		mp_fail(c, MP_E_ROLE, mp_gc_name((uint8_t)gc));
+		return -1;
 	case MP_GC_NEED_HOLD:
 		mp_fail(c, MP_E_HOLD, mp_gc_name((uint8_t)gc));
 		return -1;
@@ -378,6 +447,15 @@ static int m_hello(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	(void)mp_jw_kv_str(w, "fw", c->w.fw_version);
 	(void)mp_jw_kv_str(w, "boot", c->w.boot_version);
 	(void)mp_jw_kv_str(w, "board", c->w.board_id);
+
+	/*
+	 * Advertised on `hello`, before any session exists, so the tool prompts
+	 * for a credential instead of discovering the G0 cap by being refused a
+	 * G1 action. `role` is the *current* session's role — "none" when there
+	 * is no session, which is also what an unauthenticated one reports.
+	 */
+	(void)mp_jw_kv_bool(w, "auth_required", c->w.auth != NULL);
+	(void)mp_jw_kv_str(w, "role", mp_role_name(mp_ovr_session_role(&c->ovr)));
 
 	(void)mp_jw_key(w, "manifest");
 	(void)mp_jw_obj_open(w);
@@ -525,18 +603,114 @@ static int m_manifest_get(mp_ctx_t *c, const mp_json_t *p, int params,
 
 /* ----------------------------------------------------------------- session */
 
+/**
+ * Authenticate the `user`/`secret` params, if any.
+ *
+ * Split out of m_session_open() so the credential lives in exactly one stack
+ * frame and is wiped on every exit path from it, including the refusals.
+ *
+ * @param out_role  Granted role; MP_ROLE_NONE on any non-zero return and also
+ *                  when no credential was offered.
+ *
+ * @retval 0        Open the session with @p out_role (which may be
+ *                  MP_ROLE_NONE: an anonymous, observe-only session).
+ * @retval -EBUSY   Locked out; report it.
+ * @retval -EACCES  Refused. One answer for every reason — see MP_E_AUTH.
+ */
+static int session_auth(mp_ctx_t *c, const mp_json_t *p, int params,
+			uint8_t *out_role, char *out_user, size_t user_cap)
+{
+	char user[MP_USER_MAX + 1U];
+	char secret[MP_SECRET_MAX + 1U];
+	int have_user;
+	int have_secret;
+	int rc = 0;
+
+	*out_role = (uint8_t)MP_ROLE_NONE;
+	out_user[0] = '\0';
+
+	have_user = p_str(p, params, "user", user, sizeof(user));
+	have_secret = p_str(p, params, "secret", secret, sizeof(secret));
+
+	if ((have_user == 0) && (have_secret == 0)) {
+		/*
+		 * No credential offered. §5.3: "read-only monitoring needs no
+		 * session", so this is not an error — the session opens with no
+		 * role and every guard above G0 refuses it.
+		 */
+		wipe(secret, sizeof(secret));
+		return 0;
+	}
+
+	if (c->w.auth == NULL) {
+		/* Nothing on this build can authenticate anybody, so a credential
+		 * cannot be accepted. Capping at MP_ROLE_NONE rather than
+		 * refusing the open keeps observation working on a partially
+		 * wired box; `auth_required:false` in the reply says why. */
+		wipe(secret, sizeof(secret));
+		return 0;
+	}
+
+	if ((have_user < 0) || (have_secret < 0) || (user[0] == '\0')) {
+		/* A malformed or over-long field, or an empty user name, is
+		 * answered exactly like a wrong password. Distinguishing them
+		 * would tell an attacker which half they got right. */
+		rc = -EACCES;
+	} else {
+		rc = c->w.auth(c->w.auth_user, user, secret, out_role);
+		if (rc != 0) {
+			*out_role = (uint8_t)MP_ROLE_NONE;
+			/* Every refusal except the lockout collapses into one. */
+			if (rc != -EBUSY) {
+				rc = -EACCES;
+			}
+		}
+	}
+
+	wipe(secret, sizeof(secret));
+
+	if (rc == 0) {
+		size_t n = strlen(user);
+
+		if (n >= user_cap) {
+			n = user_cap - 1U;
+		}
+		(void)memcpy(out_user, user, n);
+		out_user[n] = '\0';
+	}
+	return rc;
+}
+
 static int m_session_open(mp_ctx_t *c, const mp_json_t *p, int params,
 			  mp_jw_t *w)
 {
 	char client[32];
+	char user[MP_USER_MAX + 1U];
 	uint32_t ttl = 0U;
 	uint32_t sid = 0U;
+	uint8_t role = (uint8_t)MP_ROLE_NONE;
 	int rc;
 
 	(void)p_u32(p, params, "ttl_ms", 0U, &ttl);
 	(void)p_str(p, params, "client", client, sizeof(client));
 
-	rc = mp_ovr_session_open(&c->ovr, ttl, mp_now(c), &sid);
+	/*
+	 * Authenticate *before* opening, so a bad credential leaves the session
+	 * that is already open untouched. Doing it the other way round would make
+	 * `session.open` with a junk password a way to kick a working tool off the
+	 * board and revert its overrides.
+	 */
+	rc = session_auth(c, p, params, &role, user, sizeof(user));
+	if (rc == -EBUSY) {
+		mp_fail(c, MP_E_LOCKED, "lockout");
+		return MP_E_LOCKED;
+	}
+	if (rc != 0) {
+		mp_fail(c, MP_E_AUTH, "credential");
+		return MP_E_AUTH;
+	}
+
+	rc = mp_ovr_session_open(&c->ovr, ttl, role, user, mp_now(c), &sid);
 	if (rc != 0) {
 		mp_fail(c, mp_map_errno(rc), "session");
 		return mp_map_errno(rc);
@@ -547,12 +721,35 @@ static int m_session_open(mp_ctx_t *c, const mp_json_t *p, int params,
 	c->cfg_ex_active = false;
 	c->cfg_im_active = false;
 
+	/* §5.3: one session at a time, takeover audited. The name is the
+	 * authenticated user, never the credential. */
+	if (c->w.log != NULL) {
+		char line[96];
+		size_t n = 0U;
+
+		n = str_app(line, sizeof(line), n, "mp session open: ");
+		n = str_app(line, sizeof(line), n,
+			    (user[0] != '\0') ? user : "<anonymous>");
+		n = str_app(line, sizeof(line), n, " as ");
+		(void)str_app(line, sizeof(line), n, mp_role_name(role));
+		(void)logr_puts(c->w.log, (uint8_t)LOGR_NOTICE,
+				(uint8_t)LOGR_SUB_MCP, mp_now(c), line);
+	}
+
 	(void)mp_jw_obj_open(w);
 	(void)mp_jw_kv_u64(w, "sid", sid);
 	(void)mp_jw_kv_u64(w, "keepalive_ms", c->ovr.sess.ttl_ms);
 	(void)mp_jw_kv_u64(w, "expires_ms",
 			   mp_ovr_session_remaining(&c->ovr, mp_now(c)));
 	(void)mp_jw_kv_bool(w, "serial_required", true);
+	/*
+	 * The tool must be able to discover the cap up front rather than by being
+	 * refused later: `auth_required` says a credential is accepted here, and
+	 * `role` says what this session actually got.
+	 */
+	(void)mp_jw_kv_bool(w, "auth_required", c->w.auth != NULL);
+	(void)mp_jw_kv_str(w, "role", mp_role_name(role));
+	(void)mp_jw_kv_str(w, "user", (user[0] != '\0') ? user : NULL);
 	(void)mp_jw_kv_str(w, "client", (client[0] != '\0') ? client : NULL);
 	(void)mp_jw_obj_close(w);
 	return 0;
@@ -2321,13 +2518,33 @@ static void ovr_evt(void *user, uint8_t ev, size_t obj, uint32_t sid,
 						: ((o != NULL) ? o->id : NULL));
 
 	if (c->w.log != NULL) {
-		/* §5.3 requires the reversion to be logged, not just streamed. */
+		/*
+		 * §5.3 requires the reversion to be logged, not just streamed,
+		 * and requires the audit record to name the user. The session is
+		 * still intact here on every path that emits an event: both
+		 * mp_ovr_session_close() and the dead-man revert their leases
+		 * before clearing the session.
+		 */
+		const char *who = mp_ovr_session_user(&c->ovr);
+		char line[96];
+		size_t n = 0U;
+
+		n = str_app(line, sizeof(line), n, mp_ovr_ev_name(ev));
+		n = str_app(line, sizeof(line), n, " ");
+		n = str_app(line, sizeof(line), n,
+			    (o != NULL) ? o->id : "override");
+		n = str_app(line, sizeof(line), n, " by ");
+		n = str_app(line, sizeof(line), n,
+			    (who[0] != '\0') ? who : "<anonymous>");
+		if (reason != NULL) {
+			n = str_app(line, sizeof(line), n, ": ");
+			(void)str_app(line, sizeof(line), n, reason);
+		}
 		(void)logr_puts(c->w.log,
 				(ev == (uint8_t)MP_OVR_EV_GRANT)
 					? (uint8_t)LOGR_NOTICE
 					: (uint8_t)LOGR_WARN,
-				(uint8_t)LOGR_SUB_MCP, mp_now(c),
-				(o != NULL) ? o->id : "override");
+				(uint8_t)LOGR_SUB_MCP, mp_now(c), line);
 	}
 }
 

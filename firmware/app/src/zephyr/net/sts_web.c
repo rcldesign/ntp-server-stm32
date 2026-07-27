@@ -480,12 +480,15 @@ static int pv_factory_reset(void *u)
 {
 	ARG_UNUSED(u);
 	/*
-	 * cfg_factory_reset() clears the tree and erases the store. Key
-	 * zeroization (spec §9.6) belongs to the security area and is not wired
-	 * here, so this is a config-only reset; the route's audit record and the
-	 * response say what happened.
+	 * sts_cfg_factory_reset() clears the tree, erases the store and then runs
+	 * every registered group's appliers, so no subsystem is left serving
+	 * pre-reset configuration until the next reboot — the bare
+	 * cfg_factory_reset() this used to call told nobody. Key zeroization
+	 * (spec §9.6) still belongs to the security area and is still not wired
+	 * here, so this remains a config-only reset; the route's audit record and
+	 * the response say what happened.
 	 */
-	if (cfg_factory_reset(sts_cfg()) != 0) {
+	if (sts_cfg_factory_reset() != 0) {
 		return -EIO;
 	}
 	return 0;

@@ -1,11 +1,48 @@
 /*
- * STS1000 "Meridian" — SNMPv2c agent glue + trap sender (spec §5.3, prio 12).
+ * STS1000 "Meridian" — SNMPv2c/v3 agent glue + trap sender (spec §5.3, prio 12).
  *
  * Copyright (c) 2026 RCL Design
  * SPDX-License-Identifier: Apache-2.0
  *
  * core/snmp is the codec and the walk; this file is the socket, the value
  * getter, and the trap sender.
+ *
+ * ---------------------------------------------------------------------------
+ * SNMPv3 / USM
+ * ---------------------------------------------------------------------------
+ *
+ * Spec §5.3 makes SNMPv3/USM the primary interface and v2c an explicit opt-in,
+ * and core/snmp already implements both behind one PDU layer. The receive path
+ * therefore goes through snmp_dispatch(), which routes by msgVersion; passing it
+ * a NULL v3 context is its documented way of making every v3 datagram a counted
+ * drop, which is exactly what `sec.snmpv3.en = 0` should mean. Calling
+ * snmp_handle() directly — as this file used to — refused every v3 datagram and
+ * left the whole USM implementation unreachable.
+ *
+ * Three things the engine needs and only the glue can supply:
+ *
+ *   engine id     RFC 3411 §5 from SNMP_PEN plus a device-unique value: the
+ *                 ATECC608B serial when the part answers, else the SoC device
+ *                 id. Which one was used is logged, because a software-rooted
+ *                 identity is unique per die but not tamper-resistant. If the
+ *                 id cannot be built, v3 stays off — two boards sharing an
+ *                 engine id present to a manager as random authentication
+ *                 errors months later (snmp_v3.h).
+ *   engineBoots   RFC 3414 §2.2.2: >= 1 once the engine has ever run, and
+ *                 strictly increasing across restarts, or a manager's 150 s
+ *                 timeliness window accepts messages replayed from a previous
+ *                 boot. Kept in cfg (`sec.snmpv3.boots`), incremented and
+ *                 persisted here. 2147483647 is terminal: the RFC requires a
+ *                 new engine id at that point, so v3 refuses to start rather
+ *                 than wrap into a count a manager has already seen.
+ *   engineTime    Seconds since *this engine* booted — NOT sysUpTime. The two
+ *                 differ by however long bring-up took, and against a 150 s
+ *                 window that is not academic, so it is measured from its own
+ *                 monotonic base taken at snmp_v3_init().
+ *
+ * Users come from `sec.snmpv3.uN.*`; `sec.snmpv3.local` says whether the stored
+ * key blobs are already-localised keys or passphrases. A failed slot is logged
+ * with its name and errno and does not take the other slot down with it.
  *
  * ---------------------------------------------------------------------------
  * Where the values come from — and what this area cannot reach
@@ -39,10 +76,16 @@
  * sts_app.h exposes no event hook, so transitions are derived by polling:
  * successive quality snapshots give lock acquired/lost and holdover enter/exit
  * and reference switch; the alarm bitmask diff gives rail/thermal/antenna
- * alarms. snmp_handle() returning -EACCES (bad community) offers an
+ * alarms. snmp_dispatch() returning -EACCES (a bad community, or a v3 digest
+ * that did not verify on a non-reportable request) offers an
  * authentication-failure trap to snmp_notify_gate(), which coalesces it. A
  * coldStart is sent once at start. The queue is a small ring so a burst cannot
  * block the producer.
+ *
+ * Notifications go out as USM messages when `sec.snmpv3.trap.user` names a
+ * provisioned user, at the level in `sec.snmpv3.trap.lvl`; otherwise as v2c
+ * traps. See send_trap() for why a *configured but broken* trap user is not
+ * silently downgraded to v2c.
  *
  * Enqueueing one authentication-failure trap per bad-community datagram, as this
  * file used to, turned an attack on this box into an attack on the trap
@@ -79,6 +122,8 @@
 #include <errno.h>
 #include <string.h>
 
+#include <mbedtls/platform_util.h>
+
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/socket.h>
@@ -88,6 +133,16 @@
 #include "net/sts_net.h"
 #include "quality/quality.h"
 #include "snmp/snmp.h"
+#include "snmp/snmp_v3.h"
+/*
+ * Second inbound exception to the net-area boundary, alongside
+ * storage/sts_store.h (see sts_net.h): the device-unique value behind the RFC
+ * 3411 engine id has exactly one correct source on this board and it is the
+ * secure element. sts_atecc.h is a thread-safe façade whose every entry point
+ * degrades to the software path, so consuming it costs no ordering discipline.
+ */
+#include "storage/sts_atecc.h"
+#include "storage/sts_store.h"
 #include "zephyr/sts_app.h"
 
 LOG_MODULE_REGISTER(sts_snmp, CONFIG_STS1000_LOG_LEVEL);
@@ -109,13 +164,29 @@ LOG_MODULE_REGISTER(sts_snmp, CONFIG_STS1000_LOG_LEVEL);
 #define SNMP_RX_BUDGET 4U
 
 /**
- * Minimum gap between two notifications of the same type, ms.
+ * Fallback minimum gap between two notifications of the same type, ms.
  *
- * 10 s coalesces an authentication-failure flood into one trap per interval
- * carrying a suppressed count, while still delivering a genuine lockLost
- * promptly — the gate is per notification type, so the two do not compete.
+ * The live value is cfg key `sec.snmp.notify.ms` (schema default 5000); this is
+ * only what an unreadable key falls back to. Coalescing turns an
+ * authentication-failure flood into one trap per interval carrying a suppressed
+ * count, while still delivering a genuine lockLost promptly — the gate is per
+ * notification type, so the two do not compete.
  */
-#define SNMP_NOTIFY_MIN_INTERVAL_MS 10000U
+#define SNMP_NOTIFY_MIN_INTERVAL_MS 5000U
+
+/**
+ * Terminal snmpEngineBoots (RFC 3414 §2.2.2), and the schema max of
+ * `sec.snmpv3.boots`. Reaching it is legal; exceeding it requires a new engine
+ * id, which this firmware cannot mint on its own.
+ */
+#define V3_BOOTS_MAX 2147483647U
+
+/**
+ * Largest snmpEngineTime the RFC allows. Reaching it should roll boots and reset
+ * the clock; at one second per second that is 68 years of unbroken uptime, so it
+ * is clamped instead and the roll is deliberately not implemented.
+ */
+#define V3_ENGINE_TIME_MAX 2147483647U
 
 /** Bytes of `net.mgmt.acl` blob (the cfg schema's declared size). */
 #define SNMP_ACL_MAX 32U
@@ -150,6 +221,45 @@ static snmp_ctx_t agent;
 static char community_buf[2][SNMP_COMMUNITY_MAX + 1U];
 static uint8_t community_live;
 static char hostname[64];
+
+/*
+ * SNMPv3 engine. File-scope static and touched by exactly one thread.
+ *
+ * snmp_v3_ctx_t carries a full-datagram scratch buffer — a privacy-protected
+ * request has to be decrypted somewhere and the received datagram is const — so
+ * it is ~1.6 KiB, far too large for the 4 kB SNMP thread stack, and its header
+ * states that one context serves one thread because two would share that
+ * scratch. Only snmp_loop() reaches it: snmp_dispatch() from serve_one() and
+ * snmp_v3_make_notification() from send_trap(), both on that thread.
+ */
+static snmp_v3_ctx_t v3;
+static uint8_t v3_engine_id[SNMP_V3_ENGINEID_MAX];
+static bool v3_ready;
+
+/**
+ * Monotonic base for snmpEngineTime, taken at snmp_v3_init().
+ *
+ * snmpEngineTime is seconds since *this engine* booted, which sts_net_uptime_cs()
+ * is not: that counts hundredths from kernel boot, so reusing it would overstate
+ * the engine's age by however long bring-up took. RFC 3414 §2.2.3's timeliness
+ * window is 150 s wide, so the difference is a real interoperability error and
+ * not a cosmetic one.
+ */
+static uint64_t v3_boot_ms;
+
+/*
+ * v3 notification target, double-buffered for the same reason as the community
+ * (F10): send_trap() runs on the SNMP thread and hands this pointer straight to
+ * snmp_v3_make_notification(), which borrows it for a user lookup, while the
+ * cfg applier runs on whichever thread committed. Rewriting the live buffer in
+ * place would let a lookup see a half-written name — matching nobody, or the
+ * wrong user. `trap_level` is a single byte and `trap_v3_warned` a single bool,
+ * so both publish in one store.
+ */
+static char trap_user_buf[2][SNMP_V3_USER_MAX + 1U];
+static uint8_t trap_user_live;
+static uint8_t trap_level = (uint8_t)SNMP_SEC_AUTH_NOPRIV;
+static bool trap_v3_warned;
 
 static uint8_t acl[SNMP_ACL_MAX];
 static size_t acl_len;
@@ -507,6 +617,280 @@ static int getter(void *ctx, uint16_t obj, uint16_t inst, snmp_value_t *out)
 }
 
 /* ------------------------------------------------------------------------- */
+/* SNMPv3 / USM engine                                                       */
+/* ------------------------------------------------------------------------- */
+
+/** snmpEngineTime: seconds since snmp_v3_init(). See v3_boot_ms. */
+static uint32_t engine_time_s(void)
+{
+	uint64_t s = (sts_mono_ms() - v3_boot_ms) / 1000U;
+
+	return (s > (uint64_t)V3_ENGINE_TIME_MAX) ? V3_ENGINE_TIME_MAX
+						  : (uint32_t)s;
+}
+
+/**
+ * Publish the v3 notification user and level from cfg.
+ *
+ * The name goes into whichever buffer is not live and the pointer is published
+ * by one store of `trap_user_live`; a reader sees the old complete string or the
+ * new one (F10).
+ */
+static void publish_trap_user(void)
+{
+	uint8_t next = (uint8_t)(trap_user_live ^ 1U);
+	uint8_t lvl;
+
+	(void)sts_net_cfg_str(CFG_ID_SEC_SNMPV3_TRAP_USER, trap_user_buf[next],
+			      sizeof(trap_user_buf[next]));
+	trap_user_live = next;
+
+	lvl = (uint8_t)sts_net_cfg_u64(CFG_ID_SEC_SNMPV3_TRAP_LVL,
+				       (uint64_t)SNMP_SEC_AUTH_NOPRIV);
+	if (lvl > (uint8_t)SNMP_SEC_AUTH_PRIV) {
+		LOG_ERR("sec.snmpv3.trap.lvl %u is not a USM security level; "
+			"using authNoPriv", (unsigned int)lvl);
+		lvl = (uint8_t)SNMP_SEC_AUTH_NOPRIV;
+	}
+	trap_level = lvl;
+
+	/* A retargeted trap user earns a fresh diagnostic (see send_trap). */
+	trap_v3_warned = false;
+}
+
+/**
+ * Read, increment and persist snmpEngineBoots (RFC 3414 §2.2.2).
+ *
+ * @retval 0       @p out holds the value to run this engine with.
+ * @retval -EPERM  The counter is exhausted; v3 must not start.
+ */
+static int v3_next_boots(uint32_t *out)
+{
+	uint64_t boots = 0U;
+	int rc;
+
+	(void)cfg_get_u64(sts_cfg(), CFG_ID_SEC_SNMPV3_BOOTS, &boots);
+	if (boots >= V3_BOOTS_MAX) {
+		LOG_ERR("sec.snmpv3.boots has reached %u; RFC 3414 §2.2.2 requires "
+			"a new engine id before it may be reset, so SNMPv3 stays "
+			"off rather than reuse a boot count a manager has already "
+			"cached", (unsigned int)V3_BOOTS_MAX);
+		return -EPERM;
+	}
+	boots++;
+	*out = (uint32_t)boots;
+
+	/*
+	 * Stage under the cfg mutex, commit outside it: sts_cfg_commit() takes
+	 * the mutex itself and then dispatches the group appliers with it
+	 * released. Those appliers re-enter this area (sts_snmp_on_cfg_sec() is
+	 * a no-op until `started`), so the ordering matters.
+	 */
+	sts_cfg_lock();
+	rc = cfg_set_u64(sts_cfg(), CFG_ID_SEC_SNMPV3_BOOTS, boots);
+	sts_cfg_unlock();
+	if (rc == 0) {
+		rc = sts_cfg_commit(NULL);
+	}
+
+	/*
+	 * A failure here is annunciated but not fatal. Refusing to serve v3 on a
+	 * box whose NVS is unavailable would take away the primary management
+	 * interface (spec §5.3) over a replay window that only matters for the
+	 * first 150 s after a reset — but the operator has to be told, because the
+	 * next boot will reuse this count.
+	 */
+	if (!sts_cfg_is_persistent()) {
+		LOG_WRN("snmpEngineBoots %u: no persistent cfg store this boot, so "
+			"the count repeats across the next reset and a manager may "
+			"accept a message replayed from this one",
+			(unsigned int)boots);
+	} else if (rc != 0) {
+		LOG_ERR("snmpEngineBoots %u could not be persisted (%d); it will "
+			"repeat across the next reset", (unsigned int)boots, rc);
+	}
+	return 0;
+}
+
+/**
+ * Load one USM user slot from cfg.
+ *
+ * A slot with an empty name is unconfigured and skipped. Everything else is
+ * reported: a slot that fails is the difference between "the manager cannot
+ * poll" and "the manager cannot poll and nothing said why", and one bad slot
+ * must not take the other down with it.
+ */
+static void v3_load_user(uint16_t id_name, uint16_t id_auth, uint16_t id_akey,
+			 uint16_t id_priv, uint16_t id_pkey, bool localized)
+{
+	char name[SNMP_V3_USER_MAX + 1U];
+	uint8_t akey[CFG_VAL_MAX];
+	uint8_t pkey[CFG_VAL_MAX];
+	size_t akey_len = 0U;
+	size_t pkey_len = 0U;
+	uint8_t auth;
+	uint8_t priv;
+	int rc;
+
+	if (sts_net_cfg_str(id_name, name, sizeof(name)) == 0U) {
+		return;
+	}
+
+	auth = (uint8_t)sts_net_cfg_u64(id_auth,
+					(uint64_t)SNMP_AUTH_HMAC_SHA256_192);
+	priv = (uint8_t)sts_net_cfg_u64(id_priv, (uint64_t)SNMP_PRIV_AES128_CFB);
+
+	if (cfg_get_bytes(sts_cfg(), id_akey, akey, sizeof(akey), &akey_len) != 0) {
+		akey_len = 0U;
+	}
+	if (cfg_get_bytes(sts_cfg(), id_pkey, pkey, sizeof(pkey), &pkey_len) != 0) {
+		pkey_len = 0U;
+	}
+
+	if (!localized) {
+		/*
+		 * RFC 3414 §2.6 expansion hashes 1 MiB per key by design, which
+		 * is ~100 ms each on this part and happens on the bring-up
+		 * thread. Say so, so the pause in the boot log has a cause, and
+		 * so the localised-key route (which skips it entirely and keeps
+		 * the passphrase off the device) is visible as the alternative.
+		 */
+		LOG_INF("SNMPv3 user '%s': expanding passphrases (RFC 3414 §2.6, "
+			"1 MiB per key); provision localised keys to avoid it",
+			name);
+	}
+
+	rc = snmp_v3_user_set(&v3, name, auth, (akey_len != 0U) ? akey : NULL,
+			      akey_len, localized, priv,
+			      (pkey_len != 0U) ? pkey : NULL, pkey_len,
+			      localized);
+
+	/*
+	 * Drop the plaintext copies before this frame is reused. mbedTLS's
+	 * zeroize, not memset: a plain memset to a dead local is exactly what
+	 * dead-store elimination removes, and a wipe that the compiler deletes is
+	 * worse than none because it reads as a control that is not there. This
+	 * does not make the secret gone — cfg's live tree holds the same bytes for
+	 * the life of the box, and key zeroization on factory reset is a
+	 * documented deferral (ARCHITECTURE.md §5) — it just keeps it off a stack
+	 * that later carries unrelated data.
+	 */
+	mbedtls_platform_zeroize(akey, sizeof(akey));
+	mbedtls_platform_zeroize(pkey, sizeof(pkey));
+
+	if (rc == -ENOTSUP) {
+		LOG_ERR("SNMPv3 user '%s': this build cannot expand a %s "
+			"passphrase (no streaming SHA-256 port); provision an "
+			"already-localised key and set sec.snmpv3.local = 1",
+			name, snmp_auth_proto_name(auth));
+		return;
+	}
+	if (rc != 0) {
+		LOG_ERR("SNMPv3 user '%s' rejected (%d): auth %s, priv %s, %s "
+			"secrets of %u/%u octets", name, rc,
+			snmp_auth_proto_name(auth), snmp_priv_proto_name(priv),
+			localized ? "localised" : "passphrase",
+			(unsigned int)akey_len, (unsigned int)pkey_len);
+		return;
+	}
+
+	LOG_INF("SNMPv3 user '%s': auth %s, priv %s", name,
+		snmp_auth_proto_name(auth), snmp_priv_proto_name(priv));
+}
+
+/**
+ * Bring the USM engine up.
+ *
+ * Any failure leaves v3_ready false, which makes serve_one() pass NULL to
+ * snmp_dispatch() and every v3 datagram a counted drop. That is the right
+ * outcome for a missing identity: an agent that answers under a default or
+ * duplicated engine id is worse than one that does not answer v3 at all.
+ */
+static void v3_start(void)
+{
+	snmp_v3_cfg_t vcfg;
+	/* The engine id is 4 octets of PEN plus a format octet plus the unique
+	 * value, capped at SNMP_V3_ENGINEID_MAX — so this is all of the unique
+	 * value that can ever be used. */
+	uint8_t uniq[SNMP_V3_ENGINEID_MAX - 5U];
+	size_t uniq_len = 0U;
+	bool from_atecc = false;
+	uint32_t boots = 0U;
+	int len;
+	int rc;
+
+	if (!sts_net_cfg_bool(CFG_ID_SEC_SNMPV3_EN, true)) {
+		LOG_INF("SNMPv3/USM off by configuration (sec.snmpv3.en)");
+		return;
+	}
+
+	rc = sts_atecc_device_unique(uniq, sizeof(uniq), &uniq_len, &from_atecc);
+	if (rc != 0) {
+		LOG_ERR("no device-unique value for the SNMP engine id (%d); "
+			"SNMPv3 stays off", rc);
+		return;
+	}
+	/* Which source answered is operationally relevant: the SoC device id is
+	 * per-die and immutable but not tamper-resistant. */
+	LOG_INF("SNMP engine id: %u octets from %s", (unsigned int)uniq_len,
+		from_atecc ? "the ATECC608B serial" : "the SoC device id");
+
+	len = snmp_v3_engine_id_build(SNMP_PEN, uniq, uniq_len, v3_engine_id,
+				      sizeof(v3_engine_id));
+	if (len < 0) {
+		LOG_ERR("snmp_v3_engine_id_build: %d; SNMPv3 stays off", len);
+		return;
+	}
+
+	if (v3_next_boots(&boots) != 0) {
+		return;
+	}
+
+	memset(&vcfg, 0, sizeof(vcfg));
+	vcfg.ports.crypto = sts_port_crypto();
+	/* Needed only to expand a SHA-256 passphrase (1 MiB of streaming hash);
+	 * without it snmp_v3_user_set() answers -ENOTSUP and the operator's fix
+	 * is to provision localised keys. */
+	vcfg.ports.sha256_stream = sts_port_sha256_stream();
+	vcfg.engine_boots = boots;
+	vcfg.engine_id = v3_engine_id;
+	vcfg.engine_id_len = (size_t)len;
+	vcfg.max_msg_size = 0U; /* selects SNMP_PKT_MAX */
+
+	v3_boot_ms = sts_mono_ms();
+	rc = snmp_v3_init(&v3, &vcfg);
+	if (rc != 0) {
+		LOG_ERR("snmp_v3_init: %d; SNMPv3 stays off", rc);
+		return;
+	}
+	v3_ready = true;
+
+	{
+		bool localized = sts_net_cfg_bool(CFG_ID_SEC_SNMPV3_LOCALIZED,
+						  false);
+
+		v3_load_user(CFG_ID_SEC_SNMPV3_U1_NAME, CFG_ID_SEC_SNMPV3_U1_AUTH,
+			     CFG_ID_SEC_SNMPV3_U1_AKEY, CFG_ID_SEC_SNMPV3_U1_PRIV,
+			     CFG_ID_SEC_SNMPV3_U1_PKEY, localized);
+		v3_load_user(CFG_ID_SEC_SNMPV3_U2_NAME, CFG_ID_SEC_SNMPV3_U2_AUTH,
+			     CFG_ID_SEC_SNMPV3_U2_AKEY, CFG_ID_SEC_SNMPV3_U2_PRIV,
+			     CFG_ID_SEC_SNMPV3_U2_PKEY, localized);
+	}
+
+	if (snmp_v3_user_count(&v3) == 0U) {
+		/* Not a failure: the engine still answers a discovery Report, so
+		 * a manager can read the engine id back and be provisioned
+		 * against it. It just cannot authenticate anybody yet. */
+		LOG_WRN("SNMPv3 is enabled with no USM user provisioned: the engine "
+			"answers discovery only. Set sec.snmpv3.u1.*");
+	}
+
+	LOG_INF("SNMPv3/USM ready: engineID %u octets, engineBoots %u, %u user(s)",
+		(unsigned int)len, (unsigned int)boots,
+		(unsigned int)snmp_v3_user_count(&v3));
+}
+
+/* ------------------------------------------------------------------------- */
 /* trap queue                                                                */
 /* ------------------------------------------------------------------------- */
 
@@ -736,18 +1120,54 @@ static void load_acl(void)
 
 static void send_trap(snmp_trap_t t)
 {
+	const char *user = trap_user_buf[trap_user_live];
 	size_t len = 0U;
+	bool as_v3 = false;
 
 	if (!trap_resolved || trap_sock < 0) {
 		return;
 	}
-	if (snmp_make_trap(&agent, t, sts_net_uptime_cs(), NULL, 0U, trap_buf,
-			   sizeof(trap_buf), &len) != 0) {
+
+	if (v3_ready && user[0] != '\0') {
+		/* Our own engine id, boots and time: RFC 3414 §3.1 makes the
+		 * notification originator the authoritative engine, which is why a
+		 * receiver never has to discover anything to accept one. */
+		int rc = snmp_v3_make_notification(&agent, &v3, user, trap_level,
+						   t, engine_time_s(),
+						   sts_net_uptime_cs(), NULL, 0U,
+						   false, trap_buf,
+						   sizeof(trap_buf), &len, NULL);
+
+		if (rc != 0) {
+			/*
+			 * Deliberately NOT a fall-back to v2c. The operator named
+			 * a USM user, so -ENOENT (no such user) or -EPERM (that
+			 * user cannot reach the requested level) is a
+			 * configuration error; downgrading would put the event on
+			 * the wire unauthenticated, to a manager that is almost
+			 * certainly configured to discard it. Logged once, not
+			 * per trap — the transitions that produce traps repeat,
+			 * and each log line costs a RAM-ring and NOR-spool record
+			 * (F9). publish_trap_user() re-arms it.
+			 */
+			if (!trap_v3_warned) {
+				trap_v3_warned = true;
+				LOG_ERR("SNMPv3 notification as '%s' at %s failed "
+					"(%d); notifications stay suppressed until "
+					"sec.snmpv3.trap.user/.lvl is corrected",
+					user, snmp_sec_level_name(trap_level), rc);
+			}
+			return;
+		}
+		as_v3 = true;
+	} else if (snmp_make_trap(&agent, t, sts_net_uptime_cs(), NULL, 0U,
+				  trap_buf, sizeof(trap_buf), &len) != 0) {
 		return;
 	}
+
 	(void)zsock_sendto(trap_sock, trap_buf, len, 0,
 			   (struct sockaddr *)&trap_dest, trap_dest_len);
-	LOG_INF("SNMP trap: %s", snmp_trap_name(t));
+	LOG_INF("SNMP%s trap: %s", as_v3 ? "v3" : "v2c", snmp_trap_name(t));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -863,6 +1283,44 @@ void sts_snmp_reapply(void)
 	resolve_trap_dest();
 }
 
+/**
+ * Runtime-apply the 0x0A security keys this agent owns.
+ *
+ * Only the keys the schema flags CFG_F_RUNTIME_APPLY are here — `sec.snmp.v2c`,
+ * `sec.snmp.notify.ms`, `sec.snmpv3.trap.user/.lvl`. The USM users,
+ * `sec.snmpv3.local` and `sec.snmpv3.en` are CFG_F_REBOOT_REQUIRED and stay
+ * that way on purpose: localised keys are bound to the engine id, so
+ * re-initialising a live engine would clear every user
+ * (snmp_v3_set_engine_id()) and leave the agent looking configured while
+ * authenticating nobody. cfg reports the group in `reboot_groups`, which is how
+ * the operator learns a reboot is needed.
+ *
+ * Every publish below is one aligned store or the double-buffered string, so the
+ * SNMP thread always sees a whole value.
+ */
+void sts_snmp_on_cfg_sec(void)
+{
+	if (!started) {
+		return;
+	}
+
+	(void)snmp_set_v2c_enabled(&agent,
+				   sts_net_cfg_bool(CFG_ID_SEC_SNMP_V2C_EN, false));
+
+	/*
+	 * core/snmp has no setter for the notification interval and is outside
+	 * this change's boundary. The field is a single aligned uint32_t that
+	 * snmp_notify_gate() only ever reads as a comparison, so the gate sees
+	 * either the old or the new value — never a torn one.
+	 * TODO(core/snmp): add snmp_set_notify_interval() and use it here.
+	 */
+	agent.cfg.notify_min_interval_ms =
+		(uint32_t)sts_net_cfg_u64(CFG_ID_SEC_SNMP_NOTIFY_MS,
+					  SNMP_NOTIFY_MIN_INTERVAL_MS);
+
+	publish_trap_user();
+}
+
 /* ------------------------------------------------------------------------- */
 /* agent socket                                                              */
 /* ------------------------------------------------------------------------- */
@@ -925,19 +1383,31 @@ static bool serve_one(int fd)
 		return true;
 	}
 
-	rc = snmp_handle(&agent, rx, (size_t)n, sts_net_uptime_cs(), tx,
-			 sizeof(tx), &rsp_len);
+	/*
+	 * snmp_dispatch(), not snmp_handle(): it routes on msgVersion so a v3
+	 * manager reaches the USM engine and a v2c manager still reaches the same
+	 * PDU layer. A NULL context is its documented way of counting and dropping
+	 * v3 datagrams, which is what `sec.snmpv3.en = 0` (or a v3 engine that
+	 * could not be identified) should mean.
+	 */
+	rc = snmp_dispatch(&agent, v3_ready ? &v3 : NULL, rx, (size_t)n,
+			   engine_time_s(), sts_net_uptime_cs(), tx, sizeof(tx),
+			   &rsp_len);
 	if (rc == 0) {
+		/* May be a Report PDU rather than a Response — that is a normal
+		 * success and must be sent, because provoking one is how a manager
+		 * discovers the engine id and synchronises its clock. */
 		(void)zsock_sendto(fd, tx, rsp_len, 0,
 				   (struct sockaddr *)&peer, plen);
 		return true;
 	}
 	if (rc == -EACCES) {
 		/*
-		 * Bad community: RFC-silent to the sender, but a security event
-		 * worth a trap (spec §5.3) — offered to the gate, not enqueued
-		 * unconditionally, so a flood becomes one trap per interval
-		 * instead of one per datagram.
+		 * A bad v2c community, or a v3 digest that did not verify on a
+		 * request that was not reportable: RFC-silent to the sender, but a
+		 * security event worth a trap (spec §5.3) — offered to the gate,
+		 * not enqueued unconditionally, so a flood becomes one trap per
+		 * interval instead of one per datagram.
 		 */
 		if (snmp_notify_gate(&agent, SNMP_TRAP_AUTH_FAILURE,
 				     sts_mono_ms(), NULL)) {
@@ -1050,9 +1520,21 @@ void sts_snmp_stats(snmp_stats_t *out)
 	(void)snmp_stats_get(&agent, out);
 }
 
+void sts_snmp_v3_stats(snmp_v3_stats_t *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	memset(out, 0, sizeof(*out));
+	if (v3_ready) {
+		(void)snmp_v3_stats_get(&v3, out);
+	}
+}
+
 int sts_snmp_start(void)
 {
 	snmp_cfg_t cfg;
+	bool v2c;
 	int rc;
 
 	if (!sts_net_cfg_bool(CFG_ID_SNMP_ENABLE, false)) {
@@ -1073,15 +1555,39 @@ int sts_snmp_start(void)
 	cfg.getter.get = getter;
 	cfg.getter.ctx = NULL;
 	cfg.max_repetitions = 0U;
-	cfg.notify_min_interval_ms = SNMP_NOTIFY_MIN_INTERVAL_MS;
+	cfg.notify_min_interval_ms =
+		(uint32_t)sts_net_cfg_u64(CFG_ID_SEC_SNMP_NOTIFY_MS,
+					 SNMP_NOTIFY_MIN_INTERVAL_MS);
 
 	rc = snmp_init(&agent, &cfg);
 	if (rc != 0) {
 		LOG_ERR("snmp_init: %d", rc);
 		return rc;
 	}
+
+	/*
+	 * `sec.snmp.v2c` defaults to 0 (spec §9.5: v2c only when explicitly
+	 * enabled), and core/snmp spells its gate negatively so a zeroed config
+	 * keeps the historical behaviour — which means the gate has to be driven
+	 * from cfg here or the default never takes effect.
+	 */
+	v2c = sts_net_cfg_bool(CFG_ID_SEC_SNMP_V2C_EN, false);
+	(void)snmp_set_v2c_enabled(&agent, v2c);
+
+	v3_start();
+	publish_trap_user();
+
+	if (!v2c && !v3_ready) {
+		LOG_ERR("SNMP is enabled but both versions are off: v2c by "
+			"sec.snmp.v2c and v3 by sec.snmpv3.en (or a failed engine "
+			"id). The agent will answer nothing.");
+	}
 	if (community_buf[0][0] == '\0') {
-		LOG_WRN("snmp.community is empty; every request will be refused");
+		/* Both halves matter: the community authenticates v2c requests AND
+		 * is what snmp_make_trap() needs, so an empty one also silences
+		 * every v2c trap. */
+		LOG_WRN("snmp.community is empty; every v2c request will be refused "
+			"and no v2c trap can be built");
 	}
 	if (acl_len == 0U && !acl_deny_all) {
 		LOG_WRN("SNMP is enabled with no net.mgmt.acl: every source may "
@@ -1108,6 +1614,9 @@ int sts_snmp_start(void)
 			NULL, NULL, SNMP_PRIORITY, 0, K_NO_WAIT);
 	k_thread_name_set(&snmp_thread, "snmp");
 
-	LOG_INF("SNMPv2c agent on :%d", SNMP_AGENT_PORT);
+	LOG_INF("SNMP agent on :%d (v2c %s, v3/USM %s), notifications as %s",
+		SNMP_AGENT_PORT, v2c ? "on" : "off", v3_ready ? "on" : "off",
+		(v3_ready && trap_user_buf[trap_user_live][0] != '\0') ? "v3"
+								       : "v2c");
 	return 0;
 }

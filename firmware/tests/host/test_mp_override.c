@@ -5,7 +5,10 @@
  * tests are organised around the properties the FMT spec puts numbers on:
  *
  *   §5.2  the guard escalation, as an exhaustive matrix over
- *         (class, session, keepalive freshness, confirmation, nonce, hold);
+ *         (class, session, role, keepalive freshness, confirmation, nonce, hold);
+ *   §5.3  the role floor — G1 needs operator, G2/G3 need admin — including that
+ *         the typed device serial does *not* substitute for a role, because the
+ *         serial is printed on the chassis and returned by `hello`;
  *   §5.3  the dead-man — every override reverts to firmware-automatic within the
  *         keepalive TTL plus one tick, on *any* of: link loss, session loss,
  *         stale keepalive, session close, mode exit;
@@ -25,9 +28,17 @@
 
 #include "unity.h"
 
+/*
+ * core/auth's header, for the enum only — no auth symbol is linked. core/mp
+ * cannot include it (ARCHITECTURE.md §4 gives mp no `auth` edge), so it carries
+ * its own MP_ROLE_* constants; this is where the two are proved numerically
+ * identical on the host, mirroring the BUILD_ASSERTs in mp_glue.c.
+ */
+#include "auth/auth.h"
 #include "mp/mp_override.h"
 
 #define SERIAL "STS1000-000042"
+#define USER "tech"
 
 /* ------------------------------------------------------------------ fixture */
 
@@ -165,14 +176,26 @@ static size_t obj_of(const char *id)
 	return (size_t)idx;
 }
 
-/** Open a session and satisfy G2 so grants can be tested in isolation. */
-static uint32_t open_session(uint32_t now)
+/** Open a session with @p role. */
+static uint32_t open_session_as(uint32_t now, uint8_t role, const char *user)
 {
 	uint32_t sid = 0U;
 
-	TEST_ASSERT_EQUAL_INT(0, mp_ovr_session_open(&g_c, 0U, now, &sid));
+	TEST_ASSERT_EQUAL_INT(0, mp_ovr_session_open(&g_c, 0U, role, user, now,
+						     &sid));
 	TEST_ASSERT_NOT_EQUAL_UINT32(0U, sid);
 	return sid;
+}
+
+/**
+ * Open an **admin** session, which is what the lease and interlock tests need:
+ * they are about the interlocks, not about authentication, so they run at the
+ * privilege every guard class accepts. The role floor itself is tested
+ * separately, below.
+ */
+static uint32_t open_session(uint32_t now)
+{
+	return open_session_as(now, (uint8_t)MP_ROLE_ADMIN, USER);
 }
 
 /* ------------------------------------------------------------------ naming */
@@ -190,9 +213,44 @@ static void test_names(void)
 
 	for (i = 0U; i < (uint8_t)MP_GC_COUNT; i++) {
 		TEST_ASSERT_TRUE(strlen(mp_gc_name(i)) > 0U);
+		TEST_ASSERT_TRUE(strcmp(mp_gc_name(i), "unknown") != 0);
 	}
 	TEST_ASSERT_EQUAL_STRING("unknown", mp_gc_name(MP_GC_COUNT));
 	TEST_ASSERT_EQUAL_STRING("ok", mp_gc_name(MP_GC_OK));
+	TEST_ASSERT_EQUAL_STRING("need-role", mp_gc_name(MP_GC_NEED_ROLE));
+
+	TEST_ASSERT_EQUAL_STRING("none", mp_role_name(MP_ROLE_NONE));
+	TEST_ASSERT_EQUAL_STRING("viewer", mp_role_name(MP_ROLE_VIEWER));
+	TEST_ASSERT_EQUAL_STRING("operator", mp_role_name(MP_ROLE_OPERATOR));
+	TEST_ASSERT_EQUAL_STRING("admin", mp_role_name(MP_ROLE_ADMIN));
+	TEST_ASSERT_EQUAL_STRING("unknown", mp_role_name(MP_ROLE_ADMIN + 1U));
+	TEST_ASSERT_EQUAL_STRING("unknown", mp_role_name(255U));
+}
+
+/**
+ * The role constants core/mp carries must be the ones core/auth hands out.
+ *
+ * MP_ROLE_* exists because core/mp has no `auth` dependency edge; if the two
+ * ever diverge, an operator's numeric role would silently satisfy an admin
+ * guard. Pinned here and, on target, by BUILD_ASSERTs in mp_glue.c.
+ */
+static void test_roles_match_the_auth_enum(void)
+{
+	TEST_ASSERT_EQUAL_UINT((unsigned int)AUTH_ROLE_NONE,
+			       (unsigned int)MP_ROLE_NONE);
+	TEST_ASSERT_EQUAL_UINT((unsigned int)AUTH_ROLE_VIEWER,
+			       (unsigned int)MP_ROLE_VIEWER);
+	TEST_ASSERT_EQUAL_UINT((unsigned int)AUTH_ROLE_OPERATOR,
+			       (unsigned int)MP_ROLE_OPERATOR);
+	TEST_ASSERT_EQUAL_UINT((unsigned int)AUTH_ROLE_ADMIN,
+			       (unsigned int)MP_ROLE_ADMIN);
+	/* Ordered so a numeric compare is a privilege compare. */
+	TEST_ASSERT_TRUE(MP_ROLE_NONE < MP_ROLE_VIEWER);
+	TEST_ASSERT_TRUE(MP_ROLE_VIEWER < MP_ROLE_OPERATOR);
+	TEST_ASSERT_TRUE(MP_ROLE_OPERATOR < MP_ROLE_ADMIN);
+	/* And a session can record the longest credential name AAA accepts. */
+	TEST_ASSERT_TRUE(MP_USER_MAX >= AUTH_USER_MAX);
+	TEST_ASSERT_TRUE(MP_SECRET_MAX >= AUTH_SECRET_MAX);
 }
 
 static void test_init_validation(void)
@@ -212,7 +270,10 @@ static void test_init_validation(void)
 	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_ovr_revert_all(NULL, 0U, NULL, 0U));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_ovr_keepalive(NULL, 1U, 0U));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_ovr_session_close(NULL, 1U, 0U));
-	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_ovr_session_open(NULL, 0U, 0U, NULL));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      mp_ovr_session_open(NULL, 0U,
+						  (uint8_t)MP_ROLE_ADMIN, USER,
+						  0U, NULL));
 	TEST_ASSERT_NULL(mp_ovr_lease(NULL, 0U));
 	TEST_ASSERT_EQUAL_size_t(0U, mp_ovr_active(NULL));
 	TEST_ASSERT_FALSE(mp_ovr_session_valid(NULL, 1U, 0U));
@@ -254,7 +315,10 @@ static void test_session_lifecycle(void)
 								  MP_KEEPALIVE_TTL_MS));
 
 	/* Reopening yields a different id. */
-	TEST_ASSERT_EQUAL_INT(0, mp_ovr_session_open(&g_c, 0U, 20000U, &sid2));
+	TEST_ASSERT_EQUAL_INT(0,
+			      mp_ovr_session_open(&g_c, 0U,
+						  (uint8_t)MP_ROLE_ADMIN, USER,
+						  20000U, &sid2));
 	TEST_ASSERT_NOT_EQUAL_UINT32(sid1, sid2);
 
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_session_close(&g_c, sid2, 21000U));
@@ -266,11 +330,16 @@ static void test_session_ttl_is_clamped(void)
 {
 	uint32_t sid = 0U;
 
-	TEST_ASSERT_EQUAL_INT(0, mp_ovr_session_open(&g_c, 999999U, 1000U,
-						    &sid));
+	TEST_ASSERT_EQUAL_INT(0,
+			      mp_ovr_session_open(&g_c, 999999U,
+						  (uint8_t)MP_ROLE_ADMIN, USER,
+						  1000U, &sid));
 	TEST_ASSERT_EQUAL_UINT32(MP_KEEPALIVE_TTL_MS, g_c.sess.ttl_ms);
 
-	TEST_ASSERT_EQUAL_INT(0, mp_ovr_session_open(&g_c, 1500U, 2000U, &sid));
+	TEST_ASSERT_EQUAL_INT(0,
+			      mp_ovr_session_open(&g_c, 1500U,
+						  (uint8_t)MP_ROLE_ADMIN, USER,
+						  2000U, &sid));
 	TEST_ASSERT_EQUAL_UINT32(1500U, g_c.sess.ttl_ms);
 	TEST_ASSERT_FALSE(mp_ovr_session_valid(&g_c, sid, 3600U));
 }
@@ -281,9 +350,13 @@ static void test_session_requires_a_link(void)
 
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_set_link(&g_c, false, 1000U));
 	TEST_ASSERT_EQUAL_INT(-ENOLINK,
-			      mp_ovr_session_open(&g_c, 0U, 1000U, &sid));
+			      mp_ovr_session_open(&g_c, 0U,
+						  (uint8_t)MP_ROLE_ADMIN, USER,
+						  1000U, &sid));
 	TEST_ASSERT_EQUAL_INT(-EINVAL,
-			      mp_ovr_session_open(&g_c, 0U, 1000U, NULL));
+			      mp_ovr_session_open(&g_c, 0U,
+						  (uint8_t)MP_ROLE_ADMIN, USER,
+						  1000U, NULL));
 }
 
 static void test_reopening_reverts_the_previous_sessions_overrides(void)
@@ -300,13 +373,223 @@ static void test_reopening_reverts_the_previous_sessions_overrides(void)
 	TEST_ASSERT_EQUAL_size_t(1U, mp_ovr_active(&g_c));
 
 	logs_clear();
-	TEST_ASSERT_EQUAL_INT(0, mp_ovr_session_open(&g_c, 0U, 2000U, &sid2));
+	TEST_ASSERT_EQUAL_INT(0,
+			      mp_ovr_session_open(&g_c, 0U,
+						  (uint8_t)MP_ROLE_ADMIN, USER,
+						  2000U, &sid2));
 	TEST_ASSERT_EQUAL_size_t(0U, mp_ovr_active(&g_c));
 	TEST_ASSERT_EQUAL_UINT(1U, releases_of(obj));
 	TEST_ASSERT_EQUAL_UINT(1U, events_of((uint8_t)MP_OVR_EV_RELEASE));
 }
 
+static void test_session_records_the_role_and_the_user(void)
+{
+	uint32_t sid;
+
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MP_ROLE_NONE,
+				mp_ovr_session_role(&g_c));
+	TEST_ASSERT_EQUAL_STRING("", mp_ovr_session_user(&g_c));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MP_ROLE_NONE, mp_ovr_session_role(NULL));
+	TEST_ASSERT_EQUAL_STRING("", mp_ovr_session_user(NULL));
+
+	sid = open_session_as(1000U, (uint8_t)MP_ROLE_OPERATOR, "alice");
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MP_ROLE_OPERATOR,
+				mp_ovr_session_role(&g_c));
+	TEST_ASSERT_EQUAL_STRING("alice", mp_ovr_session_user(&g_c));
+
+	/* Closing forgets both — an audit record must never name a session that
+	 * is no longer there. */
+	TEST_ASSERT_EQUAL_INT(0, mp_ovr_session_close(&g_c, sid, 1100U));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MP_ROLE_NONE,
+				mp_ovr_session_role(&g_c));
+	TEST_ASSERT_EQUAL_STRING("", mp_ovr_session_user(&g_c));
+
+	/* A NULL user is legal and reads back as empty, not as a dangling
+	 * pointer. */
+	(void)open_session_as(2000U, (uint8_t)MP_ROLE_VIEWER, NULL);
+	TEST_ASSERT_EQUAL_STRING("", mp_ovr_session_user(&g_c));
+
+	/* An over-long name is truncated, not overflowed. */
+	{
+		char long_user[MP_USER_MAX + 32U];
+
+		memset(long_user, 'u', sizeof(long_user) - 1U);
+		long_user[sizeof(long_user) - 1U] = '\0';
+		(void)open_session_as(3000U, (uint8_t)MP_ROLE_ADMIN, long_user);
+		TEST_ASSERT_EQUAL_size_t(MP_USER_MAX,
+					 strlen(mp_ovr_session_user(&g_c)));
+	}
+}
+
+/**
+ * A role the device does not recognise grants nothing.
+ *
+ * Roles compare numerically, so a backend returning 200 must not read as
+ * "more than admin". The fail-safe answer for an unknown role is no privilege.
+ */
+static void test_an_unrecognised_role_grants_nothing(void)
+{
+	uint32_t sid = open_session_as(1000U, 200U, "weird");
+
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MP_ROLE_NONE,
+				mp_ovr_session_role(&g_c));
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_ROLE,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL,
+					   NULL, 0U, 1000U, NULL));
+}
+
+/**
+ * A takeover does not inherit the previous session's privilege.
+ *
+ * The concrete attack: an admin opens a session, then an anonymous caller opens
+ * another. If the role survived the reopen, the second caller would hold admin.
+ */
+static void test_session_takeover_does_not_inherit_the_role(void)
+{
+	uint32_t admin_sid;
+	uint32_t anon_sid;
+
+	admin_sid = open_session_as(1000U, (uint8_t)MP_ROLE_ADMIN, "admin");
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, admin_sid, 0U, 0U,
+					   SERIAL, NULL, 0U, 1000U, NULL));
+	TEST_ASSERT_TRUE(g_c.sess.serial_ok);
+
+	/* The next tool presents no credential at all. */
+	anon_sid = open_session_as(2000U, (uint8_t)MP_ROLE_NONE, NULL);
+	TEST_ASSERT_NOT_EQUAL_UINT32(admin_sid, anon_sid);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MP_ROLE_NONE,
+				mp_ovr_session_role(&g_c));
+	TEST_ASSERT_EQUAL_STRING("", mp_ovr_session_user(&g_c));
+	/* The G2 confirmation does not carry over either. */
+	TEST_ASSERT_FALSE(g_c.sess.serial_ok);
+
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_ROLE,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, anon_sid, 0U, 0U,
+					   NULL, NULL, 0U, 2000U, NULL));
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_ROLE,
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, anon_sid, 0U, 0U,
+					   SERIAL, NULL, 0U, 2000U, NULL));
+
+	/* And the old id is dead, so the admin cannot keep using it either. */
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SESSION,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, admin_sid, 0U, 0U,
+					   NULL, NULL, 0U, 2000U, NULL));
+}
+
 /* ============================================== §5.2 guard escalation ==== */
+
+/** An unauthenticated session may observe (G0) and nothing else. */
+static void test_a_session_with_no_credential_is_capped_at_g0(void)
+{
+	uint32_t sid = open_session_as(1000U, (uint8_t)MP_ROLE_NONE, NULL);
+
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
+			      mp_ovr_guard(&g_c, MP_GUARD_G0, sid, 0U, 0U, NULL,
+					   NULL, 0U, 1000U, NULL));
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_ROLE,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL,
+					   NULL, 0U, 1000U, NULL));
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_ROLE,
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, SERIAL,
+					   NULL, 0U, 1000U, NULL));
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_ROLE,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL,
+					   MP_G3_PHRASE_DEFAULT, 0U, 1000U,
+					   NULL));
+	/* Refused, and nothing was armed by the attempt. G0 is not a refusal, so
+	 * the three guarded attempts are all that count. */
+	TEST_ASSERT_EQUAL_UINT32(0U, g_c.sess.arm_nonce);
+	TEST_ASSERT_EQUAL_UINT32(3U, g_c.refusals);
+}
+
+/** A viewer is read-only: it may not perform a G1 action. */
+static void test_a_viewer_cannot_perform_a_g1_action(void)
+{
+	uint32_t sid = open_session_as(1000U, (uint8_t)MP_ROLE_VIEWER, "obs");
+
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
+			      mp_ovr_guard(&g_c, MP_GUARD_G0, sid, 0U, 0U, NULL,
+					   NULL, 0U, 1000U, NULL));
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_ROLE,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL,
+					   NULL, 0U, 1000U, NULL));
+	TEST_ASSERT_EQUAL_UINT32(1U, g_c.refusals);
+}
+
+/**
+ * An operator may perform G1 but not G2 — **even with the correct serial**.
+ *
+ * This is the property that makes the typed serial an anti-mistake interlock
+ * rather than a credential: it is printed on the label and returned by `hello`,
+ * so being able to type it must buy no privilege.
+ */
+static void test_an_operator_gets_g1_but_not_g2_even_with_the_serial(void)
+{
+	uint32_t sid = open_session_as(1000U, (uint8_t)MP_ROLE_OPERATOR, "op");
+
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL,
+					   NULL, 0U, 1000U, NULL));
+
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_ROLE,
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, SERIAL,
+					   NULL, 0U, 1000U, NULL));
+	/* The refusal is a role refusal, not a serial one, and the G2
+	 * confirmation was never recorded. */
+	TEST_ASSERT_FALSE(g_c.sess.serial_ok);
+
+	/* G3 is refused for the same reason, and does not arm. */
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_ROLE,
+			      mp_ovr_guard(&g_c, MP_GUARD_G3, sid, 5U, 0U, SERIAL,
+					   MP_G3_PHRASE_DEFAULT, 0U, 1000U,
+					   NULL));
+	TEST_ASSERT_EQUAL_UINT32(0U, g_c.sess.arm_nonce);
+}
+
+/** An admin with the correct serial gets G2. */
+static void test_an_admin_with_the_serial_gets_g2(void)
+{
+	uint32_t sid = open_session_as(1000U, (uint8_t)MP_ROLE_ADMIN, "admin");
+
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL,
+					   NULL, 0U, 1000U, NULL));
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_OK,
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, SERIAL,
+					   NULL, 0U, 1000U, NULL));
+	TEST_ASSERT_TRUE(g_c.sess.serial_ok);
+	/* Admin is still not exempt from the serial itself. */
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SERIAL,
+			      mp_ovr_guard(&g_c, MP_GUARD_G2, sid, 0U, 0U, NULL,
+					   NULL, 0U, 1000U, NULL));
+	TEST_ASSERT_EQUAL_UINT32(1U, g_c.refusals);
+}
+
+/**
+ * An under-privileged caller cannot hold its session open by hammering.
+ *
+ * The keepalive refresh is a reward for a *successful* guard check, so a viewer
+ * spraying G1 requests must still go stale on schedule.
+ */
+static void test_a_refused_role_does_not_refresh_the_keepalive(void)
+{
+	uint32_t sid = open_session_as(1000U, (uint8_t)MP_ROLE_VIEWER, "obs");
+	uint32_t t;
+
+	for (t = 1000U; t < (1000U + MP_KEEPALIVE_TTL_MS); t += 1000U) {
+		TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_ROLE,
+				      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U,
+						   NULL, NULL, 0U, t, NULL));
+	}
+	TEST_ASSERT_FALSE(mp_ovr_session_valid(&g_c, sid,
+					       1000U + MP_KEEPALIVE_TTL_MS + 1U));
+	TEST_ASSERT_EQUAL_INT((int)MP_GC_STALE,
+			      mp_ovr_guard(&g_c, MP_GUARD_G1, sid, 0U, 0U, NULL,
+					   NULL, 0U,
+					   1000U + MP_KEEPALIVE_TTL_MS + 1U,
+					   NULL));
+}
 
 static void test_g0_needs_nothing(void)
 {
@@ -400,7 +683,10 @@ static void test_g2_on_an_unprovisioned_board_always_refuses(void)
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_init(&g_c, apply_cb, NULL, evt_cb, NULL,
 					     NULL));
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_set_link(&g_c, true, 1000U));
-	TEST_ASSERT_EQUAL_INT(0, mp_ovr_session_open(&g_c, 0U, 1000U, &sid));
+	TEST_ASSERT_EQUAL_INT(0,
+			      mp_ovr_session_open(&g_c, 0U,
+						  (uint8_t)MP_ROLE_ADMIN, USER,
+						  1000U, &sid));
 
 	/* An empty expected string must never match, including against "". */
 	TEST_ASSERT_EQUAL_INT((int)MP_GC_NEED_SERIAL,
@@ -567,45 +853,79 @@ static void test_g3_phrase_is_replaceable(void)
 					   &arm));
 }
 
-/** The whole escalation as a matrix, so a reordering cannot pass unnoticed. */
+/**
+ * The whole escalation as a matrix, so a reordering cannot pass unnoticed.
+ *
+ * The `role` column is the §5.3 floor. Note the ordering rows: a session check
+ * outranks a role check, and a role check outranks both confirmations — so an
+ * operator holding a valid serial is told "need-role", never "ok".
+ */
 static void test_guard_escalation_matrix(void)
 {
 	static const struct {
 		uint8_t guard;
 		bool session;
+		uint8_t role;
 		bool fresh;
 		const char *confirm;
 		const char *phrase;
 		int expect;
 	} m[] = {
-		/* G0 ignores everything else. */
-		{ MP_GUARD_G0, false, false, NULL, NULL, MP_GC_OK },
-		{ MP_GUARD_G0, false, false, "junk", "junk", MP_GC_OK },
-		/* G1: a session, fresh. */
-		{ MP_GUARD_G1, false, false, NULL, NULL, MP_GC_NEED_SESSION },
-		{ MP_GUARD_G1, true, true, NULL, NULL, MP_GC_OK },
-		{ MP_GUARD_G1, true, false, NULL, NULL, MP_GC_STALE },
-		/* G2: G1 plus the typed serial; the session check comes first. */
-		{ MP_GUARD_G2, false, false, SERIAL, NULL,
+		/* G0 ignores everything else, role included. */
+		{ MP_GUARD_G0, false, MP_ROLE_NONE, false, NULL, NULL,
+		  MP_GC_OK },
+		{ MP_GUARD_G0, false, MP_ROLE_NONE, false, "junk", "junk",
+		  MP_GC_OK },
+		{ MP_GUARD_G0, true, MP_ROLE_NONE, false, NULL, NULL,
+		  MP_GC_OK },
+		/* G1: a fresh session, operator or better. */
+		{ MP_GUARD_G1, false, MP_ROLE_ADMIN, false, NULL, NULL,
 		  MP_GC_NEED_SESSION },
-		{ MP_GUARD_G2, true, false, SERIAL, NULL, MP_GC_STALE },
-		{ MP_GUARD_G2, true, true, NULL, NULL, MP_GC_NEED_SERIAL },
-		{ MP_GUARD_G2, true, true, "nope", NULL, MP_GC_NEED_SERIAL },
-		{ MP_GUARD_G2, true, true, SERIAL, NULL, MP_GC_OK },
-		/* G3: G2 plus the typed phrase; both are required to arm. */
-		{ MP_GUARD_G3, false, false, SERIAL, MP_G3_PHRASE_DEFAULT,
-		  MP_GC_NEED_SESSION },
-		{ MP_GUARD_G3, true, false, SERIAL, MP_G3_PHRASE_DEFAULT,
+		{ MP_GUARD_G1, true, MP_ROLE_NONE, true, NULL, NULL,
+		  MP_GC_NEED_ROLE },
+		{ MP_GUARD_G1, true, MP_ROLE_VIEWER, true, NULL, NULL,
+		  MP_GC_NEED_ROLE },
+		{ MP_GUARD_G1, true, MP_ROLE_OPERATOR, true, NULL, NULL,
+		  MP_GC_OK },
+		{ MP_GUARD_G1, true, MP_ROLE_ADMIN, true, NULL, NULL,
+		  MP_GC_OK },
+		/* Staleness outranks the role: the session is gone either way. */
+		{ MP_GUARD_G1, true, MP_ROLE_ADMIN, false, NULL, NULL,
 		  MP_GC_STALE },
-		{ MP_GUARD_G3, true, true, NULL, MP_G3_PHRASE_DEFAULT,
+		{ MP_GUARD_G1, true, MP_ROLE_NONE, false, NULL, NULL,
+		  MP_GC_STALE },
+		/* G2: G1 plus admin plus the typed serial, in that order. */
+		{ MP_GUARD_G2, false, MP_ROLE_ADMIN, false, SERIAL, NULL,
+		  MP_GC_NEED_SESSION },
+		{ MP_GUARD_G2, true, MP_ROLE_ADMIN, false, SERIAL, NULL,
+		  MP_GC_STALE },
+		{ MP_GUARD_G2, true, MP_ROLE_OPERATOR, true, SERIAL, NULL,
+		  MP_GC_NEED_ROLE },
+		{ MP_GUARD_G2, true, MP_ROLE_VIEWER, true, SERIAL, NULL,
+		  MP_GC_NEED_ROLE },
+		{ MP_GUARD_G2, true, MP_ROLE_ADMIN, true, NULL, NULL,
 		  MP_GC_NEED_SERIAL },
-		{ MP_GUARD_G3, true, true, SERIAL, NULL, MP_GC_NEED_PHRASE },
-		{ MP_GUARD_G3, true, true, SERIAL, "wrong",
+		{ MP_GUARD_G2, true, MP_ROLE_ADMIN, true, "nope", NULL,
+		  MP_GC_NEED_SERIAL },
+		{ MP_GUARD_G2, true, MP_ROLE_ADMIN, true, SERIAL, NULL,
+		  MP_GC_OK },
+		/* G3: G2 plus the typed phrase; both are required to arm. */
+		{ MP_GUARD_G3, false, MP_ROLE_ADMIN, false, SERIAL,
+		  MP_G3_PHRASE_DEFAULT, MP_GC_NEED_SESSION },
+		{ MP_GUARD_G3, true, MP_ROLE_ADMIN, false, SERIAL,
+		  MP_G3_PHRASE_DEFAULT, MP_GC_STALE },
+		{ MP_GUARD_G3, true, MP_ROLE_OPERATOR, true, SERIAL,
+		  MP_G3_PHRASE_DEFAULT, MP_GC_NEED_ROLE },
+		{ MP_GUARD_G3, true, MP_ROLE_ADMIN, true, NULL,
+		  MP_G3_PHRASE_DEFAULT, MP_GC_NEED_SERIAL },
+		{ MP_GUARD_G3, true, MP_ROLE_ADMIN, true, SERIAL, NULL,
 		  MP_GC_NEED_PHRASE },
-		{ MP_GUARD_G3, true, true, MP_G3_PHRASE_DEFAULT, SERIAL,
-		  MP_GC_NEED_SERIAL },
-		{ MP_GUARD_G3, true, true, SERIAL, MP_G3_PHRASE_DEFAULT,
-		  MP_GC_ARMED },
+		{ MP_GUARD_G3, true, MP_ROLE_ADMIN, true, SERIAL, "wrong",
+		  MP_GC_NEED_PHRASE },
+		{ MP_GUARD_G3, true, MP_ROLE_ADMIN, true,
+		  MP_G3_PHRASE_DEFAULT, SERIAL, MP_GC_NEED_SERIAL },
+		{ MP_GUARD_G3, true, MP_ROLE_ADMIN, true, SERIAL,
+		  MP_G3_PHRASE_DEFAULT, MP_GC_ARMED },
 	};
 	size_t i;
 
@@ -619,7 +939,7 @@ static void test_guard_escalation_matrix(void)
 						    evt_cb, NULL, SERIAL));
 		TEST_ASSERT_EQUAL_INT(0, mp_ovr_set_link(&g_c, true, now));
 		if (m[i].session) {
-			sid = open_session(now);
+			sid = open_session_as(now, m[i].role, USER);
 			if (!m[i].fresh) {
 				now += MP_KEEPALIVE_TTL_MS + 1U;
 			}
@@ -1545,7 +1865,9 @@ static void test_release_error_is_counted_but_the_lease_still_goes(void)
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_init(&c, apply_refuse_release_cb, NULL,
 					     NULL, NULL, SERIAL));
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_set_link(&c, true, 1000U));
-	TEST_ASSERT_EQUAL_INT(0, mp_ovr_session_open(&c, 0U, 1000U, &sid));
+	TEST_ASSERT_EQUAL_INT(0,
+			      mp_ovr_session_open(&c, 0U, (uint8_t)MP_ROLE_ADMIN,
+						  USER, 1000U, &sid));
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_grant(&c, obj, 50, 0U, sid, &st, 1000U,
 					      NULL));
 
@@ -1570,13 +1892,22 @@ int main(void)
 
 	RUN_TEST(test_names);
 	RUN_TEST(test_init_validation);
+	RUN_TEST(test_roles_match_the_auth_enum);
 
 	RUN_TEST(test_session_lifecycle);
 	RUN_TEST(test_session_ttl_is_clamped);
 	RUN_TEST(test_session_requires_a_link);
 	RUN_TEST(test_reopening_reverts_the_previous_sessions_overrides);
+	RUN_TEST(test_session_records_the_role_and_the_user);
+	RUN_TEST(test_an_unrecognised_role_grants_nothing);
+	RUN_TEST(test_session_takeover_does_not_inherit_the_role);
 
 	RUN_TEST(test_g0_needs_nothing);
+	RUN_TEST(test_a_session_with_no_credential_is_capped_at_g0);
+	RUN_TEST(test_a_viewer_cannot_perform_a_g1_action);
+	RUN_TEST(test_an_operator_gets_g1_but_not_g2_even_with_the_serial);
+	RUN_TEST(test_an_admin_with_the_serial_gets_g2);
+	RUN_TEST(test_a_refused_role_does_not_refresh_the_keepalive);
 	RUN_TEST(test_g1_needs_a_fresh_session);
 	RUN_TEST(test_a_successful_guard_refreshes_the_keepalive);
 	RUN_TEST(test_g2_needs_the_typed_device_serial);

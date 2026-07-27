@@ -55,6 +55,13 @@
 #include "console/sts_console.h"
 #include "fault/fault.h"
 #include "ina228/ina228.h"
+/*
+ * net/sts_aaa.h is included across areas on that header's own invitation: it
+ * exists so "the web server, the MCP console channel and the shell" share one
+ * credential store, one role map and one lockout table instead of growing three.
+ * This adds a console -> net edge to ARCHITECTURE.md §4.
+ */
+#include "net/sts_aaa.h"
 #include "zephyr/sts_app.h"
 
 LOG_MODULE_REGISTER(sts_mp, CONFIG_STS1000_LOG_LEVEL);
@@ -91,6 +98,21 @@ LOG_MODULE_REGISTER(sts_mp, CONFIG_STS1000_LOG_LEVEL);
 
 BUILD_ASSERT(MP_SCRATCH_BYTES >= (int)MP_SCRATCH_MIN,
 	     "CONFIG_STS1000_MP_SCRATCH cannot hold one mirror keyframe");
+
+/*
+ * core/mp carries its own MP_ROLE_* constants because its dependency set does
+ * not include core/auth (ARCHITECTURE.md §4). This file is the seam where both
+ * are visible, so it is where the numeric identity is proved. If auth_role_t is
+ * ever reordered, the build stops here instead of silently promoting a viewer.
+ */
+BUILD_ASSERT((int)AUTH_ROLE_NONE == (int)MP_ROLE_NONE, "role enum drift");
+BUILD_ASSERT((int)AUTH_ROLE_VIEWER == (int)MP_ROLE_VIEWER, "role enum drift");
+BUILD_ASSERT((int)AUTH_ROLE_OPERATOR == (int)MP_ROLE_OPERATOR, "role enum drift");
+BUILD_ASSERT((int)AUTH_ROLE_ADMIN == (int)MP_ROLE_ADMIN, "role enum drift");
+BUILD_ASSERT(MP_USER_MAX >= AUTH_USER_MAX,
+	     "a session cannot record the longest user AAA accepts");
+BUILD_ASSERT(MP_SECRET_MAX >= AUTH_SECRET_MAX,
+	     "the control plane would truncate a credential AAA would accept");
 
 /* ------------------------------------------------------------------ state */
 
@@ -352,6 +374,39 @@ static int prov_cfg_commit(void *user, cfg_commit_res_t *res)
 	ARG_UNUSED(user);
 	/* sts_cfg_commit(), not cfg_commit(): the group appliers must run. */
 	return sts_cfg_commit(res);
+}
+
+/**
+ * The maintenance credential check (FMT §5.3).
+ *
+ * One line of substance, and that is the point: the throttle, the hard lockout
+ * that reconnecting does not reset, the positive cache and the role mapping all
+ * live in sts_aaa_check(), shared with the web and shell planes. Every non-zero
+ * return is a denial — including -EHOSTUNREACH, which means no authority could
+ * answer and is never an allow-on-failure (sts_aaa.h).
+ *
+ * Only -EBUSY is passed through with its identity intact, because core reports a
+ * lockout distinctly; every other refusal reaches the host as one
+ * indistinguishable answer, so this is not an account oracle.
+ */
+static int prov_auth(void *user, const char *user_name, const char *secret,
+		     uint8_t *out_role)
+{
+	int rc;
+
+	ARG_UNUSED(user);
+
+	*out_role = (uint8_t)AUTH_ROLE_NONE;
+	if ((user_name == NULL) || (secret == NULL)) {
+		return -EACCES;
+	}
+
+	rc = sts_aaa_check(user_name, secret, out_role);
+	if (rc != 0) {
+		*out_role = (uint8_t)AUTH_ROLE_NONE;
+		return (rc == -EBUSY) ? -EBUSY : -EACCES;
+	}
+	return 0;
 }
 
 /* ------------------------------------------------------- object accessors */
@@ -785,6 +840,13 @@ static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "session      %u, overrides %u/%u",
 		    mp.ovr.sess.id, (unsigned int)mp_ovr_active(&mp.ovr),
 		    (unsigned int)MP_LEASE_MAX);
+	{
+		const char *who = mp_ovr_session_user(&mp.ovr);
+
+		shell_print(sh, "auth         role %s, user %s",
+			    mp_role_name(mp_ovr_session_role(&mp.ovr)),
+			    (who[0] != '\0') ? who : "-");
+	}
 	shell_print(sh, "safety       grants %u, vetoes %u, deadman %u, "
 			"verify-fail %u, refusals %u",
 		    mp.ovr.grants, mp.ovr.vetoes, mp.ovr.deadman_reverts,
@@ -873,6 +935,7 @@ int sts_mp_start(void)
 	w.pulse = obj_pulse;
 	w.diag = diag_action;
 	w.cfg_commit = prov_cfg_commit;
+	w.auth = prov_auth;
 	w.img = sts_dfu_port();
 	w.cfg = sts_cfg();
 	w.log = sts_logring();

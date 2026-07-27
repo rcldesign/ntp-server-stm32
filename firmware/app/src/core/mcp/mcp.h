@@ -78,6 +78,12 @@
  * appliers with it dropped, and an applier may block (sockets, DNS, display
  * I/O). Holding the section across it would export that latency to every other
  * config user.
+ *
+ * FACTORY_RESET is the same story with a wider blast radius, and gets its own
+ * delegate (mcp_wiring_t::cfg_factory_cb) on identical terms: NULL falls back to
+ * a bare cfg_factory_reset(), and when supplied it is invoked with the critical
+ * section released. Without it a factory reset answered OK while every subsystem
+ * carried on with the configuration it had before the reset.
  */
 
 #ifndef STS1000_CORE_MCP_MCP_H_
@@ -237,6 +243,22 @@ typedef void (*mcp_cfg_lock_fn)(void *user);
  */
 typedef int (*mcp_cfg_commit_fn)(void *user, cfg_commit_res_t *res);
 
+/**
+ * Factory-reset the config tree and notify whoever consumes those groups.
+ *
+ * A factory reset is a whole-tree commit, so it needs the glue for exactly the
+ * reason a commit does: resetting the tree without telling the subscribers leaves
+ * every subsystem running its pre-reset configuration until the next reboot,
+ * while the response says the reset succeeded. Same return codes as
+ * cfg_factory_reset():
+ *
+ * @retval 0     Reset, and the appliers ran.
+ * @retval -EIO  The live tree was reset but at least one store erase failed.
+ *               Appliers MUST still have run — the running system did change.
+ * @retval <0    Rejected; nothing was reset.
+ */
+typedef int (*mcp_cfg_factory_fn)(void *user);
+
 /* ------------------------------------------------------------- wiring */
 
 /** Device identity reported by HELLO. */
@@ -275,6 +297,14 @@ typedef struct {
 	 */
 	mcp_cfg_commit_fn cfg_commit_cb;
 	void             *cfg_commit_user;
+
+	/**
+	 * Factory-reset delegate. Optional; NULL falls back to a bare
+	 * cfg_factory_reset(), which does NOT run the glue's config appliers and
+	 * is therefore only appropriate where there are none.
+	 */
+	mcp_cfg_factory_fn cfg_factory_cb;
+	void              *cfg_factory_user;
 
 	mcp_tx_fn tx;       /* required */
 	void     *tx_user;

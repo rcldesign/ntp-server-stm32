@@ -10,6 +10,12 @@
  *
  * The last group runs the full stack: a request is COBS-framed, fed in a byte at
  * a time, and the reply is decoded from the captured wire bytes.
+ *
+ * Authentication (FMT §5.3) is wired to a table-driven stand-in for
+ * sts_aaa_check(), so the role floor, the indistinguishable refusal and the
+ * lockout are covered without a credential store. The default session is an
+ * **admin** session, because most of these tests are about the handlers rather
+ * than about who is allowed to reach them; the role tests open their own.
  */
 
 #include <errno.h>
@@ -22,6 +28,15 @@
 #include "test_support.h"
 
 #define SERIAL "STS1000-000042"
+
+/* Credentials the stand-in AAA accepts. */
+#define ADMIN_USER "root"
+#define ADMIN_PW "correct horse"
+#define OPER_USER "tech"
+#define OPER_PW "operator pw"
+#define VIEW_USER "guest"
+#define VIEW_PW "viewer pw"
+#define LOCKED_USER "locked"
 
 /* ------------------------------------------------------------------ fixture */
 
@@ -209,6 +224,55 @@ static int time_cb(void *user, uint64_t *tai_ns, bool *fallback)
 	return 0;
 }
 
+/* --- the credential store stand-in ------------------------------------- */
+
+static bool g_auth_present = true;
+static unsigned int g_auth_calls;
+static char g_auth_last_user[96];
+static char g_auth_last_secret[96];
+
+/**
+ * Stands in for sts_aaa_check() with the same three-valued contract: 0 accepts
+ * and writes a role, -EBUSY is a lockout, everything else is a refusal that the
+ * control plane must not describe.
+ */
+static int auth_cb(void *user, const char *user_name, const char *secret,
+		   uint8_t *out_role)
+{
+	(void)user;
+	g_auth_calls++;
+	(void)snprintf(g_auth_last_user, sizeof(g_auth_last_user), "%s",
+		       (user_name != NULL) ? user_name : "");
+	(void)snprintf(g_auth_last_secret, sizeof(g_auth_last_secret), "%s",
+		       (secret != NULL) ? secret : "");
+
+	*out_role = (uint8_t)MP_ROLE_NONE;
+	if ((user_name == NULL) || (secret == NULL)) {
+		return -EACCES;
+	}
+	if (strcmp(user_name, LOCKED_USER) == 0) {
+		return -EBUSY;
+	}
+	if ((strcmp(user_name, ADMIN_USER) == 0) &&
+	    (strcmp(secret, ADMIN_PW) == 0)) {
+		*out_role = (uint8_t)MP_ROLE_ADMIN;
+		return 0;
+	}
+	if ((strcmp(user_name, OPER_USER) == 0) &&
+	    (strcmp(secret, OPER_PW) == 0)) {
+		*out_role = (uint8_t)MP_ROLE_OPERATOR;
+		return 0;
+	}
+	if ((strcmp(user_name, VIEW_USER) == 0) &&
+	    (strcmp(secret, VIEW_PW) == 0)) {
+		*out_role = (uint8_t)MP_ROLE_VIEWER;
+		return 0;
+	}
+	/* Unknown user and wrong password are the same answer here, exactly as
+	 * they are in the reply. */
+	return -EACCES;
+}
+
 static int cfg_commit_cb(void *user, cfg_commit_res_t *res)
 {
 	(void)user;
@@ -266,6 +330,7 @@ static void wire_up(mp_wiring_t *w)
 	w->pulse = pulse_cb;
 	w->diag = diag_action_cb;
 	w->cfg_commit = cfg_commit_cb;
+	w->auth = g_auth_present ? auth_cb : NULL;
 	w->img = &g_img;
 	w->cfg = &g_cfg;
 	w->log = &g_log;
@@ -296,6 +361,10 @@ void setUp(void)
 	g_reboot_mode = -1;
 	g_ilk_present = true;
 	g_ilk_rc = 0;
+	g_auth_present = true;
+	g_auth_calls = 0U;
+	g_auth_last_user[0] = '\0';
+	g_auth_last_secret[0] = '\0';
 	g_telem_present = true;
 	g_pps_present = true;
 	g_mirror_present = true;
@@ -424,8 +493,34 @@ static bool res_streq(const char *key, const char *want)
 			     want);
 }
 
-/** Open a session and return its id. */
+/** Open a session as @p user / @p secret and return its id. */
+static uint32_t session_as(const char *user, const char *secret)
+{
+	char req[256];
+
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.open\","
+		       "\"params\":{\"client\":\"fmt\",\"user\":\"%s\","
+		       "\"secret\":\"%s\"}}",
+		       user, secret);
+	(void)call(req);
+	return (uint32_t)res_i("sid");
+}
+
+/**
+ * Open the default session: **admin**.
+ *
+ * Every guarded method below is reached at the privilege its guard class
+ * demands, so these tests exercise the handler rather than the role floor. The
+ * floor itself is covered by the §5.3 group.
+ */
 static uint32_t session(void)
+{
+	return session_as(ADMIN_USER, ADMIN_PW);
+}
+
+/** Open an anonymous session — no credential at all. */
+static uint32_t session_anon(void)
 {
 	(void)call("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.open\","
 		   "\"params\":{\"client\":\"fmt\"}}");
@@ -755,6 +850,11 @@ static void test_hello(void)
 	TEST_ASSERT_TRUE(res_streq("fw", "1.2.3"));
 	TEST_ASSERT_TRUE(res_streq("boot", "0.9.0"));
 
+	/* The tool learns before opening anything that a credential is accepted
+	 * here and that it currently holds no role. */
+	TEST_ASSERT_TRUE(res_b("auth_required"));
+	TEST_ASSERT_TRUE(res_streq("role", "none"));
+
 	m = mp_json_obj_get(&g_rp, r, "manifest");
 	TEST_ASSERT_TRUE(m >= 0);
 	{
@@ -914,7 +1014,14 @@ static void test_session_methods(void)
 	sid = session();
 	TEST_ASSERT_NOT_EQUAL_UINT32(0U, sid);
 	TEST_ASSERT_TRUE(res_b("serial_required"));
+	TEST_ASSERT_TRUE(res_b("auth_required"));
+	TEST_ASSERT_TRUE(res_streq("role", "admin"));
+	TEST_ASSERT_TRUE(res_streq("user", ADMIN_USER));
 	TEST_ASSERT_EQUAL_INT64(MP_KEEPALIVE_TTL_MS, res_i("keepalive_ms"));
+	/* The credential went to the hook, and only there. */
+	TEST_ASSERT_EQUAL_UINT(1U, g_auth_calls);
+	TEST_ASSERT_EQUAL_STRING(ADMIN_USER, g_auth_last_user);
+	TEST_ASSERT_EQUAL_STRING(ADMIN_PW, g_auth_last_secret);
 
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":2,"
@@ -941,6 +1048,421 @@ static void test_session_methods(void)
 
 	(void)call(req);
 	TEST_ASSERT_EQUAL_INT64(MP_E_NO_SESSION, err_code());
+}
+
+/* ================================== §5.3 authentication and the role floor */
+
+/** A G1 action (`obj.set` on ui.disp.bl); returns the reply's error code, or 0. */
+static int64_t try_g1(uint32_t sid)
+{
+	char req[256];
+
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"obj.set\","
+		       "\"params\":{\"id\":\"ui.disp.bl\",\"value\":42,"
+		       "\"sid\":%u}}",
+		       sid);
+	(void)call(req);
+	if (mp_json_obj_get(&g_rp, 0, "error") < 0) {
+		return 0;
+	}
+	return err_code();
+}
+
+/** A G2 action (`obj.set` on pwr.gps.en) with the correct typed serial. */
+static int64_t try_g2_with_serial(uint32_t sid)
+{
+	char req[256];
+
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":91,\"method\":\"obj.set\","
+		       "\"params\":{\"id\":\"pwr.gps.en\",\"value\":true,"
+		       "\"sid\":%u,\"confirm\":\"%s\"}}",
+		       sid, SERIAL);
+	(void)call(req);
+	if (mp_json_obj_get(&g_rp, 0, "error") < 0) {
+		return 0;
+	}
+	return err_code();
+}
+
+/**
+ * A session opened with no credential is capped at G0.
+ *
+ * This is the defect this group exists for: before authentication was wired,
+ * `session.open` with no parameters granted every G1 action on the board.
+ */
+static void test_a_session_with_no_credential_is_capped_at_g0(void)
+{
+	uint32_t sid = session_anon();
+
+	TEST_ASSERT_NOT_EQUAL_UINT32(0U, sid);
+	/* The open itself succeeds — read-only monitoring needs no credential. */
+	TEST_ASSERT_TRUE(res_streq("role", "none"));
+	TEST_ASSERT_TRUE(res_b("auth_required"));
+	TEST_ASSERT_EQUAL_UINT(0U, g_auth_calls);
+
+	/* G0 still answers. */
+	(void)call("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"obj.get\","
+		   "\"params\":{\"id\":\"sensor.rail.poe\"}}");
+	TEST_ASSERT_TRUE(res_streq("id", "sensor.rail.poe"));
+
+	/* G1 does not, and nothing was applied. */
+	TEST_ASSERT_EQUAL_INT64(MP_E_ROLE, try_g1(sid));
+	TEST_ASSERT_EQUAL_UINT(0U, g_apply_n);
+	TEST_ASSERT_EQUAL_INT64(MP_E_ROLE, try_g2_with_serial(sid));
+	TEST_ASSERT_EQUAL_UINT(0U, g_apply_n);
+}
+
+/** A viewer may observe but not act. */
+static void test_a_viewer_cannot_perform_a_g1_action(void)
+{
+	uint32_t sid = session_as(VIEW_USER, VIEW_PW);
+
+	TEST_ASSERT_TRUE(res_streq("role", "viewer"));
+	TEST_ASSERT_EQUAL_INT64(MP_E_ROLE, try_g1(sid));
+	TEST_ASSERT_EQUAL_UINT(0U, g_apply_n);
+}
+
+/**
+ * An operator gets G1 and is refused G2 **with the correct serial supplied**.
+ *
+ * The serial is printed on the chassis and returned by `hello`, so typing it
+ * must not stand in for an admin credential.
+ */
+static void test_an_operator_gets_g1_but_not_g2(void)
+{
+	uint32_t sid = session_as(OPER_USER, OPER_PW);
+
+	TEST_ASSERT_TRUE(res_streq("role", "operator"));
+
+	TEST_ASSERT_EQUAL_INT64(0, try_g1(sid));
+	TEST_ASSERT_EQUAL_UINT(1U, g_apply_n);
+	TEST_ASSERT_EQUAL_INT32(42, g_apply[0].value);
+
+	TEST_ASSERT_EQUAL_INT64(MP_E_ROLE, try_g2_with_serial(sid));
+	TEST_ASSERT_EQUAL_UINT(1U, g_apply_n); /* nothing further applied */
+}
+
+/** An admin with the correct serial gets G2. */
+static void test_an_admin_with_the_serial_gets_g2(void)
+{
+	uint32_t sid = session();
+
+	TEST_ASSERT_TRUE(res_streq("role", "admin"));
+	TEST_ASSERT_EQUAL_INT64(0, try_g1(sid));
+	TEST_ASSERT_EQUAL_INT64(0, try_g2_with_serial(sid));
+	TEST_ASSERT_EQUAL_UINT(2U, g_apply_n);
+}
+
+/**
+ * With no auth hook wired, every session is capped at G0.
+ *
+ * The fail-closed default: an unwired hook must degrade to read-only, never to
+ * full access. A build that forgot to wire it is diagnosable
+ * (`auth_required:false`) rather than wide open.
+ */
+static void test_no_auth_hook_caps_every_session_at_g0(void)
+{
+	mp_wiring_t w;
+	uint32_t sid;
+
+	g_auth_present = false;
+	wire_up(&w);
+	TEST_ASSERT_EQUAL_INT(0, mp_init(&g_c, &w));
+	TEST_ASSERT_EQUAL_INT(0, mp_set_link(&g_c, true));
+	TEST_ASSERT_EQUAL_INT(0, mp_mode_enter(&g_c));
+
+	(void)call("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\"}");
+	TEST_ASSERT_FALSE(res_b("auth_required"));
+
+	/* Even presenting a credential that the real store would accept. */
+	sid = session();
+	TEST_ASSERT_NOT_EQUAL_UINT32(0U, sid);
+	TEST_ASSERT_FALSE(res_b("auth_required"));
+	TEST_ASSERT_TRUE(res_streq("role", "none"));
+	TEST_ASSERT_EQUAL_UINT(0U, g_auth_calls);
+
+	TEST_ASSERT_EQUAL_INT64(MP_E_ROLE, try_g1(sid));
+	TEST_ASSERT_EQUAL_UINT(0U, g_apply_n);
+}
+
+/**
+ * A refused credential and an unknown user are indistinguishable.
+ *
+ * Same code, same message, same `data.reason` — the control plane is not an
+ * account oracle. An over-long field and an empty user name join them.
+ */
+static void test_a_refusal_reveals_nothing_about_the_account(void)
+{
+	char req[512];
+	char first[256];
+	size_t len;
+	unsigned int i;
+	static const char *const bad[] = {
+		/* wrong password for a real account */
+		"{\"user\":\"" ADMIN_USER "\",\"secret\":\"wrong\"}",
+		/* an account that does not exist */
+		"{\"user\":\"nosuchuser\",\"secret\":\"wrong\"}",
+		/* the right password, the wrong account */
+		"{\"user\":\"nosuchuser\",\"secret\":\"" ADMIN_PW "\"}",
+		/* a user with no password at all */
+		"{\"user\":\"" ADMIN_USER "\"}",
+		/* an empty user name */
+		"{\"user\":\"\",\"secret\":\"" ADMIN_PW "\"}",
+		/* a secret longer than MP_SECRET_MAX */
+		"{\"user\":\"" ADMIN_USER "\",\"secret\":\""
+		"0123456789012345678901234567890123456789"
+		"0123456789012345678901234567890123456789\"}",
+		/* a user name longer than MP_USER_MAX */
+		"{\"user\":\""
+		"uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu"
+		"uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu"
+		"\",\"secret\":\"" ADMIN_PW "\"}",
+	};
+
+	first[0] = '\0';
+	for (i = 0U; i < (sizeof(bad) / sizeof(bad[0])); i++) {
+		(void)snprintf(req, sizeof(req),
+			       "{\"jsonrpc\":\"2.0\",\"id\":1,"
+			       "\"method\":\"session.open\",\"params\":%s}",
+			       bad[i]);
+		len = call(req);
+		TEST_ASSERT_EQUAL_INT64_MESSAGE(MP_E_AUTH, err_code(), bad[i]);
+
+		/* Byte-for-byte identical replies, not merely the same code. */
+		TEST_ASSERT_TRUE(len < sizeof(first));
+		if (first[0] == '\0') {
+			memcpy(first, g_rp.src, len);
+			first[len] = '\0';
+		} else {
+			TEST_ASSERT_EQUAL_STRING_MESSAGE(first, g_rp.src,
+							 bad[i]);
+		}
+
+		/* And no session came into existence. */
+		TEST_ASSERT_EQUAL_UINT32(0U, g_c.ovr.sess.id);
+	}
+}
+
+/**
+ * A lockout is reported distinctly, and only a lockout.
+ *
+ * Telling an operator to wait is operationally necessary and reveals nothing an
+ * attacker who caused the lockout does not already know.
+ */
+static void test_a_lockout_is_reported_distinctly(void)
+{
+	(void)call("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.open\","
+		   "\"params\":{\"user\":\"" LOCKED_USER
+		   "\",\"secret\":\"whatever\"}}");
+	TEST_ASSERT_EQUAL_INT64(MP_E_LOCKED, err_code());
+	TEST_ASSERT_EQUAL_UINT32(0U, g_c.ovr.sess.id);
+}
+
+/**
+ * A failed open leaves the session that is already there alone.
+ *
+ * Otherwise `session.open` with a junk password would be a way to kick a working
+ * tool off the board and revert its overrides — a denial of service that needs
+ * no credential.
+ */
+static void test_a_failed_open_does_not_disturb_the_live_session(void)
+{
+	uint32_t sid = session();
+	char req[256];
+
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"obj.override\","
+		       "\"params\":{\"id\":\"ui.disp.bl\",\"value\":30,"
+		       "\"sid\":%u}}",
+		       sid);
+	(void)call(req);
+	TEST_ASSERT_EQUAL_INT64(30, res_i("value"));
+	TEST_ASSERT_EQUAL_size_t(1U, mp_ovr_active(&g_c.ovr));
+
+	/* An attacker tries to take over and fails. */
+	(void)call("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session.open\","
+		   "\"params\":{\"user\":\"attacker\",\"secret\":\"guess\"}}");
+	TEST_ASSERT_EQUAL_INT64(MP_E_AUTH, err_code());
+
+	/* The original session and its lease survive untouched. */
+	TEST_ASSERT_EQUAL_UINT32(sid, g_c.ovr.sess.id);
+	TEST_ASSERT_EQUAL_size_t(1U, mp_ovr_active(&g_c.ovr));
+	TEST_ASSERT_EQUAL_INT64(0, try_g1(sid));
+}
+
+/** A successful takeover does not inherit the previous session's role. */
+static void test_a_takeover_does_not_inherit_the_role(void)
+{
+	uint32_t admin_sid = session();
+	uint32_t anon_sid;
+
+	TEST_ASSERT_EQUAL_INT64(0, try_g2_with_serial(admin_sid));
+
+	anon_sid = session_anon();
+	TEST_ASSERT_NOT_EQUAL_UINT32(admin_sid, anon_sid);
+	TEST_ASSERT_TRUE(res_streq("role", "none"));
+
+	g_apply_n = 0U;
+	TEST_ASSERT_EQUAL_INT64(MP_E_ROLE, try_g1(anon_sid));
+	TEST_ASSERT_EQUAL_INT64(MP_E_ROLE, try_g2_with_serial(anon_sid));
+	TEST_ASSERT_EQUAL_UINT(0U, g_apply_n);
+
+	/* The admin's id is dead too. */
+	TEST_ASSERT_EQUAL_INT64(MP_E_NO_SESSION, try_g1(admin_sid));
+
+	/* `hello` now reports the anonymous session's role, not the admin's. */
+	(void)call("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"hello\"}");
+	TEST_ASSERT_TRUE(res_streq("role", "none"));
+}
+
+/** The credential never reaches the reply, the log or the event stream. */
+static void test_the_secret_never_leaves_the_auth_hook(void)
+{
+	logr_rec_t recs[16];
+	logr_filter_t f;
+	uint16_t n = 0U;
+	uint32_t next = 0U;
+	uint32_t gap = 0U;
+	uint16_t i;
+
+	(void)session();
+
+	/* Not in the reply. */
+	TEST_ASSERT_NULL(strstr(g_rp.src, ADMIN_PW));
+	/* Not anywhere in what has been transmitted. */
+	TEST_ASSERT_TRUE(g_wire_len < sizeof(g_wire));
+	g_wire[g_wire_len] = '\0';
+	TEST_ASSERT_NULL(strstr((const char *)g_wire, ADMIN_PW));
+
+	/* Not in the audit log — which does name the user, per §5.3. */
+	logr_filter_all(&f);
+	TEST_ASSERT_EQUAL_INT(0, logr_tail(&g_log, 0U, &f, recs, 16U, &n, &next,
+					   &gap));
+	TEST_ASSERT_TRUE(n > 0U);
+	{
+		bool named = false;
+
+		for (i = 0U; i < n; i++) {
+			TEST_ASSERT_NULL_MESSAGE(strstr(recs[i].msg, ADMIN_PW),
+						 recs[i].msg);
+			if (strstr(recs[i].msg, ADMIN_USER) != NULL) {
+				named = true;
+			}
+		}
+		TEST_ASSERT_TRUE_MESSAGE(named,
+					 "§5.3: the session open must be audited "
+					 "with the user");
+	}
+}
+
+/**
+ * An override audit record names the user (§5.3).
+ *
+ * The grant and its reversion are both logged, and both carry the name the
+ * credential was granted to — an audit trail that says only "ui.disp.bl changed"
+ * answers none of the questions an audit trail exists for.
+ */
+static void test_an_override_is_audited_with_the_user(void)
+{
+	uint32_t sid = session_as(OPER_USER, OPER_PW);
+	logr_rec_t recs[16];
+	logr_filter_t f;
+	uint16_t n = 0U;
+	uint32_t next = 0U;
+	uint32_t gap = 0U;
+	uint16_t i;
+	char req[256];
+	bool grant_named = false;
+	bool revert_named = false;
+
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"obj.override\","
+		       "\"params\":{\"id\":\"ui.disp.bl\",\"value\":30,"
+		       "\"sid\":%u}}",
+		       sid);
+	(void)call(req);
+	TEST_ASSERT_EQUAL_INT64(30, res_i("value"));
+
+	/* Let the dead-man revert it, which is the path §5.3 requires logged. */
+	g_now += MP_KEEPALIVE_TTL_MS + 1U;
+	(void)mp_tick(&g_c);
+	TEST_ASSERT_EQUAL_size_t(0U, mp_ovr_active(&g_c.ovr));
+
+	logr_filter_all(&f);
+	TEST_ASSERT_EQUAL_INT(0, logr_tail(&g_log, 0U, &f, recs, 16U, &n, &next,
+					   &gap));
+	for (i = 0U; i < n; i++) {
+		if (strstr(recs[i].msg, OPER_USER) == NULL) {
+			continue;
+		}
+		if (strstr(recs[i].msg, "grant") != NULL) {
+			grant_named = true;
+		}
+		if (strstr(recs[i].msg, "deadman") != NULL) {
+			revert_named = true;
+		}
+	}
+	TEST_ASSERT_TRUE_MESSAGE(grant_named, "grant not audited with the user");
+	TEST_ASSERT_TRUE_MESSAGE(revert_named,
+				 "dead-man revert not audited with the user");
+}
+
+/**
+ * An over-long string param is *emptied*, not truncated.
+ *
+ * mp_json_str() returns -ENOSPC before writing the NUL, so the destination is
+ * left unterminated with its last byte indeterminate; every p_str() caller here
+ * then treats it as a C string (guard_or_fail() hands `confirm` straight to
+ * strlen()). The `client` echo is the deterministic witness: an over-long value
+ * must come back as JSON null, because the buffer was emptied. Without the fix
+ * it comes back as 31 bytes of garbage — and the `confirm` path, which has no
+ * echo, reads one indeterminate byte instead.
+ */
+static void test_an_over_long_string_param_is_emptied(void)
+{
+	uint32_t sid;
+	char req[512];
+	char big[MP_CONFIRM_MAX + 32U];
+	int t;
+
+	memset(big, 'X', sizeof(big) - 1U);
+	big[sizeof(big) - 1U] = '\0';
+
+	/* `client` is a 32-byte buffer and is echoed back verbatim. */
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.open\","
+		       "\"params\":{\"user\":\"" ADMIN_USER "\",\"secret\":\""
+		       ADMIN_PW "\",\"client\":\"%s\"}}",
+		       big);
+	(void)call(req);
+	sid = (uint32_t)res_i("sid");
+	t = mp_json_obj_get(&g_rp, result(), "client");
+	TEST_ASSERT_TRUE(t >= 0);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MP_J_NULL, mp_json_at(&g_rp, t)->type);
+
+	/* And an over-long confirmation is a clean refusal, not a comparison
+	 * against whatever the stack happened to hold. */
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"obj.set\","
+		       "\"params\":{\"id\":\"pwr.gps.en\",\"value\":true,"
+		       "\"sid\":%u,\"confirm\":\"%s\"}}",
+		       sid, big);
+	(void)call(req);
+	TEST_ASSERT_EQUAL_INT64(MP_E_GUARD, err_code());
+	TEST_ASSERT_EQUAL_UINT(0U, g_apply_n);
+
+	/* An over-long object id is an unknown object, not a truncated match. */
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"obj.get\","
+		       "\"params\":{\"id\":\"%s\"}}",
+		       big);
+	(void)call(req);
+	TEST_ASSERT_EQUAL_INT64(MP_E_BAD_PARAMS, err_code());
+
+	/* The real serial still works afterwards. */
+	TEST_ASSERT_EQUAL_INT64(0, try_g2_with_serial(sid));
 }
 
 /* ----------------------------------------------------------------- objects */
@@ -3006,6 +3528,19 @@ int main(void)
 	RUN_TEST(test_hello);
 	RUN_TEST(test_manifest_paging);
 	RUN_TEST(test_session_methods);
+
+	RUN_TEST(test_a_session_with_no_credential_is_capped_at_g0);
+	RUN_TEST(test_a_viewer_cannot_perform_a_g1_action);
+	RUN_TEST(test_an_operator_gets_g1_but_not_g2);
+	RUN_TEST(test_an_admin_with_the_serial_gets_g2);
+	RUN_TEST(test_no_auth_hook_caps_every_session_at_g0);
+	RUN_TEST(test_a_refusal_reveals_nothing_about_the_account);
+	RUN_TEST(test_a_lockout_is_reported_distinctly);
+	RUN_TEST(test_a_failed_open_does_not_disturb_the_live_session);
+	RUN_TEST(test_a_takeover_does_not_inherit_the_role);
+	RUN_TEST(test_the_secret_never_leaves_the_auth_hook);
+	RUN_TEST(test_an_override_is_audited_with_the_user);
+	RUN_TEST(test_an_over_long_string_param_is_emptied);
 
 	RUN_TEST(test_obj_get);
 	RUN_TEST(test_obj_get_reports_an_override);

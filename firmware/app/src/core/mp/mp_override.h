@@ -17,7 +17,14 @@
  *             board in a commanded state after the tool walks away.
  *   §5.4      The owning subsystem may **veto**: firmware always wins, and the
  *             veto is reported on the event channel rather than swallowed.
- *   §5.2      Guard classes G0..G3 escalate cumulatively (see mp_manifest.h).
+ *   §5.2/5.3  Guard classes G0..G3 escalate cumulatively (see mp_manifest.h) and
+ *             each carries a **minimum role**: G1 needs operator, G2 and G3 need
+ *             admin. The role is granted once, at session open, by the
+ *             platform's credential store (mp_wiring_t::auth); a session that
+ *             presented no credential carries MP_ROLE_NONE and can therefore do
+ *             nothing but observe. There is no way to raise a session's role
+ *             after the fact — re-authenticating means opening a new session,
+ *             which reverts everything the old one held.
  *   §5.5      Interlocks are evaluated **here**, on the device, from a state
  *             struct the glue fills. None of them is host-overridable. Making
  *             them a pure function of (mask, state, value) is what lets the
@@ -80,6 +87,45 @@ extern "C" {
 
 /** Longest accepted confirmation string (serial or phrase). */
 #define MP_CONFIRM_MAX 48U
+
+/**
+ * Longest user name recorded on a session, excluding the NUL.
+ *
+ * Matches AUTH_USER_MAX (core/auth) so an audit record never names a truncated
+ * user — the whole point of storing it is that the name in the log is the name
+ * the operator typed.
+ */
+#define MP_USER_MAX 63U
+
+/**
+ * Longest credential the control plane will carry, excluding the NUL.
+ *
+ * Matches AUTH_SECRET_MAX. Anything longer is refused as a bad credential, not
+ * truncated: silently hashing a prefix would make two different passwords the
+ * same password.
+ */
+#define MP_SECRET_MAX 64U
+
+/* --------------------------------------------------------------------- roles */
+
+/**
+ * Authorisation roles, ordered so a numeric comparison is a privilege
+ * comparison: a guard needing operator rights accepts `role >= MP_ROLE_OPERATOR`.
+ *
+ * These are numerically identical to `auth_role_t` (`core/auth/auth.h`), which
+ * is deliberately **not** included here: core/mp's dependency edge set
+ * (ARCHITECTURE.md §4) does not contain `auth`, and taking one for three
+ * integers would couple the protocol to the AAA module it must stay independent
+ * of. The glue that bridges the two asserts the identity at build time
+ * (mp_glue.c) and tests/host/test_mp_override.c pins it against the real enum.
+ */
+#define MP_ROLE_NONE 0U
+#define MP_ROLE_VIEWER 1U
+#define MP_ROLE_OPERATOR 2U
+#define MP_ROLE_ADMIN 3U
+
+/** Role name ("none"/"viewer"/"operator"/"admin"). Never NULL. */
+const char *mp_role_name(uint8_t role);
 
 /** Display-rail minimum off-time before it may be re-enabled. */
 #ifndef MP_DISP_MIN_OFF_MS
@@ -175,6 +221,17 @@ typedef struct {
 	uint32_t keepalive_ms; /**< last keepalive or successful request */
 	uint32_t ttl_ms;       /**< negotiated, <= MP_KEEPALIVE_TTL_MS */
 	bool serial_ok;        /**< G2 device-serial confirmation satisfied */
+
+	/**
+	 * Role granted at open (MP_ROLE_*), and the name it was granted to.
+	 *
+	 * Both are set by mp_ovr_session_open() and by nothing else, so a
+	 * takeover cannot inherit the previous caller's privilege. `user` is
+	 * empty when no credential was presented; it is what an audit record
+	 * names (FMT §5.3), and it is never the credential itself.
+	 */
+	uint8_t role;
+	char user[MP_USER_MAX + 1U];
 
 	/* G3 arm state: one armed action per session. */
 	uint32_t arm_nonce;
@@ -291,9 +348,22 @@ int mp_ovr_set_link(mp_ovr_ctx_t *c, bool up, uint32_t now_ms);
 /* ------------------------------------------------------------- session API */
 
 /**
- * Open the single session.
+ * Open the single session with an already-granted role.
+ *
+ * Authentication happens **before** this call, in the control plane, against the
+ * platform's credential store; this function only records the verdict. Taking
+ * the role as an argument rather than exposing a later "authorize" call is what
+ * makes it impossible to leave a session open carrying the previous caller's
+ * privilege: the role and the user are written in the same operation that clears
+ * the old session, so there is no window in between.
  *
  * @param ttl_ms   Requested keepalive TTL; clamped to MP_KEEPALIVE_TTL_MS.
+ * @param role     Granted role (MP_ROLE_*). MP_ROLE_NONE for an unauthenticated
+ *                 session, which is legal and useful — it can still observe.
+ *                 A value above MP_ROLE_ADMIN is not a super-admin: it is an
+ *                 unrecognised role and is recorded as MP_ROLE_NONE.
+ * @param user     Authenticated user name, or NULL/"" when none. Truncated to
+ *                 MP_USER_MAX. Never a credential.
  * @param out_sid  Receives the new session id (never 0).
  *
  * @retval 0        Opened. Any previous session is closed and its overrides
@@ -302,8 +372,19 @@ int mp_ovr_set_link(mp_ovr_ctx_t *c, bool up, uint32_t now_ms);
  * @retval -EINVAL  Bad argument.
  * @retval -ENOLINK The physical link is not asserted.
  */
-int mp_ovr_session_open(mp_ovr_ctx_t *c, uint32_t ttl_ms, uint32_t now_ms,
-			uint32_t *out_sid);
+int mp_ovr_session_open(mp_ovr_ctx_t *c, uint32_t ttl_ms, uint8_t role,
+			const char *user, uint32_t now_ms, uint32_t *out_sid);
+
+/** The open session's granted role, or MP_ROLE_NONE when there is none. */
+uint8_t mp_ovr_session_role(const mp_ovr_ctx_t *c);
+
+/**
+ * The open session's user name. Never NULL; "" when unauthenticated or closed.
+ *
+ * Borrowed from the ctx, so it is only valid until the session changes. This is
+ * the `user` field of the §5.3 audit record.
+ */
+const char *mp_ovr_session_user(const mp_ovr_ctx_t *c);
 
 /**
  * Refresh the keepalive.
@@ -335,6 +416,14 @@ typedef enum {
 	MP_GC_ARMED,         /**< G3: armed; repeat with the nonce after the hold */
 	MP_GC_NEED_HOLD,     /**< G3: armed but the hold has not elapsed */
 	MP_GC_ARM_MISMATCH,  /**< G3: nonce does not match the armed action */
+	/**
+	 * The session is valid but its role is below the class minimum (§5.3).
+	 *
+	 * Appended rather than inserted next to MP_GC_STALE so the existing
+	 * outcome numbers — which appear in the wire error `data.reason` through
+	 * mp_gc_name() — do not shift.
+	 */
+	MP_GC_NEED_ROLE,
 	MP_GC_COUNT,
 } mp_gc_t;
 
@@ -355,6 +444,20 @@ typedef struct {
  * serial in @p confirm (the G2 requirement, which does not go away) and the
  * phrase in @p phrase. They are separate fields rather than one, because one
  * field could only ever carry one of them and the spec asks for both.
+ *
+ * The role requirement is checked **before** either confirmation, so an operator
+ * attempting a G2 action is told its role is insufficient rather than being sent
+ * to find a serial number that would not have helped. Neither string is a
+ * secret — the serial is printed on the chassis and the phrase is in the manual
+ * — so ordering the checks for a useful message leaks nothing:
+ *
+ *   G0  nothing.
+ *   G1  a fresh session, role >= MP_ROLE_OPERATOR.
+ *   G2  G1 + role >= MP_ROLE_ADMIN + the typed device serial.
+ *   G3  G2 + the typed phrase + the arm/hold.
+ *
+ * A @p guard value above MP_GUARD_G3 is treated as G3, which is the fail-safe
+ * reading of an unknown class.
  *
  * @param guard    Required class (mp_guard_t).
  * @param sid      Caller's session id (0 when it presented none).

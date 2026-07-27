@@ -14,9 +14,17 @@
  *   - the render thread (ui_local, priority 15, 10 Hz per ARCHITECTURE.md §6)
  *     drains that queue, folds in the TIM1 encoder delta, ticks the timeout,
  *     builds the health snapshot, renders, and blits the dirty tiles;
+ *   - it publishes each rendered frame to the Maintenance Protocol panel mirror
+ *     (sts_mp_mirror_publish(), see mirror_publish() below), which is what makes
+ *     channel 0x0A and the `mirror.get` RPC answer with a real panel;
  *   - it drains the core/ui action queue: brightness/timeout edits are pushed
  *     back into cfg (and persisted), the lamp test drives the panel LED string,
  *     and reboot / factory-reset are executed here.
+ *
+ * Config mutations from this file (the brightness/timeout persist and the
+ * factory reset) go through sts_cfg_lock() and sts_cfg_factory_reset() per the
+ * sts_app.h contract: the tree is shared with the MCP engine, the shell backend
+ * and the web plane, and none of them is internally locked.
  *
  * INPUT INTEGRATION STATUS (sts_app.h contract, as it now stands)
  * ---------------------------------------------------------------
@@ -87,6 +95,20 @@ static K_THREAD_STACK_DEFINE(ui_stack, STS_UI_RENDER_STACK);
 static int ui_liveness_id = -1;
 static bool lamp_on;
 
+/*
+ * Input echo for the panel mirror (sts_app.h sts_mp_mirror_publish).
+ *
+ * Written and read only by the render thread — handle_scan_event() and the
+ * render tick both run there — so no lock is involved. These are the UI area's
+ * own view of the scan it is fed; core/fault's debounced bitmap itself is behind
+ * the platform's fault lock and is not exposed cross-area.
+ */
+static uint32_t mirror_buttons; /**< FAULT_SIG_BIT bitmap: PF0..PF6 + PF11 */
+static int32_t mirror_enc_pos;  /**< detents accumulated since encoder init */
+static uint16_t mirror_touch_x;
+static uint16_t mirror_touch_y;
+static uint32_t mirror_touch_ms; /**< 0 = no coordinate has ever been read */
+
 /* ------------------------------------------------------- input translation */
 
 /*
@@ -137,6 +159,16 @@ static void handle_scan_event(const sts_input_evt_t *e)
 	case STS_INPUT_BUTTON: {
 		uint8_t kind = button_press_kind(e->id);
 
+		/* Mirror echo: the scan posts press (1) and release (0) for every
+		 * FAULT_CLASS_BUTTON signal, so the bitmap tracks both edges. */
+		if (e->id < (uint8_t)FAULT_SIG_COUNT) {
+			if (e->value != 0) {
+				mirror_buttons |= FAULT_SIG_BIT(e->id);
+			} else {
+				mirror_buttons &= ~FAULT_SIG_BIT(e->id);
+			}
+		}
+
 		if (e->id == FAULT_SIG_BUTTON_6) {
 			/* LAMP is level: press = held, release = released. */
 			lamp_on = (e->value != 0);
@@ -163,6 +195,13 @@ static void handle_scan_event(const sts_input_evt_t *e)
 		int rc = ui_input_touch_read(&x, &y);
 
 		if (rc == 1) {
+			mirror_touch_x = x;
+			mirror_touch_y = y;
+			/* The scan's own timestamp, not now: this is when the
+			 * controller asserted INT. A zero stamp means "never", so
+			 * a coordinate captured in the first millisecond after boot
+			 * is aged by one tick rather than reported as absent. */
+			mirror_touch_ms = (e->mono_ms != 0u) ? e->mono_ms : 1u;
 			ui_feed((uint8_t)UI_IN_TOUCH, 0, x, y);
 		} else if (rc < 0) {
 			/* Rail down or bus busy: still wake so a stale panel
@@ -179,6 +218,7 @@ static void handle_scan_event(const sts_input_evt_t *e)
 	case STS_INPUT_ENCODER:
 		/* The scan does not normally post this (TIM1 is read here), but
 		 * honour it if some future source does. */
+		mirror_enc_pos += (int32_t)e->value;
 		ui_feed((uint8_t)UI_IN_ENCODER, e->value, 0u, 0u);
 		break;
 	default:
@@ -199,7 +239,17 @@ void sts_ui_post_input(const sts_input_evt_t *evt)
 
 /* ----------------------------------------------------------- action drain */
 
-/** Persist one numeric UI cfg key and commit (runs the appliers). */
+/**
+ * Persist one numeric UI cfg key and commit (runs the appliers).
+ *
+ * sts_app.h: sts_cfg() is not internally locked and the MCP engine, the shell
+ * backend and the web plane write the same tree, so the STAGE must be bracketed
+ * by sts_cfg_lock()/sts_cfg_unlock(). The lock is then RELEASED before
+ * sts_cfg_commit(), which takes the mutex itself and dispatches appliers with it
+ * down — holding it across the commit would run every applier inside the config
+ * critical section (the lock is recursive, so it would not deadlock; it would
+ * quietly park every other cfg user behind display and socket I/O).
+ */
 static void ui_cfg_persist(uint16_t id, uint64_t val)
 {
 	cfg_ctx_t *c = sts_cfg();
@@ -208,7 +258,11 @@ static void ui_cfg_persist(uint16_t id, uint64_t val)
 	if (c == NULL) {
 		return;
 	}
+
+	sts_cfg_lock();
 	rc = cfg_set_u64(c, id, val);
+	sts_cfg_unlock();
+
 	if (rc != 0) {
 		LOG_WRN("cfg_set 0x%04x failed (%d)", id, rc);
 		return;
@@ -270,16 +324,28 @@ static void handle_action(const ui_action_t *a)
 		k_sleep(K_MSEC(50)); /* let the log line drain */
 		sys_reboot(SYS_REBOOT_WARM);
 		break;
-	case UI_ACTION_FACTORY_RESET:
+	case UI_ACTION_FACTORY_RESET: {
+		int rc;
+
 		sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_WARN,
 			"operator requested factory reset from the panel");
-		if (sts_cfg() != NULL) {
-			(void)cfg_factory_reset(sts_cfg());
+		/*
+		 * sts_cfg_factory_reset(), not cfg_factory_reset(): it takes the
+		 * cfg mutex and then runs EVERY group's appliers, so no subsystem
+		 * is left serving pre-reset configuration if the cold reboot below
+		 * does not happen (a failed sys_reboot, or a supervisor that gets
+		 * there first). The bare core call reset the tree and told nobody.
+		 */
+		rc = sts_cfg_factory_reset();
+		if (rc != 0) {
+			sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_ERR,
+				"factory reset returned %d", rc);
 		}
 		(void)sts_panel_led_set(0u);
 		k_sleep(K_MSEC(50));
 		sys_reboot(SYS_REBOOT_COLD);
 		break;
+	}
 	default:
 		break;
 	}
@@ -355,6 +421,18 @@ static void fill_ident(ui_health_t *h)
 	ssize_t n;
 	size_t hlen = 0u;
 
+	/*
+	 * Deliberately NOT under sts_cfg_lock(). sts_app.h requires the lock for
+	 * every mutation and for "every read that must not see a half-applied
+	 * commit"; a hostname drawn on the panel is not one of those. This runs on
+	 * the 10 Hz render path from the lowest-priority thread in the system, so
+	 * taking the config mutex here would put every other cfg user behind a
+	 * render tick for no gain. The worst case is one frame of a torn string,
+	 * and it is bounded: cfg_get() copies a whole fixed-size cfg_val_t, and
+	 * cfg_get_bytes() rejects any length past the caller's capacity (leaving
+	 * hlen 0 and the "meridian" fallback below), so a torn read cannot
+	 * over-read.
+	 */
 	(void)cfg_get_bytes(sts_cfg(), (uint16_t)CFG_ID_NET_HOSTNAME,
 			    (uint8_t *)h->hostname, sizeof(h->hostname) - 1u,
 			    &hlen);
@@ -463,9 +541,107 @@ static void build_health(ui_health_t *h, const quality_block_t *q)
 	}
 }
 
+/* -------------------------------------------------------------- panel mirror */
+
+/**
+ * Publish the just-rendered frame for the Maintenance Protocol panel mirror
+ * (channel 0x0A / `mirror.get`).
+ *
+ * Called from the render tick with the freshly rendered g_surf. Everything here
+ * is a copy out of state this thread owns; sts_mp_mirror_publish() deep-copies
+ * the cells, the attributes and the hint list before it returns, so the
+ * stack-local frame and the pointers into g_surf do not outlive the call. It
+ * takes a 5 ms mutex and drops the frame on contention rather than parking the
+ * priority-15 ui thread — which is why there is no return code to check and no
+ * log line here: a dropped frame at 10 Hz is normal and self-healing (the next
+ * frame carries the same rows, and core/mp only records a row in its
+ * previous-frame store once it has actually been emitted).
+ *
+ * FIELDS WITH NO TRUTHFUL SOURCE, left zero rather than guessed
+ * -------------------------------------------------------------
+ *  - dialog_item / dialog_stage: ui_frame_t::item / ::stage of the top stack
+ *    frame. core/ui exposes ui_page()/ui_depth()/ui_selection() but no accessor
+ *    for either, and reaching into ui_ctx_t from the glue is not this area's
+ *    business. `dialog` itself IS truthful (the top page is EDIT or CONFIRM), so
+ *    the host still learns a dialog is up, and the dialog's text is mirrored in
+ *    full by the cells.
+ *  - led_logical: the UI's per-lamp logical bitmap. There is no such model in
+ *    core/ui — the seven panel lamps are one series string on a single PWM
+ *    (mp_mirror.h "As-built note on (b)"), so the electrical truth is carried by
+ *    panel_rail_on + panel_duty_pct + panel_fault and a fabricated bitmap would
+ *    be strictly worse than an empty one.
+ *  - rgb_state / rgb_r / rgb_g / rgb_b: the status RGB D5 is driven by the
+ *    platform's supervisor (TIM4, PD12-14). Its commanded pattern and per-channel
+ *    duties are private to supervisor.c and sts_app.h exposes no getter.
+ */
+static void mirror_publish(void)
+{
+	mp_mirror_in_t f;
+	uint8_t page = (uint8_t)ui_page(&g_ui);
+
+	memset(&f, 0, sizeof(f));
+
+	/* (a) screen — straight from the surface core/ui just rendered. */
+	f.rows = g_surf.rows;
+	f.cols = g_surf.cols;
+	f.cell_w = g_surf.cell_w; /* 8, per ui_font8x16.h UI_FONT_W */
+	f.cell_h = g_surf.cell_h; /* 16, per UI_FONT_H */
+	f.ch = g_surf.ch;
+	f.attr = g_surf.attr;
+	f.hint = g_surf.hint;
+	f.hint_count = g_surf.hint_count;
+
+	f.page = page;
+	f.depth = ui_depth(&g_ui);
+	f.sel = ui_selection(&g_ui);
+	f.dialog = (page == (uint8_t)UI_PAGE_EDIT) ||
+		   (page == (uint8_t)UI_PAGE_CONFIRM);
+
+	f.awake = ui_awake(&g_ui);
+	f.identify = ui_identify(&g_ui);
+	/* The debounced LAMP level this area forwarded to core. It equals
+	 * ui_ctx_t::lamp_test except across a wake edge, where core consumes the
+	 * waking event; core exposes no ui_lamp_test(), and for a mirror of "what
+	 * the operator is doing to the box" the held key is the honest answer. */
+	f.lamp_test = lamp_on;
+
+	/* (b) indicators. */
+	f.panel_duty_pct = sts_panel_led_get();
+	/* sts_app.h: duty 0 drops PANEL_LED_EN (PC0) and any non-zero duty asserts
+	 * it, so the commanded duty IS the rail state — one writer, no readback. */
+	f.panel_rail_on = (f.panel_duty_pct != 0u);
+	/* PF12 (U55 RT9742 nFLG) is scanned signal 12, and alarm ids 0..31 mirror
+	 * fault_sig_t one-for-one (fault.h), so the alarm mask is the cross-area
+	 * view of that pin. */
+	f.panel_fault = (sts_alarms_active() &
+			 FAULT_ALARM_BIT(FAULT_SIG_PANEL_LED_FAULT)) != 0u;
+	f.bl_permille = ui_backlight_permille(&g_ui);
+
+	/* (c) input echo. */
+	f.buttons_down = mirror_buttons;
+	f.enc_pos = mirror_enc_pos;
+	f.touch_x = mirror_touch_x;
+	f.touch_y = mirror_touch_y;
+	f.touch_ms = mirror_touch_ms;
+
+	sts_mp_mirror_publish(&f);
+}
+
 /* --------------------------------------------------------------- cfg apply */
 
-/** Pull ui.brightness / ui.timeout.s from cfg into the core ui context. */
+/**
+ * Pull ui.brightness / ui.timeout.s from cfg into the core ui context.
+ *
+ * The pair is read under sts_cfg_lock(): these two keys are applied together and
+ * this runs on the *committing* thread with the cfg mutex released (sts_app.h),
+ * so a second commit racing in between could otherwise hand the panel one key
+ * from before it and one from after. sts_app.h scopes read-locking to exactly
+ * this case — "every read that must not see a half-applied commit" — and taking
+ * the mutex here is free, since an applier only runs on a commit.
+ *
+ * No deadlock: sts_cfg_commit(), sts_cfg_factory_reset() and
+ * sts_cfg_register_store() all dispatch appliers with the mutex down.
+ */
 static void apply_ui_group(void *ctx, uint8_t group)
 {
 	uint64_t bright = 60u;
@@ -474,8 +650,10 @@ static void apply_ui_group(void *ctx, uint8_t group)
 	ARG_UNUSED(ctx);
 	ARG_UNUSED(group);
 
+	sts_cfg_lock();
 	(void)cfg_get_u64(sts_cfg(), (uint16_t)CFG_ID_UI_BRIGHTNESS, &bright);
 	(void)cfg_get_u64(sts_cfg(), (uint16_t)CFG_ID_UI_TIMEOUT_S, &timeout);
+	sts_cfg_unlock();
 
 	/* The schema allows 0..100 but core/ui floors brightness at 10 % so a
 	 * mis-set value cannot black out the field-service panel. */
@@ -528,6 +706,7 @@ static void ui_thread_entry(void *p1, void *p2, void *p3)
 			int32_t detents = ui_input_encoder_delta();
 
 			if (detents != 0) {
+				mirror_enc_pos += detents;
 				ui_feed((uint8_t)UI_IN_ENCODER,
 					(int16_t)detents, 0u, 0u);
 			}
@@ -539,7 +718,13 @@ static void ui_thread_entry(void *p1, void *p2, void *p3)
 			}
 			build_health(&h, &q);
 
-			(void)ui_render(&g_ui, &q, &h, &g_surf);
+			if (ui_render(&g_ui, &q, &h, &g_surf) == 0) {
+				/* Mirror the frame the panel is about to show,
+				 * before the blit: the surface is what the host
+				 * replicates, and a display that is absent or
+				 * still powering up must not stop the mirror. */
+				mirror_publish();
+			}
 			(void)ui_display_blit(&g_surf);
 			ui_display_backlight_permille(
 				ui_backlight_permille(&g_ui));
@@ -566,10 +751,15 @@ int sts_ui_start(void)
 		uint64_t bright = cfg.brightness_pct;
 		uint64_t timeout = cfg.timeout_s;
 
+		/* Same coherency argument as apply_ui_group(): the console and web
+		 * planes are already running by the time this area starts. */
+		sts_cfg_lock();
 		(void)cfg_get_u64(sts_cfg(), (uint16_t)CFG_ID_UI_BRIGHTNESS,
 				  &bright);
 		(void)cfg_get_u64(sts_cfg(), (uint16_t)CFG_ID_UI_TIMEOUT_S,
 				  &timeout);
+		sts_cfg_unlock();
+
 		if (bright < UI_BRIGHTNESS_MIN_PCT) {
 			bright = UI_BRIGHTNESS_MIN_PCT;
 		}

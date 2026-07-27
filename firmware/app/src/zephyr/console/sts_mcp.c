@@ -171,6 +171,20 @@ static int mcp_cfg_commit(void *user, cfg_commit_res_t *res)
 	return sts_cfg_commit(res);
 }
 
+/*
+ * And the same for FACTORY_RESET, for the same reason with a wider blast radius:
+ * cfg_factory_reset() alone rewrote every key and erased NVS while the log ring,
+ * the syslog sender, the network services, the timing loop and the display all
+ * carried on with the configuration they had been handed before the reset — until
+ * somebody rebooted the unit. sts_cfg_factory_reset() runs every registered
+ * group's appliers.
+ */
+static int mcp_cfg_factory_reset(void *user)
+{
+	ARG_UNUSED(user);
+	return sts_cfg_factory_reset();
+}
+
 /* ------------------------------------------------------------------ ISR */
 
 static void mcp_uart_isr(const struct device *dev, void *user)
@@ -440,6 +454,7 @@ int sts_mcp_start(void)
 	w.cfg_lock = mcp_cfg_lock;
 	w.cfg_unlock = mcp_cfg_unlock;
 	w.cfg_commit_cb = mcp_cfg_commit;
+	w.cfg_factory_cb = mcp_cfg_factory_reset;
 	w.log = sts_logring();
 	w.status_cb = mcp_status_cb;
 	w.diag_cb = sts_diag_encode;

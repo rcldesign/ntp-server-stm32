@@ -290,6 +290,31 @@ static int cfg_commit_through_glue(mcp_ctx_t *c, cfg_commit_res_t *res,
 	return rc;
 }
 
+/*
+ * Same shape and the same reason, for FACTORY_RESET (mcp.h "Config commits"). A
+ * reset that rewrites every key and tells no subscriber is the commit defect with
+ * a wider blast radius: the reply says the unit is back to defaults while the
+ * network stack, the log level, the display and the timing loop all keep the
+ * configuration they were handed before it.
+ */
+static int cfg_factory_through_glue(mcp_ctx_t *c, bool locked)
+{
+	int rc;
+
+	if (c->w.cfg_factory_cb == NULL) {
+		return cfg_factory_reset(c->w.cfg);
+	}
+
+	if (locked) {
+		cfg_leave(c);
+	}
+	rc = c->w.cfg_factory_cb(c->w.cfg_factory_user);
+	if (locked) {
+		cfg_enter(c);
+	}
+	return rc;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Session / policy                                                          */
 /* ------------------------------------------------------------------------- */
@@ -1015,7 +1040,9 @@ static int h_factory_reset(mcp_ctx_t *c, const mcp_frame_t *f)
 					 (uint8_t)MCP_ERR_ARG);
 	}
 
-	rc = cfg_factory_reset(c->w.cfg);
+	/* Through the glue, so every group's appliers run (mcp.h "Config
+	 * commits"); the section is held here, so it is dropped for the call. */
+	rc = cfg_factory_through_glue(c, true);
 	c->exp_active = false;
 	c->imp_active = false;
 	/* The credential this session authenticated against no longer

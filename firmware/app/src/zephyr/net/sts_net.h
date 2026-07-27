@@ -5,10 +5,16 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * PRIVATE to src/zephyr/net/. The platform, console and ui areas talk to this
- * area through src/zephyr/sts_app.h and nothing else (ARCHITECTURE.md §2); the
- * one inbound exception is src/zephyr/storage/sts_store.h, which its own header
- * declares to be a deliberately public façade (that is where this area gets its
- * port_crypto_t from rather than standing up a second mbedTLS binding).
+ * area through src/zephyr/sts_app.h and nothing else (ARCHITECTURE.md §2). Two
+ * inbound exceptions, both thread-safe façades over hardware this area cannot
+ * reach twice:
+ *
+ *   storage/sts_store.h  where this area gets its port_crypto_t, rather than
+ *                        standing up a second mbedTLS binding.
+ *   storage/sts_atecc.h  the device-unique value behind the RFC 3411 SNMP
+ *                        engine id (sts_snmp.c). Every entry point there
+ *                        degrades to the software path, so consuming it needs
+ *                        no ordering discipline.
  *
  * Naming: every file and header in this directory carries an `sts_` prefix.
  * app/CMakeLists.txt puts `src/` on the include path, so `<zephyr/net/x.h>`
@@ -30,6 +36,7 @@
 #include "ntp/ntp.h"
 #include "ptp/ptp.h"
 #include "snmp/snmp.h"
+#include "snmp/snmp_v3.h"
 
 #include "zephyr/sts_app.h"
 
@@ -196,6 +203,15 @@ void sts_txts_stats(sts_txts_stats_t *out);
 
 int sts_ntp_start(void);
 
+/**
+ * Re-read the four `sec.ntpkeyN.*` symmetric-key slots into the live server.
+ *
+ * Called from sts_ntp_start() and from the CFG_G_SEC applier. The work is
+ * DEFERRED to the NTP thread — see the implementation for why the applier must
+ * not write the key table itself.
+ */
+void sts_ntp_reload_keys(void);
+
 /** Snapshot the core/ntp and core/nts counters plus the socket-level ones. */
 typedef struct {
 	ntp_stats_t ntp;
@@ -288,16 +304,28 @@ typedef struct {
 void sts_syslog_stats(sts_syslog_stats_t *out);
 
 /* ------------------------------------------------------------------------- */
-/* sts_snmp.c — SNMPv2c agent + traps (priority 12)                           */
+/* sts_snmp.c — SNMPv2c/v3 agent + traps (priority 12)                        */
 /* ------------------------------------------------------------------------- */
 
 int sts_snmp_start(void);
+
+/** Re-apply the 0x0B snmp group (community, trap host, ACL, hostname). */
 void sts_snmp_reapply(void);
+
+/**
+ * Re-apply the 0x0A security keys this agent owns: `sec.snmp.v2c`,
+ * `sec.snmp.notify.ms` and `sec.snmpv3.trap.user/.lvl`. The USM users and the
+ * engine keys are CFG_F_REBOOT_REQUIRED and deliberately not touched.
+ */
+void sts_snmp_on_cfg_sec(void);
 
 /** Queue a notification for the trap sender. Safe from any thread. */
 void sts_snmp_notify(snmp_trap_t trap);
 
 void sts_snmp_stats(snmp_stats_t *out);
+
+/** USM counters. Zeroed when SNMPv3 is not running. */
+void sts_snmp_v3_stats(snmp_v3_stats_t *out);
 
 #ifdef __cplusplus
 }

@@ -58,6 +58,19 @@
 
 LOG_MODULE_REGISTER(sts_hk, CONFIG_STS1000_LOG_LEVEL);
 
+/*
+ * sts_atecc_reapply() applies `sec.atecc.en` / `sec.atecc.slot` to the secure
+ * element. It is implemented in the console-gated storage area
+ * (src/zephyr/storage/sts_atecc.c), so the reference is WEAK — the same idiom
+ * sts_web.c uses for sts_dfu_port() — and with CONFIG_STS1000_CONSOLE=n it
+ * resolves to NULL: that image has no cfg persistence and no secure-element
+ * services, so there is nothing to configure.
+ *
+ * Declared here rather than by including the area's header, so the always-built
+ * platform area gains no hard link dependency on an optional area.
+ */
+extern void sts_atecc_reapply(void) __attribute__((weak));
+
 #define HK_STACK_SIZE 4096
 #define HK_PRIO       14   /* ARCHITECTURE.md §6 */
 #define HK_PERIOD_MS  250  /* 4 Hz base tick; the 1 Hz work runs every 4th */
@@ -803,6 +816,21 @@ int sts_hk_start(void)
 	if (rc != 0) {
 		LOG_ERR("thermal_init failed (%d)", rc);
 		return rc;
+	}
+
+	/*
+	 * Push the ATECC608B's configuration into the façade. It had no caller, so
+	 * `sec.atecc.en` and `sec.atecc.slot` were read by nothing and the part ran
+	 * on the Kconfig default slot however cfg was set.
+	 *
+	 * Nothing to check and nothing to propagate: the call returns void, and
+	 * every entry point behind it answers -ENODEV when the part is absent,
+	 * unprovisioned or disabled — which means "use the software key"
+	 * (port_crypto over PSA/mbedTLS), not "housekeeping failed to start"
+	 * (sts_atecc.h). The absence is logged once, by that area.
+	 */
+	if (sts_atecc_reapply != NULL) {
+		sts_atecc_reapply();
 	}
 
 	hk.liveness_id = sts_liveness_register("housekeeping");

@@ -104,8 +104,16 @@ Conventions:
   `thermal→util`; `ntp→util,quality`; `nts→util`; `ptp→util,quality`; `ina228→util`;
   `fault→util`; `pwrseq→ina228,util`; `mcp→util,cfg,logring,quality`; `cfg→util`;
   `logring→util`; `snmp→util,quality`; `ui→util,quality`;
-  `web→util,cfg,logring,quality`; `mp→util,cfg,logring,quality`;
-  `atecc→util`; `auth→util,cfg`; `fwupd→util,ubx`.
+  `web→util,cfg,logring,quality`; `mp→util,cfg,logring,quality,ina228`;
+  `atecc→util`; `auth→util`; `fwupd→util,ubx`.
+- Two qualifications on that map, both recorded in `tests/host/CMakeLists.txt` because the
+  build is what enforces them:
+  - **Types-only includes are not edges.** `mp` includes `ui/ui.h` and `port/port_image.h`
+    for `ui_hint_t`/`UI_ATTR_*` and the reboot-mode enum, but references no `ui` symbol, so
+    `ui` is deliberately not a link dependency of `mp`. Port headers are never edges in this
+    map — they are the platform seam, not core modules.
+  - **A module may own several suites.** `snmp` carries a second suite, `snmpv3`
+    (`snmpv3→snmp,util,quality`), because USM is a distinct layer over the shared PDU codec.
 
 ---
 

@@ -24,13 +24,28 @@ const char *mp_ovr_ev_name(uint8_t ev)
 }
 
 static const char *const gc_names[MP_GC_COUNT] = {
-	"ok",          "need-session", "stale",       "need-serial",
-	"need-phrase", "armed",        "need-hold",   "arm-mismatch",
+	"ok",          "need-session", "stale",        "need-serial",
+	"need-phrase", "armed",        "need-hold",    "arm-mismatch",
+	"need-role",
 };
 
 const char *mp_gc_name(uint8_t gc)
 {
 	return (gc < (uint8_t)MP_GC_COUNT) ? gc_names[gc] : "unknown";
+}
+
+static const char *const role_names[] = {
+	"none",
+	"viewer",
+	"operator",
+	"admin",
+};
+
+const char *mp_role_name(uint8_t role)
+{
+	return (role < (uint8_t)(sizeof(role_names) / sizeof(role_names[0])))
+		       ? role_names[role]
+		       : "unknown";
 }
 
 /* ------------------------------------------------------------------ utils */
@@ -380,8 +395,8 @@ int mp_ovr_set_link(mp_ovr_ctx_t *c, bool up, uint32_t now_ms)
 	return 0;
 }
 
-int mp_ovr_session_open(mp_ovr_ctx_t *c, uint32_t ttl_ms, uint32_t now_ms,
-			uint32_t *out_sid)
+int mp_ovr_session_open(mp_ovr_ctx_t *c, uint32_t ttl_ms, uint8_t role,
+			const char *user, uint32_t now_ms, uint32_t *out_sid)
 {
 	if ((c == NULL) || (out_sid == NULL)) {
 		return -EINVAL;
@@ -397,6 +412,12 @@ int mp_ovr_session_open(mp_ovr_ctx_t *c, uint32_t ttl_ms, uint32_t now_ms,
 					"session replaced", now_ms);
 	}
 
+	/*
+	 * The memset is what makes a takeover safe: it clears the previous
+	 * session's role, user and G2 confirmation, and the only writes after it
+	 * are from this call's own arguments. Nothing here can carry privilege
+	 * across the boundary.
+	 */
 	(void)memset(&c->sess, 0, sizeof(c->sess));
 	if (ttl_ms == 0U) {
 		ttl_ms = MP_KEEPALIVE_TTL_MS;
@@ -413,9 +434,29 @@ int mp_ovr_session_open(mp_ovr_ctx_t *c, uint32_t ttl_ms, uint32_t now_ms,
 	c->sess.opened_ms = now_ms;
 	c->sess.keepalive_ms = now_ms;
 	c->sess.ttl_ms = ttl_ms;
+	/* An out-of-range role is unrecognised, not privileged. */
+	c->sess.role = (role <= (uint8_t)MP_ROLE_ADMIN) ? role
+						       : (uint8_t)MP_ROLE_NONE;
+	copy_str(c->sess.user, sizeof(c->sess.user), user);
 
 	*out_sid = c->sess.id;
 	return 0;
+}
+
+uint8_t mp_ovr_session_role(const mp_ovr_ctx_t *c)
+{
+	if ((c == NULL) || (c->sess.id == 0U)) {
+		return (uint8_t)MP_ROLE_NONE;
+	}
+	return c->sess.role;
+}
+
+const char *mp_ovr_session_user(const mp_ovr_ctx_t *c)
+{
+	if ((c == NULL) || (c->sess.id == 0U)) {
+		return "";
+	}
+	return c->sess.user;
 }
 
 int mp_ovr_keepalive(mp_ovr_ctx_t *c, uint32_t sid, uint32_t now_ms)
@@ -520,6 +561,23 @@ int mp_ovr_guard(mp_ovr_ctx_t *c, uint8_t guard, uint32_t sid, uint16_t obj1,
 	if (since(now_ms, c->sess.keepalive_ms) > c->sess.ttl_ms) {
 		c->refusals++;
 		return (int)MP_GC_STALE;
+	}
+
+	/*
+	 * §5.3 role floor: operator for G1, admin above it. Checked before the
+	 * confirmations so the refusal names the real obstacle, and before the
+	 * keepalive refresh so an under-privileged caller cannot hold a session
+	 * open by hammering actions it is not allowed to perform.
+	 */
+	{
+		uint8_t need = (guard == (uint8_t)MP_GUARD_G1)
+				       ? (uint8_t)MP_ROLE_OPERATOR
+				       : (uint8_t)MP_ROLE_ADMIN;
+
+		if (c->sess.role < need) {
+			c->refusals++;
+			return (int)MP_GC_NEED_ROLE;
+		}
 	}
 
 	if (guard == (uint8_t)MP_GUARD_G1) {

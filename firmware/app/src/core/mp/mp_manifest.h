@@ -53,18 +53,30 @@ extern "C" {
 /* ------------------------------------------------------------ guard classes */
 
 /**
- * Guard classes (FMT §5.2).
+ * Guard classes (FMT §5.2, §5.3).
  *
  * The escalation is cumulative: every requirement of a lower class also applies.
+ * Each class above G0 also carries a **minimum role**, granted at session open
+ * from the credential store the web and console planes share; the typed serial
+ * and phrase are anti-mistake interlocks *on top of* that authentication, never
+ * a substitute for it (the serial is printed on the label and returned by
+ * `hello`, so it authenticates nobody).
  *
- *   G0  observe only, or a change with no service consequence. No session.
- *   G1  an open session with a fresh keepalive.
- *   G2  G1 + a typed device-serial confirmation + every declared interlock must
- *       pass. This is the class for anything that can interrupt served time or
- *       damage an attached instrument.
+ *   G0  observe only, or a change with no service consequence. No session, no
+ *       role.
+ *   G1  an open session with a fresh keepalive, role >= operator.
+ *   G2  G1 + role >= admin + a typed device-serial confirmation + every declared
+ *       interlock must pass. This is the class for anything that can interrupt
+ *       served time or damage an attached instrument.
  *   G3  G2 + a typed phrase + a hold: the request arms, and a second request
  *       carrying the same nonce completes it only after the hold has elapsed.
  *       Reserved for actions that stop the clock or the board.
+ *
+ * The role floor is enforced in mp_ovr_guard(), which every guarded RPC reaches
+ * through one function (guard_or_fail() in mp_rpc.c). No object carrying
+ * MP_OF_WRITE, MP_OF_OVERRIDE or MP_OF_PULSE may be declared G0 — that would
+ * route actuation around the check, and tests/host/test_mp_manifest.c fails if
+ * one ever is.
  */
 typedef enum {
 	MP_GUARD_G0 = 0,

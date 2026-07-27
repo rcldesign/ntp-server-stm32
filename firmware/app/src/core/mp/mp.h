@@ -103,6 +103,28 @@ typedef enum {
 #define MP_E_HOLD (-32007)       /**< G3 armed; the hold has not elapsed */
 #define MP_E_VETO (-32008)       /**< firmware refused or withdrew */
 #define MP_E_IO (-32009)         /**< a port or subsystem returned an error */
+/**
+ * The credential was not accepted.
+ *
+ * Deliberately one code for every non-lockout refusal: a wrong password, an
+ * unknown user, an over-long field and "no authority could answer" are
+ * indistinguishable in the reply, so the control plane is not an account
+ * oracle.
+ */
+#define MP_E_AUTH (-32010)
+/**
+ * Locked out by the credential store's brute-force throttle.
+ *
+ * Reported distinctly from MP_E_AUTH on purpose. Telling an operator "you are
+ * locked out, wait" is operationally necessary — otherwise a technician at the
+ * board reads a lockout as a typo and keeps extending it — and it reveals
+ * nothing: the lockout is keyed on the name the caller just supplied, and
+ * whoever caused it already knows they were failing. It says nothing about
+ * whether the account exists, because the throttle counts attempts, not users.
+ */
+#define MP_E_LOCKED (-32011)
+/** The session is valid but its role is below the guard class (FMT §5.3). */
+#define MP_E_ROLE (-32012)
 
 /** Human-readable message for an MP error code. Never NULL. */
 const char *mp_err_msg(int code);
@@ -181,6 +203,32 @@ typedef struct {
 	 */
 	int (*cfg_commit)(void *user, cfg_commit_res_t *res);
 	void *cfg_user;
+
+	/* --- authentication ------------------------------------------------ */
+	/**
+	 * Authenticate a maintenance credential and return the granted role.
+	 *
+	 * Optional. When NULL the console cannot authenticate anybody, so every
+	 * session is capped at MP_GUARD_G0 — observation only. That is the safe
+	 * default: an unwired hook must degrade to read-only, never to full
+	 * access.
+	 *
+	 * The glue routes this to the one credential store the web and console
+	 * planes already share (sts_aaa_check()), so the lockout counters and the
+	 * role mapping are the same on every surface (FMT §5.3). Core neither
+	 * stores nor caches the credential: @p secret is borrowed for the
+	 * duration of the call and wiped by the caller immediately afterwards.
+	 *
+	 * @param out_role  auth_role_t (== MP_ROLE_*); MP_ROLE_NONE unless the
+	 *                  return value is 0.
+	 * @retval 0        Accepted.
+	 * @retval -EBUSY   Locked out by the brute-force throttle. This one
+	 *                  reason *is* reported to the caller (see MP_E_LOCKED).
+	 * @retval <0       Refused. The reason is NOT reported to the caller.
+	 */
+	int (*auth)(void *user, const char *user_name, const char *secret,
+		    uint8_t *out_role);
+	void *auth_user;
 
 	/** Reboot / stay-in-bootloader. Modes as port_image_t::reboot. */
 	const port_image_t *img;
