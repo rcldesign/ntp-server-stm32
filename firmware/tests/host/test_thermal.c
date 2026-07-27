@@ -440,6 +440,19 @@ static void test_failsafe_holds_the_ladder_rather_than_escalating(void)
 	TEST_ASSERT_TRUE((out.flags & THERMAL_FLAG_ALARM) != 0u);
 	TEST_ASSERT_TRUE((out.flags & THERMAL_FLAG_SHED_RB) != 0u);
 	TEST_ASSERT_TRUE((out.flags & THERMAL_FLAG_POE_KILL) == 0u);
+
+	/* A cold cycle already requested stays requested when the sensor
+	 * disappears: pwrseq must not see the request retracted while the
+	 * enclosure is, as far as anyone knows, still at 81 C. */
+	out = soak(&ctx, &ms, 81000, 2u);
+	TEST_ASSERT_TRUE(out.request_poe_kill);
+
+	ms += 1000u;
+	in_defaults(&in, ms, 81000);
+	in.enclosure_valid = false;
+	TEST_ASSERT_EQUAL_INT(0, thermal_step_1hz(&ctx, &in, &out));
+	TEST_ASSERT_TRUE(out.request_poe_kill);
+	TEST_ASSERT_TRUE((out.flags & THERMAL_FLAG_POE_KILL) != 0u);
 }
 
 /* ------------------------------------------------------------- the ladder */

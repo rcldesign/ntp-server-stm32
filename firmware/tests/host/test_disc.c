@@ -1757,6 +1757,7 @@ static void test_publishes_the_quality_block(void)
 	disc_in_t in;
 	disc_out_t out;
 	unsigned int i;
+	uint32_t disp_locked_q16;
 
 	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, NULL));
 	TEST_ASSERT_EQUAL_INT(0, quality_state_init(&qs));
@@ -1801,6 +1802,7 @@ static void test_publishes_the_quality_block(void)
 	TEST_ASSERT_TRUE(b.root_disp_q16 > 0u);
 	TEST_ASSERT_TRUE(quality_ns_from_ntp_short(b.root_disp_q16) < 1000000);
 	TEST_ASSERT_TRUE((b.flags & QUALITY_FLAG_GNSS_TIME_LOCKED) != 0u);
+	disp_locked_q16 = b.root_disp_q16;
 
 	/* An explicit reference identifier overrides the default. */
 	ms += 1000u;
@@ -1827,6 +1829,20 @@ static void test_publishes_the_quality_block(void)
 	TEST_ASSERT_TRUE(b.holdover_elapsed_s > 90u);
 	TEST_ASSERT_TRUE(b.holdover_est_err_ns > 0);
 	TEST_ASSERT_TRUE(b.root_disp_q16 > 0u);
+	/* Entering holdover may only ever raise the served dispersion: it is
+	 * an upper bound on the error, and the error just got less certain. */
+	TEST_ASSERT_TRUE(b.root_disp_q16 >= disp_locked_q16);
+
+	/* The first pulse back publishes the recovery state. */
+	ms += 1000u;
+	env_defaults(&in.env, ms);
+	pps_from_error(&in.pps, p.e_ns, 1.0, expected);
+	expected += 1000000u;
+	TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, &qs, &out));
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_UINT8(QUALITY_LOCK_RECOVERING, b.lock_state);
+	TEST_ASSERT_FALSE(b.holdover);
+	TEST_ASSERT_EQUAL_UINT32(0u, b.holdover_elapsed_s);
 
 	/* And so does the park. */
 	TEST_ASSERT_EQUAL_INT(0, disc_park(&ctx, NULL));
@@ -2062,6 +2078,8 @@ int main(void)
 
 	RUN_TEST(test_irregular_and_backwards_timestamps_are_survivable);
 	RUN_TEST(test_slew_limiter_is_reported);
+	RUN_TEST(test_lock_is_lost_before_holdover_when_pulses_are_merely_late);
+	RUN_TEST(test_negative_rail_saturates_and_is_reported);
 	RUN_TEST(test_lock_is_lost_after_sustained_bad_seconds);
 
 	return UNITY_END();

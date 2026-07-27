@@ -236,7 +236,7 @@ static void test_keyring_rotation_window(void)
 	}
 
 	TEST_ASSERT_EQUAL_INT(0, nts_keyring_rotate(&g_ring, 9000));
-	TEST_ASSERT_EQUAL_INT(-ENOKEY, nts_cookie_unseal(&g_ring, cookie,
+	TEST_ASSERT_EQUAL_INT(-ENOENT, nts_cookie_unseal(&g_ring, cookie,
 							 sizeof(cookie), &back));
 
 	/* Fresh cookies use the new key and are unaffected. */
@@ -286,7 +286,7 @@ static void test_keyring_install_restores_across_reboot(void)
 	/*
 	 * Reboot: a brand-new ring cannot read the old cookie until the sealed
 	 * master key is restored (spec §4.2). The rejection is -EBADMSG rather
-	 * than -ENOKEY because a cold ring mints ids from 1 again, so the id
+	 * than -ENOENT because a cold ring mints ids from 1 again, so the id
 	 * matches a key that is not the one that sealed this cookie. Both codes
 	 * mean the same thing to the datapath — NTS NAK, go and re-key — which
 	 * is why the id space is not worth persisting on its own.
@@ -366,7 +366,7 @@ static void test_cookie_rejects_mutation(void)
 	 * from a forgery, which matters: one earns a NAK, the other silence. */
 	memcpy(bad, good, sizeof(bad));
 	bad[1] ^= 0x10U;
-	TEST_ASSERT_EQUAL_INT(-ENOKEY, nts_cookie_unseal(&g_ring, bad, sizeof(bad),
+	TEST_ASSERT_EQUAL_INT(-ENOENT, nts_cookie_unseal(&g_ring, bad, sizeof(bad),
 							 &back));
 
 	/* The AEAD id is checked before any crypto runs. */

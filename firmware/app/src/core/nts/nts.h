@@ -234,8 +234,10 @@ int nts_cookie_seal(nts_keyring_t *r, const nts_cookie_keys_t *k,
  * @retval 0         Authentic; @p k is valid.
  * @retval -EINVAL   NULL argument or uninitialised ring.
  * @retval -EBADMSG  Wrong length, or the SIV does not verify.
- * @retval -ENOKEY   No live master key with that id — the usual, benign case
- *                   of a cookie that outlived its generation.
+ * @retval -ENOENT   No live master key with that id — the usual, benign case
+ *                   of a cookie that outlived its generation. Deliberately not
+ *                   -ENOKEY: that code is a Linux extension, absent from the
+ *                   target's newlib, so core must never name it.
  * @retval -ENOTSUP  A well-formed cookie naming an AEAD this server does not
  *                   implement.
  * @retval -EIO      The AES port failed.

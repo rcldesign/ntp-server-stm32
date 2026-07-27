@@ -130,6 +130,26 @@ static void run_out(model_t *m, uint32_t step_ms, unsigned int max_iters)
 	}
 }
 
+/*
+ * Pump until @p stage is reached. Used by the tests that have to spoil a
+ * reading *after* stage 3's baseline has accepted it — stage 3 demands all nine
+ * monitors report, so a rail cannot simply start out unreadable.
+ */
+static void run_to_stage(model_t *m, pwrseq_stage_t stage, uint32_t step_ms,
+			 unsigned int max_iters)
+{
+	unsigned int i;
+
+	pump(m);
+	for (i = 0U; i < max_iters; i++) {
+		if ((pwrseq_stage(&m->ctx) >= stage) || m->ctx.halted) {
+			return;
+		}
+		advance(m, step_ms);
+	}
+	TEST_FAIL_MESSAGE("never reached the requested stage");
+}
+
 static int idx_of_from(const model_t *m, pwrseq_action_t a, size_t start)
 {
 	size_t i;
@@ -358,6 +378,33 @@ static void test_rb_acceptance_window(void)
 	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_rb_window(NULL, 0U, 5U, &lo, &hi));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_rb_window(&x, 0U, 5U, NULL, &hi));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_rb_window(&x, 0U, 5U, &lo, NULL));
+}
+
+static void test_rb_window_survives_a_degenerate_transfer_function(void)
+{
+	/*
+	 * The transfer function comes from configuration, so a wrong pedestal
+	 * or gain can drive the expected voltage negative. The window must stay
+	 * an ordered interval around it — a tolerance that inherited the sign
+	 * would produce hi < lo, which reads as "always out of window" for the
+	 * over-voltage case and, worse, could read as "always in" if the
+	 * comparison were written the other way round.
+	 */
+	pwrseq_rb_xfer_t bad = {
+		.vref_mv = 3000U,
+		.steps = 1024U,
+		.pedestal_mv = 0U,
+		.gain_m1000 = 335U,
+	};
+	int32_t lo = 0;
+	int32_t hi = 0;
+
+	TEST_ASSERT_EQUAL_INT32(-1005, pwrseq_rb_expected_mv(&bad, 0U));
+
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_rb_window(&bad, 0U, 5U, &lo, &hi));
+	TEST_ASSERT_EQUAL_INT32(-1055, lo);
+	TEST_ASSERT_EQUAL_INT32(-955, hi);
+	TEST_ASSERT_TRUE(lo < hi);
 }
 
 /* ------------------------------------------------------ derived predicates */
@@ -1083,6 +1130,222 @@ static void test_stage_re_entry_after_a_failure(void)
 						   0U));
 }
 
+static void test_an_i2c_probe_that_never_answers_alarms(void)
+{
+	model_t m;
+
+	model_init(&m, NULL);
+	m.in.i2c_probe_ok = false;
+	run_out(&m, 250U, 60U);
+
+	TEST_ASSERT_EQUAL_UINT(3U, count_of(&m, PWRSEQ_ACT_I2C_PROBE));
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_I2C)) != 0U);
+	/* Stage 2 is abandoned, so the display controller is left in reset. */
+	expect_absent(&m, PWRSEQ_ACT_DISP_RST_RELEASE);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
+}
+
+static void test_shunt_trims_that_never_apply_stop_the_rail_checks(void)
+{
+	model_t m;
+
+	/*
+	 * ARCHITECTURE.md invariant 7 and interface ref §10 caution 7: an
+	 * INA228 that has reverted to POR calibration reads about 1 % off and
+	 * raises no flag of its own. If the trim cannot be written, no reading
+	 * downstream of it may be believed — so the stage is abandoned rather
+	 * than continuing on to judge rails with uncalibrated monitors.
+	 */
+	model_init(&m, NULL);
+	m.in.shunt_trims_applied = false;
+	run_out(&m, 100U, 60U);
+
+	TEST_ASSERT_EQUAL_UINT(3U, count_of(&m, PWRSEQ_ACT_APPLY_SHUNT_TRIMS));
+	expect_absent(&m, PWRSEQ_ACT_READ_RAIL_BASELINE);
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_SHUNT_TRIM)) != 0U);
+	/* The rail checks were part of the abandoned stage, so no halt. */
+	TEST_ASSERT_FALSE(m.ctx.halted);
+}
+
+static void test_a_missing_phy_reference_clock_holds_the_reset(void)
+{
+	model_t m;
+
+	/* Interface ref §2 stage 4: release LAN_RST_N only "after rails stable
+	 * and the 25 MHz PHY clock is up". A PHY reset released into a dead
+	 * clock reads back an all-ones ID and never links. */
+	model_init(&m, NULL);
+	m.in.phy_refclk_stable = false;
+	run_out(&m, 250U, 60U);
+
+	expect_absent(&m, PWRSEQ_ACT_LAN_RST_RELEASE);
+	expect_absent(&m, PWRSEQ_ACT_PHY_MDIO_POLL);
+	TEST_ASSERT_FALSE(m.ctx.phy_released);
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_PHY)) != 0U);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
+}
+
+static void test_a_phy_that_will_not_identify_alarms(void)
+{
+	model_t m;
+
+	model_init(&m, NULL);
+	m.in.phy_id_ok = false;
+	run_out(&m, 250U, 80U);
+
+	expect_present(&m, PWRSEQ_ACT_LAN_RST_RELEASE);
+	TEST_ASSERT_EQUAL_UINT(3U, count_of(&m, PWRSEQ_ACT_PHY_MDIO_POLL));
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_PHY)) != 0U);
+	/* Networking is not a precondition for timing: GNSS still comes up. */
+	expect_present(&m, PWRSEQ_ACT_GPS_PWR_EN);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
+}
+
+static void test_an_unreadable_antenna_current_drops_the_bias(void)
+{
+	model_t m;
+
+	model_init(&m, NULL);
+	run_to_stage(&m, PWRSEQ_STAGE_5_GNSS, 10U, 200U);
+	/* The monitor answered at the stage-3 baseline and has since gone
+	 * quiet — the antenna supervisor would be blind. */
+	m.in.ina_valid[INA228_RAIL_V_ANT] = false;
+	run_out(&m, 100U, 200U);
+
+	expect_present(&m, PWRSEQ_ACT_ANT_BIAS_EN);
+	expect_present(&m, PWRSEQ_ACT_ANT_BIAS_DIS);
+	TEST_ASSERT_FALSE(m.ctx.ant_bias_on);
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_ANTENNA)) != 0U);
+	/* Stage 5 is abandoned, so the receiver is never reconfigured. */
+	expect_absent(&m, PWRSEQ_ACT_ANT_SUPERVISOR_START);
+	expect_absent(&m, PWRSEQ_ACT_GNSS_CONFIG_REQUEST);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
+}
+
+static void test_a_display_rail_that_never_comes_up_is_dropped(void)
+{
+	model_t m;
+
+	model_init(&m, NULL);
+	run_to_stage(&m, PWRSEQ_STAGE_6_PANEL, 10U, 300U);
+	m.in.ina_valid[INA228_RAIL_5V_DISP] = false;
+	run_out(&m, 100U, 200U);
+
+	expect_present(&m, PWRSEQ_ACT_DISP_EN);
+	expect_present(&m, PWRSEQ_ACT_DISP_DIS);
+	TEST_ASSERT_FALSE(m.ctx.display_on);
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_DISPLAY)) != 0U);
+	/* Spec §13: a display fault is UI-only and never blocks timing. */
+	expect_present(&m, PWRSEQ_ACT_RELAY_ELIGIBLE);
+	TEST_ASSERT_TRUE(m.ctx.relay_eligible);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+}
+
+static void test_a_panel_rail_that_never_comes_up_is_dropped(void)
+{
+	model_t m;
+
+	model_init(&m, NULL);
+	run_to_stage(&m, PWRSEQ_STAGE_6_PANEL, 10U, 300U);
+	m.in.ina_vbus_mv[INA228_RAIL_PANEL_5V] = 1000; /* nowhere near 5 V */
+	run_out(&m, 100U, 200U);
+
+	/* The display still comes up; only the LED string is dropped. */
+	expect_present(&m, PWRSEQ_ACT_DISP_EN);
+	TEST_ASSERT_TRUE(m.ctx.display_on);
+	expect_present(&m, PWRSEQ_ACT_PANEL_LED_EN);
+	expect_present(&m, PWRSEQ_ACT_PANEL_LED_DIS);
+	expect_absent(&m, PWRSEQ_ACT_PANEL_LED_PWM);
+	TEST_ASSERT_FALSE(m.ctx.panel_led_on);
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_PANEL_LED)) != 0U);
+	TEST_ASSERT_TRUE(m.ctx.relay_eligible);
+}
+
+static void test_an_oven_that_never_warms_alarms_but_lets_the_board_run(void)
+{
+	model_t m;
+
+	model_init(&m, NULL);
+	m.in.ocxo_temp_stable = false;
+	m.in.ina_current_ma[INA228_RAIL_OCXO] = 900; /* still heating */
+	run_out(&m, 60000U, 30U);                    /* 10 min warm timeout */
+
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_OCXO_WARM)) != 0U);
+	/* Stage 7 is abandoned, so the discipline loop is not handed a cold
+	 * oscillator... */
+	expect_absent(&m, PWRSEQ_ACT_DISC_START);
+	/* ...and stage 8's warm precondition defers the rubidium too. */
+	expect_absent(&m, PWRSEQ_ACT_RB_PWR_EN);
+	TEST_ASSERT_TRUE(m.ctx.rb_deferred);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
+}
+
+static void test_a_rail_excursion_between_gating_and_lock_aborts_stage_8(void)
+{
+	model_t m;
+
+	/*
+	 * The window is not a one-shot gate at step 8.13. Holding at step 8.15
+	 * waiting for lock, a rail that wanders must still drop the FE — the
+	 * supervisor runs every call, whatever stage the machine is in.
+	 */
+	model_init(&m, NULL);
+	m.in.rb_lock = false;
+	run_out(&m, 100U, 40U);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+
+	m.in.ina_vbus_mv[INA228_RAIL_VCC_RB] = 20000;
+	advance(&m, 100U);
+
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
+	TEST_ASSERT_FALSE(m.ctx.rb_gated);
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_WINDOW)) != 0U);
+	TEST_ASSERT_TRUE(pwrseq_rb_fault(&m.ctx));
+
+	/* The abort abandons stage 8 rather than sitting out the ten-minute
+	 * lock timeout, so bring-up finishes promptly on the OCXO. */
+	TEST_ASSERT_TRUE(pwrseq_stage(&m.ctx) >= PWRSEQ_STAGE_9_ARM);
+	run_out(&m, 100U, 40U);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
+	TEST_ASSERT_TRUE(m.ctx.relay_eligible);
+}
+
+static void test_an_over_voltage_during_the_lock_wait_aborts_stage_8(void)
+{
+	model_t m;
+
+	model_init(&m, NULL);
+	m.in.rb_lock = false;
+	run_out(&m, 100U, 40U);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
+
+	m.in.rb_ov_det = true;
+	advance(&m, 100U);
+
+	TEST_ASSERT_TRUE(pwrseq_ov_latched(&m.ctx));
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_OV)) != 0U);
+	TEST_ASSERT_TRUE(pwrseq_stage(&m.ctx) >= PWRSEQ_STAGE_9_ARM);
+
+	/* The latch is still set, so a clear is refused until PE3 goes low. */
+	TEST_ASSERT_EQUAL_INT(-EBUSY, pwrseq_ov_clear(&m.ctx, m.in.mono_ms));
+
+	run_out(&m, 100U, 40U);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
+	TEST_ASSERT_TRUE(m.ctx.relay_eligible);
+}
+
 /* --------------------------------------------------------- settle delays */
 
 static void test_settle_delays_are_observed(void)
@@ -1671,6 +1934,7 @@ int main(void)
 
 	RUN_TEST(test_digipot_transfer_matches_the_documented_table);
 	RUN_TEST(test_rb_acceptance_window);
+	RUN_TEST(test_rb_window_survives_a_degenerate_transfer_function);
 
 	RUN_TEST(test_poe_headroom_never_wraps);
 	RUN_TEST(test_ocxo_warm_needs_both_current_and_temperature);
@@ -1702,6 +1966,16 @@ int main(void)
 	RUN_TEST(test_pg4_must_corroborate_the_3v3_telemetry);
 	RUN_TEST(test_a_sagging_poe_bus_alarms_but_does_not_halt);
 	RUN_TEST(test_stage_re_entry_after_a_failure);
+	RUN_TEST(test_an_i2c_probe_that_never_answers_alarms);
+	RUN_TEST(test_shunt_trims_that_never_apply_stop_the_rail_checks);
+	RUN_TEST(test_a_missing_phy_reference_clock_holds_the_reset);
+	RUN_TEST(test_a_phy_that_will_not_identify_alarms);
+	RUN_TEST(test_an_unreadable_antenna_current_drops_the_bias);
+	RUN_TEST(test_a_display_rail_that_never_comes_up_is_dropped);
+	RUN_TEST(test_a_panel_rail_that_never_comes_up_is_dropped);
+	RUN_TEST(test_an_oven_that_never_warms_alarms_but_lets_the_board_run);
+	RUN_TEST(test_a_rail_excursion_between_gating_and_lock_aborts_stage_8);
+	RUN_TEST(test_an_over_voltage_during_the_lock_wait_aborts_stage_8);
 	RUN_TEST(test_settle_delays_are_observed);
 
 	RUN_TEST(test_shed_ladder_order_and_exhaustion);

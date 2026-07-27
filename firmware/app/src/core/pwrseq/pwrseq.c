@@ -313,17 +313,19 @@ bool pwrseq_ocxo_is_warming(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 /* True when VCC_RB reads inside the window implied by the commanded code. */
 static bool rb_rail_in_window(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 {
-	int32_t lo;
-	int32_t hi;
+	/* Seeded as an empty window (lo > hi), so if pwrseq_rb_window() ever
+	 * declined to write them the answer is "out of window" rather than a
+	 * comparison against uninitialised memory. */
+	int32_t lo = 1;
+	int32_t hi = 0;
 	int32_t mv;
 
 	if (!in->ina_valid[INA228_RAIL_VCC_RB]) {
 		return false;
 	}
-	if (pwrseq_rb_window(&ctx->cfg.rb_xfer, ctx->cfg.digipot_safe_code,
-			     ctx->cfg.rb_vbus_tol_pct, &lo, &hi) != 0) {
-		return false;
-	}
+
+	(void)pwrseq_rb_window(&ctx->cfg.rb_xfer, ctx->cfg.digipot_safe_code,
+			       ctx->cfg.rb_vbus_tol_pct, &lo, &hi);
 
 	mv = in->ina_vbus_mv[INA228_RAIL_VCC_RB];
 	return (mv >= lo) && (mv <= hi);
@@ -991,13 +993,12 @@ uint32_t pwrseq_actions_dropped(const pwrseq_ctx_t *ctx)
 
 static void raise_alarm(pwrseq_ctx_t *ctx, uint8_t a)
 {
-	uint32_t bit;
+	/* Bit 0 is PWRSEQ_ALARM_NONE, the step table's "no alarm" sentinel, and
+	 * is masked off rather than branched on so it can never appear in the
+	 * reported set. */
+	uint32_t bit = PWRSEQ_ALARM_BIT(a) &
+		       ~PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_NONE);
 
-	if (a == (uint8_t)PWRSEQ_ALARM_NONE) {
-		return;
-	}
-
-	bit = PWRSEQ_ALARM_BIT(a);
 	ctx->alarms |= bit;
 	if ((bit & RB_HARD_FAULT_MASK) != 0U) {
 		ctx->alarms |= PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_FAULT);
@@ -1060,22 +1061,22 @@ static void do_failact(pwrseq_ctx_t *ctx, uint8_t fa)
 
 /* --------------------------------------------------------- stage traversal */
 
+/*
+ * Open @p stage at its first row.
+ *
+ * Every caller passes a stage that has rows: pwrseq_start() uses stage 2,
+ * pwrseq_restart_stage() validates before calling, and abandon_stage() only
+ * ever moves to 3..9. A stageless value would leave `step` at -1, which the
+ * step loop already reads as "nothing further to do".
+ */
 static void enter_stage(pwrseq_ctx_t *ctx, uint8_t stage, uint32_t ms)
 {
-	int16_t idx = first_step_of(stage);
-
 	ctx->stage = stage;
 	ctx->stage_entered_ms = ms;
 	ctx->step_entered_ms = ms;
 	ctx->retries = 0U;
 	ctx->step_armed = false;
-
-	if (idx < 0) {
-		ctx->stage = (uint8_t)PWRSEQ_STAGE_DONE;
-		ctx->step = -1;
-	} else {
-		ctx->step = idx;
-	}
+	ctx->step = first_step_of(stage);
 }
 
 /* Abandon whatever remains of the current stage and open the next one. */

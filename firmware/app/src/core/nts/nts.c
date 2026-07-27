@@ -302,7 +302,7 @@ int nts_cookie_unseal(const nts_keyring_t *r, const uint8_t *cookie, size_t len,
 	}
 	if (mk == NULL) {
 		/* The ordinary end of a cookie's life, not an attack. */
-		return -ENOKEY;
+		return -ENOENT;
 	}
 	if (aead != NTS_AEAD_AES_SIV_CMAC_256) {
 		return -ENOTSUP;
@@ -510,7 +510,7 @@ int nts_process_request(nts_ctx_t *ctx, const uint8_t *pkt, size_t len,
 	/* A cookie we cannot use — wrong size, retired key, wrong AEAD, bad tag
 	 * — is what NTS NAK exists to report. */
 	rc = nts_cookie_unseal(ctx->ring, cookie, cookie_len, &out->keys);
-	if (rc == -EBADMSG || rc == -ENOKEY || rc == -ENOTSUP) {
+	if (rc == -EBADMSG || rc == -ENOENT || rc == -ENOTSUP) {
 		ctx->stats.nak++;
 		return NTS_ACT_NAK;
 	}

@@ -532,7 +532,7 @@ static int mac_append(const ntp_ctx_t *ctx, uint32_t keyid, uint8_t *pkt,
 	uint8_t digest[32];
 
 	if (k == NULL || ctx->crypto.hmac_sha256 == NULL) {
-		return -ENOKEY;
+		return -ENOENT;
 	}
 	if (*len + NTP_MAC_FIELD_LEN > cap) {
 		return -ENOSPC;
