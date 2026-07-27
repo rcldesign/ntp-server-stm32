@@ -166,8 +166,10 @@ module_deps(ptp_icv     ptp)
 # client — all live in core/fwupd/, so each suite names the same module set. The
 # `ubx` edge is real: ubx_fwupd.c frames UBX and reads back UBX-MON-VER.
 module_deps(fwupd     ubx util)
-module_deps(ubx_fwupd ubx util)
-module_deps(rb_fwupd  ubx util)
+# The two transport suites name `fwupd` so the core/fwupd/ directory is globbed;
+# `fwupd` in turn carries the ubx and util edges.
+module_deps(ubx_fwupd fwupd)
+module_deps(rb_fwupd  fwupd)
 
 # The polar skyplot renderer lives in core/ui/ and consumes ui_sv_t.
 module_deps(skyplot ui)
