@@ -379,10 +379,16 @@ typedef struct {
 
 /**
  * @retval 0         @p ef holds the next field.
- * @retval -ENOENT   Clean end of the packet.
- * @retval -EBADMSG  A short, unaligned or overrunning field, or a tail too
- *                   short to be one. An NTS packet's extension fields tile the
- *                   datagram exactly, so anything else is malformed.
+ * @retval -ENOENT   Clean end of the packet, or the remainder is a legacy MAC
+ *                   field (RFC 7822 §7.5.1: a 4/20/24-octet tail is a MAC, not
+ *                   an extension field). Applying the same disambiguation ntp
+ *                   uses (L13) stops a plain NTP+MAC packet — or an NTS packet
+ *                   carrying a trailing MAC — from being mis-parsed as a broken
+ *                   extension field and dropped before the datapath can class
+ *                   it; the caller sees only the fields before the MAC.
+ * @retval -EBADMSG  A short, unaligned or overrunning field. An NTS packet's
+ *                   extension fields tile the datagram exactly up to any MAC,
+ *                   so anything else is malformed.
  */
 static int ef_next(ef_iter_t *it, ef_t *ef)
 {
@@ -393,6 +399,9 @@ static int ef_next(ef_iter_t *it, ef_t *ef)
 		return -ENOENT;
 	}
 	rem = it->len - it->off;
+	if (rem == 4U || rem == 20U || rem == 24U) {
+		return -ENOENT; /* RFC 7822 §7.5.1 MAC field: end of extensions */
+	}
 	if (rem < 4U) {
 		return -EBADMSG;
 	}
@@ -497,6 +506,12 @@ int nts_process_request(nts_ctx_t *ctx, const uint8_t *pkt, size_t len,
 			cookie_len = ef.body_len;
 			break;
 		case NTS_EF_COOKIE_PLACEHOLDER:
+			/* RFC 8915 §5.5 MUST: a placeholder's body length equals
+			 * the cookie length it reserves room for. A mismatch is a
+			 * malformed request (L9). */
+			if (ef.body_len != NTS_COOKIE_LEN) {
+				malformed = true;
+			}
 			n_ph++;
 			break;
 		case NTS_EF_AUTH:

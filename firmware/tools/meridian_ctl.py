@@ -172,6 +172,9 @@ def cobs_encode(data: bytes) -> bytes:
     '0311220233'
     >>> cobs_encode(b'\\x00').hex()
     '0101'
+    >>> e = cobs_encode(bytes(range(1, 255)))   # 254 non-zero bytes
+    >>> len(e), hex(e[0]), hex(e[-1])           # 0xFF group, no trailing 0x01
+    (255, '0xff', '0xfe')
     """
     out = bytearray()
     idx = 0
@@ -242,6 +245,21 @@ def build_frame(ftype: int, cmd: int, seq: int, payload: bytes = b"",
     '0100010001000000376b68da'
     >>> build_frame(0, 0x20, 7, b'\\x02').hex()
     '0100200007000100027aee2363'
+
+    The two firmware-update frames below are the shared cross-codec vectors:
+    the identical byte strings are asserted against mcp_wire_build() in
+    firmware/tests/host/test_mcp_dfu.c (test_wire_vectors_match_the_tool), so
+    the two implementations cannot drift apart silently.
+
+    FW_BEGIN/REQ/seq 1, size 0x00020000, sha256 = 0x00..0x1F:
+
+    >>> build_frame(0, 0x41, 1, struct.pack('<I', 0x20000) + bytes(range(32))).hex()
+    '010041000100240000000200000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1ff47924c1'
+
+    FW_DATA/REQ/seq 2, offset 0, data AA BB CC DD:
+
+    >>> build_frame(0, 0x42, 2, struct.pack('<I', 0) + bytes([0xAA,0xBB,0xCC,0xDD])).hex()
+    '010042000200080000000000aabbccdd48e91869'
     """
     if len(payload) > MAX_PAYLOAD:
         raise ValueError("payload of %d exceeds %d" % (len(payload), MAX_PAYLOAD))

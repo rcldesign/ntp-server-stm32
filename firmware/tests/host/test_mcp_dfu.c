@@ -421,6 +421,60 @@ static void upload_range(uint32_t from, uint32_t to, uint32_t chunk)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Shared cross-codec wire vectors (MEDIUM-9)                                 */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * These exact byte strings are also pinned in tools/meridian_ctl.py's
+ * build_frame() doctest. Asserting mcp_wire_build() produces the same bytes
+ * gives the C engine and the Python tool an automated agreement check on the
+ * FW_* framing, independent of any round-trip between them.
+ */
+static void test_wire_vectors_match_the_tool(void)
+{
+	uint8_t out[MCP_MAX_FRAME];
+	uint8_t pl[36];
+	size_t n = 0U;
+	size_t i;
+
+	/* FW_BEGIN/REQ/seq 1, size 0x00020000, sha256 = 0x00..0x1F. */
+	static const uint8_t fw_begin[] = {
+		0x01, 0x00, 0x41, 0x00, 0x01, 0x00, 0x24, 0x00,
+		0x00, 0x00, 0x02, 0x00, 0x00, 0x01, 0x02, 0x03,
+		0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+		0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13,
+		0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+		0x1c, 0x1d, 0x1e, 0x1f, 0xf4, 0x79, 0x24, 0xc1,
+	};
+	static const uint8_t fw_data[] = {
+		0x01, 0x00, 0x42, 0x00, 0x02, 0x00, 0x08, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0xaa, 0xbb, 0xcc, 0xdd,
+		0x48, 0xe9, 0x18, 0x69,
+	};
+
+	bytes_put_le32(pl, 0x00020000U);
+	for (i = 0U; i < 32U; i++) {
+		pl[4U + i] = (uint8_t)i;
+	}
+	TEST_ASSERT_EQUAL_INT(0,
+		mcp_wire_build((uint8_t)MCP_T_REQ, MCP_CMD_FW_BEGIN, 0U, 1U, pl,
+			       36U, out, sizeof(out), &n));
+	TEST_ASSERT_EQUAL_size_t(sizeof(fw_begin), n);
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(fw_begin, out, sizeof(fw_begin));
+
+	bytes_put_le32(pl, 0U);
+	pl[4] = 0xAAU;
+	pl[5] = 0xBBU;
+	pl[6] = 0xCCU;
+	pl[7] = 0xDDU;
+	TEST_ASSERT_EQUAL_INT(0,
+		mcp_wire_build((uint8_t)MCP_T_REQ, MCP_CMD_FW_DATA, 0U, 2U, pl,
+			       8U, out, sizeof(out), &n));
+	TEST_ASSERT_EQUAL_size_t(sizeof(fw_data), n);
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(fw_data, out, sizeof(fw_data));
+}
+
+/* ------------------------------------------------------------------------- */
 /* Happy path                                                                */
 /* ------------------------------------------------------------------------- */
 
@@ -1138,6 +1192,7 @@ int main(void)
 {
 	UNITY_BEGIN();
 
+	RUN_TEST(test_wire_vectors_match_the_tool);
 	RUN_TEST(test_full_upload_verifies_and_stages);
 	RUN_TEST(test_odd_sized_image_with_odd_chunks);
 

@@ -118,7 +118,21 @@ static int panel_program_duty(uint8_t duty_pct)
 		cmp = panel.arr;
 	}
 
-	LL_LPTIM_SetCompare(panel_lptim, cmp);
+	/*
+	 * The H5 LPTIM is multi-channel; PANEL_LED_PWM is CH2. A CMP write is
+	 * latched at the next update and confirmed by CMP2OK. Poll it (bounded)
+	 * so a caller that changes the duty twice in quick succession does not
+	 * lose the second write; the flag is set within one LPTIM period
+	 * (~1 ms here), so the bound is generous.
+	 */
+	LL_LPTIM_ClearFlag_CMP2OK(panel_lptim);
+	LL_LPTIM_OC_SetCompareCH2(panel_lptim, cmp);
+
+	for (uint32_t i = 0; i < 100000U; i++) {
+		if (LL_LPTIM_IsActiveFlag_CMP2OK(panel_lptim)) {
+			break;
+		}
+	}
 
 	return 0;
 }
@@ -174,14 +188,6 @@ int sts_panel_led_init(void)
 
 	panel_apply_pinmux();
 
-	/* ARR must be written with the peripheral enabled but the counter
-	 * stopped, and the period is (ARR + 1) counts. */
-	LL_LPTIM_Disable(panel_lptim);
-	LL_LPTIM_SetPrescaler(panel_lptim, PANEL_LPTIM_PRESCALER);
-	LL_LPTIM_SetClockSource(panel_lptim, LL_LPTIM_CLK_SOURCE_INTERNAL);
-	LL_LPTIM_SetCounterMode(panel_lptim, LL_LPTIM_COUNTER_MODE_INTERNAL);
-	LL_LPTIM_SetPolarity(panel_lptim, LL_LPTIM_OUTPUT_POLARITY_REGULAR);
-
 	panel.arr = (lptim_hz / PANEL_LPTIM_PRESCALER_DIV) /
 		    CONFIG_STS1000_PANEL_LED_PWM_HZ;
 	if (panel.arr == 0U) {
@@ -195,9 +201,39 @@ int sts_panel_led_init(void)
 	}
 	panel.arr -= 1U;
 
+	/*
+	 * CFGR fields (prescaler, clock source, counter mode, PWM waveform) are
+	 * write-protected while the timer is enabled, so they are set first,
+	 * with the peripheral disabled. WAVEFORM_PWM is what makes CH2 a PWM
+	 * output rather than the default set-once mode.
+	 */
+	LL_LPTIM_Disable(panel_lptim);
+	LL_LPTIM_SetPrescaler(panel_lptim, PANEL_LPTIM_PRESCALER);
+	LL_LPTIM_SetClockSource(panel_lptim, LL_LPTIM_CLK_SOURCE_INTERNAL);
+	LL_LPTIM_SetCounterMode(panel_lptim, LL_LPTIM_COUNTER_MODE_INTERNAL);
+	LL_LPTIM_SetWaveform(panel_lptim, LL_LPTIM_OUTPUT_WAVEFORM_PWM);
+	LL_LPTIM_OC_SetPolarity(panel_lptim, LL_LPTIM_CHANNEL_CH2,
+				LL_LPTIM_OUTPUT_POLARITY_REGULAR);
+
+	/*
+	 * ARR and CMP must be written with the peripheral enabled, and each is
+	 * confirmed by its OK flag before the counter is started (RM0481: a
+	 * write while a previous one is pending is discarded).
+	 */
 	LL_LPTIM_Enable(panel_lptim);
+
+	LL_LPTIM_ClearFlag_ARROK(panel_lptim);
 	LL_LPTIM_SetAutoReload(panel_lptim, panel.arr);
+	for (uint32_t i = 0; i < 100000U; i++) {
+		if (LL_LPTIM_IsActiveFlag_ARROK(panel_lptim)) {
+			break;
+		}
+	}
+
 	(void)panel_program_duty(0U);
+
+	/* Enable the CH2 output and start the free-running PWM. */
+	LL_LPTIM_CC_EnableChannel(panel_lptim, LL_LPTIM_CHANNEL_CH2);
 	LL_LPTIM_StartCounter(panel_lptim, LL_LPTIM_OPERATING_MODE_CONTINUOUS);
 
 	panel.duty_pct = 0U;

@@ -1642,7 +1642,8 @@ static uint8_t sky_top(const ui_health_t *h, uint8_t *out, uint8_t want)
 	return n;
 }
 
-static void page_sky(const ui_health_t *h, ui_surface_t *s)
+static void page_sky(const quality_block_t *q, const ui_health_t *h,
+		     ui_surface_t *s)
 {
 	char buf[64];
 	sb_t sb;
@@ -1685,7 +1686,22 @@ static void page_sky(const ui_health_t *h, ui_surface_t *s)
 		sb_str(&sb, "  ");
 	}
 	if (sb.len == 0u) {
-		sb_str(&sb, "no satellites tracked");
+		/*
+		 * No per-satellite table. That is not necessarily "no
+		 * satellites": the quality block carries the used/visible
+		 * counts independently of whether the glue has a NAV-SAT
+		 * snapshot to hand, and reporting a blank sky over a locked
+		 * receiver would be the more misleading of the two errors.
+		 */
+		if (q->gnss_sv_visible != 0u || q->gnss_sv_used != 0u) {
+			sb_str(&sb, "SV detail unavailable -- ");
+			sb_u32(&sb, q->gnss_sv_used);
+			sb_str(&sb, " of ");
+			sb_u32(&sb, q->gnss_sv_visible);
+			sb_str(&sb, " in solution");
+		} else {
+			sb_str(&sb, "no satellites tracked");
+		}
 	}
 	(void)ui_surface_put(s, r, 1u, buf, UI_ATTR_NORMAL);
 
@@ -2351,7 +2367,7 @@ int ui_render(ui_ctx_t *ctx, const quality_block_t *q, const ui_health_t *h,
 		draw_pager(ctx, s);
 		break;
 	case UI_PAGE_SKYPLOT:
-		page_sky(h, s);
+		page_sky(q, h, s);
 		break;
 	case UI_PAGE_CLOCKS:
 		page_clocks(q, h, s);
