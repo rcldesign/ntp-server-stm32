@@ -397,6 +397,110 @@ static inline uint8_t sts_sky_orient(const sts_sky_orient_in_t *in,
 }
 
 /* ===================================================================== *
+ *  Repaint gate
+ * ===================================================================== */
+
+/**
+ * Rows a UI_HINT_SKYPLOT claims, as a bitmask over the surface's rows.
+ *
+ * The glue force-repaints a text row whose cells changed, and a repainted row
+ * is painted black before its glyphs go down — so a repaint anywhere inside the
+ * band destroys part of the plot. Intersecting this with the frame's dirty-row
+ * mask is what tells the glue the picture on the panel is no longer the picture
+ * it last drew, independently of whether the sky itself moved.
+ *
+ * Rows at or past @p rows are dropped rather than shifted out of a 32-bit word:
+ * `1u << 32` is undefined, and a hint that overhangs the grid must not be able
+ * to turn into a mask of everything.
+ */
+static inline uint32_t sts_sky_band_mask(const ui_hint_t *h, uint8_t rows)
+{
+	uint32_t mask = 0u;
+	unsigned int r;
+	unsigned int end;
+
+	if ((h == NULL) || (h->kind != (uint8_t)UI_HINT_SKYPLOT)) {
+		return 0u;
+	}
+	end = (unsigned int)h->row + (unsigned int)h->len;
+	for (r = h->row; (r < end) && (r < rows) && (r < 32u); r++) {
+		mask |= (uint32_t)1u << r;
+	}
+	return mask;
+}
+
+/**
+ * Signature of everything a rendered skyplot depends on.
+ *
+ * The plot is ~50 KiB of RGB565 at the as-built geometry. Pushing it at the
+ * 10 Hz render tick would be a megabyte a second of SPI to redraw a picture
+ * whose inputs — UBX-NAV-SAT and the 1 Hz e-compass sweep — move at 1 Hz, so
+ * the glue repaints only when this value changes.
+ *
+ * Field by field rather than a hash over the structs: ui_sv_t, sky_orient_t and
+ * sts_sky_layout_t all carry compiler padding, and hashing indeterminate bytes
+ * would make the gate fire at random — which looks exactly like the bug it is
+ * meant to prevent, only intermittently.
+ *
+ * It is a change detector, not a checksum: FNV-1a over ~10 words, chosen for
+ * being cheap and having no collisions that a satellite moving one degree could
+ * hit. A missed change costs one stale frame, not a wrong one.
+ *
+ * @param lay     Placement; NULL contributes nothing, so a caller that has not
+ *                placed the canvas yet still gets a well-defined value.
+ * @param sv      Markers; may be NULL when @p n is 0.
+ * @param n       Entries in @p sv, clamped to UI_MAX_SV.
+ * @param o       Orientation; NULL is GNSS-north.
+ * @param reason  An sts_sky_north_t, because the label is part of the picture.
+ */
+static inline uint32_t sts_sky_repaint_sig(const sts_sky_layout_t *lay,
+					   const ui_sv_t *sv, uint8_t n,
+					   const sky_orient_t *o,
+					   uint8_t reason)
+{
+	uint32_t h = 2166136261u;
+	uint8_t count = (n > (uint8_t)UI_MAX_SV) ? (uint8_t)UI_MAX_SV : n;
+	uint8_t i;
+
+	/* FNV-1a over one 32-bit word, least-significant octet first. */
+#define STS_SKY_SIG_MIX(acc, v)                                                \
+	do {                                                                   \
+		uint32_t v_ = (uint32_t)(v);                                   \
+		unsigned int b_;                                               \
+		for (b_ = 0u; b_ < 4u; b_++) {                                 \
+			(acc) ^= (v_ >> (8u * b_)) & 0xFFu;                    \
+			(acc) *= 16777619u;                                    \
+		}                                                              \
+	} while (0)
+
+	STS_SKY_SIG_MIX(h, (lay != NULL) ? lay->x0 : 0u);
+	STS_SKY_SIG_MIX(h, (lay != NULL) ? lay->y0 : 0u);
+	STS_SKY_SIG_MIX(h, (lay != NULL) ? lay->side : 0u);
+	STS_SKY_SIG_MIX(h, reason);
+	STS_SKY_SIG_MIX(h, ((o != NULL) && o->north_valid) ? 1u : 0u);
+	STS_SKY_SIG_MIX(h, (o != NULL) ? (uint32_t)(uint16_t)o->heading_ddeg
+				       : 0u);
+	STS_SKY_SIG_MIX(h, (o != NULL) ? (uint32_t)(uint16_t)o->declination_ddeg
+				       : 0u);
+	STS_SKY_SIG_MIX(h, ((o != NULL) && o->declination_modelled) ? 1u : 0u);
+	STS_SKY_SIG_MIX(h, ((o != NULL) && o->tilt_valid) ? 1u : 0u);
+	STS_SKY_SIG_MIX(h, count);
+
+	for (i = 0u; (sv != NULL) && (i < count); i++) {
+		STS_SKY_SIG_MIX(h, ((uint32_t)sv[i].sys << 24) |
+					   ((uint32_t)sv[i].svid << 16) |
+					   ((uint32_t)(uint8_t)sv[i].elev_deg
+					    << 8) |
+					   (uint32_t)sv[i].cno_dbhz);
+		STS_SKY_SIG_MIX(h, ((uint32_t)(uint16_t)sv[i].azim_deg << 1) |
+					   (sv[i].used ? 1u : 0u));
+	}
+
+#undef STS_SKY_SIG_MIX
+	return h;
+}
+
+/* ===================================================================== *
  *  Palette
  * ===================================================================== */
 

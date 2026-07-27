@@ -95,6 +95,60 @@ static const struct device *const i2c1 = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 #define SHT45_CMD_MEAS_HIGH   0xFDU
 #define SHT45_MEAS_MS         10
 
+/*
+ * E-compass: U61 IIS2MDC magnetometer (0x1E) + U59 LIS2DH12 accelerometer
+ * (0x19, SA0 strapped to 3V3_STM). Both have their interrupt lines
+ * unconnected on this board (sts1000_meridian.dts), so both are polled — which
+ * is why they are read here on the 1 Hz sweep and not through a trigger.
+ *
+ * Read raw over I2C1 like every other sensor in this file rather than through
+ * the Zephyr sensor API. Two reasons: this file already owns i2c1 and would
+ * otherwise interleave a driver's transfers with its own, and CONFIG_LIS2DH is
+ * not enabled in this image (only CONFIG_DT_HAS_ST_LIS2DH12_ENABLED is) — so
+ * the driver route would need a Kconfig fragment as well as code.
+ *
+ * A 1 Hz heading is ample: the only thing that changes it is somebody physically
+ * turning the enclosure, and the skyplot it feeds redraws at 10 Hz from a cached
+ * orientation.
+ *
+ * VERIFY vs datasheet — register numbers, the WHO_AM_I values, the LIS2DH
+ * auto-increment flag and both sensitivities are taken from the in-tree drivers
+ * (zephyr/drivers/sensor/st/lis2dh/lis2dh.h and
+ * modules/hal/st/sensor/stmemsc/iis2mdc_STdC/driver/iis2mdc_reg.h), not from the
+ * datasheets, which are not reachable from this project. The consequence of an
+ * error is bounded: a WHO_AM_I mismatch leaves the compass absent and the
+ * skyplot in GNSS-north behind its badge, which is the same state an
+ * uncommissioned unit is in anyway. Confirm on the bench.
+ */
+#define IIS2MDC_ADDR          0x1EU
+#define IIS2MDC_REG_WHO_AM_I  0x4FU
+#define IIS2MDC_WHO_AM_I_VAL  0x40U
+#define IIS2MDC_REG_CFG_A     0x60U
+#define IIS2MDC_REG_CFG_C     0x62U
+#define IIS2MDC_REG_OUTX_L    0x68U
+/* CFG_REG_A: COMP_TEMP_EN | ODR 10 Hz (00) | continuous mode (00). */
+#define IIS2MDC_CFG_A_VAL     0x80U
+/* CFG_REG_C: BDU, so a 6-byte burst cannot straddle two conversions. */
+#define IIS2MDC_CFG_C_VAL     0x10U
+/* Full-scale is fixed at +-50 gauss; 1 LSB = 1.5 mgauss. */
+#define IIS2MDC_MGAUSS_NUM    3
+#define IIS2MDC_MGAUSS_DEN    2
+
+#define LIS2DH12_ADDR         0x19U
+#define LIS2DH12_REG_WHO_AM_I 0x0FU
+#define LIS2DH12_WHO_AM_I_VAL 0x33U
+#define LIS2DH12_REG_CTRL1    0x20U
+#define LIS2DH12_REG_CTRL4    0x23U
+#define LIS2DH12_REG_OUT_X_L  0x28U
+/* Multi-byte reads need the auto-increment flag; the IIS2MDC does not. */
+#define LIS2DH12_AUTOINC      0x80U
+/* CTRL_REG1: ODR 10 Hz (0x20) + X/Y/Z enabled. */
+#define LIS2DH12_CTRL1_VAL    0x27U
+/* CTRL_REG4: BDU + FS +-2 g + high-resolution (12-bit) mode. */
+#define LIS2DH12_CTRL4_VAL    0x88U
+/* HR mode is 12 bits left-justified in 16; at +-2 g that is 1 mg per count. */
+#define LIS2DH12_HR_SHIFT     4
+
 /* ---- fan ----------------------------------------------------------------- */
 
 /*
@@ -122,6 +176,16 @@ static const struct device *const die_temp;
 
 static sts_hk_snapshot_t hk_cache;
 static K_MUTEX_DEFINE(hk_mutex);
+
+/*
+ * E-compass cache, under hk_mutex with everything else in this file. Separate
+ * from sts_hk_snapshot_t because that structure is the power/thermal contract
+ * platform.h publishes to pwrseq, the discipline loop and the calibration path,
+ * and none of them has any business seeing a magnetometer.
+ */
+static sts_ecompass_t ecompass_cache;
+/** The parts answered their WHO_AM_I and were configured at start. */
+static bool ecompass_present;
 
 static thermal_ctx_t thermal;
 
@@ -653,6 +717,158 @@ static bool hk_read_sht45(int32_t *rh_mpct, int32_t *t_mc)
 	return true;
 }
 
+/* ---- e-compass ----------------------------------------------------------- */
+
+static bool hk_reg_write(uint8_t addr, uint8_t reg, uint8_t val)
+{
+	uint8_t buf[2] = { reg, val };
+
+	return i2c_write(i2c1, buf, sizeof(buf), addr) == 0;
+}
+
+static bool hk_reg_read(uint8_t addr, uint8_t reg, uint8_t *val)
+{
+	return i2c_write_read(i2c1, addr, &reg, 1U, val, 1U) == 0;
+}
+
+/**
+ * Identify both parts and put them into continuous conversion.
+ *
+ * Called from the 1 Hz sweep whenever the compass is not currently present, so
+ * a part that NAKed through an I2C wedge or a slow power ramp is picked up on
+ * a later sweep rather than being written off for the uptime. Two one-byte
+ * reads per retry, against nine INA228s and three other sensors on the same
+ * sweep — the cost of retrying forever is smaller than the cost of a heading
+ * that never comes back.
+ */
+static bool hk_ecompass_probe(void)
+{
+	uint8_t who = 0U;
+
+	if (!hk_reg_read(IIS2MDC_ADDR, IIS2MDC_REG_WHO_AM_I, &who) ||
+	    who != IIS2MDC_WHO_AM_I_VAL) {
+		return false;
+	}
+	if (!hk_reg_read(LIS2DH12_ADDR, LIS2DH12_REG_WHO_AM_I, &who) ||
+	    who != LIS2DH12_WHO_AM_I_VAL) {
+		return false;
+	}
+
+	if (!hk_reg_write(IIS2MDC_ADDR, IIS2MDC_REG_CFG_A, IIS2MDC_CFG_A_VAL) ||
+	    !hk_reg_write(IIS2MDC_ADDR, IIS2MDC_REG_CFG_C, IIS2MDC_CFG_C_VAL)) {
+		return false;
+	}
+	if (!hk_reg_write(LIS2DH12_ADDR, LIS2DH12_REG_CTRL1,
+			  LIS2DH12_CTRL1_VAL) ||
+	    !hk_reg_write(LIS2DH12_ADDR, LIS2DH12_REG_CTRL4,
+			  LIS2DH12_CTRL4_VAL)) {
+		return false;
+	}
+
+	return true;
+}
+
+/**
+ * One magnetometer + accelerometer sample, converted to milligauss / milli-g.
+ *
+ * Both parts are little-endian (OUTX_L before OUTX_H) and both are read as a
+ * six-byte burst under BDU, so a triple cannot straddle two conversions. The
+ * LIS2DH12 needs the auto-increment bit in the sub-address for a burst; the
+ * IIS2MDC increments on its own.
+ */
+static bool hk_read_ecompass(int32_t mag_mgauss[3], int32_t acc_mg[3])
+{
+	uint8_t buf[6];
+	unsigned int i;
+
+	if (i2c_burst_read(i2c1, IIS2MDC_ADDR, IIS2MDC_REG_OUTX_L, buf,
+			   sizeof(buf)) != 0) {
+		return false;
+	}
+	for (i = 0U; i < 3U; i++) {
+		int32_t raw = (int16_t)sys_get_le16(&buf[2U * i]);
+
+		mag_mgauss[i] = (raw * IIS2MDC_MGAUSS_NUM) / IIS2MDC_MGAUSS_DEN;
+	}
+
+	if (i2c_burst_read(i2c1, LIS2DH12_ADDR,
+			   (uint8_t)(LIS2DH12_REG_OUT_X_L | LIS2DH12_AUTOINC),
+			   buf, sizeof(buf)) != 0) {
+		return false;
+	}
+	for (i = 0U; i < 3U; i++) {
+		int32_t raw = (int16_t)sys_get_le16(&buf[2U * i]);
+
+		/* Arithmetic shift, not a divide: the 12-bit sample is
+		 * left-justified in 16 and the sign must ride down with it. */
+		acc_mg[i] = raw >> LIS2DH12_HR_SHIFT;
+	}
+
+	return true;
+}
+
+/**
+ * Sample the e-compass and publish it, once per 1 Hz sweep.
+ *
+ * Every transfer happens outside hk_mutex for the reason hk_sweep_1hz()
+ * documents: the lock keeps the cache self-consistent, it does not serialise
+ * the bus. `valid` false is a state, not an error — it is what puts the
+ * skyplot's "north unverified" badge up (sts_app.h).
+ */
+static void hk_ecompass_1hz(uint32_t now_ms)
+{
+	int32_t mag[3] = { 0, 0, 0 };
+	int32_t acc[3] = { 0, 0, 0 };
+	bool ok;
+
+	if (!ecompass_present) {
+		if (!hk_ecompass_probe()) {
+			k_mutex_lock(&hk_mutex, K_FOREVER);
+			ecompass_cache.valid = false;
+			k_mutex_unlock(&hk_mutex);
+			return;
+		}
+		ecompass_present = true;
+		LOG_INF("e-compass up: IIS2MDC 0x%02x + LIS2DH12 0x%02x",
+			IIS2MDC_ADDR, LIS2DH12_ADDR);
+	}
+
+	ok = hk_read_ecompass(mag, acc);
+	if (!ok) {
+		/* Re-probe on the next sweep: a NAK here means the part was
+		 * reset or the bus was recovered under us, and a re-probe is
+		 * what restores its configuration registers. */
+		ecompass_present = false;
+		LOG_WRN("e-compass read failed; will re-probe");
+	}
+
+	k_mutex_lock(&hk_mutex, K_FOREVER);
+	if (ok) {
+		ecompass_cache.mag_mgauss[0] = mag[0];
+		ecompass_cache.mag_mgauss[1] = mag[1];
+		ecompass_cache.mag_mgauss[2] = mag[2];
+		ecompass_cache.acc_mg[0] = acc[0];
+		ecompass_cache.acc_mg[1] = acc[1];
+		ecompass_cache.acc_mg[2] = acc[2];
+		ecompass_cache.mono_ms = now_ms;
+	}
+	ecompass_cache.valid = ok;
+	k_mutex_unlock(&hk_mutex);
+}
+
+int sts_ecompass(sts_ecompass_t *out)
+{
+	if (out == NULL) {
+		return -EINVAL;
+	}
+
+	(void)k_mutex_lock(&hk_mutex, K_FOREVER);
+	*out = ecompass_cache;
+	(void)k_mutex_unlock(&hk_mutex);
+
+	return 0;
+}
+
 /* ========================================================================= */
 /* fan                                                                       */
 /* ========================================================================= */
@@ -865,6 +1081,8 @@ static void hk_sweep_1hz(uint32_t now_ms)
 		hk_cache.sht_valid = false;
 		k_mutex_unlock(&hk_mutex);
 	}
+
+	hk_ecompass_1hz(now_ms);
 }
 
 static void hk_thermal_1hz(uint32_t now_ms)
@@ -1074,7 +1292,8 @@ int sts_hk_start(void)
 
 	hk.started = true;
 
-	LOG_INF("housekeeping up: %u ms tick, 9x INA228 + 2x TMP117 + SHT45",
+	LOG_INF("housekeeping up: %u ms tick, 9x INA228 + 2x TMP117 + SHT45 + "
+		"e-compass",
 		HK_PERIOD_MS);
 
 	return 0;

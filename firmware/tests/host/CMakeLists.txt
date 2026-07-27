@@ -303,6 +303,38 @@ module_deps(rb_fwupd  fwupd)
 # The polar skyplot renderer lives in core/ui/ and consumes ui_sv_t.
 module_deps(skyplot ui)
 
+# `sky_policy` (app/src/zephyr/ui/sts_sky_policy.h) is the layer between the
+# renderer and the panel: where the square canvas goes inside a UI_HINT_SKYPLOT
+# band, which UBX-NAV-SAT records become markers, whether the plot may be
+# rotated to true north at all, and when the picture has to be pushed again.
+# Zephyr-free by construction so all of it is reachable here — and it needs to
+# be, because every one of those decisions is silent when it is wrong: an
+# oversized canvas is an out-of-bounds framebuffer write, an unfiltered record
+# paints a phantom satellite exactly where an operator looks for an obstruction,
+# and spec §6.3 is explicit that a plausible-but-wrong rotation is worse than an
+# honest un-rotated one. It drives the real core/ui/skyplot.c rather than a
+# model — sts_sky_orient() calls sky_heading_from_ecompass() and
+# sky_declination_dipole_ddeg() directly — hence the same `ui` edge as `skyplot`.
+module_deps(sky_policy ui)
+
+# `ptp_icv_policy` (app/src/zephyr/net/sts_ptp_icv_policy.h) is the arming
+# decision for IEEE 1588-2019 Annex P: whether the port holds an ICV context at
+# all, and what ptp_icv_cfg_t to load into it. It defers to core/ptp's own
+# ptp_icv_key_set()/ptp_icv_cfg_validate() rather than re-deriving what a usable
+# association looks like, hence the real `ptp` edge — a model would let the glue
+# install something core silently reinterprets, which is the class of defect
+# that left ptp_port_ctx_t::icv permanently NULL in the first place.
+module_deps(ptp_icv_policy ptp)
+
+# `factory_policy` (app/src/zephyr/ui/sts_factory_policy.h) is the shape of a
+# factory reset, shared by the web, MCP and panel planes. Half the suite is the
+# arithmetic; the other half reads those three sources and asserts each plane
+# still runs both the config reset and the key wipe, because the defect the
+# header records lived in the *set* of the three and no C construct can express
+# it. It compiles no core module, hence the empty dependency list — like
+# `smear_isolation` it reads the sources, it does not link them.
+module_deps(factory_policy)
+
 # ---------------------------------------------------------------------------
 # Dependency resolution
 # ---------------------------------------------------------------------------

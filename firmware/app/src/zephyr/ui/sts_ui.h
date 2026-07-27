@@ -24,6 +24,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "ui/skyplot.h"
 #include "ui/ui.h"
 
 #ifdef __cplusplus
@@ -72,6 +73,58 @@ void ui_display_backlight_permille(uint16_t permille);
 
 /** True once the ST7796 has been initialised at least once. */
 bool ui_display_ready(void);
+
+/* ---- the §6.3 skyplot ---------------------------------------------------- */
+
+/**
+ * Everything the skyplot rasteriser needs that the tile surface cannot carry.
+ *
+ * core/ui emits UI_HINT_SKYPLOT with the cell rectangle the plot belongs in and
+ * nothing else — the hint is four bytes of geometry, and the per-SV records and
+ * the compass orientation are the glue's to fetch. sts_ui.c collects them once
+ * per render tick and hands them over here; ui_display.c turns them into pixels
+ * with core/ui/skyplot.h.
+ *
+ * The two halves are deliberately separate calls rather than one render entry
+ * point: which satellites are drawn is a data question (sts_gnss_sky(), aged),
+ * where they are drawn is a framebuffer question, and only the second one needs
+ * to know that the panel exists.
+ */
+typedef struct {
+	/** Markers, already filtered and mapped by sts_sky_policy.h. */
+	ui_sv_t sv[UI_MAX_SV];
+	uint8_t sv_count;
+	/** Rotation for this frame; `north_valid` false means GNSS-north. */
+	sky_orient_t orient;
+	/** sts_sky_north_t — why the plot is, or is not, rotated to true north. */
+	uint8_t north_reason;
+} sts_ui_sky_t;
+
+/**
+ * Publish the satellites and the orientation the next blit should draw.
+ *
+ * Copied, not referenced: the caller's snapshot is a render-tick local and the
+ * rasteriser runs later in the same tick. A NULL argument clears the plot to an
+ * empty sky, which is what a page with no UI_HINT_SKYPLOT should leave behind.
+ */
+void ui_display_sky_set(const sts_ui_sky_t *s);
+
+/** Widest canvas the skyplot rasteriser will allocate for, pixels. */
+#define STS_UI_SKY_MAX_SIDE 224u
+
+/**
+ * Render the current skyplot into @p out as one ASCII character per pixel
+ * (sky_canvas_to_ascii()), at the geometry the last blit used.
+ *
+ * The console's view of a page that is otherwise pixels — spec §6.3's plot is
+ * the one panel element the text mirror cannot carry, so a unit being worked on
+ * over USB with no display attached has no other way to see it.
+ *
+ * @retval >0       Characters written, excluding the NUL.
+ * @retval 0        No plot has been rasterised (the sky page is not up, the
+ *                  panel has never been ready, or @p out is too small).
+ */
+size_t ui_display_sky_ascii(char *out, size_t cap);
 
 /* ---- ui_input.c --------------------------------------------------------- */
 

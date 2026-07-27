@@ -67,6 +67,7 @@
 #include "ui/ui.h"
 #include "zephyr/sts_app.h"
 #include "zephyr/ui/sts_factory_policy.h"
+#include "zephyr/ui/sts_sky_policy.h"
 #include "zephyr/ui/sts_ui.h"
 #include "zephyr/ui/sts_ui_echo.h"
 
@@ -126,6 +127,49 @@ static struct k_thread ui_thread;
 static K_THREAD_STACK_DEFINE(ui_stack, STS_UI_RENDER_STACK);
 
 static int ui_liveness_id = -1;
+
+/* --------------------------------------------------------------- skyplot */
+
+/*
+ * Oldest UBX-NAV-SAT frame the plot will draw, and oldest e-compass sweep the
+ * rotation will trust.
+ *
+ * sts_app.h is explicit that the sky cache is a last-known-good that a stopped
+ * receiver leaves in place indefinitely — "the right thing to draw for a second
+ * or two and the wrong thing to draw for an hour". Both sources are 1 Hz, so
+ * five seconds rides out four consecutive misses (a busy parse, a survey-in
+ * reconfiguration, an I2C retry) and still blanks the plot long before an
+ * operator could mistake a frozen sky for a live one.
+ */
+#define SKY_STALE_MS 5000u
+
+/*
+ * The §10.4 hard/soft-iron fit and the site declination, cached from cfg group
+ * 0x0C by the applier below.
+ *
+ * Cached rather than read per frame for coherency, not speed: the seven keys
+ * are one calibration and a render tick that read three of them from before a
+ * commit and four from after would rotate the plot by an angle that was never
+ * configured. sts_app.h dispatches appliers after the commit completes, so the
+ * set this holds is always one that was committed together.
+ *
+ * Written by the committing thread (a web worker or the shell), read by
+ * ui_local. Both are management threads and the failure mode of a torn read is
+ * one frame at a wrong rotation, so the words are not individually atomic — but
+ * `valid` is published LAST and cleared FIRST, so a reader never sees a partly
+ * written calibration marked usable.
+ */
+static struct {
+	int32_t off[3];  /**< cal.mag.off.*, milligauss */
+	int32_t scl[3];  /**< cal.mag.scl.*, Q12 */
+	uint32_t ref;    /**< cal.mag.ref, milligauss; 0 = never fitted */
+	int16_t decl_ddeg;
+	bool decl_valid; /**< cal.decl.ddeg is not STS_SKY_DECL_UNSET */
+	bool valid;      /**< cal.mag.ref is non-zero */
+} sky_cal;
+
+/** What the rasteriser draws; rebuilt once per render tick. */
+static sts_ui_sky_t sky_frame;
 
 /*
  * Input echo for the panel mirror (sts_app.h sts_mp_mirror_publish).
@@ -610,14 +654,107 @@ static void fill_alarms(ui_health_t *h, uint64_t mask)
 }
 
 /**
+ * Fill the per-SV markers and the true-north orientation for this frame.
+ *
+ * Both halves land in the same place because they are one picture: the numeric
+ * table on the sky page (h->sv[]) and the polar plot (sky_frame) MUST show the
+ * same satellites, or the operator reading "GPS 14, elevation 8" off the table
+ * cannot find it on the plot.
+ *
+ * The selection itself is sts_sky_policy.h's. UBX reports azimuth and elevation
+ * as zero for a satellite it knows only from the almanac, so admitting every
+ * NAV-SAT record would paint a stack of phantom markers at due north on the
+ * horizon — precisely where an operator looks for an obstruction.
+ */
+static void build_sky(ui_health_t *h)
+{
+	static sts_gnss_sky_t sky; /* ~280 B; the ui thread's stack is 3 KiB */
+	sts_ecompass_t ec;
+	sts_sky_orient_in_t in;
+	uint64_t now = sts_mono_ms();
+	bool sky_fresh;
+	uint8_t n = 0u;
+	uint8_t i;
+
+	memset(&sky_frame, 0, sizeof(sky_frame));
+
+	if (sts_gnss_sky(&sky) != 0) {
+		/* -EBUSY: the GNSS thread is mid-parse. sts_app.h zeroes the
+		 * output, and a render tick skips the frame rather than waits. */
+		memset(&sky, 0, sizeof(sky));
+	}
+
+	/* sts_app.h: mono_ms is when the frame was DECODED and a receiver that
+	 * has stopped talking leaves the last good one in place. Age it. */
+	sky_fresh = (sky.mono_ms != 0u) && (now >= sky.mono_ms) &&
+		    ((now - sky.mono_ms) <= (uint64_t)SKY_STALE_MS);
+
+	if (sky_fresh) {
+		for (i = 0u; i < sky.count && i < (uint8_t)STS_GNSS_SKY_MAX_SV &&
+			     n < (uint8_t)UI_MAX_SV;
+		     i++) {
+			const sts_gnss_sv_t *s = &sky.sv[i];
+
+			if (sts_sky_sv_from_ubx(s->gnss_id, s->sv_id,
+						s->elev_deg, s->azim_deg,
+						s->cno_dbhz, s->used,
+						&h->sv[n])) {
+				sky_frame.sv[n] = h->sv[n];
+				n++;
+			}
+		}
+	}
+	h->sv_count = n;
+	sky_frame.sv_count = n;
+
+	/* --- orientation ------------------------------------------------- */
+
+	memset(&in, 0, sizeof(in));
+	memset(&ec, 0, sizeof(ec));
+	(void)sts_ecompass(&ec);
+
+	/*
+	 * mono_ms here is k_uptime_get_32()'s width, not sts_mono_ms()'s, so the
+	 * comparison is done in 32 bits and wraps correctly with it.
+	 */
+	in.sample_valid = ec.valid &&
+			  (((uint32_t)now - ec.mono_ms) <= SKY_STALE_MS);
+	for (i = 0u; i < 3u; i++) {
+		in.mag[i] = ec.mag_mgauss[i];
+		in.acc[i] = ec.acc_mg[i];
+		in.mag_offset[i] = sky_cal.off[i];
+		in.mag_scale[i] = sky_cal.scl[i];
+	}
+	in.cal_valid = sky_cal.valid;
+	in.field_ref = sky_cal.ref;
+	in.decl_site_valid = sky_cal.decl_valid;
+	in.decl_site_ddeg = sky_cal.decl_ddeg;
+
+	/*
+	 * Position for the dipole declination fallback comes from the SAME
+	 * snapshot as the satellites, and is trusted even when the NAV-SAT frame
+	 * behind it has aged out: a fixed-site grandmaster's last known position
+	 * does not go stale in five seconds, and a 10-15 degree model correction
+	 * is not the thing that will be wrong about a plot whose receiver has
+	 * stopped reporting.
+	 */
+	in.pos_valid = sky.pos_valid;
+	in.lat_1e7 = sky.lat_1e7;
+	in.lon_1e7 = sky.lon_1e7;
+
+	sky_frame.north_reason =
+		sts_sky_orient(&in, &sky_frame.orient, NULL);
+}
+
+/**
  * Build the health snapshot core/ui renders from.
  *
  * TODO(ui-health): the fields below the quality-derived block have no typed
- * cross-area source in sts_app.h (per-rail INA, fan/PoE, per-SV az/el/CN0, the
- * network/PTP counters and the Rb detail). They stay zero until a health getter
- * is added to sts_app.h by the platform/net owners. The Sky page already falls
- * back to the quality SV counts, and Home/Clocks/Alarms are fully populated
- * from the quality block and the alarm mask.
+ * cross-area source in sts_app.h (per-rail INA, fan/PoE, the network/PTP
+ * counters and the Rb detail). They stay zero until a health getter is added to
+ * sts_app.h by the platform/net owners. Home/Clocks/Alarms are fully populated
+ * from the quality block and the alarm mask, and the Sky page's per-SV
+ * az/el/CN0 now comes from sts_gnss_sky() through build_sky().
  */
 static void build_health(ui_health_t *h, const quality_block_t *q,
 			 uint64_t alarms)
@@ -626,6 +763,7 @@ static void build_health(ui_health_t *h, const quality_block_t *q,
 	fill_time(h, q);
 	fill_ident(h);
 	fill_alarms(h, alarms);
+	build_sky(h);
 
 	/* Antenna state is not directly exposed; approximate from the GNSS
 	 * time-lock flag so the Home/Sky badge is not permanently "UNKNOWN". */
@@ -830,6 +968,79 @@ static void apply_ui_group(void *ctx, uint8_t group)
 		(unsigned int)timeout);
 }
 
+/**
+ * Pull the §10.4 e-compass fit and the site declination out of cfg group 0x0C.
+ *
+ * Group 0x0C already has a subscriber (platform/hk.c, for the nine INA228
+ * SHUNT_CAL trims). sts_app.h dispatches EVERY subscriber for a group, in
+ * registration order, precisely so a shared group does not become first-come:
+ * these seven keys belong to the panel and none of them means anything to
+ * housekeeping.
+ *
+ * Read under sts_cfg_lock() for the same reason apply_ui_group() takes it — the
+ * keys are a set, and a commit racing in between would hand the plot half of an
+ * old calibration and half of a new one.
+ */
+static void apply_cal_group(void *ctx, uint8_t group)
+{
+	static const uint16_t off_id[3] = {
+		(uint16_t)CFG_ID_CAL_MAG_OFF_X,
+		(uint16_t)CFG_ID_CAL_MAG_OFF_Y,
+		(uint16_t)CFG_ID_CAL_MAG_OFF_Z,
+	};
+	static const uint16_t scl_id[3] = {
+		(uint16_t)CFG_ID_CAL_MAG_SCL_X,
+		(uint16_t)CFG_ID_CAL_MAG_SCL_Y,
+		(uint16_t)CFG_ID_CAL_MAG_SCL_Z,
+	};
+	int32_t off[3] = { 0, 0, 0 };
+	int32_t scl[3] = { 4096, 4096, 4096 };
+	uint64_t ref = 0u;
+	int32_t decl = STS_SKY_DECL_UNSET;
+	unsigned int i;
+
+	ARG_UNUSED(ctx);
+	ARG_UNUSED(group);
+
+	sts_cfg_lock();
+	for (i = 0u; i < 3u; i++) {
+		uint64_t s = 4096u;
+
+		(void)cfg_get_i32(sts_cfg(), off_id[i], &off[i]);
+		(void)cfg_get_u64(sts_cfg(), scl_id[i], &s);
+		scl[i] = (int32_t)s;
+	}
+	(void)cfg_get_u64(sts_cfg(), (uint16_t)CFG_ID_CAL_MAG_FIELD_REF, &ref);
+	(void)cfg_get_i32(sts_cfg(), (uint16_t)CFG_ID_CAL_DECLINATION_DDEG,
+			  &decl);
+	sts_cfg_unlock();
+
+	/* Cleared first, published last: a render tick that interleaves with
+	 * this must never read half a calibration and believe it. */
+	sky_cal.valid = false;
+	sky_cal.decl_valid = false;
+
+	for (i = 0u; i < 3u; i++) {
+		sky_cal.off[i] = off[i];
+		sky_cal.scl[i] = scl[i];
+	}
+	sky_cal.ref = (uint32_t)ref;
+	sky_cal.decl_ddeg = (int16_t)decl;
+
+	/*
+	 * `cal.mag.ref` doubles as the "the fit has been performed" flag
+	 * (cfg_schema.h): zero leaves the plot in GNSS-north behind the "north
+	 * unverified" badge, which is what an uncommissioned unit MUST show.
+	 */
+	sky_cal.decl_valid = (decl != STS_SKY_DECL_UNSET);
+	sky_cal.valid = (ref != 0u);
+
+	sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_INFO,
+		"skyplot orientation: compass fit %s, site declination %s",
+		sky_cal.valid ? "loaded" : "absent",
+		sky_cal.decl_valid ? "set" : "unset (dipole model)");
+}
+
 /* ------------------------------------------------------------------ thread */
 
 static void ui_thread_entry(void *p1, void *p2, void *p3)
@@ -890,6 +1101,15 @@ static void ui_thread_entry(void *p1, void *p2, void *p3)
 				 * still powering up must not stop the mirror. */
 				mirror_publish(alarms);
 			}
+			/*
+			 * Hand the rasteriser the satellites and the rotation
+			 * build_health() just resolved. Unconditional, and not
+			 * only when the sky page is up: the console dump renders
+			 * from the same publication, and an operator asking for
+			 * the plot over USB must not have to walk the panel to
+			 * the sky page first.
+			 */
+			ui_display_sky_set(&sky_frame);
 			(void)ui_display_blit(&g_surf);
 			ui_display_backlight_permille(
 				ui_backlight_permille(&g_ui));
@@ -961,6 +1181,19 @@ int sts_ui_start(void)
 	if (rc != 0) {
 		LOG_WRN("ui cfg applier not registered (%d)", rc);
 	}
+
+	/*
+	 * The skyplot's true-north inputs live in the calibration group (0x0C).
+	 * Seeded here as well as registered, because an applier only runs on a
+	 * commit: without the seeding call a unit that has been commissioned and
+	 * then rebooted would draw its first frames in GNSS-north behind the
+	 * badge despite holding a perfectly good fit in NVS.
+	 */
+	rc = sts_cfg_register_applier(CFG_G_CAL, apply_cal_group, NULL);
+	if (rc != 0) {
+		LOG_WRN("ui cal applier not registered (%d)", rc);
+	}
+	apply_cal_group(NULL, (uint8_t)CFG_G_CAL);
 
 	ui_liveness_id = sts_liveness_register("ui");
 	if (ui_liveness_id < 0) {

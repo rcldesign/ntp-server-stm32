@@ -56,7 +56,17 @@ static int tx_cb(void *user, const uint8_t *buf, size_t len)
 
 	TEST_ASSERT_TRUE(len >= 2U);
 	TEST_ASSERT_EQUAL_HEX8(0x00U, buf[len - 1U]); /* frame delimiter */
-	TEST_ASSERT_TRUE(g_txn < TXQ);
+	/*
+	 * The ring holds every frame a test produces, so a test that issues more
+	 * than TXQ requests overflows it. That is a harness limit and not an
+	 * engine defect, so say so: as a bare TEST_ASSERT_TRUE it surfaced as
+	 * "Expected TRUE Was FALSE" on line 59 of the capture callback, a long
+	 * way from the test that actually grew. Use tx_reset() in a loop that
+	 * scales with something (the key count, say) rather than raising TXQ.
+	 */
+	TEST_ASSERT_TRUE_MESSAGE(g_txn < TXQ,
+				 "tx capture ring full: this test issued more "
+				 "than TXQ requests — drain it with tx_reset()");
 
 	TEST_ASSERT_EQUAL_INT(0, cobs_decode(buf, len - 1U, g_tx[g_txn].buf,
 					     sizeof(g_tx[g_txn].buf), &dn));
@@ -69,6 +79,18 @@ static const cap_t *last_tx(void)
 {
 	TEST_ASSERT_TRUE(g_txn > 0U);
 	return &g_tx[g_txn - 1U];
+}
+
+/**
+ * Drop everything captured so far.
+ *
+ * For a test whose request count scales with something outside its control —
+ * the schema's key count, in the CFG_LIST pager's case. Sizing TXQ for that
+ * instead just moves the overflow to the next time the schema grows.
+ */
+static void tx_reset(void)
+{
+	g_txn = 0U;
 }
 
 /* Field accessors over a captured frame, with the CRC re-checked each time. */
@@ -1452,6 +1474,13 @@ static void test_cfg_list_pages_in_id_order(void)
 	req[2] = 5U;
 
 	do {
+		/*
+		 * One request per page, and the page count scales with the
+		 * schema, so drain the capture ring each time round rather than
+		 * sizing TXQ for however many keys core/cfg holds today.
+		 */
+		tx_reset();
+
 		(void)feed_req(MCP_CMD_CFG_LIST, req, sizeof(req));
 		expect_status(MCP_CMD_CFG_LIST, g_seq, (uint8_t)MCP_OK);
 		p = tx_pay(last_tx());
@@ -1479,7 +1508,14 @@ static void test_cfg_list_pages_in_id_order(void)
 
 		bytes_put_le16(req, next);
 		pages++;
-		TEST_ASSERT_TRUE(pages < 100U);
+		/*
+		 * A page that advertises a `next` must have emitted at least one
+		 * key, so the walk cannot need more pages than there are keys.
+		 * Derived rather than a round number, so growing the schema
+		 * cannot turn a runaway detector into a false failure.
+		 */
+		TEST_ASSERT_TRUE_MESSAGE(pages <= (cfg_key_count() + 1U),
+					 "CFG_LIST paging did not terminate");
 	} while (next != 0U);
 
 	TEST_ASSERT_EQUAL_UINT16((uint16_t)cfg_key_count(), total);

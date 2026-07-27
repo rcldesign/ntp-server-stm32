@@ -1341,6 +1341,67 @@ static int cmd_diag_mcp(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/*
+ * The §6.3 polar skyplot, as characters.
+ *
+ * The plot is the one panel element the text mirror cannot carry — it is
+ * pixels, and everything else the panel shows is glyphs — so a unit being
+ * worked on over the USB console with no display attached has no other way to
+ * see which part of its sky is obstructed. The renderer's ASCII accessor exists
+ * for exactly this (core/ui/skyplot.h), and the UI area renders it into its own
+ * small canvas rather than the panel's, so this runs without racing ui_local.
+ *
+ * WEAK, and reached without including the UI area's private header: sts_ui.h is
+ * private to src/zephyr/ui/ (ARCHITECTURE.md §2), and with CONFIG_STS1000_UI=n
+ * there is no UI area at all. Same idiom as sts_web.c's sts_dfu_port() and
+ * hk.c's sts_atecc_reapply() — the symbol resolves to NULL and the command says
+ * so, rather than the image failing to link.
+ */
+extern size_t ui_display_sky_ascii(char *out, size_t cap) __attribute__((weak));
+
+static int cmd_diag_sky(const struct shell *sh, size_t argc, char **argv)
+{
+	/* 31 rows of 31 characters plus a newline each, plus the NUL. Static
+	 * because the shell thread's stack is not the place for a kilobyte, and
+	 * safe because the Zephyr shell dispatches one command at a time. */
+	static char pic[(31 * 32) + 1];
+	const char *p = pic;
+	size_t n;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (ui_display_sky_ascii == NULL) {
+		shell_error(sh, "no local-UI area in this image");
+		return -ENOSYS;
+	}
+
+	n = ui_display_sky_ascii(pic, sizeof(pic));
+	if (n == 0u) {
+		shell_error(sh, "no skyplot has been rendered");
+		return -ENODATA;
+	}
+
+	shell_print(sh, "zenith centre, horizon rim; '=' horizon/north tick, "
+			"'-' grid, '#' north-unverified badge,");
+	shell_print(sh, "'0'-'6' GPS/GAL/GLO/BDS/SBAS/QZSS/other, filled = used "
+			"in the solution");
+
+	/* One shell_print() per row: the shell's own line buffer is far smaller
+	 * than the picture, and a single print would be truncated. */
+	while (*p != '\0') {
+		const char *nl = strchr(p, '\n');
+
+		if (nl == NULL) {
+			shell_print(sh, "%s", p);
+			break;
+		}
+		shell_print(sh, "%.*s", (int)(nl - p), p);
+		p = nl + 1;
+	}
+	return 0;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Registration                                                              */
 /* ------------------------------------------------------------------------- */
@@ -1391,6 +1452,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(store, NULL, "NVS, /lfs and fast-save state",
 		      cmd_diag_store, 1, 0),
 	SHELL_CMD_ARG(mcp, NULL, "MCP channel counters", cmd_diag_mcp, 1, 0),
+	SHELL_CMD_ARG(sky, NULL, "the §6.3 polar skyplot, as characters",
+		      cmd_diag_sky, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(

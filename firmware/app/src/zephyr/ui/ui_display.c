@@ -44,6 +44,37 @@
  * and push only that rectangle as RGB565 — the §6.5 partial-region strategy
  * that bounds SPI traffic. The BIGNUM/PROGRESS/RULE overlay hints are drawn on
  * top of the affected rows, which are force-repainted each frame.
+ *
+ * THE SKYPLOT (spec §6.3)
+ * -----------------------
+ * UI_HINT_SKYPLOT is the one hint that is not a decoration on a text row: it
+ * claims a rectangle of *rows* and asks for a polar plot in it. core/ui cannot
+ * draw one — a text-tile surface has no way to express it — so the page leaves
+ * the cells blank and this file fills them from core/ui/skyplot.h, with every
+ * decision between the hint and the pixels coming from sts_sky_policy.h.
+ *
+ * Three properties are worth stating because getting any of them wrong is
+ * silent:
+ *
+ *   1. The plot is repainted only when its CONTENT changes, not every frame.
+ *      A 224x224 canvas is 100 KiB of RGB565; at the 10 Hz render tick that
+ *      would be a megabyte a second of SPI4 traffic to redraw a picture whose
+ *      inputs (UBX-NAV-SAT, the 1 Hz e-compass sweep) move at 1 Hz. The gate is
+ *      a content signature plus "did a text row inside the band get repainted",
+ *      because a repainted row paints black over whatever was under it.
+ *
+ *   2. When the page stops asking for a plot, the rectangle is blanked. The
+ *      sky page's TABLE view writes text over the top of the band and leaves
+ *      the bottom of it blank, so without an explicit clear the lower half of
+ *      the previous plot would sit under the table indefinitely.
+ *
+ *   3. The "north unverified" label is stamped into the INDEXED canvas rather
+ *      than composited over the RGB565 strips. sky_render()'s badge is two
+ *      pixel rows — a graphical marker, because core owns no font — and the
+ *      words have to go somewhere the operator will read them. Stamping into
+ *      the palette buffer keeps the caption transparent (glyph pixels only)
+ *      when north IS verified, which is the difference between a caption and a
+ *      black box over the southern horizon.
  */
 
 #include <errno.h>
@@ -57,8 +88,10 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#include "ui/skyplot.h"
 #include "ui/ui.h"
 #include "ui/ui_font8x16.h"
+#include "zephyr/ui/sts_sky_policy.h"
 #include "zephyr/ui/sts_ui.h"
 
 LOG_MODULE_REGISTER(sts_ui_display, CONFIG_STS1000_LOG_LEVEL);
@@ -117,6 +150,55 @@ static bool shadow_valid;
  */
 #define BLIT_MAX_PX (STS_UI_COLS * UI_FONT_W * UI_FONT_H)
 static uint16_t blit[BLIT_MAX_PX];
+
+/* ---------------------------------------------------------------- skyplot */
+
+/*
+ * Indexed-colour canvas for the polar plot, one octet per pixel.
+ *
+ * 224 px is the as-built band, not a round number: core/ui gives the plot rows
+ * BODY_TOP+3 .. rows-2, which on the 60x20 grid is 14 rows of 16 px. The band
+ * is 480 px wide, so the square is height-limited and sts_sky_layout() will ask
+ * for exactly 224. Sizing the buffer to the band rather than to SKY_MAX_DIM
+ * (320) saves 52 KiB of SRAM that no geometry on this panel can use.
+ *
+ * A larger grid — a future panel, or a debug surface — is not a fault: the
+ * layout call is given this as its `max_side` ceiling and simply centres a
+ * smaller square in the taller band.
+ */
+static uint8_t sky_px[STS_UI_SKY_MAX_SIDE * STS_UI_SKY_MAX_SIDE];
+static sky_canvas_t sky_canvas;
+
+/*
+ * The console dump renders into its own small canvas rather than sharing the
+ * panel's. Two reasons, and the first is the one that matters: the shell runs
+ * on the console thread and the panel canvas is written by ui_local, so sharing
+ * the buffer would be a data race on 50 KiB. The second is that the panel
+ * canvas is 224 rows of 224 characters — 50 KiB of console output for a picture
+ * an operator wants to glance at.
+ */
+#define SKY_ASCII_SIDE 31u
+static uint8_t sky_ascii_px[SKY_ASCII_SIDE * SKY_ASCII_SIDE];
+
+/*
+ * Published by sts_ui.c once per render tick, consumed here and by the console
+ * dump. The mutex is not for the render path — ui_display_sky_set() and
+ * ui_display_blit() are both called from ui_local, in that order — it is for
+ * the shell, which reads this from another thread and would otherwise dump a
+ * frame torn across the memcpy.
+ */
+static sts_ui_sky_t sky_in;
+static K_MUTEX_DEFINE(sky_mutex);
+
+/* What is currently ON the panel, so a repaint can be skipped or a stale plot
+ * blanked. Touched only by the render thread. */
+static bool sky_drawn;
+static sts_sky_layout_t sky_at;
+static uint32_t sky_sig;
+
+/* Palette index -> RGB565, byte-swapped for the wire. Built once at init so the
+ * per-pixel inner loop is a table lookup and not a switch. */
+static uint16_t sky_lut[SKY_C__COUNT];
 
 /* ------------------------------------------------------------------ colour */
 
@@ -381,6 +463,324 @@ static int blit_row(const ui_surface_t *s, uint8_t row)
 	}
 }
 
+/* --------------------------------------------------------------- skyplot */
+
+/** Fill a pixel rectangle with black, in strips the blit scratch can hold. */
+static int push_black(unsigned int x0, unsigned int y0, unsigned int w,
+		      unsigned int h)
+{
+	unsigned int per = (w != 0u) ? (BLIT_MAX_PX / w) : 0u;
+	unsigned int y = 0u;
+
+	if (w == 0u || h == 0u || per == 0u) {
+		return 0;
+	}
+	/* RGB565 black is 0x0000, and be16(0) is 0, so one memset serves every
+	 * strip. */
+	memset(blit, 0, (size_t)w * ((per < h) ? per : h) * sizeof(blit[0]));
+
+	while (y < h) {
+		unsigned int n = ((h - y) < per) ? (h - y) : per;
+		int rc = push_region(x0, y0 + y, w, n);
+
+		if (rc != 0) {
+			return rc;
+		}
+		y += n;
+	}
+	return 0;
+}
+
+/** The frame's UI_HINT_SKYPLOT, or NULL. Only the first is honoured. */
+static const ui_hint_t *skyplot_hint(const ui_surface_t *s)
+{
+	uint8_t i;
+
+	for (i = 0u; i < s->hint_count; i++) {
+		if (s->hint[i].kind == (uint8_t)UI_HINT_SKYPLOT) {
+			return &s->hint[i];
+		}
+	}
+	return NULL;
+}
+
+/**
+ * Stamp one line of 8x16 text into the INDEXED canvas.
+ *
+ * @param opaque  true paints @p bg across the whole cell rectangle, so the text
+ *                reads as a solid badge band; false leaves every non-glyph pixel
+ *                as the plot drew it, so a caption does not punch a black hole
+ *                in the southern horizon.
+ *
+ * Writes sky_canvas.px directly. That buffer is this file's — skyplot.h is
+ * explicit that canvas storage is caller-owned — but core's own put_px() is
+ * static, so the bounds check is repeated here rather than borrowed.
+ */
+static void sky_stamp(int32_t x0, int32_t y0, const char *str, size_t n,
+		      uint8_t fg, uint8_t bg, bool opaque)
+{
+	size_t i;
+
+	for (i = 0u; i < n; i++) {
+		const uint8_t *rows = ui_font8x16_glyph(str[i]);
+		unsigned int gy;
+
+		for (gy = 0u; gy < UI_FONT_H; gy++) {
+			int32_t py = y0 + (int32_t)gy;
+			unsigned int gx;
+
+			if (py < 0 || py >= (int32_t)sky_canvas.h) {
+				continue;
+			}
+			for (gx = 0u; gx < UI_FONT_W; gx++) {
+				int32_t px = x0 + (int32_t)(i * UI_FONT_W) +
+					     (int32_t)gx;
+				bool on = (rows[gy] & (0x80u >> gx)) != 0u;
+
+				if (px < 0 || px >= (int32_t)sky_canvas.w) {
+					continue;
+				}
+				if (!on && !opaque) {
+					continue;
+				}
+				sky_canvas.px[((size_t)py * sky_canvas.w) +
+					      (size_t)px] = on ? fg : bg;
+			}
+		}
+	}
+}
+
+/**
+ * Write the §6.3 north verdict across the bottom of the canvas.
+ *
+ * Unverified: black on SKY_C_BADGE, which thickens sky_render()'s two-pixel
+ * badge into something an operator reads from across the room. That costs the
+ * southernmost strip of the plot, which is the right trade in exactly the state
+ * where the azimuths are not trustworthy anyway.
+ *
+ * Verified: the words alone, in the grid's bright colour, transparent over the
+ * plot — "TRUE NORTH" and "NORTH APPROX (MODEL)" are different enough to matter
+ * (the modelled declination is good only to 10-15 degrees) and neither is worth
+ * a black band.
+ *
+ * A canvas too narrow for the whole string gets no text at all. Half a label is
+ * worse than none: sky_render()'s graphical badge still says the orientation is
+ * suspect, and "NORT" says nothing.
+ */
+static void sky_label(void)
+{
+	bool unverified = sts_sky_north_unverified(sky_in.north_reason);
+	const char *label = sts_sky_north_label(sky_in.north_reason);
+	size_t n = strlen(label);
+	unsigned int w = (unsigned int)n * UI_FONT_W;
+
+	if (n == 0u || w > sky_canvas.w || UI_FONT_H > sky_canvas.h) {
+		return;
+	}
+
+	sky_stamp((int32_t)((sky_canvas.w - w) / 2u),
+		  (int32_t)sky_canvas.h - (int32_t)UI_FONT_H, label, n,
+		  unverified ? (uint8_t)SKY_C_BG : (uint8_t)SKY_C_GRID_MAJOR,
+		  (uint8_t)SKY_C_BADGE, unverified);
+}
+
+/** Render the published sky into @p c and stamp the north label over it. */
+static int sky_compose(sky_canvas_t *c, uint8_t *px, uint16_t side, size_t cap)
+{
+	int rc = sky_canvas_init(c, px, side, side, cap);
+
+	if (rc != 0) {
+		return rc;
+	}
+	rc = sky_render(c, sky_in.sv, sky_in.sv_count,
+			sky_in.orient.north_valid ? &sky_in.orient : NULL);
+	if (rc != 0) {
+		return rc;
+	}
+	return 0;
+}
+
+/** Convert the composed canvas to RGB565 and push it, in horizontal strips. */
+static int sky_push(void)
+{
+	unsigned int side = sky_canvas.w;
+	unsigned int per = BLIT_MAX_PX / side;
+	unsigned int y = 0u;
+
+	if (per == 0u) {
+		return -ENOSPC;
+	}
+
+	while (y < side) {
+		unsigned int n = ((side - y) < per) ? (side - y) : per;
+		unsigned int row;
+		int rc;
+
+		for (row = 0u; row < n; row++) {
+			unsigned int x;
+
+			for (x = 0u; x < side; x++) {
+				/* sky_canvas_get() rather than indexing px[]:
+				 * it is the module's read accessor and it is
+				 * what defines the out-of-bounds answer. The
+				 * clamp below is still needed — it guards the
+				 * LUT against a palette that grows without this
+				 * file's table growing with it. */
+				uint8_t idx = sky_canvas_get(
+					&sky_canvas, (int32_t)x,
+					(int32_t)(y + row));
+
+				blit[(row * side) + x] =
+					sky_lut[(idx < (uint8_t)SKY_C__COUNT)
+							? idx
+							: (uint8_t)SKY_C_BG];
+			}
+		}
+
+		rc = push_region(sky_at.x0, sky_at.y0 + y, side, n);
+		if (rc != 0) {
+			return rc;
+		}
+		y += n;
+	}
+	return 0;
+}
+
+/**
+ * Draw, skip or erase the polar plot for this frame.
+ *
+ * @param dirty  Rows this frame repainted. A repaint inside the plot's band
+ *               paints black over it, so it forces a redraw even when nothing
+ *               about the sky itself moved.
+ */
+static void skyplot_frame(const ui_surface_t *surf, uint32_t dirty)
+{
+	const ui_hint_t *h = skyplot_hint(surf);
+	sts_sky_layout_t lay;
+	uint32_t sig;
+	bool clobbered;
+	int rc;
+
+	if (h == NULL) {
+		/*
+		 * No plot this frame. If one is on the panel it has to go: the
+		 * sky page's TABLE view writes text over the top of the band and
+		 * leaves the bottom blank, so the text diff alone would erase
+		 * part of the plot and leave the rest.
+		 */
+		if (sky_drawn) {
+			(void)push_black(sky_at.x0, sky_at.y0, sky_at.side,
+					 sky_at.side);
+			sky_drawn = false;
+		}
+		return;
+	}
+
+	rc = sts_sky_layout(h, surf->rows, surf->cols, surf->cell_w,
+			    surf->cell_h, (uint16_t)STS_UI_SKY_MAX_SIDE, &lay);
+	if (rc != 0) {
+		/* The band cannot hold a legible plot (or the hint does not fit
+		 * the grid). Leave the cells blank rather than paint a smudge —
+		 * and erase a plot placed by an earlier, larger geometry. */
+		if (sky_drawn) {
+			(void)push_black(sky_at.x0, sky_at.y0, sky_at.side,
+					 sky_at.side);
+			sky_drawn = false;
+		}
+		return;
+	}
+
+	clobbered = (dirty & sts_sky_band_mask(h, surf->rows)) != 0u;
+
+	(void)k_mutex_lock(&sky_mutex, K_FOREVER);
+	sig = sts_sky_repaint_sig(&lay, sky_in.sv, sky_in.sv_count,
+				  sky_in.orient.north_valid ? &sky_in.orient
+							    : NULL,
+				  sky_in.north_reason);
+
+	if (sky_drawn && !clobbered && sig == sky_sig &&
+	    lay.x0 == sky_at.x0 && lay.y0 == sky_at.y0 &&
+	    lay.side == sky_at.side) {
+		k_mutex_unlock(&sky_mutex);
+		return; /* the panel already shows exactly this picture */
+	}
+
+	rc = sky_compose(&sky_canvas, sky_px, lay.side, sizeof(sky_px));
+	if (rc == 0) {
+		sky_label();
+	}
+	k_mutex_unlock(&sky_mutex);
+
+	if (rc != 0) {
+		LOG_WRN("skyplot render failed (%d)", rc);
+		return;
+	}
+
+	/*
+	 * A plot smaller than the one on the panel leaves a border of the old
+	 * one behind, so clear the previous rectangle before drawing the new
+	 * one. Only on a geometry change: the common case is the same rectangle
+	 * being overwritten in full.
+	 */
+	if (sky_drawn && (lay.x0 != sky_at.x0 || lay.y0 != sky_at.y0 ||
+			  lay.side != sky_at.side)) {
+		(void)push_black(sky_at.x0, sky_at.y0, sky_at.side,
+				 sky_at.side);
+	}
+
+	sky_at = lay;
+	rc = sky_push();
+	if (rc != 0) {
+		LOG_WRN("skyplot blit failed (%d)", rc);
+		sky_drawn = false; /* retry the whole plot next frame */
+		return;
+	}
+	sky_drawn = true;
+	sky_sig = sig;
+}
+
+void ui_display_sky_set(const sts_ui_sky_t *s)
+{
+	(void)k_mutex_lock(&sky_mutex, K_FOREVER);
+	if (s == NULL) {
+		memset(&sky_in, 0, sizeof(sky_in));
+		sky_in.north_reason = (uint8_t)STS_SKY_NORTH_NO_SAMPLE;
+	} else {
+		sky_in = *s;
+		if (sky_in.sv_count > (uint8_t)UI_MAX_SV) {
+			sky_in.sv_count = (uint8_t)UI_MAX_SV;
+		}
+	}
+	k_mutex_unlock(&sky_mutex);
+}
+
+size_t ui_display_sky_ascii(char *out, size_t cap)
+{
+	sky_canvas_t c;
+	size_t n;
+
+	if (out == NULL || cap == 0u) {
+		return 0u;
+	}
+
+	/*
+	 * Rendered here rather than copied out of the panel canvas: the caller
+	 * is the shell, on another thread and at another size. Under the same
+	 * mutex sts_ui.c publishes through, so the picture is one consistent
+	 * frame and not a memcpy caught mid-update.
+	 */
+	(void)k_mutex_lock(&sky_mutex, K_FOREVER);
+	if (sky_compose(&c, sky_ascii_px, (uint16_t)SKY_ASCII_SIDE,
+			sizeof(sky_ascii_px)) != 0) {
+		k_mutex_unlock(&sky_mutex);
+		return 0u;
+	}
+	n = sky_canvas_to_ascii(&c, out, cap);
+	k_mutex_unlock(&sky_mutex);
+
+	return n;
+}
+
 /* ------------------------------------------------------------- lifecycle */
 
 static uint32_t now_ms(void)
@@ -456,6 +856,7 @@ static int ensure_panel(void)
 
 int ui_display_init(void)
 {
+	unsigned int i;
 	int rc;
 
 	if (!device_is_ready(bl_pwm)) {
@@ -470,6 +871,14 @@ int ui_display_init(void)
 	if (rc != 0) {
 		return rc;
 	}
+
+	for (i = 0u; i < (unsigned int)SKY_C__COUNT; i++) {
+		sky_lut[i] = be16(sts_sky_palette_rgb565((uint8_t)i));
+	}
+	sky_drawn = false;
+	memset(&sky_at, 0, sizeof(sky_at));
+	ui_display_sky_set(NULL);
+
 	shadow_valid = false;
 	disp_state = DISP_OFF;
 	return 0;
@@ -532,6 +941,13 @@ int ui_display_blit(const ui_surface_t *surf)
 			return rc;
 		}
 	}
+
+	/*
+	 * The polar plot goes on AFTER the text rows: its band is blank cells,
+	 * and blit_row() paints those black. Drawing first would hand the
+	 * blitter a picture and then erase it.
+	 */
+	skyplot_frame(surf, dirty);
 
 	/* Adopt the frame as the new shadow. */
 	memcpy(shadow.ch, surf->ch, (size_t)surf->rows * surf->cols);

@@ -5,9 +5,11 @@
  *
  *  - The schema itself is an interface, not an implementation detail: MCP
  *    CFG_LIST pages through it in ID order and cfg.c binary-searches it, so
- *    sortedness, uniqueness and the per-group census are asserted directly.
- *    A key silently deleted or renumbered breaks a stored config; the census
- *    makes that a test failure rather than a field surprise.
+ *    sortedness, uniqueness and the group census are asserted directly. A key
+ *    silently deleted or renumbered breaks a stored config; the census makes
+ *    that a test failure rather than a field surprise. It does so without
+ *    hardcoding a key count — see the comment above test_schema_group_census()
+ *    for what that buys and what it gives up.
  *
  *  - The TLV vectors are hand-built byte-by-byte from the layout documented in
  *    cfg.h, not produced by cfg_export_read() — a round-trip against the
@@ -18,6 +20,7 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "unity.h"
@@ -173,51 +176,179 @@ void setUp(void)
 /* ------------------------------------------------------------------------- */
 
 /*
- * The census. Changing it is a deliberate act: an export written by an older
- * firmware carries the older key set, so a key that vanishes needs a
- * migration, and this table is the reminder.
+ * The census.
+ *
+ * This used to be a table of per-group key counts plus a grand total, and it
+ * was wrong every time somebody added a key — which is a change that owes
+ * nothing, because an addition is purely additive and needs no migration. A
+ * reminder that fires on the one change it does NOT need to guard is a
+ * reminder people learn to re-baseline without reading, and the two things the
+ * census actually existed for are both expressible without a number:
+ *
+ *   REASSIGNMENT.  Every key ID is 0xGGII, and every group owns exactly one
+ *   `group.item` name prefix. The mapping below is that bijection. A key given
+ *   the wrong GG byte — the realistic slip, since the row is copied from its
+ *   neighbour — lands in a group whose prefix its name does not carry, and
+ *   fails here by name. The old counts caught the same slip only as "two
+ *   numbers moved", and only if the table had already been re-baselined.
+ *
+ *   REMOVAL.  A key that vanishes breaks every export written by an older
+ *   firmware and therefore owes a migration. Two invariants catch it without
+ *   counting: item numbers run 1..N with no gap inside a group (so a removal
+ *   from the middle leaves a hole), and cfg_key_count() never drops below the
+ *   floor below (so a removal from the end drops under it). The floor is a
+ *   single number that only ever moves when a key is deliberately retired —
+ *   i.e. exactly when a migration is owed and somebody should be reading this.
+ *
+ * What is given up: a change that removed one key and added another in a
+ * different group would have moved two counts and now moves neither, provided
+ * the removal was from the end of its group. That is a narrow gap, and the
+ * schema header already makes removal a documented, migration-bearing act.
  */
+
+/**
+ * Floor on the key count.
+ *
+ * Adding keys never touches this. LOWERING it is the deliberate act: it means a
+ * key was retired, which needs a CFG_SCHEMA_VERSION bump and a migration
+ * (cfg_schema.h "Adding a key"), because a stored or exported blob written by
+ * an older firmware must still import.
+ */
+#define CFG_KEY_COUNT_FLOOR 156U
+
+/** Group byte -> the one `group.item` name prefix that group owns. */
+static const struct {
+	uint8_t group;
+	const char *prefix;
+} g_group_prefix[] = {
+	{ CFG_G_NET, "net." },       { CFG_G_NTP, "ntp." },
+	{ CFG_G_NTS, "nts." },       { CFG_G_PTP, "ptp." },
+	{ CFG_G_GNSS, "gnss." },     { CFG_G_TIMING, "tim." },
+	{ CFG_G_POWER, "pwr." },     { CFG_G_UI, "ui." },
+	{ CFG_G_LOG, "log." },       { CFG_G_SEC, "sec." },
+	{ CFG_G_SNMP, "snmp." },     { CFG_G_CAL, "cal." },
+};
+
+#define GROUP_PREFIX_N (sizeof(g_group_prefix) / sizeof(g_group_prefix[0]))
+
+/** The prefix @p group owns, or NULL when @p group is not a known group. */
+static const char *group_prefix(uint8_t group)
+{
+	size_t i;
+
+	for (i = 0U; i < GROUP_PREFIX_N; i++) {
+		if (g_group_prefix[i].group == group) {
+			return g_group_prefix[i].prefix;
+		}
+	}
+	return NULL;
+}
+
+/** Every key sits in a known group, and carries that group's name prefix. */
 static void test_schema_group_census(void)
 {
-	static const struct {
-		uint8_t group;
-		uint16_t expect;
-	} census[] = {
-		/* 7 -> 9: ntp.leap.smear (0x0208) and ntp.leap.smear.s
-		 * (0x0209), the spec §15.2 leap-smear opt-in and its window.
-		 * Purely additive, both defaulting to the existing behaviour
-		 * (smear off = step), so CFG_SCHEMA_VERSION does not move and
-		 * no migration is owed. */
-		{ CFG_G_NET, 9 },   { CFG_G_NTP, 9 },  { CFG_G_NTS, 4 },
-		{ CFG_G_PTP, 10 },  { CFG_G_GNSS, 7 }, { CFG_G_TIMING, 8 },
-		{ CFG_G_POWER, 5 }, { CFG_G_UI, 3 },   { CFG_G_LOG, 5 },
-		/* 61 -> 63: sec.operator.pw (0x0A3E) and sec.viewer.pw (0x0A3F)
-		 * gave the operator and viewer roles a persistent credential of
-		 * their own, in the same envelope as sec.admin.pw. Purely
-		 * additive — no key changed type, moved or vanished — so
-		 * CFG_SCHEMA_VERSION does not move and no migration is owed:
-		 * an export written by an older image still imports, and a new
-		 * export read by an older image loses only the two new keys. */
-		{ CFG_G_SEC, 63 },  { CFG_G_SNMP, 4 }, { CFG_G_CAL, 13 },
-	};
 	size_t i;
-	uint16_t total = 0U;
+	size_t seen = 0U;
 
-	for (i = 0U; i < (sizeof(census) / sizeof(census[0])); i++) {
-		uint16_t n = 0U;
+	for (i = 0U; i < cfg_key_count(); i++) {
+		const cfg_key_t *k = cfg_key_at(i);
+		const char *want = group_prefix(CFG_GROUP(k->id));
+		char msg[96];
+
+		(void)snprintf(msg, sizeof(msg),
+			       "0x%04X %s: group 0x%02X is not a known group",
+			       k->id, k->name, CFG_GROUP(k->id));
+		TEST_ASSERT_NOT_NULL_MESSAGE(want, msg);
+
+		(void)snprintf(msg, sizeof(msg),
+			       "0x%04X %s: group 0x%02X owns the prefix \"%s\"",
+			       k->id, k->name, CFG_GROUP(k->id), want);
+		TEST_ASSERT_EQUAL_STRING_LEN_MESSAGE(want, k->name,
+						     strlen(want), msg);
+		seen++;
+	}
+
+	/* No key outside a known group, stated as an identity rather than as a
+	 * number: the loop above visited every key exactly once. */
+	TEST_ASSERT_EQUAL_size_t(cfg_key_count(), seen);
+
+	/* And every group is populated, so a group constant cannot quietly
+	 * become dead while its prefix rule keeps passing vacuously. */
+	for (i = 0U; i < GROUP_PREFIX_N; i++) {
 		size_t j;
+		size_t n = 0U;
+		char msg[64];
 
 		for (j = 0U; j < cfg_key_count(); j++) {
-			if (CFG_GROUP(cfg_key_at(j)->id) == census[i].group) {
+			if (CFG_GROUP(cfg_key_at(j)->id) ==
+			    g_group_prefix[i].group) {
 				n++;
 			}
 		}
-		TEST_ASSERT_EQUAL_UINT16(census[i].expect, n);
-		total = (uint16_t)(total + n);
+		(void)snprintf(msg, sizeof(msg), "group 0x%02X (%s) is empty",
+			       g_group_prefix[i].group, g_group_prefix[i].prefix);
+		TEST_ASSERT_TRUE_MESSAGE(n > 0U, msg);
 	}
+}
 
-	TEST_ASSERT_EQUAL_size_t(140U, cfg_key_count());
-	TEST_ASSERT_EQUAL_UINT16(140U, total); /* no key outside a known group */
+/**
+ * A key cannot vanish unnoticed.
+ *
+ * Item numbers run 1..N inside each group with no gap, so a removal from the
+ * middle leaves a hole; the floor catches a removal from the end. Both are the
+ * reminder that an export written by an older firmware still has to import, so
+ * a retirement needs a CFG_SCHEMA_VERSION bump and a migration.
+ *
+ * If a key is ever legitimately retired: record the migration, then lower
+ * CFG_KEY_COUNT_FLOOR and add the retired ID to `retired` below.
+ */
+/* IDs deliberately retired, each with its migration. Empty today. */
+static const uint16_t g_retired_ids[] = { 0U };
+
+static bool id_is_retired(uint16_t id)
+{
+	size_t i;
+
+	for (i = 0U; i < (sizeof(g_retired_ids) / sizeof(g_retired_ids[0]));
+	     i++) {
+		if ((g_retired_ids[i] != 0U) && (g_retired_ids[i] == id)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void test_schema_has_no_retired_keys(void)
+{
+	uint8_t group = 0U;
+	uint8_t expect = 1U;
+	size_t i;
+
+	TEST_ASSERT_GREATER_OR_EQUAL_size_t(CFG_KEY_COUNT_FLOOR,
+					    cfg_key_count());
+
+	for (i = 0U; i < cfg_key_count(); i++) {
+		const cfg_key_t *k = cfg_key_at(i);
+		uint8_t g = CFG_GROUP(k->id);
+		uint8_t item = CFG_ITEM(k->id);
+		char msg[128];
+
+		if (g != group) {
+			group = g;
+			expect = 1U;
+		}
+		/* Step over the IDs that were retired on purpose. */
+		while (id_is_retired((uint16_t)(((uint16_t)g << 8) | expect))) {
+			expect++;
+		}
+
+		(void)snprintf(msg, sizeof(msg),
+			       "gap before 0x%04X %s: item 0x%02X is missing "
+			       "from group 0x%02X - was a key removed?",
+			       k->id, k->name, expect, g);
+		TEST_ASSERT_EQUAL_UINT8_MESSAGE(expect, item, msg);
+		expect = (uint8_t)(item + 1U);
+	}
 }
 
 static void test_schema_is_sorted_and_well_formed(void)
@@ -1507,6 +1638,7 @@ int main(void)
 	UNITY_BEGIN();
 
 	RUN_TEST(test_schema_group_census);
+	RUN_TEST(test_schema_has_no_retired_keys);
 	RUN_TEST(test_schema_is_sorted_and_well_formed);
 	RUN_TEST(test_schema_defaults_pass_their_own_bounds);
 	RUN_TEST(test_schema_defaults_fail_safe);
