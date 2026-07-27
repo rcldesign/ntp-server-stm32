@@ -155,17 +155,26 @@ Conventions:
 
 **Still deferred, with the reason:** ACME (compiled-out skeleton; needs an HTTPS
 client, base64url/JWS-ES256 and a trustworthy clock at first boot — the gaps are
-enumerated in `sts_cert.c`); operator/viewer accounts (need their own persisted cfg
-keys — refused to create RAM-only ghosts); Argon2id credential stretching (plumbed via
-`auth_kdf_t`, but switching it is a coordinated flag day with MCP because the 48-byte
-envelope cannot record which KDF produced the tag); key zeroization on factory reset;
-FE-5680A firmware update (no loader protocol is documented anywhere reachable — reported
-as `NOT_SUPPORTED` rather than attempted); an **ATECC-backed TLS server key** (the HTTPS
-identity is still a software PEM on NOR — routing it to the secure element needs an
-mbedTLS `PK_OPAQUE`/PSA driver over CryptoAuthLib, which is a driver, not wiring; the part
-is already the root for the SNMP engine id, attestation, the TRNG and the anti-rollback
-counters); the **MP UART7/rubidium tunnel** and the **NMEA/UBX tee producers**
-(`docs/sts1000_field_maintenance_tool.md` §11 records both blockers).
+enumerated in `sts_cert.c`); Argon2id credential stretching (plumbed via `auth_kdf_t`,
+but switching it is a coordinated flag day with MCP because the 48-byte envelope cannot
+record which KDF produced the tag); FE-5680A firmware update (no loader protocol is
+documented anywhere reachable — reported as `NOT_SUPPORTED` rather than attempted, and
+the only item on this list that no amount of work closes); an **ATECC-backed TLS server
+key** (the HTTPS identity is still a software PEM on NOR — routing it to the secure
+element needs an mbedTLS `PK_OPAQUE`/PSA driver over CryptoAuthLib, which is a driver,
+not wiring; the part is already the root for the SNMP engine id, attestation, the TRNG
+and the anti-rollback counters).
+
+**No longer deferred** — struck from the list above as they landed, recorded here because
+a deferral list that quietly loses entries is indistinguishable from one nobody maintains:
+operator/viewer accounts (now `sec.operator.pw` 0x0A3E and `sec.viewer.pw` 0x0A3F, so the
+roles the MP guard floor keys off exist locally instead of being RAM-only ghosts); key
+zeroization on factory reset (every `CFG_F_SECRET` blob, each subsystem's RAM copy via the
+applier fan-out, the web plane's sessions through a volatile pointer, and the persisted TLS
+identity — the reboot is load-bearing, not a convenience, since it is what clears
+RAM-only key material and mints the replacement identity); the **MP UART7/rubidium tunnel**
+and the **NMEA/UBX tee producers**; and **anti-rollback**, which was never on this list
+because nobody had noticed it was absent — see `app/conf/rollback.conf`.
 
 > **Reachability is a build property, not a source property.** `--gc-sections` silently
 > discards any function nothing calls, so an entry point with no caller produces code that
