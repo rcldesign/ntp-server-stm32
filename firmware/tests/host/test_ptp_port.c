@@ -419,15 +419,31 @@ static void test_cfg_validate_rejects(void)
 	cfg.degradation = (ptp_degradation_t)-1;
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ptp_cfg_validate(&cfg));
 
-	/* Every transport and profile in range is accepted. */
+	ptp_cfg_defaults(&cfg);
+	cfg.l2_mac = (uint8_t)PTP_L2_MAC_COUNT;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ptp_cfg_validate(&cfg));
+
+	/* Every transport and degradation in range is accepted on Default. */
 	ptp_cfg_defaults(&cfg);
 	cfg.transport = PTP_TRANSPORT_UDP_IPV6;
 	TEST_ASSERT_EQUAL_INT(0, ptp_cfg_validate(&cfg));
 	cfg.transport = PTP_TRANSPORT_L2;
 	TEST_ASSERT_EQUAL_INT(0, ptp_cfg_validate(&cfg));
-	cfg.profile = PTP_PROFILE_TELECOM_G8275_1;
-	TEST_ASSERT_EQUAL_INT(0, ptp_cfg_validate(&cfg));
 	cfg.degradation = PTP_DEGRADE_ALT_B;
+	TEST_ASSERT_EQUAL_INT(0, ptp_cfg_validate(&cfg));
+
+	/*
+	 * Selecting a non-Default profile is no longer a free-standing label: the
+	 * profile's own ranges are normative and are enforced. Default-profile
+	 * parameters (domain 0, 2 s Announce, UDP/IPv4) are not G.8275.1
+	 * parameters, so merely flipping the selector must be rejected — and
+	 * ptp_cfg_apply_profile() must produce a set that validates.
+	 */
+	ptp_cfg_defaults(&cfg);
+	cfg.profile = PTP_PROFILE_TELECOM_G8275_1;
+	TEST_ASSERT_EQUAL_INT(-ERANGE, ptp_cfg_validate(&cfg));
+	TEST_ASSERT_EQUAL_INT(0, ptp_cfg_apply_profile(&cfg,
+					(uint8_t)PTP_PROFILE_TELECOM_G8275_1));
 	TEST_ASSERT_EQUAL_INT(0, ptp_cfg_validate(&cfg));
 }
 
@@ -940,6 +956,12 @@ static void test_init_rejects_bad_arguments(void)
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ptp_port_init(&c, &cfg, self_mac, &ops));
 }
 
+/*
+ * PTP_ALARM_PROFILE_UNSUPPORTED now means "the selected profile has a material
+ * unimplemented feature", not "the selected profile is not Default". Default and
+ * G.8275.1 are implemented and raise nothing; G.8275.2 (no unicast message
+ * negotiation) and C37.238 (peer-delay mandated, this engine is E2E) do raise it.
+ */
 static void test_init_flags_an_unsupported_profile(void)
 {
 	ptp_port_ctx_t c;
@@ -949,15 +971,28 @@ static void test_init_flags_an_unsupported_profile(void)
 
 	fake_init(&f);
 	ops_from(&ops, &f);
-	ptp_cfg_defaults(&cfg);
-	cfg.profile = PTP_PROFILE_TELECOM_G8275_1;
-
-	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
-	TEST_ASSERT_TRUE((ptp_port_alarms(&c) & PTP_ALARM_PROFILE_UNSUPPORTED) != 0U);
 
 	ptp_cfg_defaults(&cfg);
 	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
 	TEST_ASSERT_TRUE((ptp_port_alarms(&c) & PTP_ALARM_PROFILE_UNSUPPORTED) == 0U);
+
+	ptp_cfg_defaults(&cfg);
+	TEST_ASSERT_EQUAL_INT(0, ptp_cfg_apply_profile(&cfg,
+					(uint8_t)PTP_PROFILE_TELECOM_G8275_1));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
+	TEST_ASSERT_TRUE((ptp_port_alarms(&c) & PTP_ALARM_PROFILE_UNSUPPORTED) == 0U);
+
+	ptp_cfg_defaults(&cfg);
+	TEST_ASSERT_EQUAL_INT(0, ptp_cfg_apply_profile(&cfg,
+					(uint8_t)PTP_PROFILE_TELECOM_G8275_2));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
+	TEST_ASSERT_TRUE((ptp_port_alarms(&c) & PTP_ALARM_PROFILE_UNSUPPORTED) != 0U);
+
+	ptp_cfg_defaults(&cfg);
+	TEST_ASSERT_EQUAL_INT(0, ptp_cfg_apply_profile(&cfg,
+					(uint8_t)PTP_PROFILE_POWER_C37_238));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_init(&c, &cfg, self_mac, &ops));
+	TEST_ASSERT_TRUE((ptp_port_alarms(&c) & PTP_ALARM_PROFILE_UNSUPPORTED) != 0U);
 }
 
 static void test_accessors_tolerate_null(void)

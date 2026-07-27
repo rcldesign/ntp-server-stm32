@@ -610,12 +610,11 @@ void web_jw_karr(web_jw_t *w, const char *key)
 	web_jw_arr_begin(w);
 }
 
-void web_jw_khex(web_jw_t *w, const char *key, const uint8_t *p, size_t n)
+void web_jw_hexn(web_jw_t *w, const uint8_t *p, size_t n)
 {
 	static const char hexd[] = "0123456789abcdef";
 	size_t i;
 
-	web_jw_key(w, key);
 	jw_value_sep(w);
 	jw_ch(w, '"');
 	for (i = 0U; i < n && p != NULL; i++) {
@@ -626,6 +625,12 @@ void web_jw_khex(web_jw_t *w, const char *key, const uint8_t *p, size_t n)
 		jw_raw(w, pair, 2U);
 	}
 	jw_ch(w, '"');
+}
+
+void web_jw_khex(web_jw_t *w, const char *key, const uint8_t *p, size_t n)
+{
+	web_jw_key(w, key);
+	web_jw_hexn(w, p, n);
 }
 
 int web_jw_finish(web_jw_t *w, size_t *out_len)

@@ -238,6 +238,19 @@ typedef struct {
 /** The profile defines slave/boundary behaviour this grandmaster never enters. */
 #define PTP_DEV_GM_ONLY         0x0008U
 
+/**
+ * Transport encapsulation selector; the glue owns the framing.
+ *
+ * Declared here rather than in ptp.h because a profile descriptor has to name
+ * the transports its profile permits, and ptp.h includes this header.
+ */
+typedef enum {
+	PTP_TRANSPORT_UDP_IPV4 = 0, /* IEEE 1588-2019 Annex C */
+	PTP_TRANSPORT_UDP_IPV6,     /* Annex D */
+	PTP_TRANSPORT_L2,           /* Annex E, EtherType 0x88F7 */
+	PTP_TRANSPORT_COUNT,
+} ptp_transport_t;
+
 /** Which multicast MAC an L2 profile uses (IEEE 1588-2019 Annex E, Table E.1). */
 typedef enum {
 	/** 01-1B-19-00-00-00 — forwarded by ordinary bridges. */

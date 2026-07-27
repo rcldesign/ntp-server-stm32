@@ -83,8 +83,10 @@ static ptp_dscmp_t compare_part2(const ptp_dataset_t *a, const ptp_dataset_t *b)
 	return PTP_DSCMP_ERROR_2;
 }
 
-ptp_dscmp_t ptp_bmca_compare(const ptp_dataset_t *a, const ptp_dataset_t *b)
+ptp_dscmp_t ptp_bmca_compare_profile(const ptp_dataset_t *a,
+				     const ptp_dataset_t *b, uint8_t profile)
 {
+	const ptp_profile_desc_t *desc = ptp_profile_desc(profile);
 	int d;
 
 	if ((a == NULL) || (b == NULL)) {
@@ -93,11 +95,23 @@ ptp_dscmp_t ptp_bmca_compare(const ptp_dataset_t *a, const ptp_dataset_t *b)
 
 	d = ptp_clock_id_cmp(&a->gm_identity, &b->gm_identity);
 	if (d == 0) {
+		/*
+		 * Part 2 is unchanged by every profile in scope. Two datasets
+		 * that reach it describe the same grandmaster over different
+		 * paths, and a local preference between paths is what
+		 * portDS.localPriority already expresses through part 1.
+		 */
 		return compare_part2(a, b);
 	}
 
 	/* Part 1 (Figure 34): lower wins at every rung. */
-	if (a->priority1 != b->priority1) {
+	if (desc->use_priority1 && (a->priority1 != b->priority1)) {
+		/*
+		 * G.8275.1 §6.3 removes this rung: the profile pins priority1 at
+		 * 128 for every conforming clock, so a difference here can only
+		 * come from a misconfigured peer, and honouring it would let that
+		 * peer win an election it should lose on clockClass.
+		 */
 		return pick(a->priority1 < b->priority1);
 	}
 	if (a->quality.clock_class != b->quality.clock_class) {
@@ -114,27 +128,38 @@ ptp_dscmp_t ptp_bmca_compare(const ptp_dataset_t *a, const ptp_dataset_t *b)
 	if (a->priority2 != b->priority2) {
 		return pick(a->priority2 < b->priority2);
 	}
+	if (desc->use_local_priority && (a->local_priority != b->local_priority)) {
+		/* The alternate BMCA's own rung, between priority2 and identity. */
+		return pick(a->local_priority < b->local_priority);
+	}
 
 	/* The identity tiebreak makes the ordering total. */
 	return pick(d < 0);
 }
 
+ptp_dscmp_t ptp_bmca_compare(const ptp_dataset_t *a, const ptp_dataset_t *b)
+{
+	return ptp_bmca_compare_profile(a, b, (uint8_t)PTP_PROFILE_DEFAULT);
+}
+
 /* -------------------------------------------------------- state decision -- */
 
 /* "Better" against a missing dataset: anything beats nothing. */
-static bool better_than(const ptp_dataset_t *a, const ptp_dataset_t *b)
+static bool better_than(const ptp_dataset_t *a, const ptp_dataset_t *b,
+			uint8_t profile)
 {
 	if (b == NULL) {
 		return true;
 	}
-	return ptp_dscmp_a_wins(ptp_bmca_compare(a, b));
+	return ptp_dscmp_a_wins(ptp_bmca_compare_profile(a, b, profile));
 }
 
-ptp_recommended_t ptp_bmca_state_decision(const ptp_dataset_t *d0,
-					  const ptp_dataset_t *erbest,
-					  const ptp_dataset_t *ebest,
-					  bool ebest_on_this_port,
-					  bool listening)
+ptp_recommended_t ptp_bmca_state_decision_profile(const ptp_dataset_t *d0,
+						 const ptp_dataset_t *erbest,
+						 const ptp_dataset_t *ebest,
+						 bool ebest_on_this_port,
+						 bool listening,
+						 uint8_t profile)
 {
 	if (d0 == NULL) {
 		return PTP_REC_LISTENING;
@@ -151,19 +176,31 @@ ptp_recommended_t ptp_bmca_state_decision(const ptp_dataset_t *d0,
 	 * best, not the clock-wide best.
 	 */
 	if ((d0->quality.clock_class >= 1U) && (d0->quality.clock_class <= 127U)) {
-		return better_than(d0, erbest) ? PTP_REC_M1 : PTP_REC_P1;
+		return better_than(d0, erbest, profile) ? PTP_REC_M1 : PTP_REC_P1;
 	}
 
-	if (better_than(d0, ebest)) {
+	if (better_than(d0, ebest, profile)) {
 		return PTP_REC_M2;
 	}
 	if (ebest_on_this_port) {
 		return PTP_REC_S1;
 	}
-	if (ptp_bmca_compare(ebest, erbest) == PTP_DSCMP_A_BETTER_TOPO) {
+	if (ptp_bmca_compare_profile(ebest, erbest, profile) ==
+	    PTP_DSCMP_A_BETTER_TOPO) {
 		return PTP_REC_P2;
 	}
 	return PTP_REC_M3;
+}
+
+ptp_recommended_t ptp_bmca_state_decision(const ptp_dataset_t *d0,
+					  const ptp_dataset_t *erbest,
+					  const ptp_dataset_t *ebest,
+					  bool ebest_on_this_port,
+					  bool listening)
+{
+	return ptp_bmca_state_decision_profile(d0, erbest, ebest,
+					       ebest_on_this_port, listening,
+					       (uint8_t)PTP_PROFILE_DEFAULT);
 }
 
 const char *ptp_recommended_name(ptp_recommended_t r)
@@ -228,8 +265,8 @@ void ptp_foreign_clear(ptp_foreign_tbl_t *t)
 	}
 }
 
-void ptp_foreign_dataset(const ptp_foreign_t *f, const ptp_port_id_t *receiver,
-			 ptp_dataset_t *out)
+void ptp_foreign_dataset_lp(const ptp_foreign_t *f, const ptp_port_id_t *receiver,
+			    uint8_t local_priority, ptp_dataset_t *out)
 {
 	if ((f == NULL) || (receiver == NULL) || (out == NULL)) {
 		return;
@@ -242,6 +279,20 @@ void ptp_foreign_dataset(const ptp_foreign_t *f, const ptp_port_id_t *receiver,
 	out->steps_removed = f->announce.steps_removed;
 	out->sender = f->source_port;
 	out->receiver = *receiver;
+	/*
+	 * localPriority is the *receiving port's* attribute, not anything the
+	 * Announce carried: G.8275.1 §6.3 makes it a local expression of which
+	 * upstream this clock prefers, so it is the same value for every record
+	 * on one port.
+	 */
+	out->local_priority = local_priority;
+}
+
+void ptp_foreign_dataset(const ptp_foreign_t *f, const ptp_port_id_t *receiver,
+			 ptp_dataset_t *out)
+{
+	/* 128 is the profile-neutral default; the Default profile ignores it. */
+	ptp_foreign_dataset_lp(f, receiver, 128U, out);
 }
 
 ptp_foreign_t *ptp_foreign_update(ptp_foreign_tbl_t *t,
@@ -371,9 +422,11 @@ uint32_t ptp_foreign_prune(ptp_foreign_tbl_t *t, const ptp_foreign_policy_t *pol
 	return dropped;
 }
 
-const ptp_foreign_t *ptp_foreign_best(const ptp_foreign_tbl_t *t,
-				      const ptp_port_id_t *receiver,
-				      ptp_dataset_t *out)
+const ptp_foreign_t *ptp_foreign_best_profile(const ptp_foreign_tbl_t *t,
+					      const ptp_port_id_t *receiver,
+					      uint8_t local_priority,
+					      uint8_t profile,
+					      ptp_dataset_t *out)
 {
 	const ptp_foreign_t *best = NULL;
 	ptp_dataset_t best_ds;
@@ -391,10 +444,11 @@ const ptp_foreign_t *ptp_foreign_best(const ptp_foreign_tbl_t *t,
 		if (!f->in_use || !f->qualified) {
 			continue;
 		}
-		ptp_foreign_dataset(f, receiver, &ds);
+		ptp_foreign_dataset_lp(f, receiver, local_priority, &ds);
 
 		if ((best == NULL) ||
-		    ptp_dscmp_a_wins(ptp_bmca_compare(&ds, &best_ds))) {
+		    ptp_dscmp_a_wins(
+			    ptp_bmca_compare_profile(&ds, &best_ds, profile))) {
 			best = f;
 			best_ds = ds;
 		}
@@ -404,4 +458,12 @@ const ptp_foreign_t *ptp_foreign_best(const ptp_foreign_tbl_t *t,
 		*out = best_ds;
 	}
 	return best;
+}
+
+const ptp_foreign_t *ptp_foreign_best(const ptp_foreign_tbl_t *t,
+				      const ptp_port_id_t *receiver,
+				      ptp_dataset_t *out)
+{
+	return ptp_foreign_best_profile(t, receiver, 128U,
+					(uint8_t)PTP_PROFILE_DEFAULT, out);
 }

@@ -128,13 +128,11 @@ extern "C" {
 
 /* ------------------------------------------------------------ enums, cfg -- */
 
-/** Transport encapsulation selector; the glue owns the framing. */
-typedef enum {
-	PTP_TRANSPORT_UDP_IPV4 = 0, /* IEEE 1588-2019 Annex C */
-	PTP_TRANSPORT_UDP_IPV6,     /* Annex D */
-	PTP_TRANSPORT_L2,           /* Annex E, EtherType 0x88F7 */
-	PTP_TRANSPORT_COUNT,
-} ptp_transport_t;
+/*
+ * ptp_transport_t lives in ptp_profile.h: a profile descriptor has to name the
+ * transports it permits, and ptp_profile.h cannot include this header without a
+ * cycle. It is re-exported here by that include.
+ */
 
 /**
  * Profile selector. The parameters of each live in ptp_profile.h; index into
@@ -538,6 +536,21 @@ ptp_recommended_t ptp_bmca_state_decision(const ptp_dataset_t *d0,
 					  bool ebest_on_this_port,
 					  bool listening);
 
+/**
+ * State decision algorithm using @p profile's comparison rules.
+ *
+ * Identical to ptp_bmca_state_decision() except that every dataset comparison
+ * inside it goes through ptp_bmca_compare_profile(). The state decision itself
+ * (§9.3.3 Figure 33) is not profile-specific: G.8275.1 changes what "better"
+ * means, not what to do about it.
+ */
+ptp_recommended_t ptp_bmca_state_decision_profile(const ptp_dataset_t *d0,
+						  const ptp_dataset_t *erbest,
+						  const ptp_dataset_t *ebest,
+						  bool ebest_on_this_port,
+						  bool listening,
+						  uint8_t profile);
+
 /* -------------------------------------------------- foreign-master table -- */
 
 /** One foreign-master record, §9.3.2.4. */
@@ -624,9 +637,31 @@ const ptp_foreign_t *ptp_foreign_best(const ptp_foreign_tbl_t *t,
 				      const ptp_port_id_t *receiver,
 				      ptp_dataset_t *out);
 
-/** Build the comparison dataset of a foreign record. */
+/**
+ * Erbest under @p profile's comparison rules, with @p local_priority attached to
+ * every candidate.
+ *
+ * @param local_priority  portDS.localPriority of the receiving port. Read only
+ *                        by the telecom profiles.
+ */
+const ptp_foreign_t *ptp_foreign_best_profile(const ptp_foreign_tbl_t *t,
+					      const ptp_port_id_t *receiver,
+					      uint8_t local_priority,
+					      uint8_t profile,
+					      ptp_dataset_t *out);
+
+/**
+ * Build the comparison dataset of a foreign record.
+ *
+ * localPriority is set to the profile-neutral default 128; use
+ * ptp_foreign_dataset_lp() when it matters.
+ */
 void ptp_foreign_dataset(const ptp_foreign_t *f, const ptp_port_id_t *receiver,
 			 ptp_dataset_t *out);
+
+/** As ptp_foreign_dataset(), with an explicit portDS.localPriority. */
+void ptp_foreign_dataset_lp(const ptp_foreign_t *f, const ptp_port_id_t *receiver,
+			    uint8_t local_priority, ptp_dataset_t *out);
 
 /* ----------------------------------------------------------- port engine -- */
 
@@ -732,6 +767,10 @@ typedef struct {
 	uint32_t tx_errors;
 	/** Event message dropped for want of a hardware ingress timestamp. */
 	uint32_t rx_no_timestamp;
+	/** Message dropped by the Annex-P policy; ptp_icv_counters() says why. */
+	uint32_t rx_icv_rejected;
+	/** Announce built without its mandatory profile TLV (no room). */
+	uint32_t tx_profile_tlv_errors;
 } ptp_counters_t;
 
 /** Engine state. Caller-owned; initialise with ptp_port_init(). */
@@ -764,6 +803,15 @@ typedef struct {
 
 	ptp_foreign_tbl_t foreign;
 
+	/**
+	 * Annex-P integrity, or NULL.
+	 *
+	 * A pointer rather than an embedded context: ptp_icv_ctx_t carries a key
+	 * table and a hash scratch, and a deployment that does not use Annex P
+	 * should not pay for them. Attach with ptp_port_set_icv().
+	 */
+	ptp_icv_ctx_t *icv;
+
 	ptp_counters_t counters;
 	/** Scratch for the message being transmitted. */
 	uint8_t txbuf[PTP_MSG_MAX_LEN];
@@ -774,8 +822,12 @@ typedef struct {
 	 * transmit callback, while the Sync still occupies @ref txbuf and the
 	 * glue still holds a pointer into it. Encoding the Follow_Up anywhere
 	 * else keeps that pointer honest.
+	 *
+	 * Full PTP_MSG_MAX_LEN, not PTP_TSMSG_LEN: a Follow_Up carries the
+	 * AUTHENTICATION TLV like every other message, and a 44-octet buffer
+	 * would silently refuse to sign it.
 	 */
-	uint8_t fubuf[PTP_TSMSG_LEN];
+	uint8_t fubuf[PTP_MSG_MAX_LEN];
 } ptp_port_ctx_t;
 
 /**
@@ -806,6 +858,23 @@ int ptp_port_enable(ptp_port_ctx_t *c, uint64_t now_ms);
 int ptp_port_set_quality(ptp_port_ctx_t *c, const ptp_quality_view_t *q);
 
 /**
+ * Attach (or with NULL, detach) Annex-P integrity.
+ *
+ * While attached, every PDU this engine transmits carries an AUTHENTICATION TLV
+ * (when the ICV context has a transmit key) and every PDU it receives is put
+ * through ptp_icv_verify() before it is acted on. A rejection increments
+ * @ref ptp_counters_t::rx_icv_rejected, raises PTP_ALARM_ICV_FAILED, and drops
+ * the message.
+ *
+ * @param icv  Caller-owned context, initialised with ptp_icv_init(). It must
+ *             outlive the port context. NULL detaches and clears the alarm.
+ *
+ * @retval 0        Attached.
+ * @retval -EINVAL  @p c is NULL.
+ */
+int ptp_port_set_icv(ptp_port_ctx_t *c, ptp_icv_ctx_t *icv);
+
+/**
  * Drive timeouts, the BMCA and the transmit schedulers.
  *
  * Call at least as often as the shortest configured interval; the `ptp` thread
@@ -832,7 +901,13 @@ int ptp_port_step(ptp_port_ctx_t *c, uint64_t now_ms);
  * @retval -EPROTO  Wrong versionPTP, domainNumber or majorSdoId.
  * @retval -ENODATA An event message arrived without a hardware ingress
  *                  timestamp; counted in rx_no_timestamp.
- * @retval -EPERM   The port is not receiving (INITIALIZING or FAULTY).
+ * @retval -EPERM   The port is not receiving (INITIALIZING or FAULTY), or an
+ *                  attached ICV context has no key for the message's
+ *                  association.
+ * @retval -EACCES  Annex-P integrity check failed, or was absent under the
+ *                  REQUIRE policy. Counted in rx_icv_rejected.
+ * @retval -EIO     The crypto port failed while verifying; the message is
+ *                  dropped rather than accepted unverified.
  */
 int ptp_port_rx(ptp_port_ctx_t *c, const uint8_t *buf, size_t len,
 		uint64_t rx_tai_ns, uint64_t now_ms);
@@ -868,9 +943,11 @@ ptp_port_state_t ptp_port_state(const ptp_port_ctx_t *c);
  *
  * These are live, not latched: NOT_BEST_MASTER follows the BMCA outcome on every
  * run, FAULTY clears on ptp_port_fault_reset(), and TX_ERROR clears on the next
- * successful transmit. Only PTP_ALARM_PROFILE_UNSUPPORTED is sticky — it is set
- * once at ptp_port_init() and lasts the life of the context. A consumer that
- * needs edge semantics (a trap, a log line) must remember the previous value.
+ * successful transmit. PTP_ALARM_ICV_FAILED is latched until the next PDU passes
+ * the policy, so a single forged frame is visible rather than blinking past.
+ * Only PTP_ALARM_PROFILE_UNSUPPORTED is sticky — it is set once at
+ * ptp_port_init() and lasts the life of the context. A consumer that needs edge
+ * semantics (a trap, a log line) must remember the previous value.
  */
 uint32_t ptp_port_alarms(const ptp_port_ctx_t *c);
 

@@ -58,11 +58,101 @@ void ptp_cfg_defaults(ptp_cfg_t *cfg)
 	cfg->profile = PTP_PROFILE_DEFAULT;
 	cfg->degradation = PTP_DEGRADE_ALT_A;
 	cfg->oslv_locked = PTP_OSLV_DEFAULT_LOCKED;
+	cfg->local_priority = 128U;
+	cfg->port_local_priority = 128U;
+	cfg->not_slave = false;
+	cfg->l2_mac = (uint8_t)PTP_L2_MAC_FORWARDABLE;
+	ptp_c37238_defaults(&cfg->c37238);
+}
+
+int ptp_cfg_apply_profile(ptp_cfg_t *cfg, uint8_t profile)
+{
+	const ptp_profile_desc_t *d;
+
+	if (cfg == NULL) {
+		return -EINVAL;
+	}
+	if ((unsigned int)profile >= (unsigned int)PTP_PROFILE_COUNT) {
+		return -EINVAL;
+	}
+
+	d = ptp_profile_desc(profile);
+
+	cfg->profile = (ptp_profile_t)profile;
+	cfg->domain = d->domain_default;
+	cfg->priority1 = d->priority1_default;
+	cfg->priority2 = d->priority2_default;
+	cfg->local_priority = d->local_priority_default;
+	cfg->port_local_priority = d->local_priority_default;
+	cfg->log_announce_interval = d->log_announce_default;
+	cfg->log_sync_interval = d->log_sync_default;
+	cfg->log_min_delay_req_interval = d->log_min_delay_req_default;
+	cfg->announce_receipt_timeout = d->announce_receipt_timeout_default;
+	cfg->transport = (ptp_transport_t)d->transport_default;
+	cfg->l2_mac = d->l2_mac_default;
+	cfg->not_slave = d->not_slave_default;
+
+	/*
+	 * Deliberately untouched: portNumber, majorSdoId/minorSdoId,
+	 * degradation, oslv_locked and the C37.238 payload. Those describe the
+	 * site and the unit, not the profile, and silently resetting an
+	 * operator's measured inaccuracy budget because they switched profile
+	 * would be the worst kind of helpful.
+	 */
+	return 0;
 }
 
 static bool log_interval_ok(int8_t v)
 {
 	return (v >= PTP_LOG_INTERVAL_MIN) && (v <= PTP_LOG_INTERVAL_MAX);
+}
+
+static bool in_u8(uint8_t v, ptp_range_u8_t r)
+{
+	return (v >= r.min) && (v <= r.max);
+}
+
+static bool in_i8(int8_t v, ptp_range_i8_t r)
+{
+	return (v >= r.min) && (v <= r.max);
+}
+
+/*
+ * The profile's own restrictions, checked for every profile except Default.
+ *
+ * Annex I.3 states the Default profile's intervals as *recommendations* and IEEE
+ * 1588 permits any value the field can hold, so enforcing them would reject
+ * configurations the standard allows (and, concretely, would break a
+ * long-standing engine contract: the widest interval the codec supports is
+ * 2^-7..2^7 s and callers use it). G.8275.1's ranges are normative — a domain
+ * outside 24..43 is simply not G.8275.1 — so those are enforced.
+ */
+static int profile_range_check(const ptp_cfg_t *cfg)
+{
+	const ptp_profile_desc_t *d = ptp_profile_desc((uint8_t)cfg->profile);
+
+	if (cfg->profile == PTP_PROFILE_DEFAULT) {
+		return 0;
+	}
+
+	if (!in_u8(cfg->domain, d->domain_range) ||
+	    !in_u8(cfg->priority1, d->priority1_range) ||
+	    !in_u8(cfg->priority2, d->priority2_range) ||
+	    !in_u8(cfg->local_priority, d->local_priority_range) ||
+	    !in_u8(cfg->port_local_priority, d->local_priority_range) ||
+	    !in_u8(cfg->announce_receipt_timeout,
+		   d->announce_receipt_timeout_range)) {
+		return -ERANGE;
+	}
+	if (!in_i8(cfg->log_announce_interval, d->log_announce_range) ||
+	    !in_i8(cfg->log_sync_interval, d->log_sync_range) ||
+	    !in_i8(cfg->log_min_delay_req_interval, d->log_min_delay_req_range)) {
+		return -ERANGE;
+	}
+	if ((d->transport_mask & PTP_XPORT_BIT(cfg->transport)) == 0U) {
+		return -ERANGE;
+	}
+	return 0;
 }
 
 int ptp_cfg_validate(const ptp_cfg_t *cfg)
@@ -104,7 +194,10 @@ int ptp_cfg_validate(const ptp_cfg_t *cfg)
 	if ((unsigned int)cfg->degradation >= (unsigned int)PTP_DEGRADE_COUNT) {
 		return -EINVAL;
 	}
-	return 0;
+	if ((unsigned int)cfg->l2_mac >= (unsigned int)PTP_L2_MAC_COUNT) {
+		return -EINVAL;
+	}
+	return profile_range_check(cfg);
 }
 
 /* ------------------------------------------------------- quality mapping -- */
@@ -238,9 +331,19 @@ static uint8_t accuracy_from_ns(uint64_t est_ns)
 }
 
 /*
- * Table 4. Classes 6 and 7 are the primary-reference and in-spec-holdover
- * codes; both sit in the 1..127 "never a slave" band, which is what keeps this
- * appliance out of the SLAVE branch of the state decision while it is healthy.
+ * clockClass, from the profile's ladder (ptp_profile.h).
+ *
+ * For the Default and Power profiles the ladder is IEEE 1588-2019 Table 4:
+ * locked -> 6, in-spec holdover -> 7 whatever the flywheel, and the two degraded
+ * rungs carry the PTP_CLASS_USE_DEGRADATION sentinel, which lands here on
+ * cfg->degradation (52 for alternative A, 187 for B) — bit-identical to the
+ * pre-profile engine. Classes 6 and 7 sit in the 1..127 "never a slave" band,
+ * which is what keeps a healthy unit out of the SLAVE branch of the state
+ * decision.
+ *
+ * For the telecom profiles the ladder grades in-spec holdover by which
+ * frequency source is flywheeling (7 / 140 / 150), gives out-of-spec holdover
+ * its own class (160) and free-run the default 248.
  *
  * TODO(wave-3): a clock that has never locked since boot should strictly
  * advertise 248 (default), not a degradation class. The quality view has no
@@ -252,20 +355,26 @@ static uint8_t accuracy_from_ns(uint64_t est_ns)
  * 248 clock, 52 wins the BMCA outright — so the box with no idea what time it
  * is becomes grandmaster for the segment, and stays there until GNSS comes up.
  * The gate turns that first Announce into 248 and lets the better clock win.
+ * Note that the telecom ladder already has the honest answer (248) for its own
+ * free-run rung, so this defect is Default/Power-profile only.
  */
-static uint8_t clock_class_from_state(const ptp_cfg_t *cfg, ptp_sync_state_t s)
+static uint8_t clock_class_from_state(const ptp_cfg_t *cfg,
+				      const ptp_quality_view_t *q)
 {
-	switch (s) {
-	case PTP_SYNC_LOCKED:
-		return 6U;
-	case PTP_SYNC_HOLDOVER:
-		return 7U;
-	case PTP_SYNC_HOLDOVER_EXCEEDED:
-	case PTP_SYNC_FREERUN:
-	case PTP_SYNC_COUNT:
-	default:
+	const ptp_profile_desc_t *d = ptp_profile_desc((uint8_t)cfg->profile);
+	ptp_sync_state_t s = q->sync_state;
+	uint8_t cls;
+
+	cls = ptp_class_from_ladder(d->ladder, (s == PTP_SYNC_LOCKED),
+				    (s == PTP_SYNC_HOLDOVER) ||
+					    (s == PTP_SYNC_HOLDOVER_EXCEEDED),
+				    (s == PTP_SYNC_HOLDOVER_EXCEEDED),
+				    ptp_freq_cat_from_time_source(q->time_source));
+
+	if (cls == PTP_CLASS_USE_DEGRADATION) {
 		return (cfg->degradation == PTP_DEGRADE_ALT_B) ? 187U : 52U;
 	}
+	return cls;
 }
 
 int ptp_clock_quality_from_view(const ptp_cfg_t *cfg, const ptp_quality_view_t *q,
@@ -277,7 +386,7 @@ int ptp_clock_quality_from_view(const ptp_cfg_t *cfg, const ptp_quality_view_t *
 		return -EINVAL;
 	}
 
-	out->clock_class = clock_class_from_state(cfg, q->sync_state);
+	out->clock_class = clock_class_from_state(cfg, q);
 	out->clock_accuracy = accuracy_from_ns(q->est_accuracy_ns);
 
 	disciplined = (q->sync_state == PTP_SYNC_LOCKED) ||
@@ -515,6 +624,8 @@ int ptp_port_dataset(const ptp_port_ctx_t *c, ptp_dataset_t *out)
 	 */
 	out->sender = c->port_id;
 	out->receiver = c->port_id;
+	/* defaultDS.localPriority — ours, as opposed to portDS.localPriority. */
+	out->local_priority = c->cfg.local_priority;
 	return 0;
 }
 
@@ -538,6 +649,27 @@ static void hdr_init(const ptp_port_ctx_t *c, ptp_hdr_t *h, uint8_t type,
 	h->seq_id = seq;
 	h->control = ptp_msg_control_field(type);
 	h->log_msg_interval = log_interval;
+}
+
+/*
+ * Sign an encoded message in place, when Annex-P integrity is attached.
+ *
+ * -ENOENT from ptp_icv_append() means "not armed" (policy OFF, or no transmit
+ * key) and is not a failure. Anything else leaves the message unsigned — the TLV
+ * is rolled back by ptp_icv_append() itself — and is charged to tx_errors so an
+ * operator who thinks traffic is authenticated can see that it is not.
+ */
+static void sign_if_armed(ptp_port_ctx_t *c, uint8_t *buf, size_t cap, size_t *len)
+{
+	int rc;
+
+	if (c->icv == NULL) {
+		return;
+	}
+	rc = ptp_icv_append(c->icv, buf, cap, len);
+	if ((rc != 0) && (rc != -ENOENT)) {
+		c->counters.tx_errors++;
+	}
 }
 
 /*
@@ -617,6 +749,22 @@ static void tx_announce(ptp_port_ctx_t *c)
 		return;
 	}
 
+	/*
+	 * The Power profile's organization TLV is *mandatory* on Announce, so a
+	 * failure to append it is reported separately from a generic transmit
+	 * error: the Announce that goes out is a conforming 1588 Announce but not
+	 * a conforming C37.238 one, and an operator debugging a substation clock
+	 * needs to be able to tell those apart.
+	 */
+	if (ptp_profile_desc((uint8_t)c->cfg.profile)->announce_org_tlv) {
+		if (ptp_c37238_append(c->txbuf, sizeof(c->txbuf), &len,
+				      &c->cfg.c37238) != 0) {
+			c->counters.tx_profile_tlv_errors++;
+		}
+	}
+
+	sign_if_armed(c, c->txbuf, sizeof(c->txbuf), &len);
+
 	(void)emit(c, c->txbuf, len, (uint8_t)PTP_MSG_ANNOUNCE, c->announce_seq,
 		   PTP_PORT_GENERAL, PTP_ADDR_PRIMARY, NULL);
 	c->announce_seq++;
@@ -646,6 +794,8 @@ static void tx_sync(ptp_port_ctx_t *c)
 		c->counters.tx_errors++;
 		return;
 	}
+
+	sign_if_armed(c, c->txbuf, sizeof(c->txbuf), &len);
 
 	/*
 	 * Arm the Follow_Up before handing the frame to the glue: a driver that
@@ -706,6 +856,8 @@ int ptp_on_sync_txts(ptp_port_ctx_t *c, uint16_t seq, uint64_t tai_ns)
 		c->counters.tx_errors++;
 		return rc;
 	}
+
+	sign_if_armed(c, c->fubuf, sizeof(c->fubuf), &len);
 
 	return emit(c, c->fubuf, len, (uint8_t)PTP_MSG_FOLLOW_UP, seq,
 		    PTP_PORT_GENERAL, PTP_ADDR_PRIMARY, NULL);
@@ -824,7 +976,10 @@ static void run_bmca(ptp_port_ctx_t *c, uint64_t now_ms)
 
 	(void)ptp_port_dataset(c, &d0);
 
-	if (ptp_foreign_best(&c->foreign, &c->port_id, &erbest_ds) != NULL) {
+	if (ptp_foreign_best_profile(&c->foreign, &c->port_id,
+				     c->cfg.port_local_priority,
+				     (uint8_t)c->cfg.profile,
+				     &erbest_ds) != NULL) {
 		erbest = &erbest_ds;
 	}
 
@@ -839,8 +994,11 @@ static void run_bmca(ptp_port_ctx_t *c, uint64_t now_ms)
 	c->counters.bmca_runs++;
 
 	/* Single port: Ebest is Erbest, and it is on this port by construction. */
-	rec = ptp_bmca_state_decision(&d0, erbest, erbest, (erbest != NULL),
-				      (c->state == PTP_PS_LISTENING) && !timed_out);
+	rec = ptp_bmca_state_decision_profile(&d0, erbest, erbest,
+					      (erbest != NULL),
+					      (c->state == PTP_PS_LISTENING) &&
+						      !timed_out,
+					      (uint8_t)c->cfg.profile);
 
 	if (rec != c->last_rec) {
 		c->counters.bmca_decisions++;
@@ -937,6 +1095,8 @@ static void rx_delay_req(ptp_port_ctx_t *c, const ptp_hdr_t *hdr,
 		return;
 	}
 
+	sign_if_armed(c, c->txbuf, sizeof(c->txbuf), &len);
+
 	(void)emit(c, c->txbuf, len, (uint8_t)PTP_MSG_DELAY_RESP, hdr->seq_id,
 		   PTP_PORT_GENERAL, addr, &hdr->source_port);
 }
@@ -978,6 +1138,26 @@ int ptp_port_rx(ptp_port_ctx_t *c, const uint8_t *buf, size_t len,
 	}
 
 	c->counters.rx[hdr.msg_type & 0x0FU]++;
+
+	/*
+	 * Annex-P integrity, before anything acts on the contents.
+	 *
+	 * Placed after the domain and self-address filters so that traffic for
+	 * another domain cannot cost an HMAC, and before the message is
+	 * dispatched so that an unauthenticated Announce can never reach the
+	 * foreign-master table. The alarm is latched until a PDU passes, so one
+	 * forged frame is visible in telemetry rather than blinking past between
+	 * two polls.
+	 */
+	if (c->icv != NULL) {
+		rc = ptp_icv_verify(c->icv, buf, len, &hdr.source_port, now_ms);
+		if (rc != 0) {
+			c->counters.rx_icv_rejected++;
+			c->alarms |= PTP_ALARM_ICV_FAILED;
+			return rc;
+		}
+		c->alarms &= ~PTP_ALARM_ICV_FAILED;
+	}
 
 	/*
 	 * An event message is only worth anything with its hardware ingress
@@ -1052,10 +1232,29 @@ int ptp_port_init(ptp_port_ctx_t *c, const ptp_cfg_t *cfg, const uint8_t *mac,
 	c->state = PTP_PS_INITIALIZING;
 	c->last_rec = PTP_REC_LISTENING;
 
-	if (cfg->profile != PTP_PROFILE_DEFAULT) {
+	/*
+	 * Raised only for a *material* gap — C37.238's peer-delay requirement and
+	 * G.8275.2's unicast negotiation. The two-step and grandmaster-only
+	 * deviations apply to every profile including Default, so folding them in
+	 * would light this permanently and tell nobody anything.
+	 */
+	if ((ptp_profile_desc((uint8_t)cfg->profile)->deviations &
+	     (uint16_t)PTP_DEV_MATERIAL) != 0U) {
 		c->alarms |= PTP_ALARM_PROFILE_UNSUPPORTED;
 	}
 
+	return 0;
+}
+
+int ptp_port_set_icv(ptp_port_ctx_t *c, ptp_icv_ctx_t *icv)
+{
+	if (c == NULL) {
+		return -EINVAL;
+	}
+	c->icv = icv;
+	if (icv == NULL) {
+		c->alarms &= ~PTP_ALARM_ICV_FAILED;
+	}
 	return 0;
 }
 
@@ -1121,8 +1320,16 @@ int ptp_port_fault(ptp_port_ctx_t *c, uint64_t now_ms)
 
 	/* The link is gone: everything we believed about the segment is stale. */
 	ptp_foreign_clear(&c->foreign);
+	/*
+	 * Including the replay windows. Keeping them would refuse a peer's
+	 * genuine post-recovery messages if it restarted its own sequence during
+	 * the outage; dropping them costs at most one replayable message per
+	 * peer, and only inside the window of a link that has just come back.
+	 */
+	ptp_icv_reset_peers(c->icv);
 	c->alarms |= PTP_ALARM_FAULTY;
 	c->alarms &= ~PTP_ALARM_NOT_BEST_MASTER;
+	c->alarms &= ~PTP_ALARM_ICV_FAILED;
 	c->last_rec = PTP_REC_LISTENING;
 	enter_state(c, PTP_PS_FAULTY, now_ms);
 	return 0;

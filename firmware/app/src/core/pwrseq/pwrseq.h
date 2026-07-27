@@ -228,6 +228,15 @@ typedef enum {
 	PWRSEQ_ALARM_RB_OV,
 	PWRSEQ_ALARM_RB_FAULT, /* umbrella, set alongside any specific Rb cause */
 	PWRSEQ_ALARM_LIVENESS,
+	/**
+	 * VCC_RB telemetry was too stale for too long to judge a rail window.
+	 *
+	 * Deliberately NOT a rubidium *hard* fault: "I could not see the rail"
+	 * is not "the rail was wrong". A stale reading must never latch
+	 * RB_FAULT, because that latch abandons stage 8 with no way back, so a
+	 * telemetry hiccup would permanently cost the board its rubidium.
+	 */
+	PWRSEQ_ALARM_RB_TELEMETRY,
 	PWRSEQ_ALARM_COUNT,
 } pwrseq_alarm_t;
 
@@ -240,6 +249,7 @@ typedef enum {
 	 PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_WINDOW) |                            \
 	 PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_LOCK) |                              \
 	 PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_OV) |                                \
+	 PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_TELEMETRY) |                         \
 	 PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_FAULT))
 
 /** Short, stable name for @p a. Never NULL. */
@@ -293,6 +303,40 @@ typedef enum {
  * -260 ms below the late bound).
  */
 #define PWRSEQ_WDT_KICK_PERIOD_MS 1100U
+
+/**
+ * Verdict on an observed interval between two WDI falling edges.
+ *
+ * external_wdt §4: a kick faster than tWDL(min) = 680 ms is a RUNAWAY fault and
+ * a kick slower than tWDU(min) = 1360 ms is a STALL fault; either drives WDO_N,
+ * which drives POE_KILL, which drops the board's PoE port. Both directions are
+ * therefore equally fatal, and both have to be *observable* — a cadence bug that
+ * only shows up as an unexplained field reboot is a bug nobody can diagnose.
+ */
+typedef enum {
+	PWRSEQ_WDT_INTERVAL_OK = 0,
+	PWRSEQ_WDT_INTERVAL_EARLY, /* below PWRSEQ_WDT_WINDOW_MIN_MS: runaway */
+	PWRSEQ_WDT_INTERVAL_LATE,  /* above PWRSEQ_WDT_WINDOW_MAX_MS: stall */
+} pwrseq_wdt_interval_t;
+
+/** Classify @p interval_ms against the TPS3430 valid window. */
+pwrseq_wdt_interval_t pwrseq_wdt_classify_interval(uint32_t interval_ms);
+
+/** What one supervisor tick decided about the watchdog. */
+typedef struct {
+	/** Drive a WDI edge now. The caller does the pin, nothing else may. */
+	bool kick;
+	/** The configured cadence has elapsed since the last kick. */
+	bool due;
+	/** Every liveness bit was set. */
+	bool liveness_ok;
+	/** Milliseconds since the previous kick. Only meaningful with @p kick. */
+	uint32_t interval_ms;
+	/** pwrseq_wdt_interval_t for @p interval_ms; only with @p verdict_valid. */
+	uint8_t verdict;
+	/** False for the very first kick, which has no previous edge. */
+	bool verdict_valid;
+} pwrseq_wdt_tick_t;
 
 /** Supervisor liveness bits; all must be set before a kick is permitted. */
 typedef enum {
@@ -370,9 +414,53 @@ typedef struct {
 	uint32_t ocxo_warm_timeout_ms;
 	uint32_t rb_precondition_timeout_ms;
 	uint32_t rb_softstart_ms;
+	/**
+	 * How long a rubidium rail window may go unsatisfied before the step
+	 * fails, milliseconds.
+	 *
+	 * Sized against the **telemetry cadence**, not the buck's settling time.
+	 * The rail is judged from INA228 0x47 through the housekeeping cache,
+	 * which the glue refreshes on request at its 4 Hz tick and unconditionally
+	 * at 1 Hz. A timeout shorter than a couple of cache refreshes gives the
+	 * step one evaluation against a reading that may predate the event it is
+	 * meant to observe — which is exactly how a window that the hardware
+	 * satisfies still fails on every board.
+	 */
 	uint32_t rb_window_timeout_ms;
 	uint32_t rb_lock_timeout_ms;
 	uint32_t liveness_timeout_ms;
+
+	/**
+	 * Oldest VCC_RB reading a rubidium rail decision may be made on,
+	 * milliseconds. Older than this and the step waits rather than judging
+	 * (see PWRSEQ_ALARM_RB_TELEMETRY). Must comfortably exceed the caller's
+	 * unconditional telemetry sweep period.
+	 */
+	uint32_t ina_max_age_ms;
+	/**
+	 * How long a rubidium rail step may sit with unusably stale telemetry
+	 * before it gives up, milliseconds. Bounded so a dead I²C bus cannot
+	 * park the sequencer in stage 8 and leave the watchdog unarmed.
+	 */
+	uint32_t rb_stale_stall_ms;
+
+	/** Automatic whole-stage-8 retries after a rubidium failure or deferral. */
+	uint8_t rb_auto_retry_max;
+	/** Quiet time between automatic rubidium retries, milliseconds. */
+	uint32_t rb_auto_retry_delay_ms;
+
+	/** Continuous zero PoE headroom before the shed ladder advances, ms. */
+	uint32_t poe_shed_dwell_ms;
+	/** Continuous headroom above poe_relief_mw before a rung is released, ms. */
+	uint32_t poe_restore_dwell_ms;
+	/** Headroom that counts as relief for the display/panel rungs, milliwatts. */
+	uint32_t poe_relief_mw;
+	/**
+	 * How long core/thermal's rung-3 request must persist before POE_KILL is
+	 * commanded, milliseconds. The consequence is a full cold cycle with
+	 * PSE-driven recovery, so a single glitched sample must not cause one.
+	 */
+	uint32_t poe_kill_confirm_ms;
 
 	/** Rail acceptance band as a percentage of the nominal voltage (0..100). */
 	uint32_t rail_tol_pct;
@@ -483,6 +571,16 @@ typedef struct {
 	bool ina_valid[INA228_RAIL_COUNT];
 	int32_t ina_vbus_mv[INA228_RAIL_COUNT];
 	int32_t ina_current_ma[INA228_RAIL_COUNT];
+	/**
+	 * Age of each reading at `mono_ms`, milliseconds; UINT32_MAX when the
+	 * rail has never been read.
+	 *
+	 * `ina_valid` says the reading was taken after the SHUNT_CAL trim; it says
+	 * nothing about *when*. A rail commanded to move 100 ms ago and judged
+	 * against a reading taken 900 ms before that is not a measurement of
+	 * anything. Populate this or the rubidium windows will judge history.
+	 */
+	uint32_t ina_age_ms[INA228_RAIL_COUNT];
 	uint8_t pg_mask;
 
 	/* stage 4 */
@@ -512,6 +610,19 @@ typedef struct {
 	/* policy */
 	bool ui_wanted;
 
+	/**
+	 * core/thermal rung 2: shed the rubidium (thermal_out_t::request_rb_shed).
+	 * Already hysteresis-latched by that module, so pwrseq acts on the edge
+	 * without adding a second filter.
+	 */
+	bool thermal_shed_rb;
+	/**
+	 * core/thermal rung 3: cold-cycle the board
+	 * (thermal_out_t::request_poe_kill). Confirmed over
+	 * `cfg.poe_kill_confirm_ms` before POE_KILL is commanded.
+	 */
+	bool thermal_poe_kill;
+
 	/* stage 9 */
 	bool liveness_ok;
 	bool debugger_attached;
@@ -529,6 +640,13 @@ typedef struct {
 	uint32_t stage_entered_ms;
 	uint32_t step_entered_ms;
 	uint32_t now_ms;
+	/*
+	 * Time the current step spent unable to judge itself, because the
+	 * evidence its exit predicate needs was too stale. That time is held out
+	 * of `step_entered_ms` so the step's timeout measures "the condition did
+	 * not arrive", never "I could not see whether it arrived".
+	 */
+	uint32_t step_stall_ms;
 
 	bool halted;
 	bool rb_deferred;

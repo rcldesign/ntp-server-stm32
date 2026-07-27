@@ -173,7 +173,10 @@ void web_jw_kf32(web_jw_t *w, const char *key, float v, uint8_t decimals);
 void web_jw_kobj(web_jw_t *w, const char *key);
 void web_jw_karr(web_jw_t *w, const char *key);
 
-/** Emit a lowercase hex string value for @p n bytes at @p p. */
+/** Emit a lowercase hex string *value* for @p n bytes at @p p. */
+void web_jw_hexn(web_jw_t *w, const uint8_t *p, size_t n);
+
+/** Emit a lowercase hex string value for @p n bytes at @p p, under @p key. */
 void web_jw_khex(web_jw_t *w, const char *key, const uint8_t *p, size_t n);
 
 /**

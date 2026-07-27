@@ -34,6 +34,8 @@
 #include <errno.h>
 #include <string.h>
 
+#include "snmp/snmp_internal.h"
+
 /* ========================================================================= */
 /* BER codec                                                                 */
 /* ========================================================================= */
@@ -868,7 +870,7 @@ static const snmp_node_t mib[] = {
  * the subtree a manager walks. */
 static const uint32_t o_cold_start[] = { 1U, 3U, 6U, 1U, 6U, 3U, 1U, 1U, 5U, 1U };
 static const uint32_t o_trap_base[] = { 1U, 3U, 6U, 1U, 4U, 1U, SNMP_PEN, 1U, 0U };
-static const uint32_t o_snmp_trap_oid[] = {
+const uint32_t snmp__oid_trap_oid[11] = {
 	1U, 3U, 6U, 1U, 6U, 3U, 1U, 1U, 4U, 1U, 0U
 };
 
