@@ -1232,7 +1232,10 @@ static void test_a_display_rail_that_never_comes_up_is_dropped(void)
 	model_t m;
 
 	model_init(&m, NULL);
-	run_to_stage(&m, PWRSEQ_STAGE_6_PANEL, 10U, 300U);
+	/* Stop inside stage 5, where the 1 s F9T boot delay forces a break, so
+	 * the reading can be spoiled before stage 6 ever looks at it — a single
+	 * step() call would otherwise walk stage 6 to completion. */
+	run_to_stage(&m, PWRSEQ_STAGE_5_GNSS, 10U, 200U);
 	m.in.ina_valid[INA228_RAIL_5V_DISP] = false;
 	run_out(&m, 100U, 200U);
 
@@ -1252,7 +1255,7 @@ static void test_a_panel_rail_that_never_comes_up_is_dropped(void)
 	model_t m;
 
 	model_init(&m, NULL);
-	run_to_stage(&m, PWRSEQ_STAGE_6_PANEL, 10U, 300U);
+	run_to_stage(&m, PWRSEQ_STAGE_5_GNSS, 10U, 200U);
 	m.in.ina_vbus_mv[INA228_RAIL_PANEL_5V] = 1000; /* nowhere near 5 V */
 	run_out(&m, 100U, 200U);
 
