@@ -1286,10 +1286,9 @@
 			lo -= pad; hi += pad;
 
 			function py(v) { return T + ph - (v - lo) / (hi - lo) * ph; }
-			function px(i) {
-				return data.length < 2 ? L + pw
-					: L + (i / (RING_MAX - 1)) * pw;
-			}
+			/* Fixed sample axis: the trace fills left-to-right as the ring
+			 * fills, so the x position of a sample never shifts under it. */
+			function px(i) { return L + (i / (RING_MAX - 1)) * pw; }
 
 			/* grid + y labels */
 			g.font = '9.5px ui-monospace, monospace';
@@ -1578,17 +1577,17 @@
 			}
 			var v = Number(String(raw).trim());
 			if (!isFinite(v)) { throw new Error('not a number'); }
+			if (isNum(k.min) && v < k.min) { throw new Error('min is ' + k.min); }
+			if (isNum(k.max) && v > k.max) { throw new Error('max is ' + k.max); }
 			if (k.type === T_F32) {
-				/* The device has no decimal float parser: whole numbers go as
-				 * integers, everything else as integer micro-units. */
+				/* The device deliberately has no decimal float parser: whole
+				 * numbers go as plain integers, everything else as integer
+				 * micro-units. A bare decimal literal would be rejected. */
 				if (Math.abs(v - Math.round(v)) < 1e-9) { return Math.round(v); }
 				return { micro: Math.round(v * 1e6) };
 			}
 			if (Math.abs(v - Math.round(v)) > 0) { throw new Error('must be an integer'); }
-			v = Math.round(v);
-			if (isNum(k.min) && v < k.min) { throw new Error('min is ' + k.min); }
-			if (isNum(k.max) && v > k.max) { throw new Error('max is ' + k.max); }
-			return v;
+			return Math.round(v);
 		}
 
 		function editor(k) {
@@ -1859,14 +1858,12 @@
 		var tiles = el('div', { cls: 'tiles' });
 		root.appendChild(el('div', { cls: 'c12' }, tiles));
 
-		var trend = Trend({
-			series: [{ key: 'off', color: C.accent, label: 'PPS offset' }],
-			zero: true
-		});
+		var dashSeries = [{ key: 'off', color: C.accent, label: 'PPS offset' }];
+		var trend = Trend({ series: dashSeries, zero: true });
 		root.appendChild(el('div', { cls: 'c8' },
-			panel('Phase offset · last 300 samples',
-				el('div', { cls: 'pbody tight' }, [trend.el,
-					trendLegend(trend.series || [{ color: C.accent, label: 'PPS offset' }], 'ns')]))));
+			panel('Phase offset · last ' + RING_MAX + ' samples',
+				el('div', { cls: 'pbody tight' },
+					[trend.el, trendLegend(dashSeries, 'ns')]))));
 
 		var qual = el('div', { cls: 'pbody' });
 		root.appendChild(el('div', { cls: 'c4' }, panel('Quality & holdover', qual)));
@@ -2339,14 +2336,14 @@
 
 		var may = Session.can('operator');
 
-		function surveyBtns(g) {
+		/* Also built once - a per-frame rebuild can swallow a click. */
+		function surveyBtns() {
 			var row = el('div', { cls: 'btnrow', style: 'margin-top:9px' });
-			var active = g && g.survey && g.survey.state === 'active';
 			var start = el('button', {
-				cls: 'btn sm', type: 'button', disabled: !may || active, text: 'Start survey'
+				cls: 'btn sm', type: 'button', disabled: true, text: 'Start survey'
 			});
 			var stop = el('button', {
-				cls: 'btn sm', type: 'button', disabled: !may || !active, text: 'Stop survey'
+				cls: 'btn sm', type: 'button', disabled: true, text: 'Stop survey'
 			});
 			start.addEventListener('click', function () {
 				confirmDlg({
@@ -2370,6 +2367,10 @@
 			row.appendChild(start);
 			row.appendChild(stop);
 			if (!may) { row.appendChild(el('span', { cls: 'hint', text: ' operator role required' })); }
+			row.sync = function (active) {
+				start.disabled = !may || active;
+				stop.disabled = !may || !active;
+			};
 			return row;
 		}
 
@@ -2432,6 +2433,10 @@
 		var posFormEl = posForm();
 		add(posB, [posDisp, posFormEl]);
 
+		var surveyDisp = el('div');
+		var surveyRow = surveyBtns();
+		add(surveyB, [surveyDisp, surveyRow]);
+
 		function update() {
 			var g = Store.gnss, s = Store.summary;
 
@@ -2461,9 +2466,10 @@
 				Cfg.loaded ? Cfg.val('gnss.elev.mask') : null,
 				g ? g.detail_available : false);
 
-			clear(surveyB);
+			clear(surveyDisp);
+			surveyRow.sync(!!(g && g.survey && g.survey.state === 'active'));
 			if (!g) {
-				surveyB.appendChild(empty('No GNSS provider.'));
+				surveyDisp.appendChild(empty('No GNSS provider.'));
 			} else {
 				var sv = g.survey || {};
 				var accTarget = Cfg.loaded ? Cfg.val('gnss.survey.acc') : null;
@@ -2478,19 +2484,16 @@
 				var durBar = el('div', { cls: 'barw' });
 				var durFrac = (isNum(durTarget) && durTarget > 0 && isNum(sv.duration_s))
 					? sv.duration_s / durTarget : 0;
-				durBar.appendChild(bar(durFrac, durFrac >= 1 ? 'ok' : 'accent'));
+				durBar.appendChild(bar(durFrac, durFrac >= 1 ? 'ok' : null));
 				durBar.appendChild(el('span', { cls: 'bv', text: fdur(sv.duration_s) }));
-				add(surveyB, [
-					kv([
-						['state', sv.state, sv.state === 'fixed' ? 'ok' : sv.state === 'active' ? 'warn' : 'dim'],
-						['observations', fint(sv.observations)],
-						['accuracy vs target', accBar],
-						['elapsed vs target', durBar],
-						['targets', (isNum(accTarget) ? accTarget + ' mm' : '?') + ' / ' +
-							(isNum(durTarget) ? fdur(durTarget) : '?')]
-					]),
-					surveyBtns(g)
-				]);
+				surveyDisp.appendChild(kv([
+					['state', sv.state, sv.state === 'fixed' ? 'ok' : sv.state === 'active' ? 'warn' : 'dim'],
+					['observations', fint(sv.observations)],
+					['accuracy vs target', accBar],
+					['elapsed vs target', durBar],
+					['targets', (isNum(accTarget) ? accTarget + ' mm' : '?') + ' / ' +
+						(isNum(durTarget) ? fdur(durTarget) : '?')]
+				]));
 			}
 
 			clear(posDisp);
@@ -2602,7 +2605,15 @@
 			return null;
 		}
 
-		function renderSvc() {
+		/* Rebuilt only when a state actually changes, so the buttons are not
+		 * replaced underneath a click at the telemetry rate. */
+		var svcSig = null;
+
+		function renderSvc(force) {
+			var sig = SERVICES.map(function (s) { return String(svcState(s.id)); }).join(',') +
+				'|' + Session.role;
+			if (!force && sig === svcSig) { return; }
+			svcSig = sig;
 			clear(svcB);
 			var t = table(['Service', 'State', 'Source', { t: '' }]);
 			for (var i = 0; i < SERVICES.length; i++) {
@@ -2626,7 +2637,8 @@
 							req('POST', 'services/' + sv.id, { json: { enable: a[1] } })
 								.then(function () {
 									toast(sv.label + ' ' + (a[1] ? 'enabled' : 'disabled'), 'ok', 'services');
-									return Cfg.load(true).then(renderSvc, renderSvc);
+									function again() { renderSvc(true); }
+									return Cfg.load(true).then(again, again);
 								}, function (e) { errToast(e, 'services'); });
 						});
 						row.appendChild(b);
@@ -2719,7 +2731,7 @@
 					hosts.ptp.appendChild(CfgTable({
 						title: 'PTP (ptp.*)', prefixes: ['ptp.']
 					}).el);
-					renderSvc();
+					renderSvc(true);
 				}, function (e) { errToast(e, 'config'); });
 			}
 		};

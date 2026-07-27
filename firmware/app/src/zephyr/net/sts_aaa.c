@@ -65,10 +65,21 @@
 #include "auth/tacacs.h"
 #include "cfg/cfg.h"
 #include "net/sts_aaa.h"
-#include "net/sts_net.h"
-/* sts_store.h is the one header this area takes from another (see sts_net.h):
- * it is where the net area gets its port_crypto_t, rather than standing up a
- * second mbedTLS binding. */
+/*
+ * Deliberately NOT including net/sts_net.h.
+ *
+ * That header offers cfg convenience readers this file would otherwise use, but
+ * it currently also typedefs `sts_gnss_wallclock_t`, which zephyr/sts_app.h
+ * typedefs as well — so any translation unit including both fails to compile.
+ * This file needs sts_app.h (for sts_cfg(), sts_log() and sts_mono_ms()), so it
+ * reads cfg through core/cfg directly via the three small helpers below instead.
+ * That is a handful of lines and it keeps this file building while the duplicate
+ * typedef is resolved by the areas that own those two headers.
+ *
+ * sts_store.h is the one header this area legitimately takes from another (its
+ * own comment declares it a public façade): it is where the net area gets its
+ * port_crypto_t rather than standing up a second mbedTLS binding.
+ */
 #include "storage/sts_store.h"
 #include "zephyr/sts_app.h"
 
@@ -126,12 +137,24 @@ static char g_nas_id[HOST_MAX];
 /* cfg plumbing                                                              */
 /* ------------------------------------------------------------------------- */
 
+/** A cfg STR key as a NUL-terminated string; empty when absent. */
 static void load_str(uint16_t id, char *out, size_t cap)
 {
+	cfg_ctx_t *c = sts_cfg();
+	size_t n = 0U;
+
 	out[0] = '\0';
-	(void)sts_net_cfg_str(id, out, cap);
+	if (c == NULL || cap == 0U) {
+		return;
+	}
+	/* cfg stores a STR without a terminator, so leave room for one. */
+	if (cfg_get_bytes(c, id, (uint8_t *)out, cap - 1U, &n) != 0) {
+		return;
+	}
+	out[n] = '\0';
 }
 
+/** A cfg BLOB key. @p out_len is 0 when the key is absent or empty. */
 static void load_blob(uint16_t id, uint8_t *out, size_t cap, size_t *out_len)
 {
 	cfg_ctx_t *c = sts_cfg();
@@ -144,6 +167,18 @@ static void load_blob(uint16_t id, uint8_t *out, size_t cap, size_t *out_len)
 	if (cfg_get_bytes(c, id, out, cap, &n) == 0) {
 		*out_len = n;
 	}
+}
+
+/** A cfg numeric key, with a fallback when cfg is not up yet. */
+static uint64_t load_u64(uint16_t id, uint64_t dflt)
+{
+	cfg_ctx_t *c = sts_cfg();
+	uint64_t v = dflt;
+
+	if (c != NULL && cfg_get_u64(c, id, &v) != 0) {
+		v = dflt;
+	}
+	return v;
 }
 
 void sts_aaa_reapply(void)
@@ -167,36 +202,36 @@ void sts_aaa_reapply(void)
 	load_str((uint16_t)CFG_ID_SEC_RADIUS_HOST, g_radius.host,
 		 sizeof(g_radius.host));
 	g_radius.port =
-		(uint16_t)sts_net_cfg_u64((uint16_t)CFG_ID_SEC_RADIUS_PORT,
+		(uint16_t)load_u64((uint16_t)CFG_ID_SEC_RADIUS_PORT,
 					  1812U);
 	load_blob((uint16_t)CFG_ID_SEC_RADIUS_SECRET, g_radius.secret,
 		  sizeof(g_radius.secret), &g_radius.secret_len);
 	g_radius.timeout_ms =
-		(uint16_t)sts_net_cfg_u64((uint16_t)CFG_ID_SEC_RADIUS_TMO_MS,
+		(uint16_t)load_u64((uint16_t)CFG_ID_SEC_RADIUS_TMO_MS,
 					  3000U);
 	g_radius.retries =
-		(uint8_t)sts_net_cfg_u64((uint16_t)CFG_ID_SEC_RADIUS_RETRIES,
+		(uint8_t)load_u64((uint16_t)CFG_ID_SEC_RADIUS_RETRIES,
 					 2U);
 
 	load_str((uint16_t)CFG_ID_SEC_TACACS_HOST, g_tacacs.host,
 		 sizeof(g_tacacs.host));
 	g_tacacs.port =
-		(uint16_t)sts_net_cfg_u64((uint16_t)CFG_ID_SEC_TACACS_PORT, 49U);
+		(uint16_t)load_u64((uint16_t)CFG_ID_SEC_TACACS_PORT, 49U);
 	load_blob((uint16_t)CFG_ID_SEC_TACACS_SECRET, g_tacacs.secret,
 		  sizeof(g_tacacs.secret), &g_tacacs.secret_len);
 	g_tacacs.timeout_ms =
-		(uint16_t)sts_net_cfg_u64((uint16_t)CFG_ID_SEC_TACACS_TMO_MS,
+		(uint16_t)load_u64((uint16_t)CFG_ID_SEC_TACACS_TMO_MS,
 					  5000U);
 
 	load_str((uint16_t)CFG_ID_SEC_LDAP_HOST, g_ldap.host,
 		 sizeof(g_ldap.host));
 	g_ldap.port =
-		(uint16_t)sts_net_cfg_u64((uint16_t)CFG_ID_SEC_LDAP_PORT, 389U);
+		(uint16_t)load_u64((uint16_t)CFG_ID_SEC_LDAP_PORT, 389U);
 	g_ldap.timeout_ms =
-		(uint16_t)sts_net_cfg_u64((uint16_t)CFG_ID_SEC_LDAP_TMO_MS,
+		(uint16_t)load_u64((uint16_t)CFG_ID_SEC_LDAP_TMO_MS,
 					  5000U);
 	g_ldap_cfg.mode =
-		(uint8_t)sts_net_cfg_u64((uint16_t)CFG_ID_SEC_LDAP_MODE, 0U);
+		(uint8_t)load_u64((uint16_t)CFG_ID_SEC_LDAP_MODE, 0U);
 	load_str((uint16_t)CFG_ID_SEC_LDAP_BASE_DN, g_ldap_cfg.base,
 		 sizeof(g_ldap_cfg.base));
 	load_str((uint16_t)CFG_ID_SEC_LDAP_USER_DN, g_ldap_cfg.user_dn,
@@ -228,12 +263,12 @@ void sts_aaa_reapply(void)
 	acfg.local_blob_len = g_admin_blob_len;
 	acfg.local_role = (uint8_t)AUTH_ROLE_ADMIN;
 	acfg.cache_ttl_s =
-		(uint16_t)sts_net_cfg_u64((uint16_t)CFG_ID_SEC_AAA_CACHE_S,
+		(uint16_t)load_u64((uint16_t)CFG_ID_SEC_AAA_CACHE_S,
 					  300U);
 	acfg.lockout_fails =
-		(uint8_t)sts_net_cfg_u64((uint16_t)CFG_ID_SEC_AAA_LOCK_N, 5U);
+		(uint8_t)load_u64((uint16_t)CFG_ID_SEC_AAA_LOCK_N, 5U);
 	acfg.lockout_s =
-		(uint16_t)sts_net_cfg_u64((uint16_t)CFG_ID_SEC_AAA_LOCK_S, 300U);
+		(uint16_t)load_u64((uint16_t)CFG_ID_SEC_AAA_LOCK_S, 300U);
 
 	load_str((uint16_t)CFG_ID_SEC_AAA_ORDER, order, sizeof(order));
 	n = auth_order_parse(order, acfg.order, sizeof(acfg.order));

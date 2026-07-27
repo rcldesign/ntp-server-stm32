@@ -111,6 +111,10 @@ static struct {
 	uint32_t pvt_itow_ms;
 	uint64_t pvt_rx_mono_ms;
 	bool have_pvt;
+	/* A receiver flash session owns USART3: the RX ISR still fills the ring so
+	 * the loader transport can drain it, but nothing feeds the UBX parser or
+	 * gnssmgr while this is set. See the USART3 seam at the end of this file. */
+	bool fw_mode;
 } gs;
 
 /* ========================================================================= */
@@ -365,6 +369,13 @@ static void gnss_drain_rx(uint32_t now_ms)
 {
 	uint8_t b;
 
+	/* A flash session owns the ring; sts_gnss_uart_raw_rx() drains it. Feeding
+	 * loader bytes to the UBX parser would at best desync the loader and at
+	 * worst hand gnssmgr a frame from a receiver that is not running firmware. */
+	if (gs.fw_mode) {
+		return;
+	}
+
 	while (ring_getc(&rx_ring, &b) == 0) {
 		ubx_msg_t m;
 
@@ -565,4 +576,207 @@ int sts_gnss_notify_reset(uint32_t now_ms)
 void sts_gnss_ant_supervisor_start(void)
 {
 	gs.ant_supervisor_on = true;
+}
+
+/* ========================================================================= */
+/* absolute epoch — the only thing that makes a served timestamp traceable    */
+/* ========================================================================= */
+
+/*
+ * Days from 1970-01-01 to a proleptic-Gregorian civil date, after Howard
+ * Hinnant's days_from_civil. Exact for every date the receiver can report and
+ * branch-free apart from the leap-cycle shift; no libc time functions, which
+ * would drag in a locale-aware mktime and a 64-bit division we do not want in
+ * this path.
+ */
+static int64_t days_from_civil(int32_t y, uint32_t m, uint32_t d)
+{
+	int64_t era;
+	uint32_t yoe, doy, doe;
+
+	y -= (m <= 2U) ? 1 : 0;
+	era = ((y >= 0) ? y : (y - 399)) / 400;
+	yoe = (uint32_t)(y - (int32_t)(era * 400));            /* 0..399 */
+	doy = (153U * ((m > 2U) ? (m - 3U) : (m + 9U)) + 2U) / 5U + d - 1U;
+	doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;         /* 0..146096 */
+
+	return era * 146097 + (int64_t)doe - 719468;
+}
+
+int sts_gnss_wallclock(sts_gnss_wallclock_t *out)
+{
+	gnssmgr_status_t st;
+	gnssmgr_leap_t leap;
+	uint64_t decoded_ms;
+
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	memset(out, 0, sizeof(*out));
+
+	if (!gs.started) {
+		return -ENODATA;
+	}
+
+	if ((gnssmgr_status(&mgr, &st) != 0) || !st.valid) {
+		return -ENODATA;
+	}
+	if (gnssmgr_leap(&mgr, &leap) != 0) {
+		return -ENODATA;
+	}
+
+	/*
+	 * The age reference is when this NAV-PVT was DECODED, not now — the
+	 * consumer subtracts (now - mono_ms) before it compares, so handing it a
+	 * fresh timestamp would make a stale reading look current and let a
+	 * receiver that stopped talking place the epoch anyway.
+	 */
+	(void)k_mutex_lock(&snap_mutex, K_FOREVER);
+	decoded_ms = snap.pvt_rx_mono_ms;
+	(void)k_mutex_unlock(&snap_mutex);
+
+	out->utc_valid = st.utc_valid;
+	out->time_locked = st.time_locked;
+	out->leap_valid = leap.valid && leap.curr_ls_valid;
+	out->tai_minus_utc = out->leap_valid
+			     ? ((int16_t)leap.current_ls + STS_TAI_MINUS_GPS_S)
+			     : 0;
+	out->tacc_ns = st.tacc_ns;
+	out->mono_ms = decoded_ms;
+	out->utc_nano_ns = st.nano_ns;
+	out->utc_unix_s = days_from_civil((int32_t)st.year, st.month, st.day) *
+			  86400 +
+			  (int64_t)st.hour * 3600 + (int64_t)st.min * 60 +
+			  (int64_t)st.sec;
+
+	/*
+	 * Deliberately NOT refused here on !utc_valid / !leap_valid / !locked:
+	 * the flags are reported and sts_ptpclk's reference table enforces them
+	 * (along with its own >= 2020 and staleness checks). One enforcement
+	 * point, and the caller can log precisely which condition failed.
+	 */
+	return 0;
+}
+
+/* ========================================================================= */
+/* USART3 seam for the GNSS firmware-update transport (core/fwupd)            */
+/* ========================================================================= */
+/*
+ * Strong definitions overriding the __weak stubs in console/fwupd_glue.c.
+ * Suspend/resume bracket a receiver flash session: while suspended the RX ISR
+ * still fills the ring (so raw_rx can drain it) but nothing feeds the UBX
+ * parser or gnssmgr, and gnssmgr sits in GNSSMGR_ST_FW_UPDATE so a config
+ * retry can never be aimed into a flash loader.
+ */
+
+int sts_gnss_uart_suspend(void)
+{
+	if (!gs.started) {
+		return -ENODEV;
+	}
+	if (gs.fw_mode) {
+		return 0;
+	}
+
+	gs.fw_mode = true;
+	ubx_parser_reset(&parser);
+	ring_reset(&rx_ring);
+	gs.have_pvt = false;
+
+	return gnssmgr_fw_enter(&mgr);
+}
+
+int sts_gnss_uart_resume(void)
+{
+	if (!gs.started) {
+		return -ENODEV;
+	}
+	if (!gs.fw_mode) {
+		return 0;
+	}
+
+	/* Anything in flight belongs to the loader session, not to UBX. */
+	ubx_parser_reset(&parser);
+	ring_reset(&rx_ring);
+	gs.have_pvt = false;
+	gs.fw_mode = false;
+
+	return gnssmgr_fw_exit(&mgr, (uint32_t)sts_mono_ms());
+}
+
+int sts_gnss_uart_raw_tx(const uint8_t *buf, size_t len)
+{
+	if ((buf == NULL) && (len != 0U)) {
+		return -EINVAL;
+	}
+	if (!gs.started) {
+		return -ENODEV;
+	}
+	if (!gs.fw_mode) {
+		return -EPERM;   /* raw access only inside a suspended session */
+	}
+
+	for (size_t i = 0U; i < len; i++) {
+		uart_poll_out(gnss_uart, buf[i]);
+	}
+
+	return (int)len;
+}
+
+int sts_gnss_uart_raw_rx(uint8_t *buf, size_t cap)
+{
+	size_t n = 0U;
+	uint8_t b;
+
+	if (!gs.started) {
+		return -ENODEV;
+	}
+	/* cap == 0 with a NULL buffer is the capability probe fwupd_glue uses. */
+	if ((buf == NULL) && (cap != 0U)) {
+		return -EINVAL;
+	}
+	if (buf == NULL) {
+		return 0;
+	}
+	if (!gs.fw_mode) {
+		return -EPERM;
+	}
+
+	while ((n < cap) && (ring_getc(&rx_ring, &b) == 0)) {
+		buf[n] = b;
+		n++;
+	}
+
+	return (int)n;
+}
+
+int sts_gnss_uart_set_baud(uint32_t baud)
+{
+	struct uart_config cfg;
+	int rc;
+
+	if (!gs.started) {
+		return -ENODEV;
+	}
+	if (!gs.fw_mode) {
+		return -EPERM;
+	}
+
+	rc = uart_config_get(gnss_uart, &cfg);
+	if (rc != 0) {
+		return rc;
+	}
+	if (cfg.baudrate == baud) {
+		return 0;
+	}
+	cfg.baudrate = baud;
+
+	/* Re-configuring drops anything mid-shift; the loader protocol
+	 * resynchronises after a rate change, but a stale byte would desync it. */
+	rc = uart_configure(gnss_uart, &cfg);
+	if (rc == 0) {
+		ring_reset(&rx_ring);
+	}
+
+	return rc;
 }

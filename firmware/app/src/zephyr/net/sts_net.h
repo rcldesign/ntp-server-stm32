@@ -31,6 +31,8 @@
 #include "ptp/ptp.h"
 #include "snmp/snmp.h"
 
+#include "zephyr/sts_app.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -85,55 +87,13 @@ void sts_net_link_get(sts_net_link_t *out);
 /* absolute wall-clock time from the GNSS receiver (platform area supplies)    */
 /* ------------------------------------------------------------------------- */
 
-/**
- * The receiver's idea of civil time, and the leap offset that places it on TAI.
- *
- * This is the ONLY absolute time source on the board, and the ETH PTP counter
- * cannot be put on the TAI timescale without it: the counter powers up at zero
- * and nothing else on the appliance knows what year it is (Zephyr's realtime
- * clock is never set — grep for sys_clock_set / clock_settime).
- *
- * @warning CONTRACT FOR THE PLATFORM AREA. sts_ptpclk.c carries a `__weak`
- * definition of sts_gnss_wallclock() that returns -ENODATA, so the tree links
- * and behaves conservatively (no epoch → nothing is served as traceable) while
- * the GNSS thread does not exist. When the platform area lands it — see the
- * TODO in zephyr/platform/disc_thread.c, gnssmgr is not wired to anything yet —
- * it must:
- *
- *   1. move this struct and the prototype below verbatim into zephyr/sts_app.h,
- *      since it is a cross-area interface and sts_net.h is private to this area;
- *   2. define sts_gnss_wallclock() (a strong definition overrides the weak one
- *      with no change needed here), filling it from gnssmgr_status() and
- *      gnssmgr_leap():
- *          utc_valid     <- status.utc_valid  (validDate && validTime &&
- *                                              fullyResolved)
- *          time_locked   <- status.time_locked
- *          utc_unix_s    <- days-from-civil(year, month, day) * 86400 +
- *                           hour*3600 + min*60 + sec
- *          utc_nano_ns   <- status.nano_ns  (UBX signed sub-second correction)
- *          leap_valid    <- leap.valid && leap.curr_ls_valid
- *          tai_minus_utc <- TAI-UTC, i.e. leap.current_ls + 19 (GPS-UTC plus the
- *                           fixed TAI-GPS offset), NOT leap.current_ls alone
- *          tacc_ns       <- status.tacc_ns
- *          mono_ms       <- sts_mono_ms() sampled when that NAV-PVT was decoded,
- *                           NOT when this function is called
- *
- * @retval 0         @p out is filled.
- * @retval -ENODATA  No GNSS time source is present in this build/boot.
- * @retval -EINVAL   @p out is NULL.
+/*
+ * The GNSS wall-clock interface (sts_gnss_wallclock_t / sts_gnss_wallclock())
+ * now lives in zephyr/sts_app.h, which is where a cross-area contract belongs
+ * (ARCHITECTURE.md §2) — the platform area implements it from its GNSS thread
+ * and sts_ptpclk.c consumes it to place the PTP counter's absolute epoch. It
+ * was declared here only while the platform side did not exist.
  */
-typedef struct {
-	int64_t utc_unix_s;    /* UTC seconds since 1970-01-01, receiver-reported */
-	int32_t utc_nano_ns;   /* signed sub-second correction, (-1e9, +1e9) */
-	int16_t tai_minus_utc; /* TAI − UTC, seconds; valid iff leap_valid */
-	uint32_t tacc_ns;      /* receiver time-accuracy estimate; 0 = unknown */
-	uint64_t mono_ms;      /* sts_mono_ms() at which this time was decoded */
-	bool utc_valid;        /* date and time are fully resolved */
-	bool leap_valid;       /* tai_minus_utc is a real receiver value */
-	bool time_locked;      /* the fix is usable for timing */
-} sts_gnss_wallclock_t;
-
-int sts_gnss_wallclock(sts_gnss_wallclock_t *out);
 
 /* ------------------------------------------------------------------------- */
 /* sts_ptpclk.c — ETH PTP clock: TAI source + discipline servo                */
