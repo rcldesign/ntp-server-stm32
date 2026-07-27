@@ -175,17 +175,26 @@ CDC is the unbootable-image fallback — hold BUTTON_1 (PF0) through reset.
 
 ---
 
-## Open firmware decisions (spec §15 — resolve before sizing)
+## Open firmware decisions (spec §15)
 
-- ETH PTP **auxiliary-snapshot internal trigger** (RM0481) for direct PPS↔PTP capture, else
-  lock the TIM2↔PTP software correlation.
-- **One-step vs two-step PTP** (does the H5 MAC do HW one-step for the chosen profiles?).
-- Platform commit: Zephyr custom services vs FreeRTOS+lwIP fallback (sizes the biggest effort).
-- SNMP: custom compact agent vs ported lwIP `apps/snmp`.
-- Web SPA framework + brotli size budget (must fit NOR with assets + logs).
-- Leap-second at the second of insertion: NTP **smear vs step**, PTP step — per service.
-- Final 6-key button mapping + long-press semantics.
-- Anti-rollback counter budget + field-update/recovery policy; cert lifecycle (manual/CSR vs ACME).
+**Most of this list is now decided** — see `../docs/ntp_server_software_spec.md` §15.1 for the
+table with the implementing module named for each. Settled: Zephyr (not the FreeRTOS+lwIP
+fallback), custom SNMP agent, **two-step** PTP, the full button map, a framework-free SPA at
+42.2 KiB gzip against a 256 KiB budget, RADIUS/TACACS+/LDAP in phase 1, Rb EFC hands-off,
+`REF_TERM_EN` booting terminated by hardware pull-up, and manual/CSR certificates with ACME
+deferred for a stated reason.
+
+Genuinely open (§15.2), all needing hardware or a human decision rather than more code:
+
+- **ETH PTP auxiliary-snapshot routing** (RM0481). The silicon has it; no Zephyr or ST HAL
+  driver exposes it, and whether PA0's PPS reaches the aux trigger internally needs a board.
+  The TIM2↔PTP **software correlation is the shipped path** — the aux snapshot is an accuracy
+  optimisation, not a prerequisite.
+- **Leap smear opt-in.** Step is decided and implemented for both services. The NTP-only
+  smear opt-in — cfg key, ramp, PTP refusal, annunciation — is **not built**.
+- **FE-5680A J6.8/J6.9 direction** for the specific surplus variant.
+- **Anti-rollback epoch policy**: when a release warrants bumping the security counter. The
+  mechanism is in place; the release process is a human call.
 
 ---
 

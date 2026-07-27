@@ -579,15 +579,43 @@ pins (J17.16→5V_DISP, J17.28→3V3_STM) reach the panel. The power-good/teleme
 
 ## 15. Open items / decisions
 
-- Confirm ETH PTP **auxiliary-snapshot internal trigger** (RM0481) for direct PPS↔PTP capture; else lock in the TIM2↔PTP software correlation (pin map §14).
-- One-step vs two-step PTP (does the H5 MAC do hardware one-step for the chosen profiles?).
-- Final **button-function mapping** (the 6 logical keys) and long-press semantics.
-- NTP-server + NTS-server + PTP-grandmaster implementation: build on Zephyr (custom services) vs adopt the FreeRTOS+lwIP fallback for lwIP-native SNMP — decide before committing the platform, as it sizes the largest effort.
-- SNMP agent: custom compact agent vs ported lwIP `apps/snmp`.
-- Web SPA framework/size budget (must fit NOR with assets + logs); pick a small framework (Preact/Svelte) and a brotli budget.
-- RADIUS/LDAP/TACACS+ and TLS-syslog: phase-2 or phase-1?
-- Rb EFC steering: hands-off vs optional firmware fine-trim — default hands-off; confirm FE-5680A control surface (serial command set + J6-8/J6-9 Tx/Rx direction per surplus variant).
-- External-ref front-end (§2.1/§2.2) config policy: the as-built front end is a **single LTC6752 slicer (U50)** on the `10MHz_RF_IN` SMA with only a switched 50 Ω termination (`REF_TERM_EN` PC10, default terminated). Decide the stored default (terminated vs high-Z) per source impedance and the auto-probe policy (apply term → check `EXTREF_MON` → flag if invalid). No source-select or dual-slicer routing exists on this board.
-- Leap-second handling policy at the second of insertion for NTP (smear vs step) and PTP (step) — define per service.
-- Certificate lifecycle: manual/CSR only, or add ACME — phase decision.
-- Anti-rollback counter budget and field-update policy (how many versions, recovery if exhausted).
+Split into what the firmware has settled and what genuinely remains. A decision recorded
+here is **as-built** — the implementing module is named so the claim can be checked rather
+than trusted.
+
+### 15.1 Decided by the as-built firmware
+
+| Question | Decision | Where it lives |
+|---|---|---|
+| Platform: Zephyr custom services vs FreeRTOS+lwIP fallback | **Zephyr.** The custom NTS server, PTP grandmaster and SNMP agent were built rather than adopting lwIP for its native SNMP. | whole tree; `firmware/west.yml` pins Zephyr v4.2.2 |
+| SNMP agent: custom vs ported lwIP `apps/snmp` | **Custom compact agent**, SNMPv2c + SNMPv3/USM over one shared PDU layer. | `core/snmp/` |
+| One-step vs two-step PTP | **Two-step.** Every profile carries `PTP_DEV_TWO_STEP_ONLY` and Sync sets `PTP_FLAG_TWO_STEP`; no hardware one-step is attempted. | `core/ptp/ptp_profile.c`, `ptp_port.c:801` |
+| Button-function mapping | **Assigned:** UP, DOWN, LEFT (back — pops the screen stack everywhere), RIGHT, ENTER, FN (MENU), DISPLAY (cycles Full/Dim/Night/Off), ACK (acknowledge alarms + open the list), plus encoder detents, touch and the reed-switch proximity wake. | `core/ui/ui.h` `ui_in_t` |
+| Web SPA framework + size budget | **No framework** — vanilla JS, no build step. 42.2 KiB gzipped against the 256 KiB NOR budget (16.5 %), so Preact/Svelte were unnecessary. | `firmware/web/`, `pack_assets.py` |
+| RADIUS / LDAP / TACACS+ : phase 1 or 2 | **Phase 1, built.** The AAA chain with its lockout policy is shared by the web, console and MP planes through one entry point. | `core/auth/`, `zephyr/net/sts_aaa.c` |
+| Rb EFC steering | **Hands-off**, as proposed. Firmware sequences power and reads health; it never steers the FE-5680A. | `zephyr/platform/rb_serial.c` |
+| External-ref front-end default | **Boots terminated**, set in hardware by the R176 100 k pull-up on `REF_TERM_EN` (PC10) rather than by firmware, so the default holds before firmware runs. Firmware may switch it at runtime. | `boards/rcldesign/sts1000_meridian/sts1000_meridian.dts:200` |
+| Certificate lifecycle | **Manual / CSR.** ACME is deliberately deferred — it needs an HTTPS client, base64url + JWS-ES256 and a trustworthy clock at first boot; the gaps are enumerated at the point of deferral. | `zephyr/net/sts_cert.c` |
+
+### 15.2 Genuinely open
+
+- **ETH PTP auxiliary-snapshot routing (RM0481).** The H5 silicon has the hardware —
+  `MACATSNR`/`MACATSSR`, `ETH_MACACR_ATSEN0..3`, `ETH_MACTSSR_AUXTSTRIG` are all declared in
+  `stm32h563xx.h` — but neither the Zephyr `eth_stm32_hal` driver nor the ST HAL exposes any
+  of it, and whether PA0's PPS can reach the aux trigger internally is a routing question
+  that needs a board to answer. The TIM2↔PTP **software correlation is the shipped path**;
+  the aux snapshot remains an accuracy optimisation, not a prerequisite.
+- **Leap-second handling at the second of insertion.** Decided in principle and *not yet
+  fully implemented*: **step** is correct for both services and is what the firmware does —
+  a stratum-1 reference that smears is misreporting UTC for the whole smear window, and the
+  same box serves PTP, where smear is not permitted at all. Smear therefore exists only as
+  an explicit NTP-only opt-in, must be refused for the PTP grandmaster, must be loudly
+  annunciated while active, and arguably forfeits the stratum-1 claim for its duration.
+  **None of that opt-in path is built** — there is no cfg key and no ramp.
+- **FE-5680A J6.8/J6.9 Tx/Rx direction and the full connector pinout** for the specific
+  surplus variant. Needs the physical unit; no amount of firmware settles it.
+- **Anti-rollback counter budget and exhaustion recovery.** The mechanism is being put in
+  place (MCUboot downgrade prevention keyed on a security counter, with the ATECC monotonic
+  counter as attestation evidence rather than the boot gate). What remains is the *release
+  process*: the counter is a security epoch, not a build number, so a human has to decide
+  when a release warrants a bump.
