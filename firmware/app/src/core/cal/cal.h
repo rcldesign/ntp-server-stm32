@@ -43,8 +43,15 @@
  * So this module refuses rather than clamps. The band is the cfg schema's own
  * bound on cal.ina.0..8 (3277..4915 = 4096 ±20 %), which is far wider than the
  * 1 % shunt tolerance the trim exists to remove: a pair of currents implying
- * more than ±20 % is not a shunt tolerance, it is the wrong load, the wrong rail
+ * more than that is not a shunt tolerance, it is the wrong load, the wrong rail
  * or the wrong number of zeroes.
+ *
+ * Note the band is symmetric in SHUNT_CAL and therefore ASYMMETRIC in the error
+ * it tolerates, because the trim is a reciprocal: SHUNT_CAL scales by
+ * i_ref/i_meas, so ±20 % of 4096 accepts a monitor reading between 16.7 % LOW
+ * (4096/4915) and 25.0 % HIGH (4096/3277). That is a property of the schema
+ * row, not of this module, and it is stated here because "±20 %" reads as if it
+ * were a bound on the measurement error, which it is not.
  */
 
 #ifndef STS1000_CORE_CAL_CAL_H_

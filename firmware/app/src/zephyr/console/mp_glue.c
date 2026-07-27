@@ -899,14 +899,38 @@ void sts_mp_mirror_publish(const mp_mirror_in_t *frame)
 
 /* --------------------------------------------------------- shell hand-off */
 
+/**
+ * The shell bypass callback: every console byte, on the shell thread.
+ *
+ * shell_set_bypass() is called *outside* the lock. It touches shell state, not
+ * engine state, and calling it under mp_lock would put the console's own
+ * bookkeeping inside a critical section the tick contends for.
+ */
 static void mp_bypass(const struct shell *sh, uint8_t *data, size_t len)
 {
+	bool left;
+
 	ARG_UNUSED(sh);
 
+	mp_engine_lock();
 	(void)mp_input(&mp, data, len);
 
-	if (mp_mode(&mp) != (uint8_t)MP_MODE_MP) {
-		/* The exit magic or sys.mode brought us back. */
+	/*
+	 * A BREAK or DTR drop that arrived while prov_auth() had the lock
+	 * released could not reset the frame decoder under mp_input()'s feet, so
+	 * it was deferred to here — the first point at which no engine state is
+	 * live on this stack.
+	 */
+	if (mp_exit_pending) {
+		mp_exit_pending = false;
+		(void)mp_mode_exit(&mp);
+	}
+
+	left = (mp_mode(&mp) != (uint8_t)MP_MODE_MP);
+	mp_engine_unlock();
+
+	if (left) {
+		/* The exit magic, sys.mode, or a deferred BREAK brought us back. */
 		shell_set_bypass(mp_shell, NULL);
 		LOG_INF("MP mode left; shell restored");
 	}
@@ -914,20 +938,33 @@ static void mp_bypass(const struct shell *sh, uint8_t *data, size_t len)
 
 bool sts_mp_active(void)
 {
-	return mp_started && (mp_mode(&mp) == (uint8_t)MP_MODE_MP);
+	bool active;
+
+	if (!mp_started) {
+		return false;
+	}
+	mp_engine_lock();
+	active = (mp_mode(&mp) == (uint8_t)MP_MODE_MP);
+	mp_engine_unlock();
+	return active;
 }
 
 bool sts_mp_shell_tap(uint8_t b)
 {
+	bool entered;
+
 	if (!mp_started) {
 		return false;
 	}
-	if (mp_shell_byte(&mp, b) == 1) {
+	mp_engine_lock();
+	entered = (mp_shell_byte(&mp, b) == 1);
+	mp_engine_unlock();
+
+	if (entered) {
 		shell_set_bypass(mp_shell, mp_bypass);
 		LOG_INF("MP mode entered by magic");
-		return true;
 	}
-	return false;
+	return entered;
 }
 
 void sts_mp_notify_link(bool up)
@@ -935,7 +972,22 @@ void sts_mp_notify_link(bool up)
 	if (!mp_started) {
 		return;
 	}
-	(void)mp_set_link(&mp, up);
+	mp_engine_lock();
+	if (!up && mp_auth_window) {
+		/*
+		 * The shell thread is suspended inside a credential check with a
+		 * frame half-decoded (see prov_auth). Do the half that must not
+		 * wait — the link is the dead-man's outermost condition, so every
+		 * lease is reverted here and now — and leave the mode change,
+		 * which resets that decoder, to mp_bypass().
+		 */
+		(void)mp_ovr_set_link(&mp.ovr, false, (uint32_t)k_uptime_get_32());
+		mp_exit_pending = true;
+	} else {
+		(void)mp_set_link(&mp, up);
+	}
+	mp_engine_unlock();
+
 	if (!up && (mp_shell != NULL)) {
 		shell_set_bypass(mp_shell, NULL);
 	}
@@ -946,28 +998,94 @@ void sts_mp_notify_break(void)
 	if (!mp_started) {
 		return;
 	}
-	(void)mp_mode_exit(&mp);
+	mp_engine_lock();
+	if (mp_auth_window) {
+		/* Same deferral as the link drop, and the same reason. A BREAK is
+		 * not a dead-man failure, so there is no revert to hoist. */
+		mp_exit_pending = true;
+	} else {
+		(void)mp_mode_exit(&mp);
+	}
+	mp_engine_unlock();
+
 	if (mp_shell != NULL) {
 		shell_set_bypass(mp_shell, NULL);
 	}
 }
 
-const mp_ctx_t *sts_mp_ctx(void)
+int sts_mp_stream_raw(uint8_t ch, const uint8_t *data, size_t len)
 {
-	return mp_started ? &mp : NULL;
+	int rc;
+
+	if (!mp_started) {
+		return -ENODEV;
+	}
+	if (k_is_in_isr()) {
+		/* k_mutex_lock() is illegal in an ISR at any timeout, and the
+		 * assertion that says so is compiled out of a release build. */
+		return -EBUSY;
+	}
+	if (k_mutex_lock(&mp_lock, K_MSEC(STS_MP_TICK_LOCK_MS)) != 0) {
+		return -EBUSY;
+	}
+	rc = mp_stream_raw(&mp, ch, data, len);
+	(void)k_mutex_unlock(&mp_lock);
+	return rc;
 }
 
 void sts_mp_tick(void)
 {
-	if (mp_started) {
-		(void)mp_tick(&mp);
+	if (!mp_started) {
+		return;
 	}
+
+	/*
+	 * Bounded, and a miss is tolerated. An unbounded wait here would let a
+	 * shell thread stuck in a long call stall the console supervisor past
+	 * CONFIG_STS1000_LIVENESS_DEADLINE_MS, at which point the supervisor
+	 * stops kicking the TPS3430 and the board cold-cycles — a maintenance
+	 * login would reboot the grandmaster. The budget arithmetic is in
+	 * mp_glue.h and is BUILD_ASSERTed against the caller's period in
+	 * sts_console.c.
+	 */
+	if (k_mutex_lock(&mp_lock, K_MSEC(STS_MP_TICK_LOCK_MS)) != 0) {
+		mp_tick_misses++;
+		if (mp_tick_miss_run < UINT8_MAX) {
+			mp_tick_miss_run++;
+		}
+		if (mp_tick_miss_run > mp_tick_miss_worst) {
+			mp_tick_miss_worst = mp_tick_miss_run;
+		}
+		/*
+		 * Once per excursion, not once per pass: a run this long means the
+		 * dead-man's revert deadline is no longer guaranteed, which is an
+		 * operational fault worth a record even though the next successful
+		 * tick still reverts.
+		 */
+		if (mp_tick_miss_run == (uint8_t)(STS_MP_TICK_MISS_MAX + 1U)) {
+			LOG_ERR("MP tick starved: %u consecutive misses, dead-man "
+				"revert may exceed %u ms",
+				(unsigned int)mp_tick_miss_run,
+				(unsigned int)MP_TICK_MAX_MS);
+			sts_log((uint8_t)LOGR_SUB_MCP, (uint8_t)LOGR_ERR,
+				"MP service tick starved (%u misses); override "
+				"dead-man latency is no longer bounded",
+				(unsigned int)mp_tick_misses);
+		}
+		return;
+	}
+
+	mp_tick_miss_run = 0U;
+	(void)mp_tick(&mp);
+	(void)k_mutex_unlock(&mp_lock);
 }
 
 /* ------------------------------------------------------------ shell command */
 
 static int cmd_mp_enter(const struct shell *sh, size_t argc, char **argv)
 {
+	uint32_t hash;
+
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
@@ -976,11 +1094,16 @@ static int cmd_mp_enter(const struct shell *sh, size_t argc, char **argv)
 		return -ENODEV;
 	}
 	mp_shell = sh;
+
+	mp_engine_lock();
 	(void)mp_set_link(&mp, true);
 	(void)mp_mode_enter(&mp);
+	hash = mp_manifest_hash_cached(&mp);
+	mp_engine_unlock();
+
 	shell_print(sh, "MP mode: proto %u, manifest %u objects, hash 0x%08x",
 		    (unsigned int)MP_PROTO_VER, (unsigned int)mp_obj_count(),
-		    (unsigned int)mp_manifest_hash_cached(&mp));
+		    (unsigned int)hash);
 	shell_print(sh, "send \\x01MP0\\x02 or BREAK to return to the shell");
 	shell_set_bypass(sh, mp_bypass);
 	return 0;
@@ -994,12 +1117,25 @@ static int cmd_mp_exit(const struct shell *sh, size_t argc, char **argv)
 	if (!mp_started) {
 		return -ENODEV;
 	}
+	mp_engine_lock();
 	(void)mp_mode_exit(&mp);
+	mp_engine_unlock();
+
 	shell_set_bypass(sh, NULL);
 	shell_print(sh, "MP mode left");
 	return 0;
 }
 
+/**
+ * Counters, printed from one consistent snapshot.
+ *
+ * The whole read runs under the engine lock rather than sampling field by field:
+ * `mp status` reads engine state the tick mutates, and a report that mixes a
+ * pre-revert lease count with a post-revert dead-man counter is a report that
+ * misleads whoever is diagnosing the box. shell_print() is called inside the
+ * lock, which costs the tick a few skipped passes on a slow console — bounded by
+ * the tick's timeout, counted, and cheaper than a shadow copy of the context.
+ */
 static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 {
 	ARG_UNUSED(argc);
@@ -1009,8 +1145,10 @@ static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 		shell_error(sh, "MP engine is not running");
 		return -ENODEV;
 	}
+
+	mp_engine_lock();
 	shell_print(sh, "mode         %s",
-		    sts_mp_active() ? "mp" : "shell");
+		    (mp_mode(&mp) == (uint8_t)MP_MODE_MP) ? "mp" : "shell");
 	shell_print(sh, "manifest     %u objects, hash 0x%08x, ver %u",
 		    (unsigned int)mp_obj_count(),
 		    (unsigned int)mp_manifest_hash_cached(&mp),
@@ -1036,15 +1174,47 @@ static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 			"verify-fail %u, refusals %u",
 		    mp.ovr.grants, mp.ovr.vetoes, mp.ovr.deadman_reverts,
 		    mp.ovr.verify_failures, mp.ovr.refusals);
-	/* The ui area publishes after every ui_render(), so "no frame yet" means
+	/*
+	 * Tick health. `late` is core's own count of gaps past MP_TICK_MAX_MS;
+	 * `miss` is this file's count of passes that could not take the engine
+	 * lock. A non-zero worst run at or above STS_MP_TICK_MISS_MAX means the
+	 * dead-man's revert deadline was not guaranteed over that excursion.
+	 */
+	shell_print(sh, "tick         %u miss (run %u, worst %u/%u), %u late",
+		    (unsigned int)mp_tick_misses, (unsigned int)mp_tick_miss_run,
+		    (unsigned int)mp_tick_miss_worst,
+		    (unsigned int)STS_MP_TICK_MISS_MAX,
+		    (unsigned int)mp.ovr.late_ticks);
+	/*
+	 * The ui area publishes after every ui_render(), so "no frame yet" means
 	 * it has not rendered one — CONFIG_STS1000_UI=n, or a boot this early —
-	 * not that the hook is missing. */
+	 * not that the hook is missing.
+	 *
+	 * mirror_valid is read without mirror_lock here, unlike in prov_mirror():
+	 * this call site only picks a label, it does not go on to copy the cells
+	 * the flag vouches for.
+	 */
 	shell_print(sh, "mirror       %s (%u frames, %u keyframes)",
 		    mirror_valid ? "live" : "no frame yet (ui has not rendered)",
 		    mp.mirror.frames, mp.mirror.keyframes);
 	shell_print(sh, "events       %u queued, %u dropped",
 		    (unsigned int)mp_stream_event_count(&mp.st),
 		    mp_stream_event_dropped(&mp.st));
+	mp_engine_unlock();
+
+	{
+		uint32_t gnss = 0U;
+		uint32_t rb = 0U;
+		uint32_t nmea = 0U;
+		uint32_t ubx = 0U;
+		uint32_t dropped = 0U;
+
+		sts_mp_tunnel_stats(&gnss, &rb, &nmea, &ubx, &dropped);
+		shell_print(sh,
+			    "tees         gnss %u, rb %u, nmea %u, ubx %u "
+			    "(dropped %u)",
+			    gnss, rb, nmea, ubx, dropped);
+	}
 	return 0;
 }
 
@@ -1135,7 +1305,16 @@ int sts_mp_start(void)
 	w.mirror_prev_attr = mirror_prev_attr;
 	w.mirror_cells = MP_MIRROR_CELLS;
 
+	/*
+	 * Under the lock even though this runs single-threaded before the console
+	 * supervisor exists: "every touch of `mp` is inside mp_lock" is a rule a
+	 * reviewer can check mechanically, and one documented exception is how it
+	 * stops being one. mp_started is published last, so a shell command racing
+	 * bring-up sees "not running" rather than a half-built context.
+	 */
+	mp_engine_lock();
 	rc = mp_init(&mp, &w);
+	mp_engine_unlock();
 	if (rc != 0) {
 		LOG_ERR("mp_init failed (%d)", rc);
 		return rc;

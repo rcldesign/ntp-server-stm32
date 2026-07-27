@@ -371,42 +371,99 @@ static const char *pv_alarm_name(void *u, uint8_t bit)
 /*
  * Control providers.
  *
- * GNSS survey, fixed position and the reference override all belong to threads
- * that do not exist yet (the gnss thread, and refsel's action executor is driven
- * from the discipline thread). Rather than pretend, each returns -ENOSYS so the
- * route answers 501 and the SPA disables the control. Wiring them up is a
- * one-line change per provider once those threads expose a request API, and the
- * REST contract above them is already tested.
+ * Each of these runs on a web worker at priority 12 and must not touch a timing
+ * thread's state. The platform area therefore exposes REQUEST entry points
+ * (sts_app.h) rather than the underlying core APIs: the GNSS pair post into a
+ * spinlock-guarded single-slot mailbox the priority-6 gnss thread drains, and
+ * the reference override is one atomic word the priority-4 discipline thread
+ * reads once a second. No provider here waits on either thread, so a hung or
+ * busy timing loop cannot stall the management plane and a management plane
+ * cannot perturb the timing loop (firmware/CLAUDE.md hard rule).
+ *
+ * All four return promptly with an ACCEPTANCE verdict, never a completion one.
+ * A survey runs for gnss.survey.dur seconds; a reference handoff waits out
+ * refsel's hysteresis window. The SPA polls telemetry for what actually
+ * happened.
  */
 static int pv_gnss_survey(void *u, bool start)
 {
 	ARG_UNUSED(u);
-	ARG_UNUSED(start);
-	return -ENOSYS;
+
+	/* -ENOTSUP on stop: core/gnssmgr has no survey abort. See
+	 * sts_gnss_request_survey(). */
+	return sts_gnss_request_survey(start);
 }
 
 static int pv_gnss_fixed(void *u, int64_t x, int64_t y, int64_t z)
 {
 	ARG_UNUSED(u);
-	ARG_UNUSED(x);
-	ARG_UNUSED(y);
-	ARG_UNUSED(z);
-	return -ENOSYS;
+
+	/* Centimetres straight through: the REST contract and gnssmgr_ecef_t use
+	 * the same unit (rest.h gnss_fixed, gnssmgr.h gnssmgr_ecef_t::x_cm).
+	 * Only the accuracy field is in 0.1 mm, and the caller supplies none. */
+	return sts_gnss_set_fixed_ecef(x, y, z);
 }
 
 static int pv_ref_override(void *u, uint8_t mode)
 {
 	ARG_UNUSED(u);
-	ARG_UNUSED(mode);
-	return -ENOSYS;
+
+	/*
+	 * REST_REF_RB maps to STS_REF_REQ_EXTREF, not to a distinct "rubidium"
+	 * request, because the two name the same thing: input B of the clock mux,
+	 * reached over the SMA front end. refsel's AUTO already engages the
+	 * rubidium whenever the guards allow, so an explicit selection of it *is*
+	 * refsel.h's "explicit operator selection of input B".
+	 *
+	 * Written as a switch rather than a cast even though the enumerations
+	 * agree numerically today: a silent divergence between rest.h and
+	 * sts_app.h would put the wrong 10 MHz on PH0, and out-of-range values
+	 * must fail rather than land on whatever enumerator they happen to hit.
+	 */
+	switch (mode) {
+	case (uint8_t)REST_REF_AUTO:
+		return sts_ref_override_set((uint8_t)STS_REF_REQ_AUTO);
+	case (uint8_t)REST_REF_OCXO:
+		return sts_ref_override_set((uint8_t)STS_REF_REQ_OCXO);
+	case (uint8_t)REST_REF_RB:
+		return sts_ref_override_set((uint8_t)STS_REF_REQ_EXTREF);
+	default:
+		return -EINVAL;
+	}
 }
 
+/*
+ * Calibration. Only REST_CAL_INA_TRIM is a procedure a running unit can perform
+ * on itself; the other three are bench operations whose results are entered
+ * through the group 0x0C cfg keys, and they answer -ENOTSUP rather than
+ * pretending to start (see sts_cal_run() and core/cal/cal.h).
+ *
+ * `arg` for the trim is the packed word STS_CAL_INA_ARG(rail, i_ref_ua) — rail
+ * index in the top byte, the reference instrument's current in microamps in the
+ * low 24 bits. One uint32_t is all the REST contract carries, and the procedure
+ * needs both numbers: the board cannot measure its own reference.
+ *
+ * KNOWN GAP, reported to the web layer: firmware/web/app.js sends `arg` as a
+ * bare rail index (0..8), which decodes here as rail 0 with a reference current
+ * of 0..8 uA. That fails the plausibility band and is refused — the honest
+ * outcome, but the SPA control cannot succeed until it sends the packed word.
+ */
 static int pv_cal_run(void *u, uint8_t proc, uint32_t arg)
 {
 	ARG_UNUSED(u);
-	ARG_UNUSED(proc);
-	ARG_UNUSED(arg);
-	return -ENOSYS;
+
+	switch (proc) {
+	case (uint8_t)REST_CAL_HOLDOVER:
+		return sts_cal_run((uint8_t)STS_CAL_HOLDOVER, arg);
+	case (uint8_t)REST_CAL_OCXO_TUNE:
+		return sts_cal_run((uint8_t)STS_CAL_OCXO_TUNE, arg);
+	case (uint8_t)REST_CAL_INA_TRIM:
+		return sts_cal_run((uint8_t)STS_CAL_INA_TRIM, arg);
+	case (uint8_t)REST_CAL_COMPASS:
+		return sts_cal_run((uint8_t)STS_CAL_COMPASS, arg);
+	default:
+		return -EINVAL;
+	}
 }
 
 /*

@@ -75,8 +75,12 @@ extern "C" {
  * The role floor is enforced in mp_ovr_guard(), which every guarded RPC reaches
  * through one function (guard_or_fail() in mp_rpc.c). No object carrying
  * MP_OF_WRITE, MP_OF_OVERRIDE or MP_OF_PULSE may be declared G0 — that would
- * route actuation around the check, and tests/host/test_mp_manifest.c fails if
- * one ever is.
+ * route actuation around the check, because a G0 request is answered for a
+ * session with no role at all (MP_ROLE_NONE), including one that never presented
+ * a credential. The rule has no exceptions and
+ * tests/host/test_mp_manifest.c::test_writable_objects_are_guarded fails the
+ * build if one is ever introduced; `ui.identify` was the single exception and is
+ * now G1 (see the note on its row in mp_manifest.c).
  */
 typedef enum {
 	MP_GUARD_G0 = 0,

@@ -284,7 +284,20 @@ const mp_obj_t mp_objs[] = {
 	{ .id = "ui.lamp.test", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G1,
 	  .group = MP_GRP_PANEL, .flags = F_RW,
 	  .desc = "all panel indicators on, for a lamp test" },
-	{ .id = "ui.identify", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G0,
+	/*
+	 * G1, not G0, despite being "which box is this in the rack".
+	 *
+	 * It carries F_RW, i.e. MP_OF_OVERRIDE, so at G0 an unauthenticated
+	 * session could take a lease — consuming one of MP_LEASE_MAX slots and
+	 * engaging the dead-man and the actuation path — which is not "a change
+	 * with no service consequence" (mp_manifest.h's own definition of G0).
+	 * And its whole behaviour is to outrank the fault colour: suppressing the
+	 * board's primary annunciation is a service consequence by definition.
+	 * The cost of the promotion is nil — the tool opens a session for
+	 * everything else anyway, and MP mode already requires physical access to
+	 * the console port.
+	 */
+	{ .id = "ui.identify", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G1,
 	  .group = MP_GRP_PANEL, .flags = F_RW,
 	  .desc = "D5 identify pulse; outranks the fault colour by policy" },
 

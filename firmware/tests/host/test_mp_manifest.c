@@ -291,19 +291,53 @@ static void test_writable_objects_are_guarded(void)
 		mutable_count++;
 		/*
 		 * Anything that changes board state needs at least a session.
-		 * `ui.identify` is the one deliberate G0 mutator — an operator
-		 * locating a box in a rack — and it is asserted by name below.
+		 * No exemptions, by name or otherwise: a G0 request is answered
+		 * for MP_ROLE_NONE, so a G0 mutator routes actuation around the
+		 * whole authentication check. `ui.identify` used to be exempted
+		 * here and is now G1 — see the note on its manifest row.
 		 */
-		if (strcmp(o->id, "ui.identify") != 0) {
-			TEST_ASSERT_TRUE_MESSAGE(o->guard >=
-							 (uint8_t)MP_GUARD_G1,
-						 o->id);
-		}
+		TEST_ASSERT_TRUE_MESSAGE(o->guard >= (uint8_t)MP_GUARD_G1, o->id);
 		/* A sensor is never mutable. */
 		TEST_ASSERT_NOT_EQUAL_MESSAGE((uint8_t)MP_GRP_SENSOR, o->group,
 					      o->id);
 	}
 	TEST_ASSERT_TRUE(mutable_count > 25U);
+}
+
+/**
+ * The rule above, stated the other way round so it cannot be satisfied vacuously.
+ *
+ * test_writable_objects_are_guarded() would still pass if the mutating-object
+ * predicate were broken (nothing would be checked). This counts the G0 mutators
+ * directly and requires the count to be exactly zero, and separately proves that
+ * G0 objects exist at all — so "no G0 mutator" cannot be true because there are
+ * no G0 rows left to look at.
+ */
+static void test_no_g0_object_can_mutate(void)
+{
+	size_t i;
+	size_t n = mp_obj_count();
+	unsigned int g0_mutators = 0U;
+	unsigned int g0_total = 0U;
+	const char *first = "none";
+
+	for (i = 0U; i < n; i++) {
+		const mp_obj_t *o = mp_obj_at(i);
+
+		if (o->guard != (uint8_t)MP_GUARD_G0) {
+			continue;
+		}
+		g0_total++;
+		if ((o->flags & (MP_OF_WRITE | MP_OF_OVERRIDE | MP_OF_PULSE)) !=
+		    0U) {
+			if (g0_mutators == 0U) {
+				first = o->id;
+			}
+			g0_mutators++;
+		}
+	}
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, g0_mutators, first);
+	TEST_ASSERT_TRUE(g0_total > 20U);
 }
 
 /**
@@ -348,8 +382,12 @@ static void test_guard_classes_of_the_dangerous_objects(void)
 		{ "ui.rgb.r", MP_GUARD_G1 },
 		{ "pwr.disp.en", MP_GUARD_G1 },
 		{ "ref.term.en", MP_GUARD_G1 },
-		/* G0 — the locate pulse. */
-		{ "ui.identify", MP_GUARD_G0 },
+		/*
+		 * The locate pulse. G1 rather than G0: it is overridable and it
+		 * outranks the fault colour, so it needs a session and a role
+		 * like every other mutator.
+		 */
+		{ "ui.identify", MP_GUARD_G1 },
 	};
 	size_t i;
 
@@ -865,6 +903,7 @@ int main(void)
 	RUN_TEST(test_enum_and_bits_kinds_name_their_values);
 
 	RUN_TEST(test_writable_objects_are_guarded);
+	RUN_TEST(test_no_g0_object_can_mutate);
 	RUN_TEST(test_guard_classes_of_the_dangerous_objects);
 	RUN_TEST(test_interlocks_are_attached_where_they_must_be);
 

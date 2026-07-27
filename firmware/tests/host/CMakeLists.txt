@@ -96,6 +96,11 @@ module_deps(snmp     util quality)
 module_deps(ui       util quality)
 module_deps(atecc    util)
 module_deps(auth     util)
+# `cal` adds one edge to the ARCHITECTURE.md §4 map: `ina228`. The trim's
+# arithmetic and the register's own 15-bit clamp belong to core/ina228
+# (ina228_shunt_cal_trim); core/cal owns the plausibility policy on top of it,
+# and reusing the codec keeps one implementation of the formula.
+module_deps(cal      ina228 util)
 # `mp` (the Maintenance Protocol, FMT device side) adds one edge to the
 # ARCHITECTURE.md §4 map: `ina228`, for the nine-monitor rail table the
 # capability manifest publishes (name, designator, address, shunt) rather than

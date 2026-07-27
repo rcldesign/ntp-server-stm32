@@ -20,10 +20,35 @@
  *   diagnostics     mp_diag.h    named tests with progress and results
  *   panel mirror    mp_mirror.h  live front-panel replica (project requirement)
  *
- * Threading and budget (FMT §10). Everything here runs in the console thread's
- * context. Core never takes a lock and never reads hardware: it consumes
- * snapshot structs the glue fills, which is what keeps the protocol off the
- * timing path (ARCHITECTURE.md §10 invariant 10).
+ * Threading and budget (FMT §10). Core never takes a lock and never reads
+ * hardware: it consumes snapshot structs the glue fills, which is what keeps the
+ * protocol off the timing path (ARCHITECTURE.md §10 invariant 10). It is
+ * **not** re-entrant and it is **not** internally synchronised — one mp_ctx_t
+ * carries one frame decoder, one reply buffer, one transmit scratch, one lease
+ * array and one session, and every entry point below mutates several of them.
+ *
+ * That matters because the engine has *two* drivers, on purpose:
+ *
+ *   byte-driven   mp_input() / mp_shell_byte(), from whatever context the glue
+ *                 receives console bytes in;
+ *   time-driven   mp_tick(), from a periodic context, which must keep running
+ *                 when the host has gone quiet — the dead-man exists for
+ *                 exactly that case, so folding the tick onto the byte path
+ *                 would make the safety property fail in its own design case.
+ *
+ * **The glue must serialise every entry into one mp_ctx_t under a single lock**,
+ * and that lock must span encode *and* transmit: mp_frame_encode() returns a
+ * pointer into the ctx's one mp_frame_tx_t (mp_frame.h), so a caller that
+ * releases before the sink has drained lets a second caller re-encode over the
+ * bytes still on the wire — a spliced COBS frame. The same applies to the lease
+ * array, which mp_tick()'s dead-man revert and mp_obj_override()'s grant both
+ * write. The reference implementation of that rule is `mp_lock` in
+ * src/zephyr/console/mp_glue.c, which also documents the one point where it is
+ * released (a blocking credential check) and why that release is safe.
+ *
+ * Nothing here may be called from an interrupt: the transmit sink, the log ring
+ * and the state providers are all thread-context facilities, and the lock above
+ * cannot be taken in an ISR.
  *
  * Mode entry (FMT §2.3). The console starts in shell mode. MP mode is entered by
  * the `mp enter` shell command or, autobaud-safe, by the in-band magic

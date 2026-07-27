@@ -34,6 +34,20 @@
  * A tunnel is *not* a subscription: it is opened by the override and closed by
  * releasing it, by the dead-man, or by leaving MP mode — all of which arrive here
  * as an apply/release from core.
+ *
+ * Threading (F11). Two sides, and they are not symmetric:
+ *
+ *   - the open/close side (sts_mp_tunnel_set_*) is called from core's apply
+ *     callback and therefore already holds the engine lock. It is the only
+ *     writer of the tunnel flags;
+ *   - the tee side is called by peripheral reader threads and reaches the engine
+ *     through sts_mp_stream_raw(), which takes the lock with a timeout and drops
+ *     the bytes on contention. A reader thread must not be pinned behind a
+ *     console request, and a passthrough tee is best-effort by nature.
+ *
+ * The `..._open()` predicates stay lock-free — the flags are atomic words — so a
+ * reader asking "may I drive this port" never queues behind the console. That is
+ * the priority inversion this split exists to prevent.
  */
 
 #include <zephyr/kernel.h>
@@ -43,6 +57,7 @@
 #include <errno.h>
 
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 #include "console/mp_glue.h"
 #include "fault/fault.h"
@@ -52,24 +67,35 @@ LOG_MODULE_DECLARE(sts_mp, CONFIG_STS1000_LOG_LEVEL);
 
 /* ------------------------------------------------------------------ state */
 
-static bool tunnel_gnss;
-static bool tunnel_rb;
+/*
+ * Written only under the engine lock (sts_mp_tunnel_set_*), read lock-free by
+ * peripheral threads. atomic_t rather than bool so the lock-free read is defined
+ * behaviour rather than a compiler's favour.
+ */
+static atomic_t tunnel_gnss = ATOMIC_INIT(0);
+static atomic_t tunnel_rb = ATOMIC_INIT(0);
 
-/* Counters, for `mp status` and the support bundle. */
-static uint32_t tee_gnss_bytes;
-static uint32_t tee_rb_bytes;
-static uint32_t tee_nmea_bytes;
-static uint32_t tee_ubx_bytes;
-static uint32_t tee_dropped;
+/*
+ * Counters, for `mp status` and the support bundle. Updated on whichever
+ * peripheral thread produced the bytes and read from the shell, so they are
+ * atomic: an unsynchronised read-modify-write across threads is a defect even
+ * when the datum is only a statistic, and the cost is nothing next to the mutex
+ * and the UART on the same path.
+ */
+static atomic_t tee_gnss_bytes = ATOMIC_INIT(0);
+static atomic_t tee_rb_bytes = ATOMIC_INIT(0);
+static atomic_t tee_nmea_bytes = ATOMIC_INIT(0);
+static atomic_t tee_ubx_bytes = ATOMIC_INIT(0);
+static atomic_t tee_dropped = ATOMIC_INIT(0);
 
 bool sts_mp_tunnel_gnss_open(void)
 {
-	return tunnel_gnss;
+	return atomic_get(&tunnel_gnss) != 0;
 }
 
 bool sts_mp_tunnel_rb_open(void)
 {
-	return tunnel_rb;
+	return atomic_get(&tunnel_rb) != 0;
 }
 
 /**
@@ -101,7 +127,7 @@ int sts_mp_tunnel_set_gnss(bool open)
 {
 	int rc;
 
-	if (tunnel_gnss == open) {
+	if (sts_mp_tunnel_gnss_open() == open) {
 		return 0;
 	}
 
@@ -115,14 +141,14 @@ int sts_mp_tunnel_set_gnss(bool open)
 				rc);
 			return rc;
 		}
-		tunnel_gnss = true;
+		atomic_set(&tunnel_gnss, 1);
 		(void)sts_alarm_set(FAULT_ALARM_TAMPER, true);
 		sts_log(LOGR_SUB_GNSS, LOGR_WARN,
 			"MP GNSS tunnel open; receiver stood down, reference SUSPECT");
 		return 0;
 	}
 
-	tunnel_gnss = false;
+	atomic_set(&tunnel_gnss, 0);
 	rc = sts_gnss_uart_resume();
 	if ((rc != 0) && (rc != -ENOTSUP)) {
 		sts_log(LOGR_SUB_GNSS, LOGR_ERR,
@@ -157,10 +183,10 @@ int sts_mp_tunnel_set_gnss(bool open)
  */
 int sts_mp_tunnel_set_rb(bool open)
 {
-	if (tunnel_rb == open) {
+	if (sts_mp_tunnel_rb_open() == open) {
 		return 0;
 	}
-	tunnel_rb = open;
+	atomic_set(&tunnel_rb, open ? 1 : 0);
 
 	sts_log(LOGR_SUB_TIMING, open ? LOGR_WARN : LOGR_NOTICE,
 		"MP Rb tunnel %s; reference %s (firmware still reads UART7)",
@@ -170,41 +196,43 @@ int sts_mp_tunnel_set_rb(bool open)
 
 /* -------------------------------------------------------------------- tees */
 
-/** Frame @p len bytes onto @p ch, counting a refusal rather than retrying. */
-static void tee(uint8_t ch, const uint8_t *data, size_t len, uint32_t *counter)
+/**
+ * Frame @p len bytes onto @p ch, counting a refusal rather than retrying.
+ *
+ * sts_mp_stream_raw() is the locked entry point; this file never holds a pointer
+ * to the engine context, because a caller that does can mutate protocol state
+ * with no lock at all. -EBUSY (lock contended, or an ISR caller) is counted with
+ * the other drops: a tee that waits is a peripheral reader that stalls.
+ */
+static void tee(uint8_t ch, const uint8_t *data, size_t len, atomic_t *counter)
 {
-	const mp_ctx_t *c = sts_mp_ctx();
 	int rc;
 
-	if ((c == NULL) || (data == NULL) || (len == 0U)) {
+	if ((data == NULL) || (len == 0U)) {
 		return;
 	}
-	/*
-	 * mp_stream_raw() takes a non-const ctx, but the only mutation is the
-	 * frame counter and the TX path; the const accessor exists so other
-	 * console-area code cannot reach in and change engine state.
-	 */
-	rc = mp_stream_raw((mp_ctx_t *)c, ch, data, len);
+	rc = sts_mp_stream_raw(ch, data, len);
 	if (rc < 0) {
-		if (rc != -ENOENT) {
-			/* -ENOENT is the normal "nobody is listening" case. */
-			tee_dropped++;
+		if ((rc != -ENOENT) && (rc != -ENODEV)) {
+			/* -ENOENT is the normal "nobody is listening" case, and
+			 * -ENODEV is "the engine has not started". */
+			(void)atomic_inc(&tee_dropped);
 		}
 		return;
 	}
-	*counter += (uint32_t)len;
+	(void)atomic_add(counter, (atomic_val_t)len);
 }
 
 void sts_mp_tee_gnss(const uint8_t *data, size_t len)
 {
-	if (tunnel_gnss) {
+	if (sts_mp_tunnel_gnss_open()) {
 		tee(MP_CH_GNSS_PASS, data, len, &tee_gnss_bytes);
 	}
 }
 
 void sts_mp_tee_rb(const uint8_t *data, size_t len)
 {
-	if (tunnel_rb) {
+	if (sts_mp_tunnel_rb_open()) {
 		tee(MP_CH_RB_PASS, data, len, &tee_rb_bytes);
 	}
 }
@@ -219,24 +247,24 @@ void sts_mp_tee_ubx(const uint8_t *data, size_t len)
 	tee(MP_CH_UBX, data, len, &tee_ubx_bytes);
 }
 
-/** Tee byte counts, for `mp status`. */
+/** Tee byte counts, for `mp status`. Lock-free; needs no engine lock. */
 void sts_mp_tunnel_stats(uint32_t *gnss, uint32_t *rb, uint32_t *nmea,
 			 uint32_t *ubx, uint32_t *dropped)
 {
 	if (gnss != NULL) {
-		*gnss = tee_gnss_bytes;
+		*gnss = (uint32_t)atomic_get(&tee_gnss_bytes);
 	}
 	if (rb != NULL) {
-		*rb = tee_rb_bytes;
+		*rb = (uint32_t)atomic_get(&tee_rb_bytes);
 	}
 	if (nmea != NULL) {
-		*nmea = tee_nmea_bytes;
+		*nmea = (uint32_t)atomic_get(&tee_nmea_bytes);
 	}
 	if (ubx != NULL) {
-		*ubx = tee_ubx_bytes;
+		*ubx = (uint32_t)atomic_get(&tee_ubx_bytes);
 	}
 	if (dropped != NULL) {
-		*dropped = tee_dropped;
+		*dropped = (uint32_t)atomic_get(&tee_dropped);
 	}
 }
 

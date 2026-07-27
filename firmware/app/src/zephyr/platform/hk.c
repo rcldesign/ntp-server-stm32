@@ -1050,6 +1050,18 @@ int sts_hk_start(void)
 		sts_atecc_reapply();
 	}
 
+	/*
+	 * Group 0x0C carries the nine per-board SHUNT_CAL trims. Nothing was
+	 * subscribed to it, so committing a trim — from the calibration
+	 * procedure, the config page, MCP or the shell — changed the stored value
+	 * and left the parts running the old one until the next reboot.
+	 */
+	rc = sts_cfg_register_applier(CFG_G_CAL, hk_cal_applier, NULL);
+	if (rc != 0) {
+		LOG_ERR("cal-group applier registration failed (%d)", rc);
+		return rc;
+	}
+
 	hk.liveness_id = sts_liveness_register("housekeeping");
 
 	tid = k_thread_create(&hk_tcb, hk_stack, HK_STACK_SIZE, hk_entry, NULL, NULL,

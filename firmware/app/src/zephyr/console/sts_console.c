@@ -71,6 +71,25 @@ LOG_MODULE_REGISTER(sts_console, CONFIG_STS1000_LOG_LEVEL);
 /** Self-confirm gate re-evaluation interval. */
 #define SELFCONFIRM_PERIOD_MS 5000
 
+/*
+ * The MP dead-man budget, as an inequality the compiler checks.
+ *
+ * sts_mp_tick() takes the engine lock with a timeout and skips the pass rather
+ * than waiting (it shares this loop with sts_liveness_feed(), and a supervisor
+ * that blocks past CONFIG_STS1000_LIVENESS_DEADLINE_MS stops kicking the
+ * TPS3430 — an unbounded wait here would cold-cycle the board on a slow
+ * maintenance login). Skipping means the worst interval between two *successful*
+ * ticks is (STS_MP_TICK_MISS_MAX + 1) whole loop passes, each of which can run
+ * long by the lock timeout. That interval is what MP_TICK_MAX_MS bounds.
+ *
+ * As built: (5 + 1) * (250 + 50) = 1800 <= 2000 ms.
+ */
+BUILD_ASSERT(((STS_MP_TICK_MISS_MAX + 1U) *
+	      ((unsigned int)CONSOLE_PERIOD_MS + STS_MP_TICK_LOCK_MS)) <=
+		     MP_TICK_MAX_MS,
+	     "console period + MP tick-miss budget exceeds the override dead-man "
+	     "deadline (MP_TICK_MAX_MS)");
+
 static struct k_thread console_thread;
 static K_THREAD_STACK_DEFINE(console_stack, CONSOLE_STACK);
 
@@ -159,6 +178,12 @@ static void console_thread_entry(void *p1, void *p2, void *p3)
 		 * dead-man: a tick that is skipped is a lease that outlives its
 		 * keepalive. CONSOLE_PERIOD_MS (250) is 8x inside that budget,
 		 * and the call is a no-op until sts_mp_start() has run.
+		 *
+		 * It is also a bounded call: it waits at most
+		 * STS_MP_TICK_LOCK_MS for the engine lock and returns having
+		 * skipped the pass, so the shell thread cannot delay
+		 * sts_liveness_feed() below. The BUILD_ASSERT above is what keeps
+		 * the skips inside the dead-man's deadline.
 		 */
 		sts_mp_tick();
 
