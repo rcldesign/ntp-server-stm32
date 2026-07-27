@@ -133,6 +133,7 @@ int quality_snapshot(const quality_state_t *qs, quality_block_t *out)
 uint32_t quality_ntp_short_from_ns(int64_t ns)
 {
 	uint64_t scaled;
+	uint64_t q;
 
 	if (ns <= 0) {
 		return 0u;
@@ -144,7 +145,12 @@ uint32_t quality_ntp_short_from_ns(int64_t ns)
 	/* ns * 2^16 / 1e9, rounded to nearest. The bound above keeps the
 	 * multiply inside uint64: 65536e9 * 65536 = 4.3e18 < 1.8e19. */
 	scaled = (uint64_t)ns * NTP_SHORT_PER_S + (NS_PER_S / 2u);
-	return (uint32_t)(scaled / NS_PER_S);
+	q = scaled / NS_PER_S;
+
+	/* Round-to-nearest can carry the quotient up to 2^32 for an ns just
+	 * below the whole-second cap (e.g. 65535.9999995 s), which would wrap
+	 * to 0 on the cast. Saturate in uint64 before narrowing. */
+	return (q > UINT32_MAX) ? UINT32_MAX : (uint32_t)q;
 }
 
 int64_t quality_ns_from_ntp_short(uint32_t q16)
@@ -225,10 +231,16 @@ float quality_holdover_time_to_ns(const quality_holdover_model_t *m, float dt_c,
 	aging = holdover_aging(m);
 
 	if (aging > 0.0f) {
-		/* Positive root of 0.5*a*t^2 + rate*t - budget = 0. */
+		/* Positive root of 0.5*a*t^2 + rate*t - budget = 0. Written as
+		 * 2b/(rate + sqrt(disc)) rather than (sqrt(disc) - rate)/a: the
+		 * two forms are algebraically identical, but when rate dominates
+		 * (small aging, large drift) sqrt(disc) ~= rate and the textbook
+		 * subtraction loses most of its significant figures, while the
+		 * conjugate form adds two like-signed quantities and stays
+		 * accurate. */
 		float disc = rate * rate + 2.0f * aging * budget;
 
-		return (quality_sqrtf(disc) - rate) / aging;
+		return (2.0f * budget) / (rate + quality_sqrtf(disc));
 	}
 	if (rate > 0.0f) {
 		return budget / rate;

@@ -286,15 +286,26 @@ int mcp_wire_build(uint8_t type, uint8_t cmd, uint8_t flags, uint16_t seq,
  *
  * CFG_EXPORT 0x15
  *   REQ: u32 offset, u8 flags   flags bit0 = include CFG_F_SECRET keys
+ *        (CFG_F_NOEXPORT keys — the admin credential — are never included)
  *   RSP: u32 offset, u8 more, u8 data[...]   (data is the rest of the payload)
- *        offset 0 restarts the export; any other value must equal the byte
- *        offset the previous chunk ended at, else MCP_ERR_OFFSET.
+ *        offset 0 restarts the export. Any other value must equal either the
+ *        byte offset the previous chunk ended at (the normal advance) or the
+ *        offset of the previous chunk (a retransmit after a lost response, in
+ *        which case the identical chunk is re-emitted); anything else is
+ *        MCP_ERR_OFFSET. Requesting secrets needs an authenticated session.
  *
  * CFG_IMPORT 0x16
  *   REQ: u32 offset, u8 flags, u8 data[...]
  *        flags bit0 = strict (unknown key IDs are an error), bit1 = final
  *        chunk (commit after this one)
- *   RSP: u32 next_offset, u8 complete, u16 applied, u32 reboot_groups
+ *   RSP: u32 next_offset, u8 complete, u16 applied, u32 reboot_groups,
+ *        u16 persist_errors
+ *        offset 0 restarts the import. A repeat of the previous chunk's offset
+ *        is absorbed — the engine re-acknowledges the current frontier without
+ *        re-applying — and a repeat of a committed final chunk re-emits the
+ *        cached result, so a lost response never forces a restart. complete==1
+ *        marks the committed final chunk; persist_errors carries the same
+ *        meaning as in CFG_COMMIT.
  *
  * FACTORY_RESET 0x17
  *   REQ: u32 magic == MCP_FACTORY_MAGIC
@@ -328,11 +339,18 @@ int mcp_wire_build(uint8_t type, uint8_t cmd, uint8_t flags, uint16_t seq,
  * FW_INFO 0x40
  *   REQ: (empty)
  *   RSP: u8 n_slots, n × { u8 slot, u8 flags, u32 size, u32 ver[4] },
- *        u8 dfu_state, u32 dfu_total, u32 dfu_written, u32 chunk_max
+ *        u8 dfu_state, u32 dfu_total, u32 dfu_written, u32 chunk_max,
+ *        u32 write_block
  *
  * FW_BEGIN 0x41
  *   REQ: u32 size, u8 sha256[32]
- *   RSP: u32 next_expected, u32 chunk_max, u8 resumed
+ *        size is the image length and MUST NOT exceed staging_size() (the slot
+ *        capacity minus the MCUboot trailer, per port_image.h); a larger image
+ *        is MCP_ERR_NOSPC.
+ *   RSP: u32 next_expected, u32 chunk_max, u32 write_block, u8 resumed
+ *        Every non-final FW_DATA chunk length must be a multiple of write_block
+ *        (the port buffers only the final short block); the final chunk may be
+ *        any length.
  *
  * FW_DATA 0x42
  *   REQ: u32 offset, u8 data[1..1024]

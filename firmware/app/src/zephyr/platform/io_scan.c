@@ -202,27 +202,27 @@ static void io_scan_dispatch(const fault_evt_t *evt)
 			if (io_scan_ina_rail_for_sig((fault_sig_t)evt->id, &rail) == 0) {
 				sts_hk_request_ina((uint8_t)rail);
 			}
-			sts_log(LOGR_SUB_POWER, LOGR_WARN, "INA228 ALERT: %s",
+			sts_log(LOGR_SUB_PWR, LOGR_WARN, "INA228 ALERT: %s",
 				fault_sig_name((fault_sig_t)evt->id));
 		}
 		break;
 
 	case FAULT_EVT_PG_FAULT:
-		sts_log(LOGR_SUB_POWER, LOGR_ERR, "power-good lost: %s",
+		sts_log(LOGR_SUB_PWR, LOGR_ERR, "power-good lost: %s",
 			fault_sig_name((fault_sig_t)evt->id));
 		break;
 	case FAULT_EVT_PG_RECOVER:
-		sts_log(LOGR_SUB_POWER, LOGR_NOTICE, "power-good restored: %s",
+		sts_log(LOGR_SUB_PWR, LOGR_NOTICE, "power-good restored: %s",
 			fault_sig_name((fault_sig_t)evt->id));
 		break;
 	case FAULT_EVT_EN_FAULT:
-		sts_log(LOGR_SUB_POWER,
+		sts_log(LOGR_SUB_PWR,
 			(evt->edge == FAULT_EDGE_ASSERT) ? LOGR_ERR : LOGR_NOTICE,
 			"load switch %s %s", fault_sig_name((fault_sig_t)evt->id),
 			(evt->edge == FAULT_EDGE_ASSERT) ? "faulted" : "recovered");
 		break;
 	case FAULT_EVT_BKP_PG:
-		sts_log(LOGR_SUB_POWER, LOGR_NOTICE, "backup supply %s %s",
+		sts_log(LOGR_SUB_PWR, LOGR_NOTICE, "backup supply %s %s",
 			fault_sig_name((fault_sig_t)evt->id),
 			(evt->edge == FAULT_EDGE_ASSERT) ? "not good" : "good");
 		break;
@@ -319,7 +319,7 @@ static void io_scan_entry(void *p1, void *p2, void *p3)
 
 		if (dropped != io_scan.evt_dropped_reported) {
 			io_scan.evt_dropped_reported = dropped;
-			sts_log(LOGR_SUB_POWER, LOGR_WARN,
+			sts_log(LOGR_SUB_PWR, LOGR_WARN,
 				"io_scan: %u fault events dropped", dropped);
 		}
 
