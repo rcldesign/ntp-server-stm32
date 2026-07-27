@@ -87,7 +87,15 @@ LOG_MODULE_REGISTER(sts_spi4, CONFIG_STS1000_LOG_LEVEL);
 #define MCP41U83_CMD_WRITE      0x0U
 #define MCP41U83_CMD_READ       0x3U
 
-/** CMDERR: set by the device when it accepted the command. */
+/** The MCP41U83 is a 10-bit potentiometer: wiper codes are 0..1023. */
+#define MCP41U83_CODE_MAX 0x3FFU
+
+/*
+ * Read response: the device echoes the address/command in the high bits and
+ * returns the 10-bit wiper value in [9:0]. Bit 1 of the echoed command nibble
+ * is CMDERR (1 = accepted). Data D9/D8 land in [9:8], so the CMDERR bit is read
+ * from the high byte with D9/D8 masked off first.
+ */
 #define MCP41U83_CMDERR_BIT 0x02U
 
 /** Non-volatile writes need tWC to complete (DS20007000B §1.2, 10 ms max). */
@@ -138,7 +146,7 @@ static uint16_t digipot_cmd(uint8_t addr, uint8_t cmd, uint16_t data)
 			  ((uint16_t)(cmd & 0x03U) << 10) | (data & 0x03FFU));
 }
 
-static int digipot_read_reg(uint8_t addr, uint8_t *code)
+static int digipot_read_reg(uint8_t addr, uint16_t *code)
 {
 	uint16_t rsp = 0;
 	int rc;
@@ -150,19 +158,21 @@ static int digipot_read_reg(uint8_t addr, uint8_t *code)
 
 	/*
 	 * CMDERR must read back set. A part that is absent, held in reset or
-	 * wired to a floating MISO returns 0x0000 or 0xFFFF; requiring the
-	 * flag rejects both, which matters because the value read here gates
-	 * whether pwrseq is allowed to energise the rubidium rail.
+	 * wired to a floating MISO returns all-zero or all-one; the CMDERR
+	 * check plus the 10-bit readback compare in the callers rejects both,
+	 * which matters because this gates whether pwrseq may energise the Rb
+	 * rail. D9/D8 share the high byte with the echoed command, so mask
+	 * them off before testing CMDERR.
 	 */
-	if (((rsp >> 8) & MCP41U83_CMDERR_BIT) == 0U) {
+	if ((((rsp >> 8) & ~0x03U) & MCP41U83_CMDERR_BIT) == 0U) {
 		return -EIO;
 	}
 
-	*code = (uint8_t)(rsp & 0xFFU);
+	*code = (uint16_t)(rsp & MCP41U83_CODE_MAX);
 	return 0;
 }
 
-int sts_digipot_get(uint8_t *code)
+int sts_digipot_get(uint16_t *code)
 {
 	int rc;
 
@@ -180,75 +190,69 @@ int sts_digipot_get(uint8_t *code)
 	return rc;
 }
 
-int sts_digipot_set(uint8_t code)
+static int digipot_write_verify(uint8_t addr, uint16_t code, bool nv)
 {
-	uint8_t readback = 0;
+	uint16_t readback = 0;
 	int rc;
 
-	if (!digipot_ready) {
-		return -ENODEV;
+	if (code > MCP41U83_CODE_MAX) {
+		return -EINVAL;
 	}
 
 	(void)k_mutex_lock(&spi4_seq_mutex, K_FOREVER);
 
-	rc = digipot_xfer(digipot_cmd(MCP41U83_ADDR_WIPER0, MCP41U83_CMD_WRITE, code),
-			  NULL);
+	rc = digipot_xfer(digipot_cmd(addr, MCP41U83_CMD_WRITE, code), NULL);
 	if (rc == 0) {
-		rc = digipot_read_reg(MCP41U83_ADDR_WIPER0, &readback);
+		if (nv) {
+			k_msleep(MCP41U83_NV_WRITE_MS);
+		}
+		rc = digipot_read_reg(addr, &readback);
 	}
 
 	(void)k_mutex_unlock(&spi4_seq_mutex);
 
 	if (rc != 0) {
-		LOG_ERR("digipot: write %u failed (%d)", code, rc);
+		LOG_ERR("digipot: %swrite %u failed (%d)", nv ? "NV " : "", code, rc);
 		return rc;
 	}
 
 	if (readback != code) {
 		/*
 		 * A wiper that did not take the commanded code is the failure
-		 * mode that can destroy the FE-5680A, so it is an error, not a
-		 * warning: pwrseq must not proceed to RB_PWR_EN on it.
+		 * mode that can over-volt the FE-5680A, so it is an error, not
+		 * a warning: pwrseq must not proceed to RB_PWR_EN on it.
 		 */
-		LOG_ERR("digipot: wrote %u, read back %u", code, readback);
+		LOG_ERR("digipot: %swrote %u, read back %u", nv ? "NV " : "", code,
+			readback);
 		return -EIO;
 	}
 
 	return 0;
 }
 
-int sts_digipot_set_nv(uint8_t code)
+int sts_digipot_set(uint16_t code)
 {
-	uint8_t readback = 0;
+	if (!digipot_ready) {
+		return -ENODEV;
+	}
+
+	return digipot_write_verify(MCP41U83_ADDR_WIPER0, code, false);
+}
+
+int sts_digipot_set_nv(uint16_t code)
+{
 	int rc;
 
 	if (!digipot_ready) {
 		return -ENODEV;
 	}
 
-	(void)k_mutex_lock(&spi4_seq_mutex, K_FOREVER);
-
-	rc = digipot_xfer(digipot_cmd(MCP41U83_ADDR_NV_WIPER0, MCP41U83_CMD_WRITE, code),
-			  NULL);
+	rc = digipot_write_verify(MCP41U83_ADDR_NV_WIPER0, code, true);
 	if (rc == 0) {
-		k_msleep(MCP41U83_NV_WRITE_MS);
-		rc = digipot_read_reg(MCP41U83_ADDR_NV_WIPER0, &readback);
+		LOG_INF("digipot: NV wiper programmed to %u (POR value)", code);
 	}
 
-	(void)k_mutex_unlock(&spi4_seq_mutex);
-
-	if (rc != 0) {
-		LOG_ERR("digipot: NV write %u failed (%d)", code, rc);
-		return rc;
-	}
-
-	if (readback != code) {
-		LOG_ERR("digipot: NV wrote %u, read back %u", code, readback);
-		return -EIO;
-	}
-
-	LOG_INF("digipot: NV wiper programmed to %u (POR value)", code);
-	return 0;
+	return rc;
 }
 
 int sts_spi4_init(void)

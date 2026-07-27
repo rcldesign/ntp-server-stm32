@@ -184,16 +184,6 @@ static void pk_u8(struct pk *p, uint8_t v)
 	p->buf[p->len++] = v;
 }
 
-static void pk_u16(struct pk *p, uint16_t v)
-{
-	if (p->len + 2U > p->cap) {
-		p->overflow = true;
-		return;
-	}
-	bytes_put_le16(&p->buf[p->len], v);
-	p->len += 2U;
-}
-
 static void pk_u32(struct pk *p, uint32_t v)
 {
 	if (p->len + 4U > p->cap) {

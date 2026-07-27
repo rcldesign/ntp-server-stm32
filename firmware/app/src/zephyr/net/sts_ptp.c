@@ -53,6 +53,7 @@
 #include <zephyr/net/ethernet.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_ip.h>
+#include <zephyr/net/ptp_time.h>
 #include <zephyr/net/socket.h>
 
 #include "cfg/cfg.h"

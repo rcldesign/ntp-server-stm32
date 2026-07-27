@@ -27,11 +27,13 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+/* net_if.h first: dhcpv4.h references `struct net_if` in its prototypes
+ * without declaring it, so it must be complete before dhcpv4.h is parsed. */
+#include <zephyr/net/net_if.h>
 #include <zephyr/net/dhcpv4.h>
 #include <zephyr/net/dns_sd.h>
 #include <zephyr/net/hostname.h>
 #include <zephyr/net/net_event.h>
-#include <zephyr/net/net_if.h>
 #include <zephyr/net/net_mgmt.h>
 
 #include "cfg/cfg.h"

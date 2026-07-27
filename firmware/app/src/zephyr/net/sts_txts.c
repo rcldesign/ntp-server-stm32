@@ -54,6 +54,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_pkt.h>
+#include <zephyr/net/ptp_time.h>
 
 #include "net/sts_net.h"
 #include "util/bytes.h"

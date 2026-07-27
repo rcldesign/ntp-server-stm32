@@ -69,6 +69,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/net_ip.h>
+#include <zephyr/net/ptp_time.h>
 #include <zephyr/net/socket.h>
 
 #include "cfg/cfg.h"

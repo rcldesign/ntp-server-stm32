@@ -151,14 +151,14 @@ void sts_extref_mon_read(uint32_t *hz, bool *valid, bool *edges);
 /** Bind the SPI4 controller and build the digipot's transfer configuration. */
 int sts_spi4_init(void);
 
-/** Write the digipot wiper (0..255) and read it back. */
-int sts_digipot_set(uint8_t code);
+/** Write the 10-bit digipot wiper (0..1023) and read it back. */
+int sts_digipot_set(uint16_t code);
 
-/** Read the digipot volatile wiper register. */
-int sts_digipot_get(uint8_t *code);
+/** Read the 10-bit digipot volatile wiper register. */
+int sts_digipot_get(uint16_t *code);
 
-/** Program the non-volatile wiper so a POR comes up at @p code. */
-int sts_digipot_set_nv(uint8_t code);
+/** Program the non-volatile wiper so a POR comes up at @p code (0..1023). */
+int sts_digipot_set_nv(uint16_t code);
 
 /* ------------------------------------------------------------------------- */
 /* hk.c — housekeeping: I2C sweep cache, pwrseq, thermal, supervisor         */
