@@ -276,6 +276,13 @@ const fault_alarm_t *fault_alarm_get(const fault_ctx_t *ctx, fault_alarm_id_t id
 	return &ctx->alarm[(unsigned int)id];
 }
 
+/* True when scanned-signal alarm @p i is suppressed by the expected-off mask. */
+static bool alarm_suppressed(const fault_ctx_t *ctx, unsigned int i)
+{
+	return (i < (unsigned int)FAULT_SIG_COUNT) &&
+	       ((ctx->expected_off & FAULT_SIG_BIT(i)) != 0U);
+}
+
 uint64_t fault_alarms(const fault_ctx_t *ctx)
 {
 	uint64_t m = 0U;
@@ -285,7 +292,7 @@ uint64_t fault_alarms(const fault_ctx_t *ctx)
 		return 0U;
 	}
 	for (i = 0U; i < (unsigned int)FAULT_ALARM_COUNT; i++) {
-		if (ctx->alarm[i].active) {
+		if (ctx->alarm[i].active && !alarm_suppressed(ctx, i)) {
 			m |= FAULT_ALARM_BIT(i);
 		}
 	}
@@ -349,6 +356,26 @@ int fault_alarm_clear_all(fault_ctx_t *ctx)
 		(void)fault_alarm_clear(ctx, (fault_alarm_id_t)i);
 	}
 	return 0;
+}
+
+int fault_set_expected_off(fault_ctx_t *ctx, fault_sig_t sig, bool expected)
+{
+	if ((ctx == NULL) ||
+	    ((unsigned int)sig >= (unsigned int)FAULT_SIG_COUNT)) {
+		return -EINVAL;
+	}
+
+	if (expected) {
+		ctx->expected_off |= FAULT_SIG_BIT(sig);
+	} else {
+		ctx->expected_off &= ~FAULT_SIG_BIT(sig);
+	}
+	return 0;
+}
+
+uint32_t fault_expected_off_mask(const fault_ctx_t *ctx)
+{
+	return (ctx != NULL) ? ctx->expected_off : 0U;
 }
 
 /* -------------------------------------------------------------- relay policy */

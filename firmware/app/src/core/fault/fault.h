@@ -467,14 +467,42 @@ int fault_alarm_set(fault_ctx_t *ctx, fault_alarm_id_t id, bool active,
 const fault_alarm_t *fault_alarm_get(const fault_ctx_t *ctx,
 				     fault_alarm_id_t id);
 
-/** Mask of alarms whose condition is true right now (ARCHITECTURE.md §5). */
+/**
+ * Mask of alarms whose condition is true right now (ARCHITECTURE.md §5).
+ *
+ * A scanned signal marked expected-off (fault_set_expected_off()) is excluded
+ * even while its level is asserted — a rail firmware has deliberately gated off
+ * is not a fault. Software-raised alarms (ids >= 32) are never masked this way.
+ */
 uint64_t fault_alarms(const fault_ctx_t *ctx);
 
-/** Mask of alarms latched since their last clear, whether or not still true. */
+/** Mask of alarms latched since their last clear, whether or not still true.
+ *  The expected-off mask does not apply — the latch is a historical record. */
 uint64_t fault_alarms_latched(const fault_ctx_t *ctx);
 
-/** True when any alarm is currently active. */
+/** True when any alarm is currently active (expected-off signals excluded). */
 bool fault_any_active(const fault_ctx_t *ctx);
+
+/**
+ * Mark a scanned signal's asserted level as expected (not a fault), or clear
+ * that marking.
+ *
+ * pwrseq calls this as it gates each rail: a deferred or shed rubidium leaves
+ * FAULT_SIG_PG_RB_PSU asserted indefinitely, and without the mark it would hold
+ * fault_any_active() true and the status RGB red on a healthy OCXO-only unit.
+ * The marking is level-independent and applied at query time, so it may be set
+ * before or after the signal actually asserts.
+ *
+ * Only the scanned signals (ids 0..31) are maskable. The event stream and the
+ * latch history are unaffected — this changes only the *active* aggregate.
+ *
+ * @retval 0        Applied.
+ * @retval -EINVAL  @p ctx is NULL or @p sig out of range.
+ */
+int fault_set_expected_off(fault_ctx_t *ctx, fault_sig_t sig, bool expected);
+
+/** The set of scanned signals currently marked expected-off. 0 if @p ctx NULL. */
+uint32_t fault_expected_off_mask(const fault_ctx_t *ctx);
 
 /**
  * Clear one latch.

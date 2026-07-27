@@ -56,6 +56,7 @@ static const char *const action_names[PWRSEQ_ACT_COUNT] = {
 	[PWRSEQ_ACT_PANEL_LED_PWM] = "panel-led-pwm",
 	[PWRSEQ_ACT_DISC_START] = "disc-start",
 	[PWRSEQ_ACT_DIGIPOT_WRITE] = "digipot-write",
+	[PWRSEQ_ACT_DIGIPOT_WRITE_OP] = "digipot-write-op",
 	[PWRSEQ_ACT_DIGIPOT_VERIFY] = "digipot-verify",
 	[PWRSEQ_ACT_RB_PWR_EN] = "rb-pwr-en",
 	[PWRSEQ_ACT_RB_PWR_DIS] = "rb-pwr-dis",
@@ -157,7 +158,17 @@ void pwrseq_cfg_default(pwrseq_cfg_t *cfg)
 	cfg->ocxo_warmup_current_ma = 800U;
 
 	cfg->digipot_safe_code = 0U; /* terminal B = VREF = minimum VOUT */
+	/*
+	 * ~14.25 V at the default transfer function (code 500). Deliberately
+	 * below the 15 000 mV ceiling by more than rb_vbus_tol_pct so the rail
+	 * reliably passes the operating-window + measured<=vmax gate; the
+	 * documented 15 V nominal (code 539) sits at 15 007 mV, one hair over
+	 * the default ceiling, so it must not be the default. Set per FE unit.
+	 */
+	cfg->digipot_operating_code = 500U;
+	cfg->rb_vmax_mv = 15000U; /* cfg key PWR_RB_VMAX_MV default */
 	cfg->rb_vbus_tol_pct = 5U;
+	cfg->rb_ramp_ms = 100U;
 	cfg->rb_cold_start_mw = 16000U;
 
 	cfg->rb_xfer.vref_mv = 3000U;
@@ -190,20 +201,21 @@ static int64_t mul_div_round(int64_t v, int64_t mul, int64_t div)
 
 uint32_t pwrseq_digipot_vctrl_mv(const pwrseq_rb_xfer_t *x, uint16_t code)
 {
-	uint32_t top;
-
 	if ((x == NULL) || (x->steps == 0U)) {
 		return 0U;
 	}
 
 	/*
-	 * A 10-bit part has codes 0..steps-1; anything above saturates at the
-	 * top code rather than producing a negative VCTRL, which would read
-	 * back as an impossibly high rail.
+	 * VOUT rises with the code (code 0 = safe-low ~4.5 V, code steps-1 =
+	 * pedestal ~24.4 V), so an out-of-range code must clamp to the
+	 * *safe-low* end, never to steps-1. Clamping to steps-1 — the previous
+	 * behaviour — turned any garbage code into MAXIMUM output, exactly the
+	 * failure that destroys a 15 V-class FE (BLOCKER-1). A code at or above
+	 * `steps` therefore returns the code-0 VCTRL (= vref, maximum VCTRL,
+	 * minimum VOUT).
 	 */
-	top = (uint32_t)x->steps - 1U;
-	if ((uint32_t)code > top) {
-		code = (uint16_t)top;
+	if ((uint32_t)code >= (uint32_t)x->steps) {
+		return x->vref_mv;
 	}
 
 	return (uint32_t)mul_div_round((int64_t)x->steps - (int64_t)code,
@@ -310,7 +322,13 @@ bool pwrseq_ocxo_is_warming(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 	       ctx->cfg.ocxo_warmup_current_ma;
 }
 
-/* True when VCC_RB reads inside the window implied by the commanded code. */
+/* True when VCC_RB reads inside the window implied by the *currently commanded*
+ * code — safe-low during precharge, the operating setpoint after it is written.
+ * Deriving from rb_current_code rather than always from the safe code is what
+ * lets the same check serve both the precharge-verify step and the post-gate
+ * supervisor. It proves the buck is regulating to whatever was commanded; it is
+ * NOT on its own a guarantee the rail is FE-safe, which is why the operating
+ * step and the supervisor also apply the code-independent measured<=vmax gate. */
 static bool rb_rail_in_window(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 {
 	/* Seeded as an empty window (lo > hi), so if pwrseq_rb_window() ever
@@ -324,11 +342,38 @@ static bool rb_rail_in_window(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 		return false;
 	}
 
-	(void)pwrseq_rb_window(&ctx->cfg.rb_xfer, ctx->cfg.digipot_safe_code,
+	(void)pwrseq_rb_window(&ctx->cfg.rb_xfer, ctx->rb_current_code,
 			       ctx->cfg.rb_vbus_tol_pct, &lo, &hi);
 
 	mv = in->ina_vbus_mv[INA228_RAIL_VCC_RB];
 	return (mv >= lo) && (mv <= hi);
+}
+
+/*
+ * The independent FE-protection gate: the *measured* rail, straight off INA228
+ * 0x47, at or below the FE ceiling. This does not consult the digipot code at
+ * all, so a buck that has run away cannot pass it by happening to match its own
+ * (wrong) setpoint — the self-referential hole BLOCKER-1 identified. An invalid
+ * reading is not provably safe, so it fails.
+ */
+static bool rb_measured_le_vmax(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
+{
+	if (!in->ina_valid[INA228_RAIL_VCC_RB]) {
+		return false;
+	}
+	return in->ina_vbus_mv[INA228_RAIL_VCC_RB] <=
+	       (int32_t)ctx->cfg.rb_vmax_mv;
+}
+
+/* The commanded operating setpoint's expected voltage is within the FE ceiling.
+ * Redundant with the init bound (which rejects a config that violates it), but
+ * the reviewer asked for a runtime gate that is independent of the measurement,
+ * and defence in depth here is free. */
+static bool rb_operating_expected_le_vmax(const pwrseq_ctx_t *ctx)
+{
+	return pwrseq_rb_expected_mv(&ctx->cfg.rb_xfer,
+				     ctx->cfg.digipot_operating_code) <=
+	       (int32_t)ctx->cfg.rb_vmax_mv;
 }
 
 /* --------------------------------------------------------------- step table */
@@ -503,9 +548,31 @@ static bool p_digipot(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 	       (in->digipot_readback == ctx->cfg.digipot_safe_code);
 }
 
+static bool p_digipot_op(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
+{
+	return in->digipot_readback_valid &&
+	       (in->digipot_readback == ctx->cfg.digipot_operating_code);
+}
+
+/* Precharge (safe-low) rail verify: the buck is regulating to the safe code. */
 static bool p_rb_window(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 {
 	return rb_rail_in_window(ctx, in);
+}
+
+/*
+ * The trust gate before RB_VCC_GATE. All three must hold: the rail matches the
+ * commanded operating code (regulation / SPI integrity), the commanded setpoint
+ * cannot exceed the FE ceiling (code check), and the *measured* rail is at or
+ * below the FE ceiling (the code-independent check that closes BLOCKER-1's
+ * self-referential hole). RB_VCC_GATE is the row after this, so the FE is only
+ * ever connected once every one of these is true.
+ */
+static bool p_rb_operating_ok(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
+{
+	return rb_rail_in_window(ctx, in) &&
+	       rb_operating_expected_le_vmax(ctx) &&
+	       rb_measured_le_vmax(ctx, in);
 }
 
 static bool p_rb_lock(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
@@ -540,6 +607,7 @@ static uint32_t t_precond(const pwrseq_cfg_t *c)
 	return c->rb_precondition_timeout_ms;
 }
 static uint32_t t_softstart(const pwrseq_cfg_t *c) { return c->rb_softstart_ms; }
+static uint32_t t_ramp(const pwrseq_cfg_t *c) { return c->rb_ramp_ms; }
 static uint32_t t_rb_win(const pwrseq_cfg_t *c) { return c->rb_window_timeout_ms; }
 static uint32_t t_rb_lock(const pwrseq_cfg_t *c) { return c->rb_lock_timeout_ms; }
 static uint32_t t_liveness(const pwrseq_cfg_t *c) { return c->liveness_timeout_ms; }

@@ -217,11 +217,21 @@ typedef struct {
 	/** Offset of the MAC field, or 0 when there is none. */
 	size_t mac_off;
 	/**
-	 * MAC field length: 0 (absent), 4 (key id only — a crypto-NAK), 20 (a
-	 * 16-octet MD5 digest, recognised only to be rejected) or 24 (a 20-octet
-	 * digest, the format this server produces).
+	 * MAC field length: 0 (absent), or the length of a trailing field the
+	 * disambiguation classified as a MAC — 4 (key id only, a crypto-NAK), 20
+	 * (key id + 16-octet digest: AES-CMAC-128 or HMAC-SHA-256/128), 24 (key id
+	 * + 20-octet digest: HMAC-SHA-256/160), or a longer MAC-shaped remainder
+	 * (36/52/68) naming a digest length this server does not implement.
 	 */
 	size_t mac_len;
+	/**
+	 * The trailing field is MAC-shaped but of a length this server cannot
+	 * verify — a crypto-NAK, or a 32/48/64-octet digest (SHA-256/384/512).
+	 * The handler MUST reject such a request rather than serve it
+	 * unauthenticated: a client that attached a MAC expects authentication or
+	 * silence, never an unauthenticated answer it will trust.
+	 */
+	bool mac_unsupported;
 	/** Key identifier from the MAC field; meaningless when mac_len == 0. */
 	uint32_t keyid;
 } ntp_pkt_t;
@@ -230,12 +240,17 @@ typedef struct {
  * Parse a datagram into @p out. Performs no policy: version, mode and
  * authentication are the caller's business.
  *
- * Tail disambiguation follows long-standing practice (ntpd, chrony): a trailing
- * remainder of exactly 4, 20 or 24 octets is a MAC field, anything else is
- * walked as RFC 7822 extension fields. The walk is tolerant — it stops at the
- * first field that is short, unaligned or overruns, reports the octets it did
- * validate in @p ext_len, and ignores the remainder rather than rejecting the
- * packet. Nothing beyond ext_len is ever echoed, so tolerance costs nothing.
+ * Tail disambiguation follows RFC 7822 §7.5.1 and long-standing practice
+ * (ntpd, chrony): a trailing remainder whose length is that of a MAC field
+ * (key id + a recognised digest length) is a MAC, not an extension field —
+ * extension fields alongside a MAC are ≥ 28 octets, so the short MAC lengths
+ * are unambiguous. A MAC-shaped remainder of a digest length this server does
+ * not implement is still recognised, and flagged in @p mac_unsupported so the
+ * handler rejects it instead of ignoring it and answering unauthenticated.
+ *
+ * The extension-field walk is otherwise tolerant: it stops at the first field
+ * that is short, unaligned or overruns, reports the octets it did validate in
+ * @p ext_len, and ignores the remainder. Nothing beyond ext_len is ever echoed.
  *
  * @retval 0         Parsed. @p out is fully populated.
  * @retval -EINVAL   @p pkt or @p out is NULL.
@@ -276,16 +291,56 @@ int ntp_ef_iter_init(ntp_ef_iter_t *it, const uint8_t *pkt, const ntp_pkt_t *p);
  */
 int ntp_ef_iter_next(ntp_ef_iter_t *it, ntp_ef_t *ef);
 
-/* ------------------------------------------------------------------ config */
+/* ------------------------------------------------------- symmetric-key MAC */
+
+/**
+ * Symmetric MAC algorithms (spec §4.3).
+ *
+ * Each key is bound to one algorithm, chosen by the operator per key id. The
+ * on-wire MAC field is `u32 keyid || digest`; the digest length disambiguates
+ * the algorithm from the packet's trailing length per RFC 7822 §7.5.1, and the
+ * key's configured algorithm must agree with it.
+ *
+ *   NTP_MAC_AES_CMAC_128    RFC 8573 AES-CMAC (AES-128). 16-octet digest,
+ *                           20-octet MAC field. The current standard NTP MAC
+ *                           and the default for new deployments; the key must
+ *                           be exactly 16 octets.
+ *   NTP_MAC_HMAC_SHA256_128 HMAC-SHA-256 truncated to 16 octets. Interop with
+ *                           peers configured for a 128-bit SHA-2 MAC; 20-octet
+ *                           field, same length class as AES-CMAC, distinguished
+ *                           by the key's algorithm.
+ *   NTP_MAC_HMAC_SHA256_160 HMAC-SHA-256 truncated to 20 octets. 24-octet
+ *                           field, the same size as a legacy SHA-1 MAC.
+ *
+ * MD5 (RFC 5905 Appendix A) is not implemented at any length: it is broken for
+ * authentication. Autokey (RFC 5906) is not implemented; NTS (core/nts) is the
+ * modern authenticated path.
+ *
+ * Config note for the cfg-schema owner (group 0x0A security): the key table
+ * needs a per-entry algorithm selector alongside the key id and material. A
+ * `u8` mapping {0: AES-CMAC-128, 1: HMAC-SHA-256/128, 2: HMAC-SHA-256/160}
+ * matching this enum is the minimal addition; core does not read cfg itself.
+ */
+typedef enum {
+	NTP_MAC_AES_CMAC_128 = 0,
+	NTP_MAC_HMAC_SHA256_128,
+	NTP_MAC_HMAC_SHA256_160,
+} ntp_mac_alg_t;
 
 /** Symmetric keys held per context (spec §4.3). */
 #define NTP_MAC_KEYS 16U
 /** Longest symmetric key accepted: the SHA-256 block size. */
 #define NTP_MAC_KEY_MAX 64U
-/** Digest octets in a MAC field produced or accepted by this server. */
-#define NTP_MAC_DIGEST_LEN 20U
-/** Full MAC field: 4-octet key id + digest. */
-#define NTP_MAC_FIELD_LEN (4U + NTP_MAC_DIGEST_LEN)
+/** AES-CMAC-128 requires exactly a 16-octet key. */
+#define NTP_MAC_AES_KEY_LEN 16U
+/** Digest of the two 128-bit algorithms: AES-CMAC-128 and HMAC-SHA-256/128. */
+#define NTP_MAC_DIGEST_128 16U
+/** Digest of HMAC-SHA-256/160. */
+#define NTP_MAC_DIGEST_160 20U
+/** Longest digest this server emits or accepts. */
+#define NTP_MAC_DIGEST_MAX 20U
+/** Largest MAC field produced: 4-octet key id + 20-octet digest. */
+#define NTP_MAC_FIELD_MAX (4U + NTP_MAC_DIGEST_160)
 
 /**
  * Per-client state slots. Must be a power of two. Holds both the rate-limit
@@ -324,7 +379,18 @@ typedef struct {
 	uint32_t kod_min_interval_ms;
 	/** Over the limit: true sends a KoD RATE (damped), false drops silently. */
 	bool kod_on_limit;
-	/** Answer interleaved requests in interleaved mode. */
+	/**
+	 * Answer interleaved requests in interleaved mode (RFC 9769).
+	 *
+	 * Off by default. Interleaved detection distinguishes an interleaved
+	 * request from an ordinary RFC 5905 one solely by which of the previous
+	 * response's timestamps the client echoed as its origin; getting that
+	 * distinction wrong serves a basic client wildly incorrect time, so the
+	 * feature is opt-in and gated on the RFC 9769 Figure-1 vector test
+	 * (test_ntp.c) which pins both the positive and the basic-mode negative
+	 * case. Enabling it also relies on ntp_tx_complete() being called with the
+	 * per-response token from ntp_result_t.
+	 */
 	bool interleave;
 	/** Answer at all while unsynchronised (the reply carries LI 3 / stratum 16). */
 	bool serve_unsync;
@@ -334,7 +400,7 @@ typedef struct {
  * Defaults: 8 req/s burst 16 per client, 20000 req/s burst 40000 aggregate
  * (twice the spec §4.1 capacity target, so the global bucket is a safety valve
  * and not a policy), KoD on limit damped to 1 per second per client, interleave
- * on, serve while unsynchronised.
+ * OFF (opt-in — see ntp_cfg_t.interleave), serve while unsynchronised.
  */
 void ntp_cfg_default(ntp_cfg_t *cfg);
 
@@ -382,7 +448,17 @@ typedef struct {
 	ntp_action_t action;
 	ntp_drop_t drop;      /**< Set when action == NTP_ACT_IGNORE. */
 	size_t len;           /**< Response octets written. */
-	uint64_t xmt;         /**< Transmit-timestamp field written, for tx_complete. */
+	uint64_t xmt;         /**< Transmit-timestamp field written. */
+	/**
+	 * Interleave pairing token for ntp_tx_complete(), or 0 when this response
+	 * armed no interleave state (interleave disabled, or a Kiss-o'-Death).
+	 * The caller passes it back with the measured hardware transmit timestamp.
+	 * It is per-client and per-response, so a later request from the same
+	 * client that arrives before this response's timestamp does cannot cause
+	 * that timestamp to be paired with the wrong exchange — the stale token is
+	 * rejected rather than committed. See ntp_tx_complete().
+	 */
+	uint32_t xl_token;
 	bool interleaved;     /**< The response used interleaved-mode timestamps. */
 	bool authenticated;   /**< A symmetric MAC was verified and appended. */
 } ntp_result_t;
@@ -423,22 +499,36 @@ typedef struct {
 
 /* -------------------------------------------------------------- the server */
 
-/** Per-client rate-limit and interleave state. All fields private. */
+/**
+ * Per-client rate-limit and interleave state. All fields private.
+ *
+ * The interleave fields hold the RFC 9769 client/server pairing. `xl_rx_sent`
+ * is the receive-timestamp field the server put in the last committed response
+ * to this client; `xl_tx_actual` is that response's measured hardware transmit
+ * instant. A request is interleaved when it echoes `xl_rx_sent` as its origin
+ * (a basic RFC 5905 client echoes the transmit field instead, and the server
+ * guarantees those two are never equal — see the never-emit-xmt==rec rule in
+ * ntp.c — so the two cases never collide). The `xl_pend_*`/`xl_gen` fields are
+ * the response awaiting its transmit timestamp; the generation token makes a
+ * late timestamp for a superseded response reject rather than mispair (M5).
+ */
 typedef struct {
 	uint32_t id;
 	bool used;
 	int64_t last_seen_ms;
 	uint32_t tokens_milli; /* 1000 milli-tokens == one request */
 	int64_t tokens_ms;
-	uint64_t xl_rx;           /* receive ts of the last acknowledged request */
-	uint64_t xl_tx_field;     /* transmit ts field of the last response */
-	uint64_t xl_tx_actual;    /* measured transmit ts of the last response */
-	uint64_t xl_pend_rx;      /* awaiting ntp_tx_complete() */
-	uint64_t xl_pend_tx_field;
 	int64_t kod_last_ms;      /* last Kiss-o'-Death emitted to this client */
 	bool kod_seen;
+	/* Committed interleave pair, usable for exactly one interleaved reply. */
+	uint64_t xl_rx_sent;      /* rec field of the last committed response */
+	uint64_t xl_tx_actual;    /* measured transmit instant of that response */
 	bool xl_valid;
-	bool xl_pending;
+	/* Response awaiting its hardware transmit timestamp (one slot + token). */
+	uint64_t xl_pend_rx_sent;
+	uint32_t xl_pend_token;
+	bool xl_pend_active;
+	uint32_t xl_gen;          /* per-client response generation counter */
 } ntp_client_t;
 
 /** One symmetric key. All fields private. */
@@ -446,6 +536,7 @@ typedef struct {
 	uint32_t keyid;
 	uint8_t key[NTP_MAC_KEY_MAX];
 	uint8_t key_len;
+	uint8_t alg; /* ntp_mac_alg_t */
 	bool used;
 } ntp_key_t;
 
@@ -458,6 +549,7 @@ typedef struct {
 	ntp_client_t clients[NTP_CLIENT_SLOTS];
 	uint32_t g_tokens_milli;
 	int64_t g_tokens_ms;
+	uint32_t hash_seed; /* per-boot client-table hash salt (L14) */
 	ntp_stats_t stats;
 } ntp_ctx_t;
 
@@ -469,7 +561,10 @@ typedef struct {
  *                clamped into [1, NTP_BURST_MAX].
  * @param crypto  Crypto port. Required only for symmetric authentication —
  *                pass NULL to run without it, and any MAC-bearing request is
- *                then an auth failure.
+ *                then an auth failure. When present its rand() also salts the
+ *                per-client hash table, so an attacker cannot craft a set of
+ *                source addresses that all collide into one bucket (L14); a
+ *                rand() failure is non-fatal and leaves the salt zero.
  * @param now_ms  Monotonic milliseconds; seeds the global bucket.
  *
  * @retval 0        Initialised.
@@ -491,14 +586,18 @@ int ntp_set_ext_hook(ntp_ctx_t *ctx, const ntp_ext_hook_t *hook);
  * Install or replace a symmetric key (spec §4.3).
  *
  * @param keyid    Key identifier; 0 is reserved by RFC 5905 and rejected.
+ * @param alg      MAC algorithm bound to this key (ntp_mac_alg_t).
  * @param key      Key octets.
- * @param key_len  1..NTP_MAC_KEY_MAX.
+ * @param key_len  For NTP_MAC_AES_CMAC_128, exactly NTP_MAC_AES_KEY_LEN (16).
+ *                 For the HMAC algorithms, 1..NTP_MAC_KEY_MAX.
  *
  * @retval 0        Stored.
- * @retval -EINVAL  NULL argument, keyid 0, or a length outside the range.
+ * @retval -EINVAL  NULL argument, keyid 0, an unknown @p alg, or a key length
+ *                  the algorithm does not permit.
  * @retval -ENOSPC  All NTP_MAC_KEYS slots are in use by other key ids.
  */
-int ntp_key_set(ntp_ctx_t *ctx, uint32_t keyid, const uint8_t *key, size_t key_len);
+int ntp_key_set(ntp_ctx_t *ctx, uint32_t keyid, ntp_mac_alg_t alg,
+		const uint8_t *key, size_t key_len);
 
 /**
  * Remove a symmetric key. The slot is wiped, not just marked free.
@@ -514,17 +613,24 @@ typedef struct {
 	const uint8_t *pkt; /**< Datagram octets. */
 	size_t len;         /**< Datagram length. */
 	/**
-	 * Opaque per-client key for the rate limiter and interleave cache. The
-	 * caller MUST derive it from the source address alone (and, if it wants
-	 * per-port granularity, the port) — never from packet contents, or a
-	 * spoofing client could evade its own bucket.
+	 * Opaque per-client key for the rate limiter and interleave cache.
+	 *
+	 * The caller MUST derive it from the source IP address ALONE — never the
+	 * source port, and never any packet contents. RFC 9769 §5 and RFC 9109
+	 * both say a server SHOULD NOT distinguish clients by port: a NAT or a
+	 * client that re-binds its socket changes port between requests, which
+	 * would split one client's interleave state and, worse, split its rate
+	 * bucket so a single host could multiply its budget by cycling ports.
+	 * Deriving from the address alone keeps one client to one bucket.
 	 */
 	uint32_t client_id;
-	int64_t rx_tai_ns;  /**< Hardware receive timestamp, TAI ns. */
+	int64_t rx_tai_ns;  /**< Hardware receive timestamp (t6), TAI ns. */
 	/**
 	 * Best estimate of the transmit instant, TAI ns. Goes in the transmit
 	 * field of a basic-mode response. In interleaved mode this value is not
-	 * transmitted; the measured timestamp of the *previous* response is.
+	 * transmitted; the cached measured timestamp of the *previous* response
+	 * is sent instead, and this exchange's real transmit timestamp is learned
+	 * later via ntp_tx_complete().
 	 */
 	int64_t tx_tai_ns;
 	int64_t now_ms;     /**< Monotonic milliseconds, for the token buckets. */

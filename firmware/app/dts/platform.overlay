@@ -1,0 +1,41 @@
+/*
+ * STS1000 "Meridian" — platform-area devicetree overlay.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Merged after the board .dts by app/CMakeLists.txt. Carries only what the
+ * platform area adds on top of the board definition; the net, console and ui
+ * areas own dts/net.overlay, dts/console.overlay and dts/ui.overlay.
+ */
+
+/*
+ * LPTIM2 drives PANEL_LED_PWM on PE0 (LPTIM2_CH2, AF3 — verified against the
+ * STM32H563 alternate-function table, see src/zephyr/platform/panel_pwm.c).
+ *
+ * The node is enabled but no Zephyr driver binds it: `st,stm32-lptim` is only
+ * claimed by the LPTIM kernel-tick driver, which is not in use here (SysTick
+ * is the tick source). Enabling it makes the DT_ macros — reg, clocks,
+ * pinctrl-0 — available so the platform can gate the clock, select the source
+ * and apply the pin mux itself.
+ *
+ * The second clocks entry pins the kernel clock to PCLK1 rather than relying
+ * on the RCC_CCIPR2 reset default, so the /128 prescaler and the ARR the
+ * driver computes are derived from a source the devicetree states.
+ */
+&lptim2 {
+	clocks = <&rcc STM32_CLOCK(APB1_2, 5U)>,
+		 <&rcc STM32_SRC_PCLK1 LPTIM2_SEL(0)>;
+	pinctrl-0 = <&lptim2_ch2_pe0>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/*
+ * PANEL_LED_PWM is now a peripheral output, not a GPIO. Drop the stale
+ * /zephyr,user handle so nothing can claim the pin as a plain output behind
+ * the LPTIM's back — the board .dts declared it that way when the AF was
+ * believed not to exist.
+ */
+&zephyr_user {
+	/delete-property/ panel-led-pwm-gpios;
+};

@@ -110,8 +110,9 @@ typedef enum {
 	PWRSEQ_ACT_DISC_START, /* hand the OCXO to the discipline loop */
 
 	/* Stage 8 */
-	PWRSEQ_ACT_DIGIPOT_WRITE,  /* U43 over SPI4, arg = wiper code */
-	PWRSEQ_ACT_DIGIPOT_VERIFY, /* read the wiper back */
+	PWRSEQ_ACT_DIGIPOT_WRITE,    /* U43 over SPI4, arg = safe/precharge code */
+	PWRSEQ_ACT_DIGIPOT_WRITE_OP, /* U43, arg = operating code (bounded) */
+	PWRSEQ_ACT_DIGIPOT_VERIFY,   /* read the wiper back */
 	PWRSEQ_ACT_RB_PWR_EN,      /* RB_PWR_EN    PB7 -> HIGH */
 	PWRSEQ_ACT_RB_PWR_DIS,     /* RB_PWR_EN    PB7 -> LOW */
 	PWRSEQ_ACT_RB_VCC_GATE_EN, /* RB_VCC_GATE  PB1 -> HIGH */
@@ -318,6 +319,14 @@ typedef enum {
  * wiper at terminal B = VREF, which is maximum VCTRL and therefore minimum
  * VOUT.** That is the safe-low power-up direction, and getting it backwards
  * would put 24 V onto a 15 V-class FE-5680A.
+ *
+ * Because VOUT *rises* toward the pedestal as the code rises, an out-of-range
+ * code must never be clamped toward `steps-1` — that is the *maximum*-output
+ * end. pwrseq_digipot_vctrl_mv() clamps any code at or above `steps` to the
+ * safe-low VCTRL (= the code-0 value), so a garbage code produces the minimum
+ * rail, not the maximum. See the CLAUDE.md gotcha: "a digipot in a buck FB
+ * node can destroy the Rb; no wiper code (POR, mid-scale, SPI fault) may exit
+ * the safe envelope."
  */
 typedef struct {
 	uint16_t vref_mv;     /* 3000 — VREF_3V0, MCP1502-30 */
@@ -365,7 +374,7 @@ typedef struct {
 	uint32_t rb_lock_timeout_ms;
 	uint32_t liveness_timeout_ms;
 
-	/** Rail acceptance band as a percentage of the nominal voltage. */
+	/** Rail acceptance band as a percentage of the nominal voltage (0..100). */
 	uint32_t rail_tol_pct;
 	/** PoE bus floor. Below this the PD is out of its operating range. */
 	int32_t poe_min_mv;
@@ -378,10 +387,38 @@ typedef struct {
 	uint32_t ocxo_warm_current_ma;
 	uint32_t ocxo_warmup_current_ma;
 
-	/** Digipot code written before RB_PWR_EN. 0 = terminal B = safe-low. */
+	/**
+	 * Digipot **precharge** code, written and readback-verified before
+	 * RB_PWR_EN (interface ref §2 step 11; ARCHITECTURE.md invariant 3).
+	 * Must be the safe-low end: 0 = terminal B = VREF = minimum VOUT
+	 * (~4.5 V). The buck is brought up here and the rail verified at this
+	 * known-low point before the operating setpoint is commanded.
+	 */
 	uint16_t digipot_safe_code;
-	/** VCC_RB acceptance tolerance, percent. */
+	/**
+	 * Digipot **operating** setpoint, written only after the precharged
+	 * rail has been verified, then re-verified against rb_vmax_mv before
+	 * RB_VCC_GATE. Bounded at init so its expected voltage cannot exceed
+	 * rb_vmax_mv — this, plus the independent measured-voltage gate, is
+	 * what stops a wrong setpoint from validating itself (BLOCKER-1). Set
+	 * per FE unit; the default targets ~14.25 V, comfortably below a
+	 * 15 000 mV ceiling with tolerance headroom.
+	 */
+	uint16_t digipot_operating_code;
+	/**
+	 * Absolute VCC_RB ceiling for the connected FE, millivolts (from cfg
+	 * key PWR_RB_VMAX_MV, default 15000). The rubidium is never gated to
+	 * the FE unless BOTH the commanded setpoint's expected voltage AND the
+	 * INA228-measured rail sit at or below this — the measured check is
+	 * independent of the digipot code, so a runaway buck cannot pass by
+	 * matching its own wrong setpoint.
+	 */
+	uint32_t rb_vmax_mv;
+	/** VCC_RB acceptance tolerance, percent (0..100). */
 	uint32_t rb_vbus_tol_pct;
+	/** Settle time after writing the operating code before the rail is
+	 *  judged, milliseconds — the buck ramps from precharge to setpoint. */
+	uint32_t rb_ramp_ms;
 	/** Headroom the PoE budget must show before the rubidium may start. */
 	uint32_t rb_cold_start_mw;
 	pwrseq_rb_xfer_t rb_xfer;
@@ -483,6 +520,15 @@ typedef struct {
 	bool halted;
 	bool rb_deferred;
 
+	/*
+	 * The digipot code currently commanded (safe precharge, then operating).
+	 * The rail-window checks derive the expected voltage from this rather
+	 * than always from the safe code, so the supervisor judges the rail
+	 * against whatever is actually set — and the operating-window step also
+	 * gates on the code-independent measured-vs-rb_vmax_mv check.
+	 */
+	uint16_t rb_current_code;
+
 	/* what the sequencer believes it has turned on */
 	bool nor_released;
 	bool disp_rst_released;
@@ -552,13 +598,14 @@ typedef struct {
  * Initialise @p ctx. @p cfg may be NULL for pwrseq_cfg_default().
  *
  * @retval 0        Initialised; the sequencer sits at PWRSEQ_STAGE_IDLE.
- * @retval -EINVAL  @p ctx is NULL, the rubidium transfer function is degenerate
- *                  (zero steps or zero reference), or @p cfg asks for a WDT
- *                  kick cadence outside the TPS3430 window — a kick that is
- *                  too fast trips the runaway boundary just as surely as one
- *                  that is too slow trips the stall boundary, so it is
- *                  rejected here rather than discovered as a cold cycle in the
- *                  field.
+ * @retval -EINVAL  @p ctx is NULL; the rubidium transfer function is degenerate
+ *                  (zero steps or zero reference); a digipot code is out of
+ *                  range or commands a rail above rb_vmax_mv (BLOCKER-1 — a
+ *                  misconfigured setpoint is rejected at boot, not discovered
+ *                  as a destroyed FE); a tolerance percentage exceeds 100; or
+ *                  the WDT kick cadence falls outside the TPS3430 window — a
+ *                  kick that is too fast trips the runaway boundary just as
+ *                  surely as one too slow trips the stall boundary.
  */
 int pwrseq_init(pwrseq_ctx_t *ctx, const pwrseq_cfg_t *cfg);
 
@@ -662,8 +709,14 @@ int pwrseq_restart_stage(pwrseq_ctx_t *ctx, pwrseq_stage_t stage,
  * alarms, then re-enters stage 8 at its first step, so the full guarded
  * sequence runs again rather than resuming mid-way.
  *
+ * Refused while halted: a halt is a hard fault (e.g. a 3V3 rail-verify
+ * failure) that must not be cleared by a routine rubidium retry. Only
+ * pwrseq_restart_stage() clears a halt, and only under explicit operator
+ * intent (HIGH-2).
+ *
  * @retval 0        Re-entered stage 8.
  * @retval -EINVAL  @p ctx is NULL.
+ * @retval -EPERM   The sequencer is halted; use pwrseq_restart_stage().
  */
 int pwrseq_rb_retry(pwrseq_ctx_t *ctx, uint32_t mono_ms);
 
@@ -690,9 +743,14 @@ int pwrseq_shed_step(pwrseq_ctx_t *ctx, uint32_t mono_ms);
  * ARCHITECTURE.md invariant 3 exists to enforce. Instead this re-enters stage 8
  * so the guarded sequence runs from the top.
  *
+ * Refused while halted, for the same reason as pwrseq_rb_retry(): restoring a
+ * load — especially re-entering stage 8 to restore the rubidium — must not
+ * resurrect a board that halted on a hard fault (HIGH-2).
+ *
  * @retval 0        Restored one level.
  * @retval -EINVAL  @p ctx is NULL.
  * @retval -ENOENT  Nothing is shed.
+ * @retval -EPERM   The sequencer is halted.
  */
 int pwrseq_shed_restore(pwrseq_ctx_t *ctx, uint32_t mono_ms);
 
@@ -717,7 +775,10 @@ bool pwrseq_ov_latched(const pwrseq_ctx_t *ctx);
  *
  * Only ever on an explicit command, and only when the cause has gone. Pulsing
  * the latch while the rail is still over-voltage re-arms a supply that is
- * already known to be running away, so it is refused.
+ * already known to be running away, so it is refused. On success this also
+ * clears the RB_OV alarm and, if no other rubidium hard-fault remains, the
+ * RB_FAULT umbrella (L1) — otherwise a cleared over-voltage would leave the
+ * board looking permanently Rb-faulted.
  *
  * @retval 0        Pulse queued and the latch cleared.
  * @retval -EINVAL  @p ctx is NULL.
@@ -738,12 +799,24 @@ int pwrseq_ov_clear(pwrseq_ctx_t *ctx, uint32_t mono_ms);
  *
  *   1. park the DAC (freeze the loop, latch the last good Vc);
  *   2. persist volatile timing state and the log;
- *   3. quiesce the rubidium if it is running, whose warm-up surge is the
- *      largest concurrent load and whose removal extends the hold-up;
+ *   3. quiesce the rubidium — RB_VCC_GATE then RB_PWR_EN low — **unconditionally**,
+ *      not gated on the sequencer's belief that it is running. The supervisor
+ *      may have already queued that shutdown and the glue may not have drained
+ *      it before the purge; the pin writes are idempotent, so re-emitting them
+ *      guarantees they reach the pins during the hold-up window (MEDIUM-3);
  *   4. set the clean-shutdown flag for the next boot.
  *
  * Sets `pfi_expected` when a POE_KILL was already commanded, so the two paths
  * log differently — a deliberate cold cycle is not a line drop.
+ *
+ * **Concurrency contract.** PFI is delivered on EXTI8, so this runs in ISR
+ * context and mutates the same action queue as pwrseq_step() and
+ * pwrseq_action_get(). It is NOT internally locked (core is platform-neutral):
+ * the glue MUST ensure it does not run concurrently with those — on this board
+ * the PFI handler is the highest-priority path and the firmware spins/halts
+ * after parking (power_fail_input §5), so nothing races it afterward. A caller
+ * that runs pwrseq_step() from an interruptible context must mask this handler
+ * across the step/drain, or route the PFI event through the same queue drain.
  *
  * @retval 0        Park list queued.
  * @retval -EINVAL  @p ctx is NULL.

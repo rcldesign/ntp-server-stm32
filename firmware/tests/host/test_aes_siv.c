@@ -556,17 +556,38 @@ static void test_siv_reports_port_failure(void)
 	aes_siv_ctx_t c;
 	aes_siv_ad_t ad[1] = { { a1_ad, sizeof(a1_ad) } };
 	uint8_t out[64];
+	unsigned enc_calls;
+	unsigned dec_calls;
 	size_t n = 0U;
 
+	/* The subkey derivation moved into init (M6), so a port failure there is
+	 * now its own path and must leave the context unusable rather than
+	 * half-built. */
+	host_crypto_init(&g_hc, 0xC0FFEEU);
+	g_hc.fail_aes_in = 1U;
+	TEST_ASSERT_EQUAL_INT(-EIO, aes_siv_init(&c, &g_port, a1_key,
+						 sizeof(a1_key)));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, aes_siv_encrypt(&c, ad, 1U, a1_pt,
+						       sizeof(a1_pt), out,
+						       sizeof(out), &n));
+
+	host_crypto_init(&g_hc, 0xC0FFEEU);
 	TEST_ASSERT_EQUAL_INT(0, aes_siv_init(&c, &g_port, a1_key, sizeof(a1_key)));
 
 	/*
 	 * Walk the failure injection across every AES call an A.1-shaped
-	 * encryption makes: subkey generation, each absorption inside each of
-	 * the four CMACs, and the CTR keystream block. A failure anywhere must
-	 * surface as -EIO and never as a plausible-looking tag.
+	 * encryption makes (each S2V CMAC absorption and the batched CTR call).
+	 * The count is taken from a clean run rather than hard-coded so the M6
+	 * batching change cannot silently shrink what this covers. A failure at
+	 * any call must surface as -EIO and never as a plausible-looking tag.
 	 */
-	for (unsigned k = 1U; k <= 8U; k++) {
+	host_crypto_init(&g_hc, 0xC0FFEEU);
+	TEST_ASSERT_EQUAL_INT(0, aes_siv_encrypt(&c, ad, 1U, a1_pt, sizeof(a1_pt),
+						 out, sizeof(out), &n));
+	enc_calls = g_hc.n_aes;
+	TEST_ASSERT_TRUE(enc_calls >= 2U);
+
+	for (unsigned k = 1U; k <= enc_calls; k++) {
 		host_crypto_init(&g_hc, 0xC0FFEEU);
 		g_hc.fail_aes_in = k;
 		TEST_ASSERT_EQUAL_INT(-EIO,
@@ -574,9 +595,13 @@ static void test_siv_reports_port_failure(void)
 						      sizeof(a1_pt), out,
 						      sizeof(out), &n));
 	}
-	TEST_ASSERT_EQUAL_UINT(8U, g_hc.n_aes);
 
-	for (unsigned k = 1U; k <= 8U; k++) {
+	host_crypto_init(&g_hc, 0xC0FFEEU);
+	TEST_ASSERT_EQUAL_INT(0, aes_siv_decrypt(&c, ad, 1U, a1_out,
+						 sizeof(a1_out), out, sizeof(out),
+						 &n));
+	dec_calls = g_hc.n_aes;
+	for (unsigned k = 1U; k <= dec_calls; k++) {
 		host_crypto_init(&g_hc, 0xC0FFEEU);
 		g_hc.fail_aes_in = k;
 		TEST_ASSERT_EQUAL_INT(-EIO,
@@ -584,6 +609,40 @@ static void test_siv_reports_port_failure(void)
 						      sizeof(a1_out), out,
 						      sizeof(out), &n));
 	}
+}
+
+/* A multi-block CTR payload spanning more than one chunk exercises the batched
+ * keystream path end to end (M6): encrypt, then decrypt, and confirm the round
+ * trip for a plaintext far longer than CTR_CHUNK_BLOCKS × 16. */
+static void test_siv_multiblock_ctr_roundtrip(void)
+{
+	aes_siv_ctx_t c;
+	aes_siv_ad_t ad[1];
+	static uint8_t pt[600];
+	uint8_t ct[600 + AES_SIV_TAG_LEN];
+	uint8_t back[600];
+	size_t n = 0U;
+	size_t m = 0U;
+
+	for (size_t i = 0U; i < sizeof(pt); i++) {
+		pt[i] = (uint8_t)(i * 7U + 3U);
+	}
+	ad[0].p = a1_ad;
+	ad[0].len = sizeof(a1_ad);
+
+	TEST_ASSERT_EQUAL_INT(0, aes_siv_init(&c, &g_port, a1_key, sizeof(a1_key)));
+	TEST_ASSERT_EQUAL_INT(0, aes_siv_encrypt(&c, ad, 1U, pt, sizeof(pt), ct,
+						 sizeof(ct), &n));
+	TEST_ASSERT_EQUAL_size_t(sizeof(pt) + AES_SIV_TAG_LEN, n);
+	TEST_ASSERT_EQUAL_INT(0, aes_siv_decrypt(&c, ad, 1U, ct, n, back,
+						 sizeof(back), &m));
+	TEST_ASSERT_EQUAL_size_t(sizeof(pt), m);
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(pt, back, sizeof(pt));
+
+	/* A single flipped ciphertext octet in a later chunk must still fail. */
+	ct[500] ^= 0x01U;
+	TEST_ASSERT_EQUAL_INT(-EBADMSG, aes_siv_decrypt(&c, ad, 1U, ct, n, back,
+							sizeof(back), &m));
 }
 
 static void test_ct_memeq(void)
@@ -615,6 +674,7 @@ int main(void)
 	RUN_TEST(test_siv_empty_and_aliased);
 	RUN_TEST(test_siv_bad_arguments);
 	RUN_TEST(test_siv_reports_port_failure);
+	RUN_TEST(test_siv_multiblock_ctr_roundtrip);
 	RUN_TEST(test_ct_memeq);
 	return UNITY_END();
 }

@@ -79,7 +79,12 @@ static refsel_out_t run_until_transition(refsel_ctx_t *ctx, refsel_in_t *in,
 	return out;
 }
 
-/* Assert the emitted list is exactly the glitchless sequence for @p mux. */
+/*
+ * Assert the emitted list is exactly the glitchless sequence for @p mux, with
+ * the discipline PARK/UNPARK bracket (MEDIUM-2). The bracket is what stops the
+ * HSI-bridge clock discontinuity from tripping the discipline loop into
+ * holdover on a healthy upgrade, so its presence and position are load-bearing.
+ */
 static void assert_handoff_sequence(const refsel_ctx_t *ctx, uint32_t mux,
 				    uint32_t settle_ms)
 {
@@ -87,16 +92,20 @@ static void assert_handoff_sequence(const refsel_ctx_t *ctx, uint32_t mux,
 	size_t n = 0u;
 
 	TEST_ASSERT_EQUAL_INT(0, refsel_actions(ctx, &s, &n));
-	TEST_ASSERT_EQUAL_size_t(6u, n);
+	TEST_ASSERT_EQUAL_size_t(8u, n);
 
-	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_BRIDGE_TO_HSI, s[0].act);
-	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_SET_MUX, s[1].act);
-	TEST_ASSERT_EQUAL_UINT32(mux, s[1].arg);
-	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_WAIT_SETTLE_MS, s[2].act);
-	TEST_ASSERT_EQUAL_UINT32(settle_ms, s[2].arg);
-	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_RESELECT_HSE, s[3].act);
-	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_VERIFY_PLL, s[4].act);
-	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_DONE, s[5].act);
+	/* Park before anything disturbs the clock; unpark only after the PLL is
+	 * verified — never leave the loop steering into a free-wheeling clock. */
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_PARK_DISCIPLINE, s[0].act);
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_BRIDGE_TO_HSI, s[1].act);
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_SET_MUX, s[2].act);
+	TEST_ASSERT_EQUAL_UINT32(mux, s[2].arg);
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_WAIT_SETTLE_MS, s[3].act);
+	TEST_ASSERT_EQUAL_UINT32(settle_ms, s[3].arg);
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_RESELECT_HSE, s[4].act);
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_VERIFY_PLL, s[5].act);
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_UNPARK_DISCIPLINE, s[6].act);
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_DONE, s[7].act);
 }
 
 static void assert_no_actions(const refsel_ctx_t *ctx)
@@ -177,6 +186,53 @@ static void test_init_rejects_bad_config(void)
 	(void)refsel_cfg_defaults(&cfg);
 	cfg.flap_window_ms = 0u;
 	TEST_ASSERT_EQUAL_INT(-EINVAL, refsel_init(&ctx, &cfg));
+
+	/* L10: the timing parameters are bounded. settle_ms blocks the glue
+	 * with SYSCLK on HSI, so an absurd value is rejected outright; the
+	 * debounce windows are capped at the documented ceiling. */
+	(void)refsel_cfg_defaults(&cfg);
+	cfg.settle_ms = REFSEL_MAX_SETTLE_MS + 1u;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, refsel_init(&ctx, &cfg));
+
+	(void)refsel_cfg_defaults(&cfg);
+	cfg.hysteresis_ms = REFSEL_MAX_WINDOW_MS + 1u;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, refsel_init(&ctx, &cfg));
+
+	(void)refsel_cfg_defaults(&cfg);
+	cfg.lockout_ms = REFSEL_MAX_WINDOW_MS + 1u;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, refsel_init(&ctx, &cfg));
+
+	/* The maxima themselves are accepted. */
+	(void)refsel_cfg_defaults(&cfg);
+	cfg.settle_ms = REFSEL_MAX_SETTLE_MS;
+	cfg.hysteresis_ms = REFSEL_MAX_WINDOW_MS;
+	cfg.lockout_ms = REFSEL_MAX_WINDOW_MS;
+	TEST_ASSERT_EQUAL_INT(0, refsel_init(&ctx, &cfg));
+}
+
+static void test_handoff_brackets_the_discipline_park(void)
+{
+	refsel_ctx_t ctx;
+	uint64_t ms = 0u;
+	const refsel_step_t *s = NULL;
+	size_t n = 0u;
+
+	/* MEDIUM-2: the glue must park the discipline loop across the whole
+	 * clock disturbance, or a healthy OCXO->Rb upgrade would look like a
+	 * multi-ms phase step to the loop and demote the server to holdover.
+	 * PARK must be first (before the clock moves) and UNPARK must come
+	 * after VERIFY_PLL (never leave the loop steering a free-wheeling
+	 * clock). */
+	TEST_ASSERT_EQUAL_INT(0, refsel_init(&ctx, NULL));
+	engage_rb(&ctx, &ms);
+	TEST_ASSERT_EQUAL_INT(0, refsel_actions(&ctx, &s, &n));
+
+	TEST_ASSERT_EQUAL_size_t(8u, n);
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_PARK_DISCIPLINE, s[0].act);
+	/* UNPARK sits strictly after VERIFY_PLL and strictly before DONE. */
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_VERIFY_PLL, s[5].act);
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_UNPARK_DISCIPLINE, s[6].act);
+	TEST_ASSERT_EQUAL_INT(REFSEL_ACT_DONE, s[7].act);
 }
 
 static void test_api_rejects_null_and_uninitialised(void)
@@ -745,6 +801,8 @@ static void test_names(void)
 	TEST_ASSERT_EQUAL_STRING("invalid", refsel_state_name(REFSEL_STATE__COUNT));
 
 	TEST_ASSERT_EQUAL_STRING("none", refsel_action_name(REFSEL_ACT_NONE));
+	TEST_ASSERT_EQUAL_STRING("park_discipline",
+				 refsel_action_name(REFSEL_ACT_PARK_DISCIPLINE));
 	TEST_ASSERT_EQUAL_STRING("bridge_to_hsi",
 				 refsel_action_name(REFSEL_ACT_BRIDGE_TO_HSI));
 	TEST_ASSERT_EQUAL_STRING("set_mux",
@@ -755,6 +813,8 @@ static void test_names(void)
 				 refsel_action_name(REFSEL_ACT_RESELECT_HSE));
 	TEST_ASSERT_EQUAL_STRING("verify_pll",
 				 refsel_action_name(REFSEL_ACT_VERIFY_PLL));
+	TEST_ASSERT_EQUAL_STRING("unpark_discipline",
+				 refsel_action_name(REFSEL_ACT_UNPARK_DISCIPLINE));
 	TEST_ASSERT_EQUAL_STRING("done", refsel_action_name(REFSEL_ACT_DONE));
 	TEST_ASSERT_EQUAL_STRING("invalid",
 				 refsel_action_name(REFSEL_ACT__COUNT));
@@ -766,6 +826,7 @@ int main(void)
 
 	RUN_TEST(test_defaults_and_init);
 	RUN_TEST(test_init_rejects_bad_config);
+	RUN_TEST(test_handoff_brackets_the_discipline_park);
 	RUN_TEST(test_api_rejects_null_and_uninitialised);
 
 	RUN_TEST(test_guard_truth_table);

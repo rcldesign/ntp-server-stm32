@@ -181,27 +181,21 @@ static uint16_t hk_shunt_cal_for(ina228_rail_t rail)
 static int hk_ina_configure(ina228_rail_t rail)
 {
 	const ina228_rail_info_t *info = &ina228_rail_tbl[rail];
-	ina228_config_t cfg = { 0 };
-	ina228_adc_config_t adc = { 0 };
+	ina228_config_t cfg;
+	ina228_adc_config_t adc;
 	int rc;
 
-	/* ADCRANGE=1 (+-40.96 mV) on all nine — the shunt values were sized
-	 * against that full scale (interface ref §4.2). */
-	cfg.adcrange = INA228_ADCRANGE_40_96MV;
-	cfg.conv_delay_ms = 0U;
-	cfg.temp_comp = false;
-	cfg.reset = false;
+	/* Board defaults from core/ina228: ADCRANGE=1 (+-40.96 mV) on all nine,
+	 * because every shunt was sized against that full scale, and continuous
+	 * bus+shunt+temperature averaging slower than both the 1 kHz scan and
+	 * the panel-LED PWM period (interface ref §4.1, §4.2). */
+	ina228_config_default(&cfg);
+	ina228_adc_config_default(&adc);
 
 	rc = ina_write16(info->addr, INA228_REG_CONFIG, ina228_config_encode(&cfg));
 	if (rc != 0) {
 		return rc;
 	}
-
-	adc.mode = INA228_MODE_CONT_ALL;
-	adc.vbus_ct = INA228_CT_1052US;
-	adc.vshunt_ct = INA228_CT_1052US;
-	adc.temp_ct = INA228_CT_1052US;
-	adc.avg = INA228_AVG_64;
 
 	rc = ina_write16(info->addr, INA228_REG_ADC_CONFIG,
 			 ina228_adc_config_encode(&adc));

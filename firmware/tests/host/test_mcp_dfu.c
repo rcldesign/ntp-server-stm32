@@ -83,9 +83,20 @@ static uint8_t rsp_status(void)
 /* RAM-backed staging slot with NOR write semantics                          */
 /* ------------------------------------------------------------------------- */
 
-#define SLOT_SIZE (256U * 1024U)
+/*
+ * The physical slot is SLOT_PHYS; the port's staging_size() (= im_size) reports
+ * STAGE_MAX, which reserves TRAILER_RESERVE at the top for the MCUboot trailer
+ * that mark_pending() owns (port_image.h). Core must accept an image of exactly
+ * STAGE_MAX and reject STAGE_MAX+1, and must never erase or write into the
+ * reserved region — the erase/write bounds checks below are against the
+ * physical size so a stray access into the trailer is caught, not masked.
+ */
+#define SLOT_PHYS       (256U * 1024U)
+#define TRAILER_RESERVE (16U * 1024U)
+#define STAGE_MAX       (SLOT_PHYS - TRAILER_RESERVE)
+#define SLOT_SIZE       STAGE_MAX  /* max image the tests upload */
 
-static uint8_t  g_slot[SLOT_SIZE];
+static uint8_t  g_slot[SLOT_PHYS];
 static uint32_t g_slot_cap;
 static uint32_t g_erase_calls;
 static uint32_t g_erase_bytes;
@@ -97,6 +108,7 @@ static int      g_read_rc;
 static int      g_pending_rc;
 static int      g_confirm_rc;
 static int      g_revert_rc;
+static bool     g_write_partial; /* on write failure, program the first half */
 static bool     g_pending;
 static bool     g_confirmed;
 static bool     g_reverted;
@@ -113,33 +125,48 @@ static int im_erase(void *ctx, uint32_t off, uint32_t len)
 	if (g_erase_rc != 0) {
 		return g_erase_rc;
 	}
-	TEST_ASSERT_TRUE((uint64_t)off + len <= g_slot_cap);
+	/* Physical bound: erasing into the reserved trailer would be a bug. */
+	TEST_ASSERT_TRUE((uint64_t)off + len <= sizeof(g_slot));
 	memset(&g_slot[off], 0xFF, len);
 	g_erase_calls++;
 	g_erase_bytes += len;
 	return 0;
 }
 
-static int im_write(void *ctx, uint32_t off, const uint8_t *data, size_t len,
-		    bool flush)
+/* Program bytes, enforcing NOR semantics (a byte must still read 0xFF). */
+static void nor_program(uint32_t off, const uint8_t *data, size_t len)
 {
 	size_t i;
 
-	(void)ctx;
-	if (g_write_rc != 0) {
-		return g_write_rc;
-	}
-	TEST_ASSERT_TRUE((uint64_t)off + len <= g_slot_cap);
-
-	/* NOR can only clear bits: programming a byte that is not still erased
-	 * means the erase window fell behind the write frontier. */
 	for (i = 0U; i < len; i++) {
 		TEST_ASSERT_EQUAL_HEX8_MESSAGE(
 			0xFFU, g_slot[off + i],
 			"DFU wrote into a region that was never erased");
 	}
-
 	memcpy(&g_slot[off], data, len);
+}
+
+static int im_write(void *ctx, uint32_t off, const uint8_t *data, size_t len,
+		    bool flush)
+{
+	(void)ctx;
+	TEST_ASSERT_TRUE((uint64_t)off + len <= sizeof(g_slot));
+
+	if (g_write_rc != 0) {
+		/*
+		 * Model a real flash fault mid-program: when asked to fail
+		 * partially, commit the first half to flash BEFORE returning
+		 * the error. That is what makes a naive retry-at-same-offset
+		 * reprogram already-programmed bytes — the NOR check above then
+		 * fires unless the engine re-erased first (HIGH-1).
+		 */
+		if (g_write_partial && (len > 0U)) {
+			nor_program(off, data, len / 2U);
+		}
+		return g_write_rc;
+	}
+
+	nor_program(off, data, len);
 	g_write_calls++;
 	g_last_flush = flush;
 	return 0;
@@ -151,7 +178,7 @@ static int im_read(void *ctx, uint32_t off, uint8_t *data, size_t len)
 	if (g_read_rc != 0) {
 		return g_read_rc;
 	}
-	TEST_ASSERT_TRUE((uint64_t)off + len <= g_slot_cap);
+	TEST_ASSERT_TRUE((uint64_t)off + len <= sizeof(g_slot));
 	memcpy(data, &g_slot[off], len);
 	return 0;
 }
@@ -224,13 +251,14 @@ static void img_reset(void)
 	g_img.ctx = NULL;
 
 	memset(g_slot, 0x00, sizeof(g_slot)); /* not erased */
-	g_slot_cap = SLOT_SIZE;
+	g_slot_cap = STAGE_MAX;               /* staging_size() excludes trailer */
 	g_erase_calls = 0U;
 	g_erase_bytes = 0U;
 	g_write_calls = 0U;
 	g_last_flush = false;
 	g_erase_rc = 0;
 	g_write_rc = 0;
+	g_write_partial = false;
 	g_read_rc = 0;
 	g_pending_rc = 0;
 	g_confirm_rc = 0;
@@ -246,6 +274,7 @@ static void img_reset(void)
 
 #define LOG_CAP 32U
 #define ERASE_GRAN 4096U
+#define WRITE_BLOCK 16U
 
 static mcp_ctx_t  g_mcp;
 static logr_t     g_log;
@@ -278,6 +307,7 @@ static void engine_up(bool with_sha)
 	w.log = &g_log;
 	w.tx = tx_cb;
 	w.dfu_erase_gran = ERASE_GRAN;
+	w.dfu_write_block = WRITE_BLOCK;
 	memcpy(w.ident.model, "STS1000", 7);
 
 	TEST_ASSERT_EQUAL_INT(0, logr_init(&g_log, g_log_slots, LOG_CAP));
@@ -405,7 +435,8 @@ static void test_full_upload_verifies_and_stages(void)
 	TEST_ASSERT_EQUAL_UINT32(0U, rsp_next_expected());
 	TEST_ASSERT_EQUAL_UINT32(MCP_FW_CHUNK_MAX,
 				 bytes_get_le32(&rsp_pay()[5]));
-	TEST_ASSERT_EQUAL_UINT8(0U, rsp_pay()[9]); /* not a resume */
+	TEST_ASSERT_EQUAL_UINT32(WRITE_BLOCK, bytes_get_le32(&rsp_pay()[9]));
+	TEST_ASSERT_EQUAL_UINT8(0U, rsp_pay()[13]); /* not a resume */
 
 	/* Erase is progressive: FW_BEGIN clears one granule, not the slot. */
 	TEST_ASSERT_EQUAL_UINT32(1U, g_erase_calls);
@@ -439,7 +470,9 @@ static void test_odd_sized_image_with_odd_chunks(void)
 {
 	/* A size that is neither a chunk nor an erase-granule multiple: the
 	 * final short write and the last partially-used sector are the two
-	 * places an off-by-one hides. */
+	 * places an off-by-one hides. The chunk is a write-block multiple (the
+	 * only sizes non-final chunks may take); the odd tail rides in the
+	 * final chunk, which is allowed to be short. */
 	const uint32_t size = (3U * ERASE_GRAN) + 17U;
 	uint8_t sha[32];
 
@@ -448,7 +481,7 @@ static void test_odd_sized_image_with_odd_chunks(void)
 
 	fw_begin(size, sha);
 	expect((uint8_t)MCP_OK);
-	upload_range(0U, size, 333U);
+	upload_range(0U, size, 20U * WRITE_BLOCK); /* 320-byte aligned chunks */
 
 	feed_req(MCP_CMD_FW_END, NULL, 0U);
 	expect((uint8_t)MCP_OK);
@@ -528,7 +561,7 @@ static void test_resume_after_reconnect_keeps_the_frontier(void)
 	fw_begin(IMAGE_SIZE, g_image_sha);
 	expect((uint8_t)MCP_OK);
 	TEST_ASSERT_EQUAL_UINT32(16384U, rsp_next_expected());
-	TEST_ASSERT_EQUAL_UINT8(1U, rsp_pay()[9]); /* resumed */
+	TEST_ASSERT_EQUAL_UINT8(1U, rsp_pay()[13]); /* resumed */
 	TEST_ASSERT_EQUAL_UINT32(erases, g_erase_calls);
 	TEST_ASSERT_EQUAL_UINT32(bytes, g_erase_bytes);
 
@@ -553,13 +586,13 @@ static void test_a_different_image_restarts_the_session(void)
 	fw_begin(IMAGE_SIZE, other);
 	expect((uint8_t)MCP_OK);
 	TEST_ASSERT_EQUAL_UINT32(0U, rsp_next_expected());
-	TEST_ASSERT_EQUAL_UINT8(0U, rsp_pay()[9]);
+	TEST_ASSERT_EQUAL_UINT8(0U, rsp_pay()[13]);
 
 	/* Same content, different size: also a restart. */
 	fw_begin(IMAGE_SIZE, g_image_sha);
 	TEST_ASSERT_EQUAL_UINT32(0U, rsp_next_expected());
 	fw_begin(IMAGE_SIZE / 2U, g_image_sha);
-	TEST_ASSERT_EQUAL_UINT8(0U, rsp_pay()[9]);
+	TEST_ASSERT_EQUAL_UINT8(0U, rsp_pay()[13]);
 }
 
 static void test_idle_session_suspends_and_resumes(void)
@@ -584,7 +617,7 @@ static void test_idle_session_suspends_and_resumes(void)
 
 	fw_begin(IMAGE_SIZE, g_image_sha);
 	expect((uint8_t)MCP_OK);
-	TEST_ASSERT_EQUAL_UINT8(1U, rsp_pay()[9]);
+	TEST_ASSERT_EQUAL_UINT8(1U, rsp_pay()[13]);
 	TEST_ASSERT_EQUAL_UINT32(2048U, rsp_next_expected());
 
 	/* The clock keeps running; the refreshed session must not re-suspend
@@ -620,7 +653,7 @@ static void test_sha_mismatch_is_rejected_and_not_staged(void)
 	TEST_ASSERT_EQUAL_UINT32(0U, mcp_dfu_status(&g_mcp)->written);
 
 	fw_begin(IMAGE_SIZE, wrong);
-	TEST_ASSERT_EQUAL_UINT8(0U, rsp_pay()[9]); /* no resume offered */
+	TEST_ASSERT_EQUAL_UINT8(0U, rsp_pay()[13]); /* no resume offered */
 }
 
 static void test_missing_mcuboot_magic_is_rejected(void)
@@ -754,19 +787,17 @@ static void test_port_failures_are_reported(void)
 	make_image(13U, true);
 	fw_begin(IMAGE_SIZE, g_image_sha);
 
-	g_write_rc = -EIO;
-	fw_data(0U, g_image, 1024U);
-	expect((uint8_t)MCP_ERR_INTERNAL);
-	TEST_ASSERT_EQUAL_UINT32(0U, rsp_next_expected()); /* frontier held */
-	g_write_rc = 0;
-
-	/* Push the frontier far enough that the next chunk needs a fresh
-	 * erase, then fail that erase. */
+	/* An erase failure is retryable in place: nothing was written and erase
+	 * is idempotent, so the frontier holds and a retry recovers (this is
+	 * why the erase path, unlike the write path, does not reset). Push the
+	 * frontier far enough that the next chunk needs a fresh window. */
 	upload_range(0U, 8192U, 1024U);
 	g_erase_rc = -EIO;
 	fw_data(8192U, &g_image[8192], 1024U);
 	expect((uint8_t)MCP_ERR_INTERNAL);
 	TEST_ASSERT_EQUAL_UINT32(8192U, rsp_next_expected());
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MCP_DFU_ACTIVE,
+				mcp_dfu_status(&g_mcp)->state);
 	g_erase_rc = 0;
 
 	upload_range(8192U, IMAGE_SIZE, MCP_FW_CHUNK_MAX);
@@ -786,6 +817,98 @@ static void test_port_failures_are_reported(void)
 
 	feed_req(MCP_CMD_FW_END, NULL, 0U);
 	expect((uint8_t)MCP_OK);
+}
+
+/*
+ * HIGH-1: a staging_write fault must abandon the session so the tool cannot
+ * retry into half-programmed flash. The fake programs the first half of the
+ * chunk before reporting the error, exactly the state that would trip the NOR
+ * check on a naive retry. The correct behaviour is a reset: the session drops
+ * to IDLE, in-place FW_DATA is refused, and a fresh FW_BEGIN re-erases (not a
+ * resume) so the eventual upload succeeds and stages byte-correct content.
+ */
+static void test_write_failure_resets_so_rebegin_re_erases(void)
+{
+	uint32_t erases_before;
+
+	make_image(21U, true);
+	fw_begin(IMAGE_SIZE, g_image_sha);
+	upload_range(0U, 4096U, 1024U);
+	erases_before = g_erase_calls;
+
+	g_write_rc = -EIO;
+	g_write_partial = true;
+	fw_data(4096U, &g_image[4096], 1024U);
+	expect((uint8_t)MCP_ERR_INTERNAL);
+	g_write_rc = 0;
+	g_write_partial = false;
+
+	/* The session is gone, so a bare retry at the same offset is refused —
+	 * the tool cannot reprogram the half-written block. */
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MCP_DFU_IDLE,
+				mcp_dfu_status(&g_mcp)->state);
+	fw_data(4096U, &g_image[4096], 1024U);
+	expect((uint8_t)MCP_ERR_STATE);
+
+	/* A fresh FW_BEGIN is NOT treated as a resume (state was reset), so it
+	 * re-erases from zero and the retry succeeds with correct content. */
+	fw_begin(IMAGE_SIZE, g_image_sha);
+	expect((uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_UINT8(0U, rsp_pay()[13]); /* not a resume */
+	TEST_ASSERT_EQUAL_UINT32(0U, rsp_next_expected());
+	TEST_ASSERT_TRUE(g_erase_calls > erases_before);
+
+	upload_range(0U, IMAGE_SIZE, MCP_FW_CHUNK_MAX);
+	feed_req(MCP_CMD_FW_END, NULL, 0U);
+	expect((uint8_t)MCP_OK);
+	TEST_ASSERT_TRUE(g_pending);
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(g_image, g_slot, IMAGE_SIZE);
+}
+
+/*
+ * HIGH-2: staging_size() is the max IMAGE size (trailer excluded). An image of
+ * exactly that size is accepted; one byte larger is refused so the trailer
+ * that mark_pending writes is never overwritten.
+ */
+static void test_begin_honours_the_trailer_reserve(void)
+{
+	uint8_t sha[32];
+
+	memset(sha, 0, sizeof(sha));
+
+	fw_begin(STAGE_MAX + 1U, sha);
+	expect((uint8_t)MCP_ERR_NOSPC);
+
+	fw_begin(STAGE_MAX, sha);
+	expect((uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_UINT32(STAGE_MAX, mcp_dfu_status(&g_mcp)->total);
+}
+
+/*
+ * MEDIUM-8: only the final chunk may be shorter than a flash write block; a
+ * non-final chunk whose length is not a write-block multiple is refused so the
+ * port never has to buffer a mid-stream partial block.
+ */
+static void test_non_final_chunk_must_be_write_block_aligned(void)
+{
+	make_image(22U, true);
+	fw_begin(IMAGE_SIZE, g_image_sha);
+
+	/* 1000 is not a multiple of 16 and does not reach the end. */
+	fw_data(0U, g_image, 1000U);
+	expect((uint8_t)MCP_ERR_ARG);
+	TEST_ASSERT_EQUAL_UINT32(0U, rsp_next_expected());
+
+	/* The aligned form of the same prefix is accepted. */
+	fw_data(0U, g_image, 1008U); /* 63 * 16 */
+	expect((uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_UINT32(1008U, rsp_next_expected());
+
+	/* A short *final* chunk is fine even though it is not block-aligned. */
+	upload_range(1008U, IMAGE_SIZE - 5U, MCP_FW_CHUNK_MAX);
+	fw_data(IMAGE_SIZE - 5U, &g_image[IMAGE_SIZE - 5U], 5U);
+	expect((uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_UINT32(IMAGE_SIZE, rsp_next_expected());
 }
 
 static void test_trailing_payloads_are_rejected(void)
@@ -832,7 +955,8 @@ static void test_fw_info_reports_slots_and_session(void)
 	TEST_ASSERT_EQUAL_UINT32(IMAGE_SIZE, bytes_get_le32(&p[47]));
 	TEST_ASSERT_EQUAL_UINT32(3072U, bytes_get_le32(&p[51]));
 	TEST_ASSERT_EQUAL_UINT32(MCP_FW_CHUNK_MAX, bytes_get_le32(&p[55]));
-	TEST_ASSERT_EQUAL_UINT16(59U, rsp_len());
+	TEST_ASSERT_EQUAL_UINT32(WRITE_BLOCK, bytes_get_le32(&p[59]));
+	TEST_ASSERT_EQUAL_UINT16(63U, rsp_len());
 
 	/* Once staged, the slot-1 flags reflect it. */
 	upload_range(3072U, IMAGE_SIZE, MCP_FW_CHUNK_MAX);

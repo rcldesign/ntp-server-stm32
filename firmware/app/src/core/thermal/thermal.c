@@ -41,6 +41,16 @@ int thermal_cfg_defaults(thermal_cfg_t *cfg)
 	cfg->shed_rb_mc = 70000;
 	cfg->kill_mc = 80000;
 	cfg->ladder_hyst_mc = 2000;
+	/*
+	 * Bias applied to the hottest secondary sensor when the enclosure
+	 * sensor has failed and the ladder falls back to it (§10.2). BENCH:
+	 * the oscillator-oven case (TMP117 #1) and the STM32 die both read
+	 * hotter than the enclosure, so a negative bias relates them to it.
+	 * Left at 0 until characterised — the conservative direction, since it
+	 * trips protection early on an already-degraded (primary-sensor-down)
+	 * system rather than late.
+	 */
+	cfg->fallback_offset_mc = 0;
 
 	cfg->rpm_at_full = 6000u;
 	cfg->rpm_model_pct = 50u;
@@ -115,7 +125,13 @@ static bool rung(bool latched, int32_t t_mc, int32_t on_mc, int32_t hyst_mc)
 
 static uint8_t clamp_duty(const thermal_cfg_t *c, float duty)
 {
-	if (!(duty > (float)c->min_duty_pct)) {
+	/* NaN must fail toward cooling, not toward the floor: `!(NaN > min)` is
+	 * true, so an unguarded compare would silently return min_duty on a
+	 * bad reading. A fan controller's safe direction is always maximum. */
+	if (isnan(duty)) {
+		return c->max_duty_pct;
+	}
+	if (duty <= (float)c->min_duty_pct) {
 		return c->min_duty_pct;
 	}
 	if (duty >= (float)c->max_duty_pct) {
@@ -146,13 +162,46 @@ static uint16_t expected_rpm(const thermal_cfg_t *c, uint8_t duty)
 	return (uint16_t)model;
 }
 
+/*
+ * Temperature the escalation ladder acts on. Normally the enclosure sensor
+ * (TMP117 #2); if that has failed, the hottest available secondary sensor plus
+ * a configured bias, so one dead primary sensor cannot disable over-temperature
+ * protection. Returns false only when no sensor at all is readable, in which
+ * case the caller holds the latched rungs.
+ */
+static bool ladder_temp(const thermal_cfg_t *c, const thermal_in_t *in,
+			int32_t *out_mc)
+{
+	int32_t hot;
+	bool have = false;
+
+	if (in->enclosure_valid) {
+		*out_mc = in->enclosure_mc;
+		return true;
+	}
+
+	hot = INT32_MIN;
+	if (in->osc_valid) {
+		hot = in->osc_mc;
+		have = true;
+	}
+	if (in->die_valid && (!have || in->die_mc > hot)) {
+		hot = in->die_mc;
+		have = true;
+	}
+	if (!have) {
+		return false;
+	}
+	*out_mc = hot + c->fallback_offset_mc;
+	return true;
+}
+
 int thermal_step_1hz(thermal_ctx_t *ctx, const thermal_in_t *in,
 		     thermal_out_t *out)
 {
 	thermal_out_t o;
 	const thermal_cfg_t *c;
 	float dt = DT_NOMINAL_S;
-	int32_t t_mc;
 	uint16_t want_rpm;
 
 	if (ctx == NULL || in == NULL || !ctx->initialised) {
@@ -172,37 +221,12 @@ int thermal_step_1hz(thermal_ctx_t *ctx, const thermal_in_t *in,
 	ctx->prev_mono_ms = in->mono_ms;
 	ctx->have_prev = true;
 
-	if (!in->enclosure_valid) {
-		/*
-		 * §10.2 fail-safe. No usable enclosure reading means no basis
-		 * for running the fan slowly. Hold the integral where it is so
-		 * a transient sensor dropout does not reset the loop, hold the
-		 * ladder rungs (escalating on missing data would be as wrong as
-		 * releasing on it), and go to maximum airflow.
-		 */
-		ctx->duty_pct = c->max_duty_pct;
-		o.duty_pct = ctx->duty_pct;
-		o.failsafe = true;
-		o.temp_mc = 0;
-		o.flags = THERMAL_FLAG_FAILSAFE | THERMAL_FLAG_MAX_DUTY;
-		o.alarm_overtemp = ctx->alarm;
-		o.request_rb_shed = ctx->shed_rb;
-		o.request_poe_kill = ctx->poe_kill;
-		if (ctx->alarm) {
-			o.flags |= THERMAL_FLAG_ALARM;
-		}
-		if (ctx->shed_rb) {
-			o.flags |= THERMAL_FLAG_SHED_RB;
-		}
-		if (ctx->poe_kill) {
-			o.flags |= THERMAL_FLAG_POE_KILL;
-		}
-	} else {
+	/* ---- fan duty: PI on the enclosure, or fail-safe maximum ---- */
+	if (in->enclosure_valid) {
 		float err_c;
 		float duty_f;
 
-		t_mc = in->enclosure_mc;
-		o.temp_mc = t_mc;
+		o.temp_mc = in->enclosure_mc;
 
 		/*
 		 * Dead-band around the setpoint. The error is shrunk towards
@@ -211,7 +235,7 @@ int thermal_step_1hz(thermal_ctx_t *ctx, const thermal_in_t *in,
 		 * dithering chatter for a step of Kp*deadband every time the
 		 * temperature crossed the boundary.
 		 */
-		err_c = (float)(t_mc - c->setpoint_mc) * 0.001f;
+		err_c = (float)(in->enclosure_mc - c->setpoint_mc) * 0.001f;
 		if (err_c > 0.0f) {
 			err_c -= (float)c->deadband_mc * 0.001f;
 			if (err_c < 0.0f) {
@@ -245,35 +269,64 @@ int thermal_step_1hz(thermal_ctx_t *ctx, const thermal_in_t *in,
 		duty_f = (float)c->min_duty_pct + c->kp_pct_per_c * err_c +
 			 ctx->integ_pct;
 		ctx->duty_pct = clamp_duty(c, duty_f);
-		o.duty_pct = ctx->duty_pct;
+	} else {
+		/*
+		 * §10.2 fail-safe. No controlled variable, so there is no basis
+		 * for running the fan slowly: maximum airflow. The integral is
+		 * held (not reset) so a transient dropout does not lose the
+		 * loop's operating point.
+		 */
+		ctx->duty_pct = c->max_duty_pct;
+		o.failsafe = true;
+		o.flags |= THERMAL_FLAG_FAILSAFE;
+	}
 
-		if (ctx->duty_pct == c->min_duty_pct) {
-			o.flags |= THERMAL_FLAG_MIN_DUTY;
-		}
-		if (ctx->duty_pct == c->max_duty_pct) {
-			o.flags |= THERMAL_FLAG_MAX_DUTY;
-		}
+	o.duty_pct = ctx->duty_pct;
+	if (ctx->duty_pct == c->min_duty_pct) {
+		o.flags |= THERMAL_FLAG_MIN_DUTY;
+	}
+	if (ctx->duty_pct == c->max_duty_pct) {
+		o.flags |= THERMAL_FLAG_MAX_DUTY;
+	}
 
-		/* §10.3 escalation ladder, each rung latched with hysteresis. */
-		ctx->alarm = rung(ctx->alarm, t_mc, c->alarm_mc,
-				  c->ladder_hyst_mc);
-		ctx->shed_rb = rung(ctx->shed_rb, t_mc, c->shed_rb_mc,
-				    c->ladder_hyst_mc);
-		ctx->poe_kill = rung(ctx->poe_kill, t_mc, c->kill_mc,
-				     c->ladder_hyst_mc);
+	/* ---- §10.3 escalation ladder ---- */
+	{
+		int32_t ladder_mc = 0;
+		bool ladder_valid = ladder_temp(c, in, &ladder_mc);
 
-		o.alarm_overtemp = ctx->alarm;
-		o.request_rb_shed = ctx->shed_rb;
-		o.request_poe_kill = ctx->poe_kill;
-		if (ctx->alarm) {
-			o.flags |= THERMAL_FLAG_ALARM;
+		/*
+		 * Run the ladder on the enclosure sensor, or — if it has failed
+		 * — on the hottest secondary sensor plus a bias. A single
+		 * TMP117 #2 failure must not silently disable over-temperature
+		 * protection while the die and oscillator sensors are watching
+		 * the rise. With no sensor readable at all, hold the latched
+		 * rungs: escalating on no data would be as wrong as releasing.
+		 */
+		if (ladder_valid) {
+			ctx->alarm = rung(ctx->alarm, ladder_mc, c->alarm_mc,
+					  c->ladder_hyst_mc);
+			ctx->shed_rb = rung(ctx->shed_rb, ladder_mc,
+					    c->shed_rb_mc, c->ladder_hyst_mc);
+			ctx->poe_kill = rung(ctx->poe_kill, ladder_mc,
+					     c->kill_mc, c->ladder_hyst_mc);
+			if (!in->enclosure_valid) {
+				o.temp_mc = ladder_mc;
+				o.flags |= THERMAL_FLAG_LADDER_FALLBACK;
+			}
 		}
-		if (ctx->shed_rb) {
-			o.flags |= THERMAL_FLAG_SHED_RB;
-		}
-		if (ctx->poe_kill) {
-			o.flags |= THERMAL_FLAG_POE_KILL;
-		}
+	}
+
+	o.alarm_overtemp = ctx->alarm;
+	o.request_rb_shed = ctx->shed_rb;
+	o.request_poe_kill = ctx->poe_kill;
+	if (ctx->alarm) {
+		o.flags |= THERMAL_FLAG_ALARM;
+	}
+	if (ctx->shed_rb) {
+		o.flags |= THERMAL_FLAG_SHED_RB;
+	}
+	if (ctx->poe_kill) {
+		o.flags |= THERMAL_FLAG_POE_KILL;
 	}
 
 	/* ---- stall / under-speed, against the duty just commanded ---- */

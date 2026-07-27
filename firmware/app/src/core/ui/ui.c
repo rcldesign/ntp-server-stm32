@@ -1454,7 +1454,13 @@ static uint8_t body_bottom(const ui_surface_t *s, bool with_pager)
 	return (uint8_t)((unsigned int)s->rows - reserved - 1u);
 }
 
-/** Half-width of the two-column key/value grid used by several pages. */
+/**
+ * Half-width of the two-column key/value grid used by several pages.
+ *
+ * The grid is laid out as: margin(1) | column A(half) | gutter(1) |
+ * column B(half) | remainder. At 60 columns that is exactly 1+29+1+29, so
+ * column B's right-aligned values land on the last cell of the row.
+ */
 static uint8_t grid_half(const ui_surface_t *s)
 {
 	return (uint8_t)((s->cols > 4u) ? ((unsigned int)(s->cols - 2u) / 2u)
@@ -1468,7 +1474,7 @@ static void page_home(const quality_block_t *q, const ui_health_t *h,
 	sb_t sb;
 	ui_hint_t hint;
 	uint8_t half = grid_half(s);
-	uint8_t colb = (uint8_t)(1u + half);
+	uint8_t colb = (uint8_t)(2u + half);
 	uint8_t r;
 
 	/* Big clock, occupying the pixel band of rows 2 and 3. */
@@ -1550,6 +1556,55 @@ static void page_home(const quality_block_t *q, const ui_health_t *h,
 	}
 	kv(s, r, colb, half, "Demote in", buf,
 	   q->holdover ? UI_ATTR_WARN : UI_ATTR_DIM);
+
+	r++;
+	draw_rule(s, r);
+
+	r++;
+	kv(s, r, 1u, half, "Host", h->hostname, UI_ATTR_NORMAL);
+	kv(s, r, colb, half, "IPv4", h->ipv4,
+	   h->link_up ? UI_ATTR_NORMAL : UI_ATTR_WARN);
+
+	r++;
+	sb_init(&sb, buf, sizeof(buf));
+	sb_u32(&sb, h->ntp_req_per_s);
+	sb_str(&sb, " req/s");
+	kv(s, r, 1u, half, "NTP", buf, UI_ATTR_NORMAL);
+	kv(s, r, colb, half, "PTP", ui_ptp_state_name(h->ptp_state),
+	   (h->ptp_state == (uint8_t)UI_PTP_MASTER) ? UI_ATTR_OK : UI_ATTR_DIM);
+
+	/*
+	 * Satellite-usage bar. Everything else on this page is a number; the one
+	 * quantity an operator reads at arm's length across a rack is "is the
+	 * antenna seeing sky", so it gets the graphic.
+	 */
+	r++;
+	if ((uint8_t)(r + 1u) <= body_bottom(s, true) && s->cols > 4u) {
+		uint32_t permille =
+			(q->gnss_sv_visible != 0u)
+				? ((uint32_t)q->gnss_sv_used * 1000u /
+				   (uint32_t)q->gnss_sv_visible)
+				: 0u;
+
+		sb_init(&sb, buf, sizeof(buf));
+		sb_str(&sb, "SV in solution ");
+		sb_u32(&sb, q->gnss_sv_used);
+		sb_ch(&sb, '/');
+		sb_u32(&sb, q->gnss_sv_visible);
+		(void)ui_surface_put(s, r, 1u, buf, UI_ATTR_DIM);
+
+		r++;
+		(void)ui_surface_fill(s, r, 1u, (size_t)(s->cols - 2u), ' ',
+				      UI_ATTR_NORMAL);
+		memset(&hint, 0, sizeof(hint));
+		hint.kind = (uint8_t)UI_HINT_PROGRESS;
+		hint.row = r;
+		hint.col = 1u;
+		hint.len = (uint8_t)(s->cols - 2u);
+		hint.attr = (permille >= 400u) ? UI_ATTR_OK : UI_ATTR_WARN;
+		hint.value = (permille > 1000u) ? 1000u : (uint16_t)permille;
+		(void)ui_surface_hint(s, &hint);
+	}
 }
 
 /**
@@ -1660,8 +1715,7 @@ static void page_sky(const ui_health_t *h, ui_surface_t *s)
 	sb_rjust(&sb, "AZ", 16u);
 	sb_rjust(&sb, "EL", 22u);
 	sb_rjust(&sb, "C/N0", 29u);
-	sb_col(&sb, 32u);
-	sb_str(&sb, "USE");
+	sb_rjust(&sb, "USE", 35u);
 	(void)ui_surface_put(s, r, 1u, buf, UI_ATTR_DIM);
 
 	ntop = sky_top(h, top_idx, (uint8_t)UI_SKY_TOP_N);
@@ -1678,8 +1732,7 @@ static void page_sky(const ui_health_t *h, ui_surface_t *s)
 		sb_rjust_i(&sb, sv->azim_deg, 16u);
 		sb_rjust_i(&sb, sv->elev_deg, 22u);
 		sb_rjust_i(&sb, sv->cno_dbhz, 29u);
-		sb_col(&sb, 32u);
-		sb_str(&sb, sv->used ? "YES" : "-");
+		sb_rjust(&sb, sv->used ? "YES" : "-", 35u);
 		(void)ui_surface_put(s, r, 1u, buf,
 				     sv->used ? UI_ATTR_OK : UI_ATTR_DIM);
 	}
@@ -1696,7 +1749,7 @@ static void page_clocks(const quality_block_t *q, const ui_health_t *h,
 	char buf[48];
 	sb_t sb;
 	uint8_t half = grid_half(s);
-	uint8_t colb = (uint8_t)(1u + half);
+	uint8_t colb = (uint8_t)(2u + half);
 	uint8_t r = (uint8_t)BODY_TOP;
 
 	(void)ui_surface_put(s, r, 0u, "OCXO", UI_ATTR_ACCENT);
@@ -1763,8 +1816,9 @@ static void page_clocks(const quality_block_t *q, const ui_health_t *h,
 	kv(s, r, 1u, half, "Rb temp", buf, UI_ATTR_NORMAL);
 	sb_init(&sb, buf, sizeof(buf));
 	if (h->extref_ok) {
-		sb_u32(&sb, h->extref_hz);
-		sb_str(&sb, " Hz");
+		/* Printing a hertz count with six decimals is megahertz. */
+		sb_fix(&sb, (int64_t)h->extref_hz, 6u);
+		sb_str(&sb, " MHz");
 	} else {
 		sb_str(&sb, "not in band");
 	}
@@ -1786,7 +1840,7 @@ static void page_network(const ui_health_t *h, ui_surface_t *s)
 	char buf[48];
 	sb_t sb;
 	uint8_t half = grid_half(s);
-	uint8_t colb = (uint8_t)(1u + half);
+	uint8_t colb = (uint8_t)(2u + half);
 	uint8_t r = (uint8_t)BODY_TOP;
 
 	sb_init(&sb, buf, sizeof(buf));
@@ -1875,7 +1929,7 @@ static void page_power(ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
 	unsigned int rule_row;
 	unsigned int visible;
 	uint8_t half = grid_half(s);
-	uint8_t colb = (uint8_t)(1u + half);
+	uint8_t colb = (uint8_t)(2u + half);
 	uint8_t r;
 	uint8_t i;
 

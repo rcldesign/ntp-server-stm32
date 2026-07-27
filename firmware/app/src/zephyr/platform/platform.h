@@ -148,6 +148,9 @@ void sts_extref_mon_read(uint32_t *hz, bool *valid, bool *edges);
 /* spi4.c — bus arbitration + MCP41U83 digipot                               */
 /* ------------------------------------------------------------------------- */
 
+/** Bind the SPI4 controller and build the digipot's transfer configuration. */
+int sts_spi4_init(void);
+
 /** Write the digipot wiper (0..255) and read it back. */
 int sts_digipot_set(uint8_t code);
 
@@ -193,8 +196,34 @@ int sts_hk_read(sts_hk_snapshot_t *out);
 /** Ask the housekeeping thread to re-read one INA228's DIAG_ALRT + values. */
 void sts_hk_request_ina(uint8_t rail_idx);
 
+/**
+ * Stage 3: probe all nine INA228s, apply CONFIG/ADC_CONFIG/SHUNT_CAL/SOVL/SUVL.
+ *
+ * @retval 0     All nine configured.
+ * @retval -EIO  At least one is absent or rejected its configuration; the ones
+ *               that did respond are usable and flagged cal_ok.
+ */
+int sts_hk_ina_configure_all(void);
+
 /** Start the housekeeping thread. */
 int sts_hk_start(void);
+
+/* ------------------------------------------------------------------------- */
+/* supervisor.c — WDT kick, holdover relay, status RGB                       */
+/* ------------------------------------------------------------------------- */
+
+int sts_supervisor_init(void);
+
+/** Called at 4 Hz from the housekeeping thread. */
+void sts_supervisor_step(uint32_t now_ms);
+
+/** Stage 9: assert WDT_EN and begin the kick cadence. */
+int sts_supervisor_arm(void);
+
+/** Blink the status RGB blue for @p duration_ms (operator locate). */
+void sts_supervisor_identify(uint32_t duration_ms);
+
+void sts_supervisor_counters(uint32_t *kicks, uint32_t *withheld, bool *armed);
 
 /* ------------------------------------------------------------------------- */
 /* io_scan.c                                                                  */

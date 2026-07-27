@@ -18,7 +18,10 @@
  * (interface ref §1.1, ARCHITECTURE.md §10 invariant 9), so a hung MCU cooks
  * nothing. In software this module answers a missing or invalid enclosure
  * reading with 100 % duty rather than with its last good value: a sensor that
- * has stopped reporting is not evidence that the box is cool.
+ * has stopped reporting is not evidence that the box is cool. The over-temp
+ * ladder does not go blind with it — it falls back to the hottest secondary
+ * sensor (oscillator oven / die) so a single primary-sensor failure cannot
+ * disable the alarm / Rb-shed / POE_KILL protection.
  *
  * All temperatures are milli-degrees Celsius, matching the TMP117 driver and
  * the rest of the telemetry path.
@@ -44,6 +47,7 @@ extern "C" {
 #define THERMAL_FLAG_POE_KILL   (1u << 6) /**< over the cold-cycle rung */
 #define THERMAL_FLAG_FAN_STALL  (1u << 7) /**< measured RPM below the model */
 #define THERMAL_FLAG_TACH_FAULT (1u << 8) /**< no usable tachometer reading */
+#define THERMAL_FLAG_LADDER_FALLBACK (1u << 9) /**< ladder on a secondary sensor */
 
 /* ------------------------------------------------------------------ config */
 
@@ -67,6 +71,9 @@ typedef struct {
 	int32_t shed_rb_mc;       /**< rung 2: request Rb shed (70000) */
 	int32_t kill_mc;          /**< rung 3: request POE_KILL (80000) */
 	int32_t ladder_hyst_mc;   /**< release hysteresis on all rungs (2000) */
+	/** BENCH: bias added to the hottest secondary sensor (osc/die) when the
+	 *  enclosure sensor has failed and the ladder falls back to it (0). */
+	int32_t fallback_offset_mc;
 
 	uint16_t rpm_at_full;     /**< fan RPM at 100 % duty (6000) */
 	uint8_t rpm_model_pct;    /**< fraction of the model that is acceptable (50) */
@@ -104,9 +111,11 @@ typedef struct {
 	int32_t enclosure_mc;  /**< TMP117 #2 (0x48) — the controlled variable */
 	bool enclosure_valid;
 
-	int32_t osc_mc;        /**< TMP117 #1 (0x49), reported not controlled */
+	/* Secondary sensors: reported in telemetry, and — when the enclosure
+	 * sensor fails — the fallback the over-temp ladder runs on (§10.2). */
+	int32_t osc_mc;        /**< TMP117 #1 (0x49) oscillator-oven case */
 	bool osc_valid;
-	int32_t die_mc;        /**< STM32 internal sensor, reported */
+	int32_t die_mc;        /**< STM32 internal temperature sensor */
 	bool die_valid;
 
 	uint16_t fan_rpm;      /**< FAN_TACH (PA15) */

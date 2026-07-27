@@ -78,6 +78,82 @@ config STS1000_EARLY_RESET_INIT_PRIORITY
 
 endmenu
 
+menu "STS1000 Meridian platform area"
+
+config STS1000_LOGRING_SLOTS
+	int "Structured log ring depth (records)"
+	default 192
+	range 16 2048
+	help
+	  Records retained in the RAM log ring (core/logring). Each slot is
+	  sizeof(logr_rec_t) — about 96 bytes with the default LOGR_MSG_MAX —
+	  so 192 slots is roughly 18 KB. The ring is the source for MCP
+	  LOG_TAIL and for the NOR spool; sizing it is a trade between how far
+	  back a `log tail` can reach and SRAM.
+
+config STS1000_RAM_STORE_ENTRIES
+	int "RAM config store entries (pre-persistence)"
+	default 48
+	range 8 256
+	help
+	  Size of the volatile key/value store the platform gives core/cfg
+	  before the console area registers the real NVS-backed one. It only
+	  has to hold keys written during that window, which is why it is much
+	  smaller than the full schema.
+
+config STS1000_LIVENESS_DEADLINE_MS
+	int "Liveness deadline (ms)"
+	default 5000
+	range 500 60000
+	help
+	  How long a registered liveness participant may go without feeding
+	  before the supervisor stops kicking the external watchdog. Must be
+	  comfortably longer than the slowest participant's period (the
+	  housekeeping thread's 1 Hz sweep) and shorter than the TPS3430
+	  timeout, so a genuinely wedged thread cold-cycles the board rather
+	  than being tolerated.
+
+config STS1000_WDT_KICK_WIDTH_US
+	int "WDT_KICK pulse width (us)"
+	default 50
+	range 1 1000
+	help
+	  Width of the WDT_KICK (PB2) pulse presented to the TPS3430 WDI input.
+	  Busy-waited, so keep it short. Must exceed the device's minimum
+	  pulse-width specification.
+
+config STS1000_CLKMUX_MAX_SETTLE_MS
+	int "Maximum clock-mux settle time (ms)"
+	default 20
+	range 1 100
+	help
+	  Upper bound on the settle delay the reference state machine may
+	  request during an OCXO<->Rb handoff. The whole handoff runs with
+	  interrupts locked and SYSCLK bridged to HSI, so this value directly
+	  bounds how long the system runs at the wrong clock. A larger settle
+	  request from refsel is clamped to this and logged.
+
+config STS1000_DIGIPOT_SPI_HZ
+	int "MCP41U83 digipot SPI clock (Hz)"
+	default 1000000
+	range 100000 10000000
+	help
+	  SPI4 clock used for the rubidium-rail digipot (U43). The part is
+	  rated well above this; the conservative default keeps the edge rates
+	  down on a bus shared with a 40 MHz NOR and a display ribbon.
+
+config STS1000_PANEL_LED_PWM_HZ
+	int "Panel-LED PWM frequency (Hz)"
+	default 1000
+	range 200 20000
+	help
+	  LPTIM2_CH2 (PE0) carrier for the front-panel LED string. Must be far
+	  above the flicker threshold and far above the reciprocal of the
+	  INA228 0x4C averaging window, or the panel current reading beats
+	  against the duty cycle (interface ref §4.1).
+
+endmenu
+
 module = STS1000
 module-str = sts1000
 source "subsys/logging/Kconfig.template.log_config"
