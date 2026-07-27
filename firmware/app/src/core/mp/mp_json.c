@@ -252,7 +252,16 @@ int mp_json_parse(mp_json_t *p, const char *src, size_t len,
 	if (len >= 0xFFFFU) {
 		return -EMSGSIZE;
 	}
-	if (depth_max == 0U) {
+	/*
+	 * Clamp both ends. `stack[]` holds MP_JSON_DEPTH_MAX + 1 entries and the
+	 * loop below writes stack[s.depth] for every s.depth < depth_max, so a
+	 * caller passing more than MP_JSON_DEPTH_MAX overflows it — demonstrated
+	 * with ASan at depth_max = 40. No in-tree caller does (mp_rpc.c passes the
+	 * constant), but this is the pre-authentication parser on a physical-access
+	 * surface, and a runtime argument cannot be caught by BUILD_ASSERT. The
+	 * header states the contract; this enforces it.
+	 */
+	if ((depth_max == 0U) || (depth_max > (uint8_t)MP_JSON_DEPTH_MAX)) {
 		depth_max = (uint8_t)MP_JSON_DEPTH_MAX;
 	}
 
@@ -1302,7 +1311,25 @@ int mp_jw_f32(mp_jw_t *w, float v, uint8_t decimals)
 		return mp_jw_null(w);
 	}
 	a = (v < 0.0f) ? -v : v;
-	if (a > 1.0e18f) {
+
+	/*
+	 * Bound what is actually cast, which is a*scale — not a. The old guard
+	 * tested `a > 1.0e18f` while the cast below operates on a*scale, so with
+	 * decimals == 6 (both call sites) it was five decades too loose: the true
+	 * ceiling is UINT64_MAX/1e6 ~ 1.845e13. Values above it are undefined on
+	 * conversion, and the two targets disagree about the result — x86 wraps to
+	 * 0.000000, Cortex-M33's __aeabi_f2ulz saturates to 18446744073709.551615
+	 * — so a host tool cannot even detect the corruption. This is the readback
+	 * path for cal.get/cal.list and obj.get on a REAL object, i.e. a timing
+	 * instrument's calibration constants.
+	 *
+	 * Computed after `scale` is known, and in float so the comparison happens
+	 * in the same domain as the multiply. The test is >= rather than >
+	 * because (float)UINT64_MAX rounds *up* to exactly 2^64, so a value
+	 * landing on the quotient would still convert out of range.
+	 */
+	scale = pow10f_((int)decimals);
+	if (a >= ((float)UINT64_MAX / scale)) {
 		return mp_jw_null(w);
 	}
 
@@ -1312,7 +1339,6 @@ int mp_jw_f32(mp_jw_t *w, float v, uint8_t decimals)
 		d[n++] = '-';
 	}
 
-	scale = pow10f_((int)decimals);
 	scaled = (uint64_t)((a * scale) + 0.5f);
 	ip = scaled / (uint64_t)scale;
 	fp = scaled - (ip * (uint64_t)scale);

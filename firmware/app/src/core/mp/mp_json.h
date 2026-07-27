@@ -81,7 +81,10 @@ typedef struct {
  * @param len        Source length.
  * @param tok        Token array, caller-owned.
  * @param tok_cap    Capacity of @p tok in tokens.
- * @param depth_max  Deepest nesting accepted; 0 selects MP_JSON_DEPTH_MAX.
+ * @param depth_max  Deepest nesting accepted. 0 selects MP_JSON_DEPTH_MAX, and
+ *                   anything above MP_JSON_DEPTH_MAX is clamped down to it —
+ *                   the parser's stack is sized from that constant, so a larger
+ *                   value cannot be honoured and must not be attempted.
  *
  * @retval >=0        Number of tokens produced.
  * @retval -EINVAL    Bad argument.

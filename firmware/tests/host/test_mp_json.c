@@ -570,6 +570,95 @@ static void test_writer_nan_and_inf_become_null(void)
 	TEST_ASSERT_EQUAL_STRING("[null,null,null]", buf);
 }
 
+/*
+ * A float too large to render must become null, and the bound has to be on what
+ * is actually cast — a*scale, not a.
+ *
+ * The old guard tested `a > 1.0e18f` while the conversion operates on a*scale;
+ * with decimals == 6 (what both production callers pass) the true ceiling is
+ * UINT64_MAX/1e6 ~ 1.845e13, so everything between that and 1e18 was undefined
+ * on conversion. Worse, the two targets disagreed about the result — x86 wraps
+ * to 0.000000, Cortex-M33's __aeabi_f2ulz saturates to 18446744073709.551615 —
+ * so a host tool could not detect the corruption. This is the readback path for
+ * cal.get/cal.list and obj.get on a REAL object: a timing instrument's stored
+ * calibration constants.
+ */
+static void test_writer_f32_out_of_range_is_null_not_garbage(void)
+{
+	char buf[128];
+	mp_jw_t w;
+	size_t len = 0U;
+
+	TEST_ASSERT_EQUAL_INT(0, mp_jw_init(&w, buf, sizeof(buf)));
+	(void)mp_jw_arr_open(&w);
+	(void)mp_jw_f32(&w, 1.0e14f, 6U);  /* under the old guard, over the real one */
+	(void)mp_jw_f32(&w, -1.0e14f, 6U);
+	(void)mp_jw_f32(&w, 1.0e17f, 6U);
+	(void)mp_jw_arr_close(&w);
+	TEST_ASSERT_EQUAL_INT(0, mp_jw_finish(&w, &len));
+	TEST_ASSERT_EQUAL_STRING("[null,null,null]", buf);
+}
+
+/* Just under the ceiling must still render, so the guard is not merely blunt. */
+static void test_writer_f32_just_inside_the_range_still_renders(void)
+{
+	char buf[128];
+	mp_jw_t w;
+	size_t len = 0U;
+
+	/*
+	 * Asserted as a property, not an exact string: at this magnitude the
+	 * rendered digits carry the rounding of the intermediate a*scale in
+	 * float32, which is pre-existing renderer behaviour and not what these
+	 * tests are about. What matters is that the guard did not swallow a
+	 * representable value into null.
+	 */
+	TEST_ASSERT_EQUAL_INT(0, mp_jw_init(&w, buf, sizeof(buf)));
+	(void)mp_jw_f32(&w, 1.0e13f, 6U);
+	TEST_ASSERT_EQUAL_INT(0, mp_jw_finish(&w, &len));
+	TEST_ASSERT_NOT_EQUAL(0, strcmp("null", buf));
+	TEST_ASSERT_EQUAL_CHAR('9', buf[0]); /* ~9.99999998e12, not 0 or garbage */
+	TEST_ASSERT_EQUAL_UINT(13U, (unsigned int)(strchr(buf, '.') - buf));
+
+	/* Fewer decimals raise the ceiling, because the bound tracks a*scale. */
+	TEST_ASSERT_EQUAL_INT(0, mp_jw_init(&w, buf, sizeof(buf)));
+	(void)mp_jw_f32(&w, 1.0e14f, 0U);
+	TEST_ASSERT_EQUAL_INT(0, mp_jw_finish(&w, &len));
+	TEST_ASSERT_NOT_EQUAL(0, strcmp("null", buf));
+	TEST_ASSERT_EQUAL_UINT(15U, (unsigned int)strlen(buf));
+}
+
+/*
+ * depth_max above MP_JSON_DEPTH_MAX must be clamped, not honoured. The parser's
+ * stack is sized from that constant, so honouring a larger value writes past it
+ * — demonstrated with ASan at depth_max = 40. No in-tree caller passes one, but
+ * this is the pre-authentication parser on a physical-access surface.
+ */
+static void test_parse_depth_max_above_the_stack_is_clamped(void)
+{
+	static const char deep[] =
+		"[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]"; /* 20 deep */
+	mp_json_t p;
+	mp_json_tok_t tok[128];
+
+	/* Clamped to MP_JSON_DEPTH_MAX, so a 20-deep document is refused rather
+	 * than parsed off the end of the stack. */
+	TEST_ASSERT_EQUAL_INT(-E2BIG,
+			      mp_json_parse(&p, deep, sizeof(deep) - 1U, tok,
+					    (size_t)(sizeof(tok) / sizeof(tok[0])),
+					    40U));
+	TEST_ASSERT_EQUAL_INT(-E2BIG,
+			      mp_json_parse(&p, deep, sizeof(deep) - 1U, tok,
+					    (size_t)(sizeof(tok) / sizeof(tok[0])),
+					    255U));
+
+	/* And the clamp does not change what a legal document does. */
+	TEST_ASSERT_EQUAL_INT(-E2BIG,
+			      mp_json_parse(&p, deep, sizeof(deep) - 1U, tok,
+					    (size_t)(sizeof(tok) / sizeof(tok[0])),
+					    0U));
+}
+
 static void test_writer_int64_min(void)
 {
 	char buf[64];
@@ -1076,6 +1165,9 @@ int main(void)
 	RUN_TEST(test_writer_escaping);
 	RUN_TEST(test_writer_float);
 	RUN_TEST(test_writer_nan_and_inf_become_null);
+	RUN_TEST(test_writer_f32_out_of_range_is_null_not_garbage);
+	RUN_TEST(test_writer_f32_just_inside_the_range_still_renders);
+	RUN_TEST(test_parse_depth_max_above_the_stack_is_clamped);
 	RUN_TEST(test_writer_int64_min);
 	RUN_TEST(test_writer_null_string_is_json_null);
 	RUN_TEST(test_writer_overflow_latches);
