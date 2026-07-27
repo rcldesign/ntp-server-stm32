@@ -7,9 +7,10 @@ calibration, log capture, **a live mirror of the device's own front panel**, and
 **firmware update for every updatable IC on the board** — everything needed to commission,
 maintain, and debug an STS1000 with nothing but a laptop and a USB cable.
 
-**Status.** Device side is implemented (see §13 for the as-built map). The host
-application is specified here and not yet built; `firmware/tools/meridian_ctl.py` is the
-reference client for the subset it covers (§13.2).
+**Status.** The as-built firmware capabilities the tool surfaces are catalogued in §13 and
+are in tree. The MP device-side layer of §3–§9 is under active implementation; §11 tracks
+its per-item state. The host application is specified here and not yet built;
+`firmware/tools/meridian_ctl.py` is the reference client for the subset it covers (§13.2).
 
 **Authority.** `sts1000_firmware_hardware_interface.md` wins on pins and addresses;
 `ntp_server_software_spec.md` owns firmware behavior; `firmware/ARCHITECTURE.md` owns
@@ -519,17 +520,25 @@ fail-fast courtesy, not a trust anchor.
 
 ## 11. Device-side firmware deltas
 
+This table is the authoritative build-state tracker for the MP layer. "In tree" means the
+code exists, is unit-tested on the host, and links into the signed image.
+
 | Item | State |
 |---|---|
-| Frame mux (COBS + CRC16, channel dispatch, `mp enter/exit`) | implemented |
-| Manifest generator (build-time table → runtime JSON + content hash) | implemented |
-| Override engine (lease table, dead-man, revert hooks, veto reporting) | implemented |
-| Sessions + guard/interlock evaluation | implemented, sharing the credential store and lockout discipline with the console and web planes |
-| Streams (telemetry/PPS/log/event/mirror CBOR; NMEA/UBX tees) | implemented |
-| Tunnels (USART3, UART7) with firmware-suspend handshake | implemented |
-| Diag runner + support bundle | implemented |
-| Multi-IC update orchestrator + inventory | implemented |
+| Frame mux (COBS + CRC16, channel dispatch, `mp enter/exit`) | in tree |
+| Manifest generator (build-time table → runtime JSON + content hash) | in tree |
+| Override engine (lease table, dead-man, revert hooks, veto reporting) | in tree |
+| Sessions + guard/interlock evaluation | in tree, sharing the credential store and lockout discipline with the console and web planes |
+| Streams (telemetry/PPS/log/event/mirror CBOR; NMEA/UBX tees) | in tree |
+| Tunnels (USART3, UART7) with firmware-suspend handshake | in tree |
+| Diag runner + support bundle | in tree |
+| Multi-IC update orchestrator + inventory | in tree |
+| Host application (§10) | **not started** — specified only |
 | Budget rule | MP threads run at console priority and **never hold a timing mutex** — they read the lock-free quality/health snapshots only, so the discipline loop is unaffected |
+
+Items marked "in tree" are verified against the repository at the commit that introduced
+this document's §11; anything the firmware has not yet landed is called out explicitly
+rather than implied.
 
 ---
 
