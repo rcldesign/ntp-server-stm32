@@ -396,6 +396,49 @@ static int tls_setup(void)
 /* one connection                                                            */
 /* ------------------------------------------------------------------------- */
 
+/** Feed the area's liveness bit; safe to call as often as we like. */
+static void conn_alive(void)
+{
+	if (live_id >= 0) {
+		sts_liveness_feed(live_id);
+	}
+}
+
+/**
+ * Has the client's whole request flight arrived?
+ *
+ * NTS-KE frames a request as a sequence of records terminated by End of Message
+ * (RFC 8915 §4.1.1), and TLS record boundaries have nothing to do with those
+ * boundaries. Stopping after the first mbedtls_ssl_read() — which returns at
+ * most one TLS record — therefore lost the AEAD and EOM records of any client
+ * that split its flight, and the negotiation failed with BAD_REQUEST through no
+ * fault of the client (F11). So walk what we have and only stop when the
+ * terminator is actually present.
+ *
+ * @return true once a complete record sequence ending in EOM is buffered.
+ */
+static bool request_complete(const uint8_t *buf, size_t len)
+{
+	size_t off = 0U;
+
+	while (off < len) {
+		ntske_rec_t rec;
+		size_t next = off;
+
+		if (ntske_rec_parse(buf, len, off, &rec, &next) != 0) {
+			return false; /* truncated: more to come */
+		}
+		if (rec.type == NTSKE_REC_EOM) {
+			return true;
+		}
+		if (next <= off) {
+			return false; /* no forward progress; treat as truncated */
+		}
+		off = next;
+	}
+	return false;
+}
+
 static void handle_conn(int fd)
 {
 	mbedtls_ssl_context ssl;
@@ -404,9 +447,28 @@ static void handle_conn(int fd)
 	size_t total = 0U;
 	size_t rsp_len = 0U;
 	int rc;
-	int64_t deadline = (int64_t)sts_mono_ms() + NTSKE_HANDSHAKE_TIMEOUT_MS;
+	int64_t deadline = (int64_t)sts_mono_ms() + NTSKE_CONN_BUDGET_MS;
+	struct zsock_timeval tv = {
+		.tv_sec = NTSKE_SOCK_TIMEOUT_MS / 1000,
+		.tv_usec = (NTSKE_SOCK_TIMEOUT_MS % 1000) * 1000,
+	};
 
 	mbedtls_ssl_init(&ssl);
+
+	/*
+	 * Before anything reads or writes: without these the socket blocks
+	 * K_FOREVER, mbedTLS never hands control back, and every deadline below
+	 * is dead code. See the DoS note in the file header.
+	 */
+	if (zsock_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0 ||
+	    zsock_setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) < 0) {
+		LOG_ERR("NTS-KE: socket timeouts unavailable (%d); refusing the "
+			"connection rather than risking a blocking stall", errno);
+		K_SPINLOCK(&st_lock) {
+			st.handshakes_failed++;
+		}
+		goto done;
+	}
 
 	rc = mbedtls_ssl_setup(&ssl, &tls_conf);
 	if (rc != 0) {
@@ -418,6 +480,7 @@ static void handle_conn(int fd)
 	ke.cfg.export_ctx = &ssl; /* the exporter needs this exact context */
 
 	do {
+		conn_alive();
 		rc = mbedtls_ssl_handshake(&ssl);
 		if ((int64_t)sts_mono_ms() > deadline) {
 			rc = MBEDTLS_ERR_SSL_TIMEOUT;
@@ -446,7 +509,8 @@ static void handle_conn(int fd)
 		st.handshakes_ok++;
 	}
 
-	for (;;) {
+	while (total < sizeof(req_buf)) {
+		conn_alive();
 		rc = mbedtls_ssl_read(&ssl, &req_buf[total],
 				      sizeof(req_buf) - total);
 		if (rc == MBEDTLS_ERR_SSL_WANT_READ ||
@@ -457,15 +521,16 @@ static void handle_conn(int fd)
 			continue;
 		}
 		if (rc <= 0) {
-			break;
+			break; /* close_notify, or a fatal record error */
 		}
 		total += (size_t)rc;
-		if (total >= sizeof(req_buf) || total >= 4U) {
-			/* A well-formed request ends in an End-of-Message
-			 * record; stop once one flight is in rather than
-			 * waiting for a close the client sends only after our
-			 * response. */
+		if (request_complete(req_buf, total)) {
+			/* The flight is in. Do not wait for the client's close:
+			 * it sends that only after reading our response. */
 			break;
+		}
+		if ((int64_t)sts_mono_ms() > deadline) {
+			goto close_notify;
 		}
 	}
 
@@ -485,6 +550,7 @@ static void handle_conn(int fd)
 		size_t off = 0U;
 
 		while (off < rsp_len) {
+			conn_alive();
 			rc = mbedtls_ssl_write(&ssl, &rsp_buf[off],
 					       rsp_len - off);
 			if (rc == MBEDTLS_ERR_SSL_WANT_READ ||
@@ -498,6 +564,9 @@ static void handle_conn(int fd)
 				break;
 			}
 			off += (size_t)rc;
+			if ((int64_t)sts_mono_ms() > deadline) {
+				break;
+			}
 		}
 	}
 
@@ -507,6 +576,7 @@ done:
 	ke.cfg.export_ctx = NULL;
 	mbedtls_ssl_free(&ssl);
 	(void)zsock_close(fd);
+	conn_alive();
 }
 
 /* ------------------------------------------------------------------------- */

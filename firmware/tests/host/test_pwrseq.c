@@ -1709,16 +1709,21 @@ static void test_settle_delays_are_observed(void)
 	expect_absent(&m, PWRSEQ_ACT_DIGIPOT_WRITE_OP);
 	advance(&m, 480U); /* still inside the 500 ms soft-start */
 	expect_absent(&m, PWRSEQ_ACT_DIGIPOT_WRITE_OP);
-	advance_until(&m, PWRSEQ_ACT_DIGIPOT_WRITE_OP, 200U);
+	advance_until(&m, PWRSEQ_ACT_DIGIPOT_WRITE_OP,
+		      m.ctx.cfg.rb_window_timeout_ms);
 
 	/*
 	 * And the FE connect is gated by the ramp: after the operating code is
-	 * written and read back, the rail is given rb_ramp_ms (100 ms) to settle
-	 * before the operating-window + vmax gate is judged and RB_VCC_GATE
-	 * asserted.
+	 * written and read back, the rail is given rb_ramp_ms to settle before the
+	 * operating-window + vmax gate is judged and RB_VCC_GATE asserted. That
+	 * delay is sized against the telemetry cadence, not the buck — the point of
+	 * it is that a *post-ramp reading exists* to judge.
 	 */
 	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
-	advance_until(&m, PWRSEQ_ACT_RB_VCC_GATE_EN, 400U);
+	advance(&m, m.ctx.cfg.rb_ramp_ms - 1U);
+	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
+	advance_until(&m, PWRSEQ_ACT_RB_VCC_GATE_EN,
+		      m.ctx.cfg.rb_window_timeout_ms);
 	expect_present(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 }
 
@@ -2149,14 +2154,37 @@ static void test_wdt_cadence_at_the_real_250ms_call_rate(void)
 
 static void test_wdt_cadence_holds_at_every_plausible_call_rate(void)
 {
-	const uint32_t rates[] = { 10U, 50U, 100U, 250U, 500U };
+	const uint32_t rates[] = { 10U, 50U, 100U, 250U };
 	size_t i;
 
 	/*
 	 * The cadence must come from the decision, not the call rate — including a
-	 * caller fast enough that a per-call kick would be catastrophic and one slow
-	 * enough to be a real risk of quantising past the late boundary.
+	 * caller fast enough that a per-call kick would be catastrophic (10 ms) and
+	 * the housekeeping tick that used to own the kick (250 ms).
+	 *
+	 * There IS an upper bound on the call rate, and it is worth stating: a
+	 * service call quantises the kick up to the next poll, so the caller must
+	 * satisfy ceil(period / poll) * poll <= WINDOW_MAX. At the documented
+	 * 1100 ms cadence a 250 ms poll gives 1250 ms (inside the 1360 ms late
+	 * boundary, 110 ms of margin) while a 500 ms poll would give 1500 ms and
+	 * cold-cycle the board. That is why the kicker polls at 50 ms and why 500 ms
+	 * is deliberately absent from this list.
 	 */
+	for (i = 0U; i < ARRAY_LEN(rates); i++) {
+		uint32_t quantised = ((PWRSEQ_WDT_KICK_PERIOD_MS + rates[i] - 1U) /
+				      rates[i]) * rates[i];
+
+		TEST_ASSERT_TRUE_MESSAGE(quantised <= PWRSEQ_WDT_WINDOW_MAX_MS,
+					 "poll rate cannot meet the late boundary");
+	}
+	{
+		uint32_t bad = 500U;
+		uint32_t quantised = ((PWRSEQ_WDT_KICK_PERIOD_MS + bad - 1U) / bad) *
+				     bad;
+
+		TEST_ASSERT_TRUE(quantised > PWRSEQ_WDT_WINDOW_MAX_MS);
+	}
+
 	for (i = 0U; i < ARRAY_LEN(rates); i++) {
 		pwrseq_wdt_t w;
 		uint32_t min_i = 0U;
@@ -2327,7 +2355,7 @@ static void test_the_step_machine_never_drops_an_action(void)
 	 * count but that the step machine reserves queue room before every step:
 	 * it never drops an action, and it fits inside the queue.
 	 */
-	for (i = 0U; i < 100U; i++) {
+	for (i = 0U; i < 400U; i++) {
 		m.in.mono_ms += 100U;
 		TEST_ASSERT_EQUAL_INT(0, pwrseq_step(&m.ctx, &m.in));
 	}
@@ -2400,8 +2428,18 @@ static void test_an_out_of_band_caller_that_never_drains_is_counted(void)
 				 pwrseq_action_count(&ctx));
 	TEST_ASSERT_EQUAL_UINT32(0U, pwrseq_actions_dropped(&ctx));
 
+	/*
+	 * MEDIUM-4: a full queue must *refuse*, not fold the state change in and
+	 * drop the action. The caller is told (-EAGAIN) and the loss is still
+	 * counted, so "the glue stopped draining" remains diagnosable.
+	 */
 	TEST_ASSERT_EQUAL_INT(
-		0, pwrseq_poe_kill(&ctx, PWRSEQ_POE_KILL_MAGIC, 999U));
+		-EAGAIN, pwrseq_poe_kill(&ctx, PWRSEQ_POE_KILL_MAGIC, 999U));
+	TEST_ASSERT_EQUAL_UINT32(1U, pwrseq_actions_dropped(&ctx));
+
+	/* And a PFI does not erase that evidence (L2): the next boot's post-mortem
+	 * is the only place it can be read. */
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_pfi(&ctx, 1000U));
 	TEST_ASSERT_EQUAL_UINT32(1U, pwrseq_actions_dropped(&ctx));
 }
 
