@@ -440,6 +440,15 @@ typedef struct {
 	uint16_t steps_removed;
 	ptp_port_id_t sender;   /* sourcePortIdentity of the Announce */
 	ptp_port_id_t receiver; /* the port that received it */
+	/**
+	 * localPriority attached to this dataset, 1..255.
+	 *
+	 * Read only by the telecom profiles' comparison. For our own dataset it
+	 * is cfg.local_priority; for a foreign one it is cfg.port_local_priority
+	 * of the port that received the Announce. Ignored entirely by the
+	 * Default and Power profiles, which is why a zero here is harmless.
+	 */
+	uint8_t local_priority;
 } ptp_dataset_t;
 
 /**
@@ -456,10 +465,41 @@ typedef struct {
  * hearing its own dataset back, ERROR_2 is two datasets from one port. Use
  * ptp_dscmp_a_wins()/ptp_dscmp_b_wins() rather than the sign.
  *
+ * Equivalent to ptp_bmca_compare_profile() with PTP_PROFILE_DEFAULT.
+ *
  * @param a  Dataset A; must not be NULL.
  * @param b  Dataset B; must not be NULL.
  */
 ptp_dscmp_t ptp_bmca_compare(const ptp_dataset_t *a, const ptp_dataset_t *b);
+
+/**
+ * Dataset comparison under @p profile's rules.
+ *
+ * The telecom profiles (G.8275.1, and G.8275.2 which adopts its alternate BMCA)
+ * change part 1 in exactly two ways, per G.8275.1 §6.3:
+ *
+ *   - **priority1 is not compared.** The profile fixes it at 128 for every
+ *     conforming clock, so comparing it can only produce a wrong answer against
+ *     a misconfigured peer.
+ *   - **localPriority is compared after priority2**, lower winning, before the
+ *     grandmasterIdentity tiebreak. It is a *local* attribute — not carried on
+ *     the wire — so it expresses this clock's own preference between otherwise
+ *     equally good grandmasters.
+ *
+ * Part 2 (same grandmasterIdentity: the stepsRemoved and topology ordering) is
+ * unchanged from IEEE 1588. Two datasets that reach part 2 describe the same
+ * grandmaster reached by different paths, and a local preference between paths
+ * is what portDS.localPriority already expresses through part 1.
+ *
+ * The Default and Power profiles use the unmodified §9.3.4 algorithm, so this
+ * function is byte-for-byte ptp_bmca_compare() for them.
+ *
+ * @param a        Dataset A; must not be NULL.
+ * @param b        Dataset B; must not be NULL.
+ * @param profile  ptp_profile_t. Out-of-range behaves as Default.
+ */
+ptp_dscmp_t ptp_bmca_compare_profile(const ptp_dataset_t *a,
+				     const ptp_dataset_t *b, uint8_t profile);
 
 /** Recommended state, §9.3.3 (Figure 33). */
 typedef enum {
