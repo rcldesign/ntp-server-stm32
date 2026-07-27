@@ -616,15 +616,120 @@ bool disc_qerr_matches_pulse(const disc_qerr_match_t *m);
  * between its arrival and a later capture, rounded to whole seconds, is the
  * number of epochs to add. Wraps the week.
  *
+ * CALLER OBLIGATIONS — both are preconditions, not merely conditions under
+ * which the return value happens to be -EAGAIN:
+ *
+ *  1. **@p pvt_rx_mono_ms MUST NOT be newer than @p cap_mono_ms.** This routine
+ *     only ever extrapolates *forward* from a NAV-PVT to a later pulse. A
+ *     caller holding "the newest NAV-PVT" and "the newest capture" does NOT
+ *     satisfy this for most of a second: the receiver decodes epoch N's NAV-PVT
+ *     *after* pulse N has already been captured, so from the moment of that
+ *     decode until the next pulse the newest record is newer than the newest
+ *     capture and no naming is possible. That is a property of the pairing the
+ *     caller must design around — by keeping the previous observation and
+ *     offering it here (disc_name_pulse() below does exactly that) — and not
+ *     something this function can fix. A caller that ignores it does not get
+ *     wrong answers; it gets -EAGAIN for whatever fraction of the second its
+ *     own polling phase happens to fall in, which if that phase is stable is
+ *     the same fraction forever.
+ *
+ *  2. **The NAV-PVT must have arrived within 500 ms of the epoch it names.**
+ *     The epoch count is rounded to nearest, so a receiver whose NAV-PVT lands
+ *     more than half a second after its own epoch aliases onto the neighbouring
+ *     second. At 1 Hz and this board's configured baud the message lands within
+ *     a couple of hundred milliseconds; a violation is caught downstream by
+ *     disc_qerr_matches_pulse()'s exact ToW comparison, which refuses rather
+ *     than mis-names.
+ *
  * @retval 0        @p out_tow_ms written.
  * @retval -EINVAL  @p out_tow_ms is NULL, or @p pvt_itow_ms is not a valid ToW.
- * @retval -EAGAIN  The capture predates the NAV-PVT, or is too far past it to
- *                  attribute (more than @p max_age_ms), so no honest answer
- *                  exists.
+ * @retval -EAGAIN  The capture predates the NAV-PVT (obligation 1 unmet), or is
+ *                  too far past it to attribute (more than @p max_age_ms), so
+ *                  no honest answer exists.
  */
 int disc_pulse_tow_ms(uint32_t pvt_itow_ms, uint64_t pvt_rx_mono_ms,
 		      uint64_t cap_mono_ms, uint32_t max_age_ms,
 		      uint32_t *out_tow_ms);
+
+/* ------------------------------------------------ naming a captured pulse */
+
+/**
+ * One NAV-PVT arrival, offered as evidence of which second a pulse belongs to.
+ *
+ * @p rx_mono_ms is 64-bit deliberately: it is compared against a capture
+ * timestamp on the same monotonic clock, and a 32-bit millisecond counter wraps
+ * after 49.71 days — on an appliance built to run for years, a silent and
+ * permanent loss of the comparison.
+ */
+typedef struct {
+	uint32_t itow_ms;     /**< NAV-PVT iTOW, GPS ToW milliseconds */
+	uint64_t rx_mono_ms;  /**< monotonic ms when the message was decoded */
+	bool     valid;       /**< this slot holds a real observation */
+} disc_pvt_obs_t;
+
+/** One UBX-TIM-TP record, offered as evidence naming the pulse it describes. */
+typedef struct {
+	uint32_t target_tow_ms; /**< GPS ToW of the pulse the record describes */
+	uint64_t rx_mono_ms;    /**< monotonic ms when the record was decoded */
+	uint16_t week;          /**< GPS week of that pulse, after normalisation */
+	int32_t  qerr_ps;       /**< sawtooth quantisation error to subtract */
+	bool     qerr_valid;    /**< the qErr is usable AND the ToW is on GPS */
+	bool     valid;         /**< this slot holds a real record */
+} disc_qerr_obs_t;
+
+/** What a captured pulse turned out to be. */
+typedef struct {
+	uint32_t tow_ms;   /**< GPS ToW of the captured pulse */
+	uint16_t week;     /**< GPS week of the captured pulse */
+	int32_t  qerr_ps;  /**< the sawtooth belonging to THAT pulse */
+	bool     valid;    /**< a record was positively matched */
+} disc_pulse_name_t;
+
+/**
+ * Name the pulse captured at @p cap_mono_ms: which GPS second it was, and which
+ * sawtooth belongs to it.
+ *
+ * This is the *join* — the step that turns a hardware capture with no date into
+ * an absolutely-placed second. It exists as one function, here, because it was
+ * previously open-coded in two glue files against two different callers' timing
+ * assumptions, and the assumption the second caller violated was stated nowhere.
+ *
+ * The caller offers a short history rather than a single record, newest first,
+ * because BOTH pieces of receiver evidence are, for most of each second, newer
+ * than the capture they would have to describe:
+ *
+ *   NAV-PVT for epoch N is decoded *after* pulse N (obligation 1 above).
+ *   UBX-TIM-TP names the NEXT pulse, so the record decoded during second N
+ *   describes pulse N+1, not the pulse that has already been captured.
+ *
+ * Offer depth 1 and the join therefore succeeds only while the caller's own
+ * polling phase happens to fall between the pulse and that second's messages.
+ * Offer depth 2 — the record in force at the pulse, plus the one that replaced
+ * it — and there is always exactly one candidate on the correct side of the
+ * capture, whatever the phase. Depth 2 is the minimum; more is harmless.
+ *
+ * Selection is newest-first and every candidate must still prove itself:
+ * disc_pulse_tow_ms() derives an independent belief of the captured ToW from a
+ * NAV-PVT, and disc_qerr_matches_pulse() requires a TIM-TP record whose own ToW
+ * equals it exactly and which arrived before the capture and within a second of
+ * it. A candidate that cannot be proved is skipped, never guessed at: naming the
+ * wrong second is a one-second error in every timestamp the appliance emits.
+ *
+ * @param pvt          NAV-PVT observations, newest first. May be NULL if n is 0.
+ * @param n_pvt        Number of slots in @p pvt (invalid slots are skipped).
+ * @param qerr         TIM-TP records, newest first. May be NULL if n is 0.
+ * @param n_qerr       Number of slots in @p qerr.
+ * @param cap_mono_ms  Monotonic ms the edge was captured at.
+ * @param max_pvt_age_ms  Oldest NAV-PVT still allowed to name a pulse.
+ * @param out          Always fully written; zeroed on failure. Never NULL.
+ *
+ * @return true when @p out is a positively-matched name, false when no
+ *         combination of the offered evidence could prove one.
+ */
+bool disc_name_pulse(const disc_pvt_obs_t *pvt, size_t n_pvt,
+		     const disc_qerr_obs_t *qerr, size_t n_qerr,
+		     uint64_t cap_mono_ms, uint32_t max_pvt_age_ms,
+		     disc_pulse_name_t *out);
 
 /**
  * Whole reference seconds between two iterations of the discipline loop.

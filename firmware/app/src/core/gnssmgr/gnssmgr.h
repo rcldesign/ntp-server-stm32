@@ -355,7 +355,23 @@ typedef struct {
 	bool     tow_from_utc;   /**< target_tow_ms was converted from UTC */
 	bool     utc_available;
 	uint8_t  raim;
-	uint32_t rx_mono_ms;     /**< caller clock when the message was decoded */
+	/**
+	 * Caller clock when the message was decoded, **64-bit**.
+	 *
+	 * Wider than the rest of this manager's millisecond bookkeeping, and
+	 * deliberately so. Every other timestamp here is only ever used as a
+	 * difference against another value from the same 32-bit clock, where the
+	 * wrap cancels. This one is different: it is handed out to be compared
+	 * against a PPS capture timestamp taken on the caller's 64-bit monotonic
+	 * clock (disc_qerr_matches_pulse(), which requires the record to precede
+	 * the capture by no more than a second). Truncated to 32 bits, that
+	 * comparison holds for 49.71 days of uptime and then fails permanently:
+	 * the capture timestamp passes UINT32_MAX and never comes back, so the
+	 * computed lead is always ~4.29e9 ms, the sawtooth correction is refused
+	 * every second thereafter, and nothing about it is loud. On an appliance
+	 * specified to run for years that is not an edge case.
+	 */
+	uint64_t rx_mono_ms;
 } gnssmgr_qerr_t;
 
 /** Survey-in progress, from UBX-NAV-SVIN. */
@@ -415,6 +431,8 @@ typedef struct {
 
 	gnssmgr_leap_t leap;
 	gnssmgr_qerr_t qerr;
+	gnssmgr_qerr_t qerr_prev; /**< the record @p qerr replaced; see
+				    *  gnssmgr_qerr_prev_for_pps() */
 	gnssmgr_svin_t svin;
 	gnssmgr_sats_t sats;
 
@@ -527,11 +545,19 @@ int gnssmgr_step(gnssmgr_t *g, uint32_t mono_ms);
  * Unknown messages are ignored and reported as 0, not as an error: the receiver
  * emits messages this firmware never asked for.
  *
+ * @p mono_ms is 64-bit here alone among the manager's entry points, because one
+ * field it feeds — gnssmgr_qerr_t::rx_mono_ms — leaves this module to be
+ * compared against a 64-bit PPS capture timestamp, and a 32-bit millisecond
+ * clock stops being comparable with it after 49.71 days. Everything else this
+ * value touches is the manager's own interval bookkeeping, which uses it modulo
+ * 2^32 exactly as before, so passing the low half of the same clock the other
+ * entry points get keeps every deadline consistent.
+ *
  * @retval 0        Consumed (or ignored).
  * @retval -EINVAL  NULL argument.
  * @retval -EBADMSG A message of a known type failed its typed decode.
  */
-int gnssmgr_on_msg(gnssmgr_t *g, const ubx_msg_t *m, uint32_t mono_ms);
+int gnssmgr_on_msg(gnssmgr_t *g, const ubx_msg_t *m, uint64_t mono_ms);
 
 /**
  * 1 Hz housekeeping: one antenna-supervisor sample plus NAV-PVT staleness.
@@ -617,6 +643,35 @@ gnssmgr_li_t gnssmgr_leap_indicator(const gnssmgr_t *g);
  * @retval -EAGAIN  No TIM-TP decoded yet.
  */
 int gnssmgr_qerr_for_pps(const gnssmgr_t *g, gnssmgr_qerr_t *out);
+
+/**
+ * The record gnssmgr_qerr_for_pps() last replaced — one epoch of history.
+ *
+ * The latest record is not always the one that describes a given pulse, and for
+ * most of every second it is provably not. TIM-TP names the *next* pulse, so
+ * from the moment the receiver emits the record for pulse N+1 until pulse N+1
+ * actually arrives, the pulse that has been captured is N and the only record
+ * describing it is the one just superseded. A consumer running on the PPS edge
+ * never sees this; a consumer on an unrelated timer sees it for most of the
+ * second, and gets no sawtooth and no epoch for as long as its polling phase
+ * stays where it is.
+ *
+ * So one epoch is kept. Between this and gnssmgr_qerr_for_pps() there is always
+ * exactly one record on the correct side of any capture in the current second,
+ * whatever phase the consumer polls at. Both still have to prove themselves by
+ * ToW against the caller's independently-derived belief — see disc_name_pulse(),
+ * which consumes exactly this pair.
+ *
+ * Cleared with the current record whenever the receiver's measurements are
+ * invalidated (reset, firmware session): stale history must not outlive the
+ * receiver state that produced it.
+ *
+ * @retval 0        @p out filled.
+ * @retval -EINVAL  NULL argument.
+ * @retval -EAGAIN  Only one TIM-TP has been decoded since the last reset, so
+ *                  there is no superseded record yet.
+ */
+int gnssmgr_qerr_prev_for_pps(const gnssmgr_t *g, gnssmgr_qerr_t *out);
 
 /** Copy the survey-in progress block. @retval 0 / -EINVAL / -EAGAIN. */
 int gnssmgr_svin(const gnssmgr_t *g, gnssmgr_svin_t *out);

@@ -189,7 +189,7 @@ static void assert_frame_well_formed(const fake_t *f)
 /* ------------------------------------------------------- message builders -- */
 
 static void deliver(uint8_t cls, uint8_t id, const uint8_t *p, uint16_t len,
-		    uint32_t t)
+		    uint64_t t)
 {
 	ubx_msg_t m;
 
@@ -293,7 +293,7 @@ static void send_timels(int8_t curr_ls, int8_t change, int32_t to_event,
  * aligned (this board's default time grid), false = GNSS/GPS aligned.
  */
 static void send_tim_tp_base(uint32_t tow_ms, int32_t qerr_ps, bool qerr_invalid,
-			     bool utc_base, uint16_t week, uint32_t t)
+			     bool utc_base, uint16_t week, uint64_t t)
 {
 	uint8_t p[UBX_LEN_TIM_TP];
 
@@ -310,7 +310,7 @@ static void send_tim_tp_base(uint32_t tow_ms, int32_t qerr_ps, bool qerr_invalid
 }
 
 static void send_tim_tp(uint32_t tow_ms, int32_t qerr_ps, bool qerr_invalid,
-			uint32_t t)
+			uint64_t t)
 {
 	send_tim_tp_base(tow_ms, qerr_ps, qerr_invalid, true, 2500U, t);
 }
@@ -1769,7 +1769,7 @@ static void test_qerr_pairing(void)
 	TEST_ASSERT_EQUAL_UINT16(2500U, q.week);
 	TEST_ASSERT_TRUE(q.time_base_utc);
 	TEST_ASSERT_TRUE(q.utc_available);
-	TEST_ASSERT_EQUAL_UINT32(t, q.rx_mono_ms);
+	TEST_ASSERT_EQUAL_UINT64(t, q.rx_mono_ms);
 
 	/* Positive qErr, and the next second's pulse. */
 	t += 1000U;
@@ -1785,6 +1785,92 @@ static void test_qerr_pairing(void)
 	TEST_ASSERT_TRUE(q.valid);
 	TEST_ASSERT_FALSE(q.qerr_valid);
 	TEST_ASSERT_EQUAL_UINT32(259221000UL, q.target_tow_ms);
+}
+
+/*
+ * The record's arrival stamp is compared against a PPS capture timestamp taken
+ * on the caller's 64-bit monotonic clock, so it has to BE 64-bit. Held in a
+ * uint32_t it wraps after 49.71 days, after which the computed lead is always
+ * ~4.29e9 ms, disc_qerr_matches_pulse() refuses every pairing, and the sawtooth
+ * correction is lost for the rest of that uptime with nothing to show for it.
+ */
+static void test_qerr_rx_stamp_is_a_full_width_monotonic_clock(void)
+{
+	const uint64_t past_wrap = 4320000000ULL; /* 50 days */
+	gnssmgr_qerr_t q;
+	uint32_t t;
+
+	TEST_ASSERT_TRUE(past_wrap > (uint64_t)UINT32_MAX);
+
+	setup_mgr(NULL);
+	t = walk_config(1000U);
+	send_timels(18, 0, 0, 0x03U, t);
+
+	send_tim_tp(259201000UL, -1750, false, past_wrap);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
+	TEST_ASSERT_EQUAL_UINT64(past_wrap, q.rx_mono_ms);
+	/* The truncation this replaces would have stored 25 032 704. */
+	TEST_ASSERT_TRUE(q.rx_mono_ms > (uint64_t)UINT32_MAX);
+}
+
+/*
+ * One epoch of TIM-TP history.
+ *
+ * TIM-TP names the NEXT pulse, so from the moment the record for pulse N+1
+ * arrives until pulse N+1 actually fires, the only record describing the pulse
+ * that HAS been captured is the one just superseded. A consumer on the PPS edge
+ * never needs it; a consumer on an unrelated timer needs it for most of every
+ * second, and without it gets no epoch and no sawtooth for as long as its
+ * polling phase stays put — which, both clocks being derived from the PPS-
+ * disciplined PLL, is indefinitely.
+ */
+static void test_qerr_history_retains_the_superseded_record(void)
+{
+	gnssmgr_qerr_t q;
+	uint32_t t;
+
+	setup_mgr(NULL);
+	t = walk_config(1000U);
+	send_timels(18, 0, 0, 0x03U, t);
+
+	/* Nothing superseded yet. */
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, gnssmgr_qerr_prev_for_pps(&g_mgr, &q));
+
+	t += 1000U;
+	send_tim_tp(259201000UL, -1750, false, t);
+	/* One record is not a history either. */
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, gnssmgr_qerr_prev_for_pps(&g_mgr, &q));
+
+	t += 1000U;
+	send_tim_tp(259202000UL, 2500, false, t);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_prev_for_pps(&g_mgr, &q));
+	TEST_ASSERT_TRUE(q.valid);
+	TEST_ASSERT_EQUAL_UINT32(259219000UL, q.target_tow_ms);
+	TEST_ASSERT_EQUAL_INT32(-1750, q.qerr_ps);
+	TEST_ASSERT_EQUAL_UINT64((uint64_t)(t - 1000U), q.rx_mono_ms);
+	/* The newest is still the newest. */
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
+	TEST_ASSERT_EQUAL_UINT32(259220000UL, q.target_tow_ms);
+
+	/* A third record shifts the window by exactly one. */
+	t += 1000U;
+	send_tim_tp(259203000UL, 900, false, t);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_prev_for_pps(&g_mgr, &q));
+	TEST_ASSERT_EQUAL_UINT32(259220000UL, q.target_tow_ms);
+	TEST_ASSERT_EQUAL_INT32(2500, q.qerr_ps);
+
+	TEST_ASSERT_EQUAL_INT(-EINVAL, gnssmgr_qerr_prev_for_pps(NULL, &q));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, gnssmgr_qerr_prev_for_pps(&g_mgr, NULL));
+
+	/*
+	 * A receiver reset ends the history with the live record. A pre-reset
+	 * record naming a post-reset pulse is exactly the alias the pairing's
+	 * one-second bound exists to catch, and it must not be offered at all.
+	 */
+	t += 1000U;
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_notify_reset(&g_mgr, t));
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, gnssmgr_qerr_for_pps(&g_mgr, &q));
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, gnssmgr_qerr_prev_for_pps(&g_mgr, &q));
 }
 
 /*
@@ -2649,6 +2735,8 @@ int main(void)
 
 	RUN_TEST(test_leap_tracking_and_indicator);
 	RUN_TEST(test_qerr_pairing);
+	RUN_TEST(test_qerr_rx_stamp_is_a_full_width_monotonic_clock);
+	RUN_TEST(test_qerr_history_retains_the_superseded_record);
 	RUN_TEST(test_qerr_timescale_normalisation);
 	RUN_TEST(test_qerr_tow_matches_nav_pvt_itow);
 	RUN_TEST(test_nav_sat_summary);

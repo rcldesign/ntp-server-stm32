@@ -135,6 +135,16 @@ module_deps(glue_policy)
 # here. It compiles no core module, hence the empty dependency list.
 module_deps(ppscorr)
 
+# `ppsjoin` covers the step between core/disc's pairing primitives and the
+# `ppscorr` arithmetic: naming the pulse a hardware capture belongs to from
+# receiver evidence that arrives at its own times. `ppscorr` takes epoch_valid
+# as an input and `disc` drives the primitives from a caller sitting on the PPS
+# edge, so the join between them was covered by neither — and that is exactly
+# where a defect lived, silently deciding at boot whether a unit would ever
+# serve sub-microsecond time. disc_name_pulse() lives in core/disc, hence the
+# same dependency set as the `disc` suite.
+module_deps(ppsjoin disc util quality)
+
 # The platform area's safety policy, all four in Zephyr-free headers beside
 # their .c for the same reason `ppscorr` is: these decisions are silent when
 # they are wrong and dangerous when silent, and none of them is reachable from a
@@ -190,6 +200,17 @@ module_deps(smear_isolation)
 # disagreement between the two — ntp_key_set() validates before it clears, so a
 # rejected rotation left the previous key live.
 module_deps(ntp_keys ntp util quality)
+
+# `secops_policy` is the same idea for the net area's AAA offload gate
+# (app/src/zephyr/net/sts_secops_policy.h): the feed-slice arithmetic, the
+# budgets, and who releases the gate token when a submitter's budget expires
+# while the worker is still inside the lookup. Every way it can be wrong is
+# silent — a double release puts two logins inside sts_aaa.c's shared static
+# buffers, a lost release denies the management plane for the rest of the
+# uptime, and a wait that never terminates keeps feeding the watchdog that
+# exists to recover the board from exactly that. Zephyr-free by construction,
+# hence the empty dependency list.
+module_deps(secops_policy)
 
 # The Wave-4c security cluster. `core/auth` holds the AAA chain plus the RADIUS,
 # TACACS+ and LDAP codecs, so all four suites compile the same source set; the

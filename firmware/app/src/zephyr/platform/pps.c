@@ -80,8 +80,17 @@
  * needs is already latched there, and the ISR's budget is microseconds
  * (firmware/CLAUDE.md thread table). The receiver-side naming of the pulse — its
  * GPS week/ToW and the UBX-TIM-TP sawtooth — is resolved in the *caller's*
- * context, against the same gnssmgr snapshot and with the same positive ToW
- * match that the discipline thread uses.
+ * context, with the same positive ToW match that the discipline thread uses.
+ *
+ * That naming is the one thing this second consumer cannot inherit unchanged
+ * from the first. The discipline thread runs ON the edge, so "the receiver's
+ * newest records" and "the records describing the captured pulse" are the same
+ * thing; a caller on an unrelated timer sees them diverge for most of every
+ * second, and its phase relative to the PPS is frozen at boot because both
+ * clocks come off the PLL that this same PPS disciplines. The evidence the
+ * naming reads (sts_app.h sts_gnss_pulse_evidence_t) therefore carries an epoch
+ * of history, and pps_name_pulse() below picks the candidate on the correct side
+ * of the capture rather than assuming the newest one is.
  */
 
 #include <errno.h>
@@ -330,60 +339,76 @@ uint32_t sts_pps_counter_now(void)
 	return LL_TIM_GetCounter(pps_tim2);
 }
 
+/** Two navigation epochs of slack, matching disc_thread.c. */
+#define PPS_MAX_PVT_AGE_MS 2000U
+
+BUILD_ASSERT(STS_GNSS_PULSE_OBS >= 2,
+	     "naming a pulse from a non-phase-locked caller needs an epoch of "
+	     "history; see sts_app.h sts_gnss_pulse_evidence_t");
+
 /*
  * Name the pulse a capture belongs to, and the sawtooth that belongs to it.
  *
- * This is the same positive-match rule the discipline thread applies before it
- * corrects a phase sample (disc_apply_qerr in disc_thread.c), for the same
- * reason and with the same slack: UBX-TIM-TP is emitted in the second BEFORE the
- * pulse it describes, so "the newest record" is one second early, and a qErr
- * applied to the wrong second injects the sawtooth instead of removing it.
- * gnssmgr has already normalised the record's ToW onto the GPS timescale and
- * cleared qerr_valid when it could not; what is left is to work out which ToW
- * was captured and insist on an exact match.
+ * The rule is core/disc's disc_name_pulse() — the same positive ToW match the
+ * discipline thread applies before it corrects a phase sample, for the same
+ * reason: UBX-TIM-TP is emitted in the second BEFORE the pulse it describes, so
+ * "the newest record" is one second early, and a qErr applied to the wrong
+ * second injects the sawtooth instead of removing it. gnssmgr has already
+ * normalised the record's ToW onto the GPS timescale and cleared qerr_valid when
+ * it could not; what is left is to work out which ToW was captured and insist on
+ * an exact match.
  *
  * The consequence here is stronger than a mis-corrected phase sample, which is
- * why nothing is assumed: gnssmgr_qerr_t::week + ::target_tow_ms is what names
- * the ABSOLUTE second the served timescale is placed on. Matching the wrong
- * record is a one-second error in every timestamp this appliance emits.
+ * why nothing is assumed: the record's week + target_tow_ms is what names the
+ * ABSOLUTE second the served timescale is placed on. Matching the wrong record
+ * is a one-second error in every timestamp this appliance emits.
+ *
+ * What differs from the discipline thread is not the rule but the evidence. That
+ * thread runs ON the edge, so the receiver's newest records are still the ones
+ * that describe the captured pulse. This runs whenever its caller asks — the PTP
+ * servo is a free-running 1 Hz k_timer with no phase relationship to the PPS at
+ * all — and for most of every second the newest NAV-PVT is newer than the
+ * latched capture while the newest TIM-TP already names the NEXT pulse. Pairing
+ * against "the newest" therefore succeeds only inside the window between the
+ * edge and that second's messages, and since both clocks derive from the same
+ * PLL and that PLL is disciplined to this very PPS, the caller's phase is frozen
+ * at boot: a unit that boots into the dead region stays there. So the evidence
+ * carries an epoch of history and disc_name_pulse() picks the candidate on the
+ * correct side of the capture, whichever that is.
  */
 static void pps_name_pulse(sts_pps_epoch_t *out, const sts_pps_capture_t *cap)
 {
-	sts_gnss_snap_t g;
-	disc_qerr_match_t m;
-	uint32_t pulse_tow = 0;
+	sts_gnss_pulse_evidence_t ev;
+	disc_pvt_obs_t pvt[STS_GNSS_PULSE_OBS];
+	disc_qerr_obs_t qerr[STS_GNSS_PULSE_OBS];
+	disc_pulse_name_t name;
+	size_t i;
 
-	if (sts_gnss_snapshot(&g) != 0) {
-		return;
-	}
-	if (!g.qerr.valid || !g.have_status) {
-		return;
-	}
-
-	memset(&m, 0, sizeof(m));
-	m.record_valid = g.qerr.valid;
-	m.qerr_valid = g.qerr.qerr_valid;
-	m.qerr_ps = g.qerr.qerr_ps;
-	m.target_tow_ms = g.qerr.target_tow_ms;
-	m.record_rx_mono_ms = g.qerr.rx_mono_ms;
-	m.capture_mono_ms = cap->mono_ms;
-
-	/* Two navigation epochs of slack, matching disc_thread.c: the capture may
-	 * land either side of the NAV-PVT that names its own second. */
-	if (disc_pulse_tow_ms(g.pvt_itow_ms, g.pvt_rx_mono_ms, cap->mono_ms, 2000U,
-			      &pulse_tow) != 0) {
-		return;
-	}
-	m.pulse_tow_ms = pulse_tow;
-	m.pulse_tow_valid = true;
-
-	if (!disc_qerr_matches_pulse(&m)) {
+	if (sts_gnss_pulse_evidence(&ev) != 0) {
 		return;
 	}
 
-	out->gps_week = g.qerr.week;
-	out->gps_tow_ms = g.qerr.target_tow_ms;
-	out->qerr_ps = g.qerr.qerr_ps;
+	for (i = 0; i < STS_GNSS_PULSE_OBS; i++) {
+		pvt[i].itow_ms = ev.pvt[i].itow_ms;
+		pvt[i].rx_mono_ms = ev.pvt[i].rx_mono_ms;
+		pvt[i].valid = ev.pvt[i].valid;
+
+		qerr[i].target_tow_ms = ev.qerr[i].target_tow_ms;
+		qerr[i].rx_mono_ms = ev.qerr[i].rx_mono_ms;
+		qerr[i].week = ev.qerr[i].week;
+		qerr[i].qerr_ps = ev.qerr[i].qerr_ps;
+		qerr[i].qerr_valid = ev.qerr[i].qerr_valid;
+		qerr[i].valid = ev.qerr[i].valid;
+	}
+
+	if (!disc_name_pulse(pvt, STS_GNSS_PULSE_OBS, qerr, STS_GNSS_PULSE_OBS,
+			     cap->mono_ms, PPS_MAX_PVT_AGE_MS, &name)) {
+		return;
+	}
+
+	out->gps_week = name.week;
+	out->gps_tow_ms = name.tow_ms;
+	out->qerr_ps = name.qerr_ps;
 	out->epoch_valid = true;
 }
 

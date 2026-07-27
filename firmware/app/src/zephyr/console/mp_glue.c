@@ -103,18 +103,23 @@
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
+#include "auth/auth.h"
 #include "console/mp_glue.h"
 #include "console/sts_console.h"
 #include "fault/fault.h"
 #include "ina228/ina228.h"
-/*
- * net/sts_aaa.h is included across areas on that header's own invitation: it
- * exists so "the web server, the MCP console channel and the shell" share one
- * credential store, one role map and one lockout table instead of growing three.
- * This adds a console -> net edge to ARCHITECTURE.md §4.
- */
-#include "net/sts_aaa.h"
 #include "zephyr/sts_app.h"
+
+/*
+ * The AAA lookup is a net-area implementation (src/zephyr/net/sts_secops.c).
+ * Declared WEAK rather than reached through a cross-area header, exactly as
+ * sts_mcp.c next door declares the same symbol: with CONFIG_STS1000_NET=n it
+ * resolves to NULL, the maintenance plane falls back to a denial, and the image
+ * still links. This replaces the console -> net include edge on net/sts_aaa.h
+ * that the raw sts_aaa_check() call needed.
+ */
+extern int sts_aaa_check_fed(const char *user, const char *secret,
+			     uint8_t *out_role, int live_id) __attribute__((weak));
 
 LOG_MODULE_REGISTER(sts_mp, CONFIG_STS1000_LOG_LEVEL);
 
@@ -631,6 +636,23 @@ static int prov_cfg_commit(void *user, cfg_commit_res_t *res)
  * return is a denial — including -EHOSTUNREACH, which means no authority could
  * answer and is never an allow-on-failure (sts_aaa.h).
  *
+ * ---------------------------------------------------------------------------
+ * Why sts_aaa_check_fed() and not sts_aaa_check()
+ * ---------------------------------------------------------------------------
+ *
+ * NOT for the watchdog. This runs on the shell thread, which is not a liveness
+ * participant, so `live_id` is -1 and no feeding happens — the wrapper costs
+ * this plane nothing on that axis.
+ *
+ * It is for the gate. sts_secops.h states the invariant as "one lookup at a
+ * time, board-wide", and a raw sts_aaa_check() here made that false: an MP
+ * login and a web login could be inside sts_aaa.c's shared static g_tx/g_rx
+ * buffers at the same time, serialised only by that file's own mutex, while
+ * every sts_aaa_check_fed() caller queued behind whichever of them got there
+ * first. Going through the wrapper restores the invariant and additionally
+ * bounds this call at STS_AAA_FED_CEILING_MS, so a blackholed backend cannot
+ * park the maintenance plane — or the gate every other plane needs — forever.
+ *
  * Only -EBUSY is passed through with its identity intact, because core reports a
  * lockout distinctly; every other refusal reaches the host as one
  * indistinguishable answer, so this is not an account oracle.
@@ -700,6 +722,12 @@ static int prov_auth(void *user, const char *user_name, const char *secret,
 	if ((user_name == NULL) || (secret == NULL)) {
 		return -EACCES;
 	}
+	if (sts_aaa_check_fed == NULL) {
+		/* No net area: no authority could answer, which is a denial.
+		 * Checked before the lock dance below so the window is never
+		 * opened for a call that cannot happen. */
+		return -EACCES;
+	}
 
 	/* Raised before the release and cleared after the re-acquisition, so it
 	 * is observable to another thread exactly while the window is open. */
@@ -716,7 +744,10 @@ static int prov_auth(void *user, const char *user_name, const char *secret,
 		mp_auth_window = false;
 	}
 
-	rc = sts_aaa_check(user_name, secret, out_role);
+	/* live_id -1: the shell thread feeds no liveness participant, so there
+	 * is nothing to keep alive across the wait. The wrapper is here for the
+	 * board-wide gate and the budget, not for the watchdog. */
+	rc = sts_aaa_check_fed(user_name, secret, out_role, -1);
 
 	if (released) {
 		mp_engine_lock();

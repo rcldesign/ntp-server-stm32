@@ -127,6 +127,12 @@ typedef struct {
  * sawtooth instead of removing it, and naming the wrong second is a one-second
  * error in the served time.
  *
+ * The naming is resolved in the CALLER's context from the published
+ * sts_gnss_pulse_evidence_t below, by disc_name_pulse(). It therefore does not
+ * depend on when the caller happens to ask: see that structure's comment for
+ * why a naive "newest record" pairing would instead work or not work according
+ * to a phase fixed at boot.
+ *
  * Takes the GNSS snapshot mutex for a struct copy. Callable from any
  * cooperative thread; NOT from an ISR.
  *
@@ -145,6 +151,73 @@ int sts_pps_epoch_get(sts_pps_epoch_t *out);
  *
  * ISR-safe. Meaningless before sts_pps_epoch_get() reports a capture. */
 uint32_t sts_pps_counter_now(void);
+
+/* ---- receiver-side evidence for naming a captured pulse ----------------- */
+/*
+ * What sts_pps_epoch_get() needs from the receiver in order to fill in
+ * sts_pps_epoch_t's week/ToW/qErr, published by the GNSS thread.
+ *
+ * Separate from the discipline snapshot (platform.h sts_gnss_snap_t) because
+ * the two views answer to different callers with different timing, and the
+ * difference is the whole point of this structure:
+ *
+ *   The discipline thread runs ON the PPS edge. At that instant the receiver's
+ *   newest NAV-PVT still describes the PREVIOUS epoch and its newest UBX-TIM-TP
+ *   still describes the pulse that has just fired, so one record of each is all
+ *   it can use and all it needs.
+ *
+ *   The PTP servo runs on a free-running 1 Hz k_timer with no phase relationship
+ *   to the PPS at all. Once that second's messages have been decoded — which
+ *   happens a couple of hundred milliseconds after the pulse and holds for the
+ *   rest of the second — the newest NAV-PVT is newer than the latched capture
+ *   and the newest TIM-TP describes the NEXT pulse. Both are then unusable, and
+ *   a servo whose phase sits there gets no correlated reference at all. Because
+ *   both clocks come off the same PLL and that PLL is disciplined to this very
+ *   PPS, the servo's phase relative to the pulse is frozen at boot to about a
+ *   part in 1e9: it does not drift out of a bad phase in any useful lifetime.
+ *
+ * So this carries a short history — the record in force at the pulse, and the
+ * one that replaced it. With both available there is always exactly one
+ * candidate on the correct side of the capture, whatever the polling phase, and
+ * disc_name_pulse() still has to prove which by ToW before either is believed.
+ */
+
+/** History depth. Two: the record in force at the pulse, plus its successor. */
+#define STS_GNSS_PULSE_OBS 2
+
+/** One NAV-PVT arrival: which epoch it named, and when it was decoded. */
+typedef struct {
+	uint32_t itow_ms;    /* NAV-PVT iTOW, GPS ToW milliseconds */
+	uint64_t rx_mono_ms; /* sts_mono_ms() when the message was DECODED */
+	bool     valid;
+} sts_gnss_pvt_obs_t;
+
+/** One UBX-TIM-TP record, already normalised onto the GPS timescale. */
+typedef struct {
+	uint32_t target_tow_ms; /* GPS ToW of the pulse the record describes */
+	uint64_t rx_mono_ms;    /* sts_mono_ms() when the record was DECODED */
+	uint16_t week;          /* GPS week of that pulse, after normalisation */
+	int32_t  qerr_ps;       /* sawtooth quantisation error of that pulse */
+	bool     qerr_valid;    /* receiver flagged it good AND the ToW is on GPS */
+	bool     valid;
+} sts_gnss_qerr_obs_t;
+
+/** Both histories, newest first. Index 0 is always the most recent. */
+typedef struct {
+	sts_gnss_pvt_obs_t  pvt[STS_GNSS_PULSE_OBS];
+	sts_gnss_qerr_obs_t qerr[STS_GNSS_PULSE_OBS];
+} sts_gnss_pulse_evidence_t;
+
+/* Copy the published pulse-naming evidence.
+ *
+ * Takes the GNSS snapshot mutex for a struct copy; callable from any
+ * cooperative thread, NOT from an ISR. @p out is always fully written.
+ *
+ * @retval 0        @p out written (individual slots may still be invalid).
+ * @retval -EINVAL  @p out is NULL.
+ * @retval -ENODEV  The GNSS thread never started.
+ */
+int sts_gnss_pulse_evidence(sts_gnss_pulse_evidence_t *out);
 
 /* ---- reference-selection override (operator intent) --------------------- */
 /*

@@ -112,6 +112,13 @@ static uint8_t rx_buf[GNSS_RX_RING_SZ];
 static ring_t rx_ring;
 
 static sts_gnss_snap_t snap;
+/*
+ * Published beside `snap` and under the same mutex, but a separate structure:
+ * the discipline thread reads the snapshot on the PPS edge and needs one record
+ * of each kind, while sts_pps_epoch_get() runs on whatever thread asks and needs
+ * an epoch of history to name a pulse at all. sts_app.h states the case.
+ */
+static sts_gnss_pulse_evidence_t evidence;
 static K_MUTEX_DEFINE(snap_mutex);
 
 /*
@@ -150,6 +157,17 @@ static struct {
 	uint32_t pvt_itow_ms;
 	uint64_t pvt_rx_mono_ms;
 	bool have_pvt;
+	/*
+	 * The observation the pair above replaced. The discipline thread never
+	 * needs it — it asks on the PPS edge, when the latest NAV-PVT still
+	 * describes the previous epoch — but the PTP servo asks on an unrelated
+	 * timer, and for most of every second the latest observation is newer
+	 * than the capture it would have to name. See the sts_app.h
+	 * sts_gnss_pulse_evidence_t comment.
+	 */
+	uint32_t pvt_prev_itow_ms;
+	uint64_t pvt_prev_rx_mono_ms;
+	bool have_pvt_prev;
 	/*
 	 * The configured survey accuracy limit, in gnssmgr's 0.1 mm units, kept
 	 * here so an operator-supplied fixed position can declare an accuracy
@@ -321,6 +339,58 @@ static const gnssmgr_cb_t gnss_cb = {
 /* publication                                                               */
 /* ========================================================================= */
 
+/** Copy one gnssmgr TIM-TP record into the naming-evidence form. */
+static void gnss_fill_qerr_obs(sts_gnss_qerr_obs_t *o, const gnssmgr_qerr_t *q)
+{
+	o->target_tow_ms = q->target_tow_ms;
+	o->rx_mono_ms = q->rx_mono_ms;
+	o->week = q->week;
+	o->qerr_ps = q->qerr_ps;
+	o->qerr_valid = q->qerr_valid;
+	o->valid = true;
+}
+
+/*
+ * Assemble the pulse-naming evidence: the two most recent NAV-PVT observations
+ * and the two most recent UBX-TIM-TP records, newest first.
+ *
+ * Why two of each rather than one is the whole point of the structure and is
+ * argued at sts_app.h's sts_gnss_pulse_evidence_t; in short, for most of every
+ * second the newest record of either kind is newer than the capture it would
+ * have to describe, and a consumer that is not phase-locked to the PPS lands
+ * there most of the time.
+ *
+ * @p pvt_usable carries the same gate the discipline snapshot applies — a
+ * NAV-PVT iTOW from a receiver with no valid status is not evidence of
+ * anything — so the two views cannot disagree about whether the receiver is
+ * worth believing.
+ */
+static void gnss_build_evidence(sts_gnss_pulse_evidence_t *e, bool pvt_usable)
+{
+	gnssmgr_qerr_t q;
+
+	memset(e, 0, sizeof(*e));
+
+	if (pvt_usable && gs.have_pvt) {
+		e->pvt[0].itow_ms = gs.pvt_itow_ms;
+		e->pvt[0].rx_mono_ms = gs.pvt_rx_mono_ms;
+		e->pvt[0].valid = true;
+
+		if (gs.have_pvt_prev) {
+			e->pvt[1].itow_ms = gs.pvt_prev_itow_ms;
+			e->pvt[1].rx_mono_ms = gs.pvt_prev_rx_mono_ms;
+			e->pvt[1].valid = true;
+		}
+	}
+
+	if (gnssmgr_qerr_for_pps(&mgr, &q) == 0) {
+		gnss_fill_qerr_obs(&e->qerr[0], &q);
+	}
+	if (gnssmgr_qerr_prev_for_pps(&mgr, &q) == 0) {
+		gnss_fill_qerr_obs(&e->qerr[1], &q);
+	}
+}
+
 static void gnss_publish(uint32_t now_ms)
 {
 	gnssmgr_status_t st;
@@ -328,6 +398,7 @@ static void gnss_publish(uint32_t now_ms)
 	gnssmgr_qerr_t qerr;
 	gnssmgr_state_t state = gnssmgr_get_state(&mgr);
 	sts_gnss_snap_t s;
+	sts_gnss_pulse_evidence_t e;
 
 	ARG_UNUSED(now_ms);
 
@@ -388,9 +459,29 @@ static void gnss_publish(uint32_t now_ms)
 		s.have_status = false;
 	}
 
+	gnss_build_evidence(&e, s.have_status);
+
 	(void)k_mutex_lock(&snap_mutex, K_FOREVER);
 	snap = s;
+	evidence = e;
 	(void)k_mutex_unlock(&snap_mutex);
+}
+
+int sts_gnss_pulse_evidence(sts_gnss_pulse_evidence_t *out)
+{
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	if (!gs.started) {
+		memset(out, 0, sizeof(*out));
+		return -ENODEV;
+	}
+
+	(void)k_mutex_lock(&snap_mutex, K_FOREVER);
+	*out = evidence;
+	(void)k_mutex_unlock(&snap_mutex);
+
+	return 0;
 }
 
 int sts_gnss_snapshot(sts_gnss_snap_t *out)
@@ -538,7 +629,7 @@ static void gnss_drain_tunnel(void)
 	}
 }
 
-static void gnss_drain_rx(uint32_t now_ms)
+static void gnss_drain_rx(void)
 {
 	bool tee_on;
 	uint8_t b;
@@ -561,6 +652,7 @@ static void gnss_drain_rx(uint32_t now_ms)
 
 	while (ring_getc(&rx_ring, &b) == 0) {
 		ubx_msg_t m;
+		uint64_t rx_mono_ms;
 
 		if (tee_on) {
 			/* Before the parser consumes it — the classifier needs the
@@ -577,6 +669,15 @@ static void gnss_drain_rx(uint32_t now_ms)
 		}
 
 		/*
+		 * One arrival stamp per message, on the 64-bit monotonic clock.
+		 * gnssmgr_on_msg() takes the full width because the UBX-TIM-TP
+		 * record it produces is compared against a PPS capture timestamp
+		 * that is also 64-bit; a 32-bit stamp stops being comparable with
+		 * it after 49.71 days of uptime, silently and permanently.
+		 */
+		rx_mono_ms = sts_mono_ms();
+
+		/*
 		 * Note NAV-PVT arrival before gnssmgr consumes it: pairing a
 		 * captured pulse with its qErr needs the iTOW *and* the instant it
 		 * landed, and gnssmgr's status only keeps the former.
@@ -585,13 +686,20 @@ static void gnss_drain_rx(uint32_t now_ms)
 			ubx_nav_pvt_t pvt;
 
 			if (ubx_parse_nav_pvt(&m, &pvt) == 0) {
+				/* Retain the observation being replaced; see the
+				 * gs.pvt_prev_* comment. */
+				if (gs.have_pvt) {
+					gs.pvt_prev_itow_ms = gs.pvt_itow_ms;
+					gs.pvt_prev_rx_mono_ms = gs.pvt_rx_mono_ms;
+					gs.have_pvt_prev = true;
+				}
 				gs.pvt_itow_ms = pvt.itow_ms;
-				gs.pvt_rx_mono_ms = sts_mono_ms();
+				gs.pvt_rx_mono_ms = rx_mono_ms;
 				gs.have_pvt = true;
 			}
 		}
 
-		(void)gnssmgr_on_msg(&mgr, &m, now_ms);
+		(void)gnssmgr_on_msg(&mgr, &m, rx_mono_ms);
 	}
 
 	/*
@@ -716,7 +824,7 @@ static void gnss_entry(void *p1, void *p2, void *p3)
 		k_msleep(GNSS_TICK_MS);
 		now_ms = k_uptime_get_32();
 
-		gnss_drain_rx(now_ms);
+		gnss_drain_rx();
 		gnss_drain_requests(now_ms);
 		(void)gnssmgr_step(&mgr, now_ms);
 
@@ -839,6 +947,9 @@ int sts_gnss_notify_reset(uint32_t now_ms)
 	ring_reset(&rx_ring);
 	gnss_tee_reset(&gtee);
 	gs.have_pvt = false;
+	/* Retained history goes with the live observation: an epoch from before
+	 * this discontinuity must never name a pulse after it. */
+	gs.have_pvt_prev = false;
 
 	return gnssmgr_notify_reset(&mgr, now_ms);
 }
@@ -1066,6 +1177,9 @@ int sts_gnss_uart_suspend(void)
 	ring_reset(&rx_ring);
 	gnss_tee_reset(&gtee);
 	gs.have_pvt = false;
+	/* Retained history goes with the live observation: an epoch from before
+	 * this discontinuity must never name a pulse after it. */
+	gs.have_pvt_prev = false;
 
 	return gnssmgr_fw_enter(&mgr);
 }
@@ -1084,6 +1198,9 @@ int sts_gnss_uart_resume(void)
 	ring_reset(&rx_ring);
 	gnss_tee_reset(&gtee);
 	gs.have_pvt = false;
+	/* Retained history goes with the live observation: an epoch from before
+	 * this discontinuity must never name a pulse after it. */
+	gs.have_pvt_prev = false;
 	gs.fw_mode = false;
 
 	return gnssmgr_fw_exit(&mgr, (uint32_t)sts_mono_ms());

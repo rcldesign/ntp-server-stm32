@@ -23,6 +23,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "net/sts_secops_policy.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -68,13 +70,28 @@ extern "C" {
  * semaphore in short slices and feeds @p live_id on every slice, so it is
  * asleep — not runnable, not holding the CPU — while remaining visibly alive to
  * the watchdog supervisor. The answer is identical to calling sts_aaa_check()
- * directly, including its blocking duration; only the watchdog consequence
- * changes.
+ * directly, up to the caller's budget; only the watchdog consequence changes.
  *
- * One lookup at a time, board-wide. sts_aaa.c already serialises its own
- * exchanges under a mutex with shared static buffers, so nothing is lost by
- * making that explicit here — and a second caller waits in the same
- * liveness-feeding loop rather than blocking outright.
+ * ---------------------------------------------------------------------------
+ * ...and why every wait inside it is bounded
+ * ---------------------------------------------------------------------------
+ *
+ * Feeding the watchdog through a wait turns a DETECTABLE hang into an
+ * UNDETECTABLE one, so an unbounded fed wait is strictly the worst outcome
+ * available here: it defeats the one mechanism that recovers a wedged board.
+ * Every wait therefore carries a deadline, and overrunning it is a denial —
+ * -EHOSTUNREACH, which every caller already treats as one. sts_secops_policy.h
+ * holds the budgets, the arithmetic and the reasoning.
+ *
+ * One lookup at a time, board-wide — and, since 2026-07, that is true of every
+ * caller: the web plane, the MCP console and the Maintenance Protocol all enter
+ * through this function, so all three take the same gate. (MP used to call
+ * sts_aaa_check() raw, which left this sentence false and let an MP login and a
+ * web login sit inside sts_aaa.c's shared static buffers at the same time,
+ * serialised only by that file's own mutex.) sts_aaa.c serialises its own
+ * exchanges anyway, so nothing is lost by making it explicit here — and a
+ * second caller waits in the same liveness-feeding loop rather than blocking
+ * outright.
  *
  * @param user      NUL-terminated principal name.
  * @param secret    NUL-terminated password. Copied into a private buffer for
@@ -87,13 +104,37 @@ extern "C" {
  * @retval 0               Accepted.
  * @retval -EACCES         Rejected by an authority.
  * @retval -EBUSY          Locked out by the brute-force policy.
- * @retval -EHOSTUNREACH   No backend could answer, the worker could not be
- *                         started, or AAA is not running. **Treat as a
- *                         denial** — never an allow-on-failure.
+ * @retval -EHOSTUNREACH   No backend could answer; AAA is not running; the
+ *                         offload worker has died; another lookup still held
+ *                         the gate when the budget ran out; or this lookup
+ *                         overran it. **Treat as a denial** — never an
+ *                         allow-on-failure.
  * @retval -EINVAL         Bad argument, or an over-long user/secret.
  */
 int sts_aaa_check_fed(const char *user, const char *secret, uint8_t *out_role,
 		      int live_id);
+
+/**
+ * sts_aaa_check_fed() with the caller's own wall-clock budget.
+ *
+ * Identical in every respect except how long it may take. Use it wherever the
+ * caller is holding something the rest of the appliance needs — the web plane
+ * holds `api_lock` across the whole of rest_dispatch(), so its budget is
+ * STS_AAA_FED_PREAUTH_MS rather than the ceiling. Callers that stall nothing
+ * but their own session (the physical-access console planes) use the plain
+ * sts_aaa_check_fed() and get STS_AAA_FED_CEILING_MS.
+ *
+ * @param budget_ms  Total wall clock for the whole call, gate acquisition
+ *                   included. Clamped into (0, STS_AAA_FED_CEILING_MS]; the
+ *                   call returns within it plus at most one
+ *                   STS_AAA_FED_SLICE_MS of granularity.
+ *
+ * Returns exactly what sts_aaa_check_fed() returns; a budget overrun is
+ * -EHOSTUNREACH.
+ */
+int sts_aaa_check_fed_budgeted(const char *user, const char *secret,
+			       uint8_t *out_role, int live_id,
+			       uint32_t budget_ms);
 
 /**
  * Zeroize the key material a factory reset must not leave behind.

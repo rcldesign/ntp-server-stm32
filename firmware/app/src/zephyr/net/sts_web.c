@@ -1053,12 +1053,29 @@ static void cfg_applied(void *ctx, uint8_t group)
  *     solved: the STS_WEB_WORKERS share ONE liveness id, and this worker keeps
  *     feeding it throughout.
  *
- * The cost is honest and bounded: while a remote lookup is outstanding, REST
- * requests queue behind api_lock for as long as the operator's own configured
- * backend timeouts allow. That happens only on a unit configured for remote AAA
- * whose server is unreachable — the default chain is `local`, which never
- * blocks at all — and a slow management plane is the correct trade against
- * either a corrupted credential table or a rebooting grandmaster.
+ * Hazard 3 — the one hazard 1 and hazard 2 create between them. Keeping
+ * api_lock is right, and feeding liveness is right, but together they mean one
+ * UNAUTHENTICATED POST /api/login could park the entire HTTPS management plane
+ * for the operator's whole configured chain timeout (~540 s) with nothing
+ * noticing: the watchdog was being fed the whole time, on purpose. A detectable
+ * hang had been converted into an undetectable one.
+ *
+ * The fix is a tight budget on this specific call — not on the console planes'
+ * — because this is the caller holding something everyone else needs. The other
+ * two candidates were rejected: dropping api_lock trades a bounded stall for
+ * credential-store corruption (see above), and capping concurrent lookups is a
+ * no-op because api_lock and the AAA gate each already cap them at one. The
+ * full argument, and why 10 s, is written down at STS_AAA_FED_PREAUTH_MS in
+ * net/sts_secops_policy.h.
+ *
+ * The cost is now honest AND numbered: while a remote lookup is outstanding,
+ * REST requests queue behind api_lock for at most STS_AAA_FED_PREAUTH_MS plus
+ * one feed slice, and a second attempt made while the first is still stuck is
+ * refused immediately rather than buying the budget again. That happens only on
+ * a unit configured for remote AAA whose server is unreachable — the default
+ * chain is `local`, which never blocks at all — and a briefly slow management
+ * plane is the correct trade against either a corrupted credential table or a
+ * rebooting grandmaster.
  */
 static int web_remote_auth(void *user, const char *name, const char *secret,
 			   uint8_t *out_role)
@@ -1067,7 +1084,8 @@ static int web_remote_auth(void *user, const char *name, const char *secret,
 
 	ARG_UNUSED(user);
 
-	rc = sts_aaa_check_fed(name, secret, out_role, live_id);
+	rc = sts_aaa_check_fed_budgeted(name, secret, out_role, live_id,
+					STS_AAA_FED_PREAUTH_MS);
 	if (rc != 0) {
 		*out_role = (uint8_t)WEB_ROLE_NONE;
 		return (rc == -EBUSY) ? -EBUSY : -EACCES;
@@ -1979,9 +1997,11 @@ static int web_bring_up(void)
 	 * configured through cfg group 0x0A — were reachable from exactly one of
 	 * the three management surfaces.
 	 *
-	 * Wired to sts_aaa_check_fed(), NOT sts_aaa_check(): this runs on a web
-	 * worker, under api_lock, and the workers share one liveness
-	 * participant. See web_remote_auth() and sts_secops.h.
+	 * Wired to sts_aaa_check_fed_budgeted(), NOT sts_aaa_check(): this runs
+	 * on a web worker, under api_lock, and the workers share one liveness
+	 * participant — so it needs both the offload thread and a budget an
+	 * anonymous caller cannot exceed. See web_remote_auth() and
+	 * sts_secops_policy.h.
 	 */
 	(void)auth_web_set_remote(&auth_ctx, web_remote_auth, NULL);
 

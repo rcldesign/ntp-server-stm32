@@ -565,7 +565,7 @@ static void utc_tow_to_gps(uint32_t *tow_ms, uint16_t *week, int32_t leap_s)
 	*tow_ms = (uint32_t)tow;
 }
 
-static void on_tim_tp(gnssmgr_t *g, const ubx_tim_tp_t *t, uint32_t now_ms)
+static void on_tim_tp(gnssmgr_t *g, const ubx_tim_tp_t *t, uint64_t now_ms)
 {
 	uint32_t tow = t->tow_ms;
 	uint16_t week = t->week;
@@ -588,6 +588,16 @@ static void on_tim_tp(gnssmgr_t *g, const ubx_tim_tp_t *t, uint32_t now_ms)
 			 * be paired with a PPS edge. */
 			pairable = false;
 		}
+	}
+
+	/*
+	 * Retain the record being superseded. It is the one that describes the
+	 * pulse that has ALREADY fired — this new record names the next one — so
+	 * it is the only evidence available to a consumer that looks at a capture
+	 * after this message landed. gnssmgr_qerr_prev_for_pps() states the case.
+	 */
+	if (g->qerr.valid) {
+		g->qerr_prev = g->qerr;
 	}
 
 	g->qerr.valid = true;
@@ -1048,6 +1058,9 @@ static void invalidate_measurements(gnssmgr_t *g)
 	g->pvt_seen = false;
 	g->itow_seen = false;
 	g->qerr.valid = false;
+	/* The retained epoch of history goes with it: a record from before the
+	 * receiver's previous life must never name a pulse in this one. */
+	g->qerr_prev.valid = false;
 	g->svin.valid_msg = false;
 	g->sats.valid = false;
 	(void)memset(&g->rf, 0, sizeof(g->rf));
@@ -1115,6 +1128,9 @@ int gnssmgr_notify_reset(gnssmgr_t *g, uint32_t mono_ms)
 	g->pvt_seen = false;
 	g->itow_seen = false;
 	g->qerr.valid = false;
+	/* The retained epoch of history goes with it: a record from before the
+	 * receiver's previous life must never name a pulse in this one. */
+	g->qerr_prev.valid = false;
 	g->svin.valid_msg = false;
 	g->sats.valid = false;
 	(void)memset(&g->rf, 0, sizeof(g->rf));
@@ -1144,8 +1160,19 @@ int gnssmgr_step(gnssmgr_t *g, uint32_t mono_ms)
 	return 0;
 }
 
-int gnssmgr_on_msg(gnssmgr_t *g, const ubx_msg_t *m, uint32_t mono_ms)
+int gnssmgr_on_msg(gnssmgr_t *g, const ubx_msg_t *m, uint64_t mono_ms)
 {
+	/*
+	 * The manager's own bookkeeping — ACK deadlines, NAV-PVT staleness — is
+	 * interval arithmetic on the 32-bit clock the other entry points are
+	 * given, and stays there: narrowing is the identity on the low half, so a
+	 * deadline armed from gnssmgr_step() and checked from here still agrees.
+	 * Only gnssmgr_qerr_t::rx_mono_ms keeps the full width, because it is the
+	 * one value compared against a caller timestamp rather than against
+	 * another of the manager's own. See the field's own comment.
+	 */
+	const uint32_t mono32 = (uint32_t)mono_ms;
+
 	if ((g == NULL) || (m == NULL)) {
 		return -EINVAL;
 	}
@@ -1164,7 +1191,7 @@ int gnssmgr_on_msg(gnssmgr_t *g, const ubx_msg_t *m, uint32_t mono_ms)
 		if (ubx_parse_nav_pvt(m, &pvt) != 0) {
 			return -EBADMSG;
 		}
-		on_nav_pvt(g, &pvt, mono_ms);
+		on_nav_pvt(g, &pvt, mono32);
 		return 0;
 	}
 	if (ubx_msg_is(m, UBX_CLASS_NAV, UBX_ID_NAV_SAT)) {
@@ -1185,7 +1212,7 @@ int gnssmgr_on_msg(gnssmgr_t *g, const ubx_msg_t *m, uint32_t mono_ms)
 		if (ubx_parse_nav_svin(m, &sv) != 0) {
 			return -EBADMSG;
 		}
-		on_nav_svin(g, &sv, mono_ms);
+		on_nav_svin(g, &sv, mono32);
 		return 0;
 	}
 	if (ubx_msg_is(m, UBX_CLASS_TIM, UBX_ID_TIM_TP)) {
@@ -1207,7 +1234,7 @@ int gnssmgr_on_msg(gnssmgr_t *g, const ubx_msg_t *m, uint32_t mono_ms)
 		if (ubx_parse_ack(m, &ack) != 0) {
 			return -EBADMSG;
 		}
-		on_ack(g, &ack, mono_ms);
+		on_ack(g, &ack, mono32);
 		return 0;
 	}
 
@@ -1367,6 +1394,18 @@ int gnssmgr_qerr_for_pps(const gnssmgr_t *g, gnssmgr_qerr_t *out)
 		return -EAGAIN;
 	}
 	*out = g->qerr;
+	return 0;
+}
+
+int gnssmgr_qerr_prev_for_pps(const gnssmgr_t *g, gnssmgr_qerr_t *out)
+{
+	if ((g == NULL) || (out == NULL)) {
+		return -EINVAL;
+	}
+	if (!g->qerr_prev.valid) {
+		return -EAGAIN;
+	}
+	*out = g->qerr_prev;
 	return 0;
 }
 

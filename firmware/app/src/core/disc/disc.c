@@ -846,6 +846,82 @@ int disc_pulse_tow_ms(uint32_t pvt_itow_ms, uint64_t pvt_rx_mono_ms,
 	return 0;
 }
 
+bool disc_name_pulse(const disc_pvt_obs_t *pvt, size_t n_pvt,
+		     const disc_qerr_obs_t *qerr, size_t n_qerr,
+		     uint64_t cap_mono_ms, uint32_t max_pvt_age_ms,
+		     disc_pulse_name_t *out)
+{
+	size_t i;
+	size_t j;
+
+	if (out == NULL) {
+		return false;
+	}
+	memset(out, 0, sizeof(*out));
+
+	if ((pvt == NULL) || (qerr == NULL)) {
+		return false;
+	}
+
+	/*
+	 * Newest-first over the NAV-PVT candidates. The newest one that is not
+	 * itself newer than the capture needs the least extrapolation and is
+	 * therefore tried first; an older one reaches the same answer over more
+	 * whole seconds, so the ordering is a preference, not a correctness
+	 * requirement. disc_pulse_tow_ms() enforces both of its own obligations,
+	 * so a candidate on the wrong side of the capture is skipped here rather
+	 * than silently extrapolated backwards.
+	 */
+	for (i = 0u; i < n_pvt; i++) {
+		uint32_t pulse_tow = 0u;
+
+		if (!pvt[i].valid) {
+			continue;
+		}
+		if (disc_pulse_tow_ms(pvt[i].itow_ms, pvt[i].rx_mono_ms, cap_mono_ms,
+				      max_pvt_age_ms, &pulse_tow) != 0) {
+			continue;
+		}
+
+		/*
+		 * A believed ToW is not a named pulse. It becomes one only when a
+		 * TIM-TP record independently claims the same second — which is
+		 * also what supplies the sawtooth, and what catches a NAV-PVT that
+		 * arrived far enough after its own epoch to have aliased onto the
+		 * neighbouring second.
+		 */
+		for (j = 0u; j < n_qerr; j++) {
+			disc_qerr_match_t m;
+
+			if (!qerr[j].valid) {
+				continue;
+			}
+
+			memset(&m, 0, sizeof(m));
+			m.record_valid = qerr[j].valid;
+			m.qerr_valid = qerr[j].qerr_valid;
+			m.qerr_ps = qerr[j].qerr_ps;
+			m.target_tow_ms = qerr[j].target_tow_ms;
+			m.record_rx_mono_ms = qerr[j].rx_mono_ms;
+			m.capture_mono_ms = cap_mono_ms;
+			m.pulse_tow_ms = pulse_tow;
+			m.pulse_tow_valid = true;
+
+			if (!disc_qerr_matches_pulse(&m)) {
+				continue;
+			}
+
+			out->tow_ms = pulse_tow;
+			out->week = qerr[j].week;
+			out->qerr_ps = qerr[j].qerr_ps;
+			out->valid = true;
+			return true;
+		}
+	}
+
+	return false;
+}
+
 uint32_t disc_expected_advance_s(uint64_t prev_ms, uint64_t now_ms)
 {
 	uint64_t dt_ms;
