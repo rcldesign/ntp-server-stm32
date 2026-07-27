@@ -1,0 +1,7 @@
+# Out-of-tree vendor prefixes for the STS1000 devicetree.
+#
+# Zephyr's devicetree generator warns about `compatible` strings whose vendor
+# prefix is not registered. The board root node uses "rcldesign,..." so the
+# prefix is declared here; this file is picked up because firmware/ is declared
+# as a dts_root in ../../zephyr/module.yml.
+rcldesign	RCL Design (STS1000 "Meridian")

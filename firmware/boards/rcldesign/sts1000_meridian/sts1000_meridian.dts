@@ -1,0 +1,788 @@
+/*
+ * STS1000 "Meridian" — GPS-disciplined Stratum-1 NTP/NTS/PTP grandmaster.
+ *
+ * Copyright (c) 2026 RCL Design
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * MCU: STM32H563ZIT6, LQFP144.  There are NO spare GPIO on this package; PE1
+ * and PB11 are not bonded (their die pads carry VCAP1/VCAP2), and PH1/OSC_OUT
+ * (pin 24) is the single uncommitted pin because PH0 runs in HSE-bypass.
+ *
+ * Pin↔net authority: docs/sts1000_firmware_hardware_interface.md §1 (the
+ * as-built 144-pin contract).  Net names below match the canonical names in
+ * docs/ntp_server_peripheral_map.md exactly.
+ *
+ * Flash layout authority: firmware/ARCHITECTURE.md §3.
+ */
+
+/dts-v1/;
+
+#include <st/h5/stm32h563Xi.dtsi>
+#include <st/h5/stm32h563zitx-pinctrl.dtsi>
+#include "sts1000_meridian-pinctrl.dtsi"
+
+#include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/gpio/gpio.h>
+#include <zephyr/dt-bindings/i2c/i2c.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/dt-bindings/pwm/pwm.h>
+
+/ {
+	model = "RCL Design STS1000 Meridian";
+	compatible = "rcldesign,sts1000-meridian";
+
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	chosen {
+		/*
+		 * SRAM1 only (256 KB) for now.  SRAM1/2/3 are physically
+		 * contiguous (0x20000000..0x2009FFFF, 640 KB) but Zephyr's H5
+		 * SoC init does not set RCC_AHB2ENR SRAM2EN/SRAM3EN, so the
+		 * upper 384 KB must not be linked into until that is confirmed
+		 * against RM0481.
+		 * TODO(wave-2): verify SRAM2/SRAM3 clock-enable at reset, then
+		 * widen &sram1 to DT_SIZE_K(640) and disable &sram2/&sram3.
+		 */
+		zephyr,sram = &sram1;
+		zephyr,flash = &flash0;
+		zephyr,code-partition = &slot0_partition;
+		zephyr,entropy = &rng;
+
+		/*
+		 * Console and Zephyr shell both live on USB CDC-ACM #0 (the
+		 * "human" channel).  CDC-ACM #1 is the binary MCP channel used
+		 * by tools/meridian_ctl.py (ARCHITECTURE §6/§7).  cdc_acm
+		 * poll_out discards when the host is absent (no flow control),
+		 * so an un-enumerated console cannot stall boot.
+		 */
+		zephyr,console = &cdc_acm_uart0;
+		zephyr,shell-uart = &cdc_acm_uart0;
+	};
+
+	aliases {
+		/*
+		 * MCUboot serial-recovery entry button: BUTTON_1 (PF0), held
+		 * low at reset.  See sysbuild/mcuboot.conf.
+		 */
+		mcuboot-button0 = &button_1;
+	};
+
+	/*
+	 * Front-panel keypad + rotary-encoder push switch (interface ref §1,
+	 * §5.1; docs/sts1000_panel_controls.md §3).  All are active-low with
+	 * external 10 kΩ pull-ups and 0.1 µF debounce caps.
+	 *
+	 * `status = "disabled"` on purpose: these inputs are serviced by the
+	 * 1 kHz GPIOF/GPIOG IDR scan (interface ref §5), NOT by EXTI.  Binding
+	 * them to the gpio-keys input driver would claim EXTI0..EXTI6/EXTI11
+	 * and collide with the EXTI allocation in §6.  The nodes exist so the
+	 * pin contract lives in devicetree and so MCUboot can resolve the
+	 * `mcuboot-button0` alias (which only needs the `gpios` property).
+	 */
+	gpio_keys: gpio-keys {
+		compatible = "gpio-keys";
+		status = "disabled";
+
+		button_1: button_1 {
+			label = "BUTTON_1";
+			gpios = <&gpiof 0 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_KEY_1>;
+		};
+
+		button_2: button_2 {
+			label = "BUTTON_2";
+			gpios = <&gpiof 1 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_KEY_2>;
+		};
+
+		button_3: button_3 {
+			label = "BUTTON_3";
+			gpios = <&gpiof 2 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_KEY_3>;
+		};
+
+		button_4: button_4 {
+			label = "BUTTON_4";
+			gpios = <&gpiof 3 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_KEY_4>;
+		};
+
+		button_5: button_5 {
+			label = "BUTTON_5";
+			gpios = <&gpiof 4 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_KEY_5>;
+		};
+
+		button_6: button_6 {
+			label = "BUTTON_6";
+			gpios = <&gpiof 5 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_KEY_6>;
+		};
+
+		button_7: button_7 {
+			label = "BUTTON_7";
+			gpios = <&gpiof 6 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_KEY_7>;
+		};
+
+		encoder_button: encoder_button {
+			label = "ENC_BUTTON";
+			gpios = <&gpiof 11 GPIO_ACTIVE_LOW>;
+			zephyr,code = <INPUT_KEY_ENTER>;
+		};
+	};
+
+	/*
+	 * Board control/observation lines that are plain GPIO.
+	 *
+	 * This node is the single point of truth for later waves: `port/`
+	 * implementations take every discrete signal from here rather than
+	 * hard-coding a port/pin.  Polarity flags mirror the "Active pol."
+	 * column of interface ref §1.1, so callers use gpio_pin_set_dt(1) to
+	 * mean "asserted" for every one of them.
+	 *
+	 * Not listed here (owned elsewhere in this DTS): SPI4 chip-selects
+	 * PE11/PD2/PE9 (&spi4 cs-gpios), the keypad (gpio_keys), and every
+	 * pin claimed by a pinctrl group.
+	 */
+	zephyr_user: zephyr,user {
+		/* ---- Stage 2: release held-in-reset digital devices ---- */
+		/* PE10 NOR_RST_N — boots asserted via R205 10k pull-down. */
+		nor-rst-gpios = <&gpioe 10 GPIO_ACTIVE_LOW>;
+		/* PA10 DISP_RST — boots asserted via R209 10k pull-down. */
+		disp-rst-gpios = <&gpioa 10 GPIO_ACTIVE_LOW>;
+
+		/* ---- Stage 4: PHY ---- */
+		/* PD10 LAN_RST_N — boots asserted via R35 10k pull-down. */
+		lan-rst-gpios = <&gpiod 10 GPIO_ACTIVE_LOW>;
+
+		/* ---- Stage 5: GNSS + antenna ---- */
+		gps-pwr-en-gpios = <&gpioc 8 GPIO_ACTIVE_HIGH>;
+		gps-rst-gpios = <&gpiod 11 GPIO_ACTIVE_LOW>;
+		gps-safeboot-gpios = <&gpiod 15 GPIO_ACTIVE_LOW>;
+		gps-dsel-gpios = <&gpiod 7 GPIO_ACTIVE_HIGH>;
+		gps-extint-gpios = <&gpiod 6 GPIO_ACTIVE_HIGH>;
+		ant-bias-en-gpios = <&gpioc 9 GPIO_ACTIVE_HIGH>;
+		/* PD4 GPS_ANT_OFF_MON: high = F9T has disabled the LNA. */
+		gps-ant-off-gpios = <&gpiod 4 GPIO_ACTIVE_HIGH>;
+		/*
+		 * PD5 GPS_TXRDY: F9T pin 19 defaults to GEOFENCE_STAT — trust
+		 * this only after the CFG-TXREADY remap is ACKed
+		 * (ARCHITECTURE §10.8).
+		 */
+		gps-txrdy-gpios = <&gpiod 5 GPIO_ACTIVE_HIGH>;
+
+		/* ---- Stage 6: display / panel (deferrable) ---- */
+		disp-en-gpios = <&gpioc 11 GPIO_ACTIVE_HIGH>;
+		/* PB0 DISP_DC: high = data, low = command. */
+		disp-dc-gpios = <&gpiob 0 GPIO_ACTIVE_HIGH>;
+		disp-touch-int-gpios = <&gpiof 7 GPIO_ACTIVE_LOW>;
+		panel-led-en-gpios = <&gpioc 0 GPIO_ACTIVE_HIGH>;
+		/*
+		 * PE0 PANEL_LED_PWM. No timer output channel reaches PE0 on
+		 * STM32H563 (AF table has TIM4_ETR only), so this is a plain
+		 * GPIO for now — see the TODO in prj.conf.
+		 */
+		panel-led-pwm-gpios = <&gpioe 0 GPIO_ACTIVE_HIGH>;
+		panel-led-fault-gpios = <&gpiof 12 GPIO_ACTIVE_LOW>;
+		prox-wake-gpios = <&gpiof 10 GPIO_ACTIVE_LOW>;
+
+		/* ---- Timing reference selection ---- */
+		/*
+		 * PB6 MUX_SEL — 0 = OCXO (boot default via R188 100k
+		 * pull-down), 1 = Rb.  Written ONLY by the refsel action
+		 * executor, always inside the HSI-bridge sequence
+		 * (ARCHITECTURE §10.1).
+		 */
+		mux-sel-gpios = <&gpiob 6 GPIO_ACTIVE_HIGH>;
+		/* PC10 REF_TERM_EN — boots terminated (R176 100k pull-up). */
+		ref-term-en-gpios = <&gpioc 10 GPIO_ACTIVE_HIGH>;
+
+		/* ---- Stage 8: rubidium (guarded) ---- */
+		rb-pwr-en-gpios = <&gpiob 7 GPIO_ACTIVE_HIGH>;
+		rb-vcc-gate-gpios = <&gpiob 1 GPIO_ACTIVE_HIGH>;
+		/* PD3 RB_OV_RESET — pulse high to clear the 26 V OV latch. */
+		rb-ov-reset-gpios = <&gpiod 3 GPIO_ACTIVE_HIGH>;
+		/* PE3 RB_OV_DET — high = OV latch tripped.  Polled. */
+		rb-ov-det-gpios = <&gpioe 3 GPIO_ACTIVE_HIGH>;
+		/* PE4 — de-energized relay = RS-232 (fail-safe); high = CMOS. */
+		rb-rs232-cmos-gpios = <&gpioe 4 GPIO_ACTIVE_HIGH>;
+		/*
+		 * PB13 RB_LOCK — opto U48 inverts, so the electrical sense is
+		 * a firmware config bit.  DT carries the raw (uninverted) pin
+		 * polarity; `refsel` applies the configured inversion.
+		 */
+		rb-lock-gpios = <&gpiob 13 GPIO_ACTIVE_HIGH>;
+
+		/* ---- Stage 9: watchdog, alarms, kill ---- */
+		wdt-kick-gpios = <&gpiob 2 GPIO_ACTIVE_HIGH>;
+		wdt-en-gpios = <&gpioc 12 GPIO_ACTIVE_HIGH>;
+		/* PE15 POE_KILL — low = RUN; high latches a board cold-cycle. */
+		poe-kill-gpios = <&gpioe 15 GPIO_ACTIVE_HIGH>;
+		/*
+		 * PA6 K2 holdover relay — normally-ENERGIZED fail-safe.  HIGH
+		 * only once service quality is met (ARCHITECTURE §10.6).
+		 */
+		holdover-relay-gpios = <&gpioa 6 GPIO_ACTIVE_HIGH>;
+
+		/* ---- Power / supervisory inputs ---- */
+		/* PE8 PFI — falling edge = imminent power fail (EXTI8). */
+		pfi-gpios = <&gpioe 8 GPIO_ACTIVE_LOW>;
+		/* PA15 FAN_TACH — no external pull; use the internal one. */
+		fan-tach-gpios = <&gpioa 15 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>;
+		/*
+		 * PE2 USB_VBUS_SENSE.  The as-built net is a divider
+		 * (k ~= 0.547, ~2.87 V at VBUS 5.25 V) intended for an ADC, but
+		 * STM32H563 has no ADC channel on PE2 (ADC1/2 inputs are
+		 * PA0-PA7, PB0/PB1, PC0-PC5, PF11-PF14 only).  Read it as a
+		 * digital level instead: 2.87 V is comfortably above VIH.
+		 * Polled, never EXTI — EXTI2 belongs to PC2 (interface ref §6).
+		 */
+		usb-vbus-sense-gpios = <&gpioe 2 GPIO_ACTIVE_HIGH>;
+		/*
+		 * NCP1095 status lines: open-drain, RTN-referenced, high =
+		 * idle, and no external pull-ups are fitted — the internal
+		 * pull-up is mandatory or they float (interface ref §1.1).
+		 */
+		poe-ncm-gpios = <&gpioc 2 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		poe-lcf-gpios = <&gpioc 3 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+		poe-ncl-gpios = <&gpioc 7 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>;
+
+		/* ---- RT9742 load-switch fault flags (open-drain) ---- */
+		ant-en-fault-gpios = <&gpiof 8 GPIO_ACTIVE_LOW>;
+		disp-en-fault-gpios = <&gpiof 9 GPIO_ACTIVE_LOW>;
+
+		/* ---- Backup-supply power-good (TPS61094 / U67) ---- */
+		bkp-stm-pg-gpios = <&gpiof 14 GPIO_ACTIVE_HIGH>;
+		bkp-gps-pg-gpios = <&gpiof 15 GPIO_ACTIVE_HIGH>;
+
+		/*
+		 * ---- Rail power-good, GPIOG bits 0..7 (interface ref §5.2) --
+		 * Active-high "good".  All eight are usable; PG2 no longer
+		 * needs masking now that R266 is fitted.
+		 */
+		pg-3v3-gps-gpios = <&gpiog 0 GPIO_ACTIVE_HIGH>;
+		pg-ocxo-ldo-gpios = <&gpiog 1 GPIO_ACTIVE_HIGH>;
+		pg-3v0-rf-gpios = <&gpiog 2 GPIO_ACTIVE_HIGH>;
+		pg-5v-psu-gpios = <&gpiog 3 GPIO_ACTIVE_HIGH>;
+		pg-3v3-psu-gpios = <&gpiog 4 GPIO_ACTIVE_HIGH>;
+		pg-ocxo-psu-gpios = <&gpiog 5 GPIO_ACTIVE_HIGH>;
+		pg-rb-psu-gpios = <&gpiog 6 GPIO_ACTIVE_HIGH>;
+		pg-poe-gpios = <&gpiog 7 GPIO_ACTIVE_HIGH>;
+
+		/*
+		 * ---- INA228 ALERT lines (open-drain, active-low) ----
+		 * Eight on GPIOG 8..15, plus the panel monitor on PF13.
+		 * Addresses per interface ref §4: GPS is 0x4A (SHT45 owns
+		 * 0x44) and the panel monitor is 0x4C.
+		 */
+		ina-alert-poe-gpios = <&gpiog 8 GPIO_ACTIVE_LOW>;	/* 0x40 */
+		ina-alert-3v3-stm-gpios = <&gpiog 9 GPIO_ACTIVE_LOW>;	/* 0x41 */
+		ina-alert-5v-disp-gpios = <&gpiog 10 GPIO_ACTIVE_LOW>;	/* 0x42 */
+		ina-alert-3v3-gpios = <&gpiog 11 GPIO_ACTIVE_LOW>;	/* 0x43 */
+		ina-alert-3v3-gps-gpios = <&gpiog 12 GPIO_ACTIVE_LOW>;	/* 0x4A */
+		ina-alert-v-ant-gpios = <&gpiog 13 GPIO_ACTIVE_LOW>;	/* 0x45 */
+		ina-alert-ocxo-gpios = <&gpiog 14 GPIO_ACTIVE_LOW>;	/* 0x46 */
+		ina-alert-vcc-rb-gpios = <&gpiog 15 GPIO_ACTIVE_LOW>;	/* 0x47 */
+		ina-alert-5v-panel-gpios = <&gpiof 13 GPIO_ACTIVE_LOW>;	/* 0x4C */
+
+		/* ---- Analog / bus handles for later waves ---- */
+		/* OCXO Vc read-back (PA3, ADC1_INP15). */
+		io-channels = <&adc1 15>;
+		/* OCXO steering (PA4, DAC1_OUT1); centre code = 1.65 V. */
+		dac = <&dac1>;
+		dac-channel-id = <1>;
+		dac-resolution = <12>;
+	};
+};
+
+/*
+ * ---------------------------------------------------------------------------
+ * Clock tree
+ * ---------------------------------------------------------------------------
+ * PH0 is an HSE *bypass* input fed by the 74LVC1G157 clock mux (U52), i.e. the
+ * disciplined 10 MHz from either the OH300 OCXO or the FE-5680A rubidium.  Both
+ * references are 10 MHz, so a single PLL configuration serves both and the
+ * OCXO<->Rb handoff never needs a PLL re-programme (interface ref §3).
+ *
+ *   VCO  = 10 MHz / M(1) * N(50) = 500 MHz   (wide VCO range)
+ *   SYSCLK = VCO / P(2)          = 250 MHz
+ *   pll1_q = VCO / Q(4)          = 125 MHz
+ *   pll1_r = VCO / R(2)          = 250 MHz
+ */
+&clk_hse {
+	clock-frequency = <DT_FREQ_M(10)>;
+	hse-bypass;
+	status = "okay";
+};
+
+/* 32.768 kHz crystal on PC14/PC15 — RTC / backup domain time base. */
+&clk_lse {
+	status = "okay";
+};
+
+/* USB-FS clock.  No USB crystal is fitted; HSI48 is the only source. */
+&clk_hsi48 {
+	status = "okay";
+};
+
+&pll {
+	div-m = <1>;
+	mul-n = <50>;
+	div-p = <2>;
+	div-q = <4>;
+	div-r = <2>;
+	clocks = <&clk_hse>;
+	status = "okay";
+};
+
+&rcc {
+	clocks = <&pll>;
+	clock-frequency = <DT_FREQ_M(250)>;
+	/* STM32H563 allows 250 MHz on AHB and on every APB. */
+	ahb-prescaler = <1>;
+	apb1-prescaler = <1>;
+	apb2-prescaler = <1>;
+	apb3-prescaler = <1>;
+};
+
+/* ---------------------------------------------------------------------------
+ * Internal flash — partition map per ARCHITECTURE.md §3.
+ * 2 MB, 8 KB sectors.  Both slots are 112 sectors, which satisfies MCUboot
+ * swap-using-move.
+ * ---------------------------------------------------------------------------
+ */
+&flash0 {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		boot_partition: partition@0 {
+			label = "mcuboot";
+			reg = <0x00000000 DT_SIZE_K(128)>;
+		};
+
+		slot0_partition: partition@20000 {
+			label = "image-0";
+			reg = <0x00020000 DT_SIZE_K(896)>;
+		};
+
+		slot1_partition: partition@100000 {
+			label = "image-1";
+			reg = <0x00100000 DT_SIZE_K(896)>;
+		};
+
+		/* NVS: settings, PFI fast-save, calibration deltas. */
+		storage_partition: partition@1e0000 {
+			label = "storage";
+			reg = <0x001e0000 DT_SIZE_K(64)>;
+		};
+
+		/*
+		 * Anti-rollback counters / provisioning scratch.  Reserved for
+		 * the STiRoT + MCUboot chain; the application never writes it.
+		 */
+		provision_partition: partition@1f0000 {
+			label = "provision";
+			reg = <0x001f0000 DT_SIZE_K(64)>;
+		};
+	};
+};
+
+/* ---------------------------------------------------------------------------
+ * Networking — LAN8742AI RMII PHY, MAC IEEE-1588 hardware timestamping.
+ * The PHY runs in REFCLKO mode (nINTSEL = 0) and sources the 50 MHz RMII
+ * reference clock into PA1.  There is no PHY interrupt line: link state comes
+ * from MDIO polling.  PB10/RMII_RXER and PA7/RMII_CRS_DV double as PHY straps
+ * (PHYAD0 / MODE2) on the PHY side, so they must stay Hi-Z through PHY reset —
+ * this is why LAN_RST_N is released explicitly in Stage 4 rather than at boot.
+ * ---------------------------------------------------------------------------
+ */
+&mac {
+	pinctrl-0 = <&eth_ref_clk_pa1
+		     &eth_crs_dv_pa7
+		     &eth_tx_en_pa5
+		     &eth_rx_er_pb10
+		     &eth_txd0_pb12
+		     &eth_txd1_pb15
+		     &eth_rxd0_pc4
+		     &eth_rxd1_pc5
+		     /* PB5 ETH_PPS_OUT — MAC 1588 PPS -> U71 buffer -> J15. */
+		     &eth_pps_out_pb5>;
+	pinctrl-names = "default";
+	phy-connection-type = "rmii";
+	phy-handle = <&eth_phy>;
+	status = "okay";
+};
+
+&mdio {
+	pinctrl-0 = <&eth_mdio_pa2 &eth_mdc_pc1>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	eth_phy: ethernet-phy@0 {
+		compatible = "ethernet-phy";
+		reg = <0x00>;
+		status = "okay";
+	};
+};
+
+/* ---------------------------------------------------------------------------
+ * I²C1 (PB8/PB9) — 15-device 400 kHz housekeeping bus, all on always-on
+ * 3V3_STM.  Only devices with in-tree drivers are instantiated here; the nine
+ * INA228 monitors and the ATECC608B are driven as raw I²C from application
+ * code (core/ina228 + CryptoAuthLib), so they deliberately have no DT nodes.
+ * Address map authority: interface ref §4.
+ * ---------------------------------------------------------------------------
+ */
+&i2c1 {
+	pinctrl-0 = <&i2c1_scl_pb8 &i2c1_sda_pb9>;
+	pinctrl-names = "default";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	status = "okay";
+
+	/* U58, ADD0 -> GND. Enclosure temperature; drives the fan loop. */
+	tmp117_enclosure: tmp11x@48 {
+		compatible = "ti,tmp11x";
+		reg = <0x48>;
+	};
+
+	/* U57, ADD0 -> 3V3_STM. Oscillator temperature; tempco feed-forward. */
+	tmp117_osc: tmp11x@49 {
+		compatible = "ti,tmp11x";
+		reg = <0x49>;
+	};
+
+	/* U72 SHT45 owns 0x44 — this is why the GPS INA228 is strapped 0x4A. */
+	sht45: sht4x@44 {
+		compatible = "sensirion,sht4x";
+		reg = <0x44>;
+		repeatability = <2>;
+	};
+
+	/* U59, SA0 -> 3V3_STM => 0x19. INT unconnected, so poll. */
+	lis2dh12: lis2dh12@19 {
+		compatible = "st,lis2dh12";
+		reg = <0x19>;
+	};
+
+	/* U61, fixed address. DRDY unconnected, so poll. */
+	iis2mdc: iis2mdc@1e {
+		compatible = "st,iis2mdc";
+		reg = <0x1e>;
+	};
+};
+
+/* ---------------------------------------------------------------------------
+ * SPI4 (PE12 SCK / PE13 MISO / PE14 MOSI) — three devices, distinct CS.
+ * Firmware must arbitrate with a bus mutex and reconfigure CPOL/CPHA/speed per
+ * device (interface ref §9).
+ *   cs-gpios[0] PE11  SPI_NSS      -> NOR U62      (MX25L25645G)
+ *   cs-gpios[1] PD2   SPI_DPOT_CS  -> digipot U43  (MCP41U83, mode 0,0)
+ *   cs-gpios[2] PE9   DISP_CS      -> display      (ST7796)
+ * Only the NOR gets a driver node this wave: the digipot is raw SPI from
+ * core/pwrseq and the display subsystem is deferred.
+ * ---------------------------------------------------------------------------
+ */
+&spi4 {
+	pinctrl-0 = <&spi4_sck_pe12 &spi4_miso_pe13 &spi4_mosi_pe14>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpioe 11 GPIO_ACTIVE_LOW>,
+		   <&gpiod  2 GPIO_ACTIVE_LOW>,
+		   <&gpioe  9 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	/*
+	 * Macronix MX25L25645G — 256 Mbit (32 MB), 4 KB sectors / 64 KB blocks,
+	 * 256 B pages.  `size` is in BITS.  Over 16 MB, so the 4-byte-address
+	 * opcode set (0x13/0x0C/0x12/0x21/0xDC) is used rather than the
+	 * stateful EN4B mode — that keeps the part addressable even if it is
+	 * reset asynchronously by NOR_RST_N.
+	 *
+	 * NOR_RST_N (PE10) is deliberately NOT wired as `reset-gpios` here:
+	 * the bring-up sequencer owns that pin (interface ref §2 Stage 2,
+	 * ARCHITECTURE §10.4) and this node is deferred-init so no bus traffic
+	 * can happen before the reset is released.  See src/main.c.
+	 */
+	nor_flash: mx25l25645g@0 {
+		compatible = "jedec,spi-nor";
+		status = "okay";
+		zephyr,deferred-init;
+		reg = <0>;
+		spi-max-frequency = <DT_FREQ_M(40)>;
+		jedec-id = [c2 20 19];
+		size = <DT_SIZE_M(256)>;
+		use-4b-addr-opcodes;
+		has-dpd;
+		t-enter-dpd = <10000>;
+		t-exit-dpd = <30000>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/*
+			 * Whole device is one LittleFS volume (`/lfs`): bulk
+			 * config export, calibration tables, log spool, GNSS
+			 * cache, staged assets.  Mounted by a later wave.
+			 */
+			lfs_partition: partition@0 {
+				label = "lfs";
+				reg = <0x00000000 DT_SIZE_M(32)>;
+			};
+		};
+	};
+};
+
+/* ---------------------------------------------------------------------------
+ * Serial ports (interface ref §9).
+ * ---------------------------------------------------------------------------
+ */
+
+/* Primary GNSS link to the ZED-F9T (UBX only; NMEA disabled by CFG). */
+&usart3 {
+	pinctrl-0 = <&usart3_tx_pd8 &usart3_rx_pd9>;
+	pinctrl-names = "default";
+	current-speed = <460800>;
+	status = "okay";
+};
+
+/*
+ * GNSS second port (RTCM / aux).  38400 baud is the ZED-F9T factory default.
+ *
+ * NOTE: interface ref §1.1 lists PD0 as UART4_TX and PD1 as UART4_RX, but the
+ * STM32H563 alternate-function table has UART4_RX on PD0 (AF8) and UART4_TX on
+ * PD1 (AF8) — there is no UART4_TX on PD0 at all.  The *net names* confirm the
+ * silicon: PD0 is `GPS_TXD2` (the F9T's transmit output, hence an MCU input)
+ * and PD1 is `GPS_RXD2` (the F9T's receive input, hence an MCU output), which
+ * is exactly how the same doc names USART3's PD8/PD9.  The board is correct;
+ * the AF column of that table row is transposed.
+ */
+&uart4 {
+	pinctrl-0 = <&uart4_tx_pd1 &uart4_rx_pd0>;
+	pinctrl-names = "default";
+	current-speed = <38400>;
+	status = "okay";
+};
+
+/*
+ * FE-5680A rubidium telemetry.  MCU TX = PB4 (`RB_RX`, NJTRST — this is what
+ * makes the board SWD-only), MCU RX = PE7 (`RB_TX`).  Level translation is
+ * SN65C3221E + the K1 DPDT relay selected by RB_RS232_CMOS_SW (PE4).
+ */
+&uart7 {
+	pinctrl-0 = <&uart7_tx_pb4 &uart7_rx_pe7>;
+	pinctrl-names = "default";
+	current-speed = <9600>;
+	status = "okay";
+};
+
+/* ---------------------------------------------------------------------------
+ * USB device — self-powered, gated by USB_VBUS_SENSE (PE2, polled).
+ * Composite: CDC-ACM #0 = shell + log console, CDC-ACM #1 = binary MCP channel
+ * (ARCHITECTURE §6/§7).  MCUboot disables cdc_acm_uart1 and uses #0 for its own
+ * serial recovery (see sysbuild/mcuboot.overlay).
+ * ---------------------------------------------------------------------------
+ */
+zephyr_udc0: &usb {
+	pinctrl-0 = <&usb_dm_pa11 &usb_dp_pa12>;
+	pinctrl-names = "default";
+	status = "okay";
+
+	cdc_acm_uart0: cdc_acm_uart0 {
+		compatible = "zephyr,cdc-acm-uart";
+		label = "STS1000 console";
+	};
+
+	cdc_acm_uart1: cdc_acm_uart1 {
+		compatible = "zephyr,cdc-acm-uart";
+		label = "STS1000 MCP";
+	};
+};
+
+/* ---------------------------------------------------------------------------
+ * Timing engine analog I/O (interface ref §3).
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * DAC1_OUT1 on PA4 = `OCXO_VC`.  Written ONLY by the `discipline` thread
+ * (ARCHITECTURE §10.2).  R121 (10 M) holds the Vc node at the 1.65 V centre if
+ * the DAC ever goes Hi-Z, so Vc never floats.
+ */
+&dac1 {
+	pinctrl-0 = <&dac1_out1_pa4>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/*
+ * ADC1_INP15 on PA3 = `OCXO_V`, the loop-filter read-back.  VREF+ (pin 32) is
+ * the external MCP1502-33 3.3 V reference; Zephyr's STM32 ADC driver models the
+ * VREF+ pin as ADC_REF_INTERNAL, which is the only reference it accepts.
+ * ADC kernel clock = HCLK / 6 = 41.7 MHz (max 75 MHz).
+ */
+&adc1 {
+	pinctrl-0 = <&adc1_inp15_pa3>;
+	pinctrl-names = "default";
+	clocks = <&rcc STM32_CLOCK(AHB2, 10U)>,
+		 <&rcc STM32_SRC_HCLK ADCDAC_SEL(0)>;
+	st,adc-clock-source = "ASYNC";
+	st,adc-prescaler = <6>;
+	status = "okay";
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@f {
+		reg = <15>;
+		zephyr,gain = "ADC_GAIN_1";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		/* 248 ADC clocks ~= 5.95 us — plenty for the buffered Vc node. */
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_TICKS, 248)>;
+		zephyr,resolution = <12>;
+	};
+};
+
+/* ---------------------------------------------------------------------------
+ * Timers.
+ * ---------------------------------------------------------------------------
+ */
+
+/*
+ * TIM1 encoder-interface mode on PA8/PA9 (`ENC_A`/`ENC_B`, via the U68 5 V-safe
+ * Schmitt buffer).  Hardware quadrature decode — these pins are never scanned.
+ * Glitch rejection uses the timer input filter, not series R/C
+ * (docs/sts1000_panel_controls.md §2.2).
+ */
+&timers1 {
+	st,prescaler = <0>;
+	status = "okay";
+
+	panel_qdec: qdec {
+		compatible = "st,stm32-qdec";
+		pinctrl-0 = <&tim1_ch1_pa8 &tim1_ch2_pa9>;
+		pinctrl-names = "default";
+		st,input-filter-level = <5>;	/* Fs = F_clk/2, N = 8 */
+		/*
+		 * TODO(wave-3): confirm the fitted encoder's detent count.
+		 * 96 = 24 detents x4 quadrature edges is the placeholder; the
+		 * UI consumes deltas, not absolute revolutions.
+		 */
+		st,counts-per-revolution = <96>;
+		status = "okay";
+	};
+};
+
+/*
+ * TIM2_CH1 on PA0 = `GPS_PPS`, the primary TIMEPULSE capture.  32-bit counter
+ * at the full 250 MHz timer clock (4 ns resolution, 17.2 s wrap).  The capture
+ * itself is configured by the application (pps_capture); enabling the node here
+ * clocks the timer and muxes the pin to AF1.
+ */
+&timers2 {
+	st,prescaler = <0>;
+	status = "okay";
+
+	pps_primary: pwm {
+		pinctrl-0 = <&tim2_ch1_pa0>;
+		pinctrl-names = "default";
+		status = "okay";
+	};
+};
+
+/* TIM3_CH1 on PC6 = `GPS_TP2`, the secondary TIMEPULSE (cross-check vs PA0). */
+&timers3 {
+	st,prescaler = <0>;
+	status = "okay";
+
+	pps_secondary: pwm {
+		pinctrl-0 = <&tim3_ch1_pc6>;
+		pinctrl-names = "default";
+		status = "okay";
+	};
+};
+
+/*
+ * TIM4_CH1..CH3 on PD12/PD13/PD14 = status RGB D5 (common anode, low-side NPN,
+ * active-high).  Prescaler 249 -> 1 MHz tick, so a 1 kHz LED PWM is 1000 steps.
+ */
+&timers4 {
+	st,prescaler = <249>;
+	status = "okay";
+
+	rgb_pwm: pwm {
+		pinctrl-0 = <&tim4_ch1_pd12 &tim4_ch2_pd13 &tim4_ch3_pd14>;
+		pinctrl-names = "default";
+		status = "okay";
+	};
+};
+
+/*
+ * TIM12_CH1 on PB14 = `EXTREF_MON`.  Input capture used to band-check the
+ * external ~10 MHz before the reference state machine will consider Rb.
+ */
+&timers12 {
+	st,prescaler = <0>;
+	status = "okay";
+
+	extref_mon: pwm {
+		pinctrl-0 = <&tim12_ch1_pb14>;
+		pinctrl-names = "default";
+		status = "okay";
+	};
+};
+
+/*
+ * TIM15: CH1 on PE5 = `FAN_PWM` (25 kHz), CH2 on PE6 = `DISP_BL`.
+ * Prescaler 0 -> 250 MHz tick, so a 10000-tick period is exactly 25 kHz with
+ * 10000 duty steps.  Fan fail-safe: an undriven PE5 is full speed, and the
+ * thermal loop's idle/fault duty must be 100 % (ARCHITECTURE §10.9).
+ */
+&timers15 {
+	st,prescaler = <0>;
+	status = "okay";
+
+	panel_pwm: pwm {
+		pinctrl-0 = <&tim15_ch1_pe5 &tim15_ch2_pe6>;
+		pinctrl-names = "default";
+		status = "okay";
+	};
+};
+
+/* ---------------------------------------------------------------------------
+ * Misc.
+ * ---------------------------------------------------------------------------
+ */
+
+/* RTC / backup domain off the 32.768 kHz LSE; VBAT well is supercap-backed. */
+&rtc {
+	clocks = <&rcc STM32_CLOCK(APB3, 21U)>,
+		 <&rcc STM32_SRC_LSE RTC_SEL(1)>;
+	status = "okay";
+};
+
+&backup_sram {
+	status = "okay";
+};
+
+/* TRNG — entropy source for TLS/NTS. */
+&rng {
+	status = "okay";
+};
+
+&gpdma1 {
+	status = "okay";
+};
+
+&gpdma2 {
+	status = "okay";
+};
+
+/* Port I does not exist on LQFP144. */
+&gpioi {
+	status = "disabled";
+};

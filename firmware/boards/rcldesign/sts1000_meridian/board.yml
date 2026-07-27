@@ -1,0 +1,6 @@
+board:
+  name: sts1000_meridian
+  full_name: STS1000 "Meridian" Stratum-1 NTP/NTS/PTP grandmaster
+  vendor: rcldesign
+  socs:
+    - name: stm32h563xx

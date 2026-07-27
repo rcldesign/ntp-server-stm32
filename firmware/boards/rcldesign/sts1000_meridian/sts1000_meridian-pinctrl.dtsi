@@ -1,0 +1,41 @@
+/*
+ * STS1000 "Meridian" — board pin-control overrides.
+ *
+ * Copyright (c) 2026 RCL Design
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Every pin group the board uses already exists in the SoC pin-control package
+ * (`st/h5/stm32h563zitx-pinctrl.dtsi`, included by the board .dts before this
+ * file).  This file only carries deltas that follow from *this board's*
+ * schematic, so that the .dts can keep referencing the standard node names.
+ *
+ * Pin↔net authority: docs/sts1000_firmware_hardware_interface.md §1.
+ */
+
+/*
+ * I²C1 (PB8 `I2C_SCL` / PB9 `I2C_SDA`) is a 15-device 400 kHz bus with
+ * *external* 4.7 kΩ pull-ups to 3V3_STM (R202/R203) plus an LTC4311 rise-time
+ * accelerator (U56, EN strapped high).  The SoC package enables the internal
+ * pull-ups, which would sit in parallel with the designed bus impedance and
+ * skew the rise-time budget the accelerator was sized against — remove them and
+ * let the board resistors define the bus.  Open-drain is kept.
+ */
+&i2c1_scl_pb8 {
+	/delete-property/ bias-pull-up;
+};
+
+&i2c1_sda_pb9 {
+	/delete-property/ bias-pull-up;
+};
+
+/*
+ * SPI4 is a three-device shared bus (NOR U62, digipot U43, display) whose
+ * chip-selects all have external 10 kΩ pull-ups.  The SoC package biases
+ * SCK/MISO/MOSI down, which is the correct idle state for SPI mode 0 and is
+ * kept.  MOSI/SCK carry 22 Ω source terminators (R210/R211) toward the display;
+ * hold the pin slew rate high so the series network — not the driver — shapes
+ * the edge.
+ */
+&spi4_mosi_pe14 {
+	slew-rate = "very-high-speed";
+};

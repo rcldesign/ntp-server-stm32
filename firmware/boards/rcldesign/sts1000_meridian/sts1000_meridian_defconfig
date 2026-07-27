@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Board-level defaults. These apply to EVERY sysbuild image (MCUboot as well as
+# the application), so keep them to what the hardware itself mandates.
+
+# Cortex-M33 memory protection + guard pages on every stack.
+CONFIG_ARM_MPU=y
+CONFIG_HW_STACK_PROTECTION=y
+
+# Every bring-up stage in `docs/sts1000_firmware_hardware_interface.md` §2 drives
+# GPIO, and MCUboot needs GPIO for the serial-recovery entry button (PF0).
+CONFIG_GPIO=y
+
+# Console/serial plumbing. The console device itself is selected by the
+# `zephyr,console` chosen node (USB CDC-ACM 0); MCUboot turns UART_CONSOLE off
+# again in sysbuild/mcuboot.conf.
+CONFIG_SERIAL=y
+CONFIG_CONSOLE=y
+CONFIG_UART_CONSOLE=y

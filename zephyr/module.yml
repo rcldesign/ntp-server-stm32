@@ -1,0 +1,13 @@
+# Makes this repository a Zephyr module so that `west build -b sts1000_meridian`
+# resolves the out-of-tree board without an explicit -DBOARD_ROOT.
+#
+#   board_root: firmware  ->  firmware/boards/rcldesign/sts1000_meridian
+#   dts_root:   firmware  ->  firmware/dts/bindings (vendor prefixes, board bindings)
+#
+# No `build.cmake` / `build.kconfig` keys: this module contributes roots only, it
+# does not add source to the Zephyr build.
+name: sts1000
+build:
+  settings:
+    board_root: firmware
+    dts_root: firmware

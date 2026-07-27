@@ -1,0 +1,4 @@
+# STS1000 "Meridian" board — SPDX-License-Identifier: Apache-2.0
+
+config BOARD_STS1000_MERIDIAN
+	select SOC_STM32H563XX
