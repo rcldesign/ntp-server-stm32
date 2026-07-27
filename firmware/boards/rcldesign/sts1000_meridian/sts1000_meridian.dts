@@ -36,13 +36,14 @@
 
 	chosen {
 		/*
-		 * SRAM1 only (256 KB) for now.  SRAM1/2/3 are physically
-		 * contiguous (0x20000000..0x2009FFFF, 640 KB) but Zephyr's H5
-		 * SoC init does not set RCC_AHB2ENR SRAM2EN/SRAM3EN, so the
-		 * upper 384 KB must not be linked into until that is confirmed
-		 * against RM0481.
-		 * TODO(wave-2): verify SRAM2/SRAM3 clock-enable at reset, then
-		 * widen &sram1 to DT_SIZE_K(640) and disable &sram2/&sram3.
+		 * Full 640 KB system SRAM.  SRAM1 (256 KB @ 0x20000000),
+		 * SRAM2 (64 KB @ 0x20040000) and SRAM3 (320 KB @ 0x20050000)
+		 * are physically contiguous, so &sram1 is widened to span all
+		 * three (0x20000000..0x2009FFFF) and &sram2/&sram3 are disabled
+		 * below to avoid overlapping memory-region nodes.  The upper
+		 * 384 KB is clock-gated at reset (RCC_AHB2ENR SRAM2EN/SRAM3EN),
+		 * so soc_prep_hook() (platform/soc_sram.c, CONFIG_SOC_PREP_HOOK)
+		 * enables both clocks before .bss/.data init lands there.
 		 */
 		zephyr,sram = &sram1;
 		zephyr,flash = &flash0;
@@ -767,6 +768,22 @@ zephyr_udc0: &usb {
 
 &backup_sram {
 	status = "okay";
+};
+
+/*
+ * Widen SRAM1 to the full contiguous 640 KB (SRAM1+SRAM2+SRAM3) and disable
+ * the now-subsumed banks. SRAM2/SRAM3 clocks are enabled in soc_prep_hook().
+ */
+&sram1 {
+	reg = <0x20000000 DT_SIZE_K(640)>;
+};
+
+&sram2 {
+	status = "disabled";
+};
+
+&sram3 {
+	status = "disabled";
 };
 
 /* TRNG — entropy source for TLS/NTS. */

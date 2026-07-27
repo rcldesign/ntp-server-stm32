@@ -92,15 +92,16 @@ int ptp_cfg_validate(const ptp_cfg_t *cfg)
 	if (cfg->major_sdo_id > 0x0FU) {
 		return -EINVAL;
 	}
-	if (((int)cfg->transport < 0) ||
-	    ((int)cfg->transport >= (int)PTP_TRANSPORT_COUNT)) {
+	/* Unsigned compares: the enum's own range makes a "< 0" test provably
+	 * dead (-Wtype-limits), while an out-of-range value cast into the type
+	 * still fails the upper bound. */
+	if ((unsigned int)cfg->transport >= (unsigned int)PTP_TRANSPORT_COUNT) {
 		return -EINVAL;
 	}
-	if (((int)cfg->profile < 0) || ((int)cfg->profile >= (int)PTP_PROFILE_COUNT)) {
+	if ((unsigned int)cfg->profile >= (unsigned int)PTP_PROFILE_COUNT) {
 		return -EINVAL;
 	}
-	if (((int)cfg->degradation < 0) ||
-	    ((int)cfg->degradation >= (int)PTP_DEGRADE_COUNT)) {
+	if ((unsigned int)cfg->degradation >= (unsigned int)PTP_DEGRADE_COUNT) {
 		return -EINVAL;
 	}
 	return 0;
