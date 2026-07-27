@@ -39,6 +39,25 @@ typedef struct {
 	pwrseq_in_t in;
 	pwrseq_act_t log[LOG_MAX];
 	size_t log_len;
+
+	/*
+	 * Responsive rubidium "glue". The old harness fed a single static input,
+	 * which could not model the two-code sequence (the rail is 4.5 V after
+	 * the safe write and ~14 V after the operating write) and — as MEDIUM-4
+	 * noted — let a physically impossible happy path pass (an FE "locking" at
+	 * 4.5 V). When rb_glue is on, pump() reflects the digipot writes back into
+	 * the readback register and drives VCC_RB to the voltage the *commanded*
+	 * code implies, exactly as the real buck + digipot would. Fault injectors
+	 * override specific responses; everything non-rubidium the test still sets
+	 * directly.
+	 */
+	bool rb_glue;
+	uint16_t rb_cmd;   /* last digipot code the glue saw written */
+	bool rb_powered;   /* RB_PWR_EN asserted per the action stream */
+	bool bad_readback; /* inject: readback never valid (SPI dead) */
+	bool hold_no_lock; /* inject: RB_LOCK never asserts */
+	bool hold_no_extref; /* inject: EXTREF_MON never in band */
+	int32_t force_op_rail_mv; /* inject: rail while operating code active (0=auto) */
 } model_t;
 
 /* A board where every reading is nominal and every flag is the happy one. */
@@ -93,19 +112,73 @@ static void model_init(model_t *m, const pwrseq_cfg_t *cfg)
 	memset(m, 0, sizeof(*m));
 	TEST_ASSERT_EQUAL_INT(0, pwrseq_init(&m->ctx, cfg));
 	in_healthy(&m->in);
+	m->rb_glue = true;
+	m->rb_cmd = m->ctx.cfg.digipot_safe_code;
 	TEST_ASSERT_EQUAL_INT(0, pwrseq_start(&m->ctx, 0U));
+}
+
+/*
+ * Model the buck + digipot response to the actions just emitted: the readback
+ * register follows the last code written, and VCC_RB regulates to the voltage
+ * that code implies once RB_PWR_EN is up. This is what makes the two-code
+ * guarded sequence testable end to end.
+ */
+static void glue_apply(model_t *m, size_t from)
+{
+	size_t i;
+
+	for (i = from; i < m->log_len; i++) {
+		switch (m->log[i].action) {
+		case PWRSEQ_ACT_DIGIPOT_WRITE:
+		case PWRSEQ_ACT_DIGIPOT_WRITE_OP:
+			m->rb_cmd = m->log[i].arg;
+			break;
+		case PWRSEQ_ACT_RB_PWR_EN:
+			m->rb_powered = true;
+			break;
+		case PWRSEQ_ACT_RB_PWR_DIS:
+			m->rb_powered = false;
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (m->bad_readback) {
+		m->in.digipot_readback_valid = false;
+	} else {
+		m->in.digipot_readback = m->rb_cmd;
+		m->in.digipot_readback_valid = true;
+	}
+
+	if (!m->rb_powered) {
+		m->in.ina_vbus_mv[INA228_RAIL_VCC_RB] = 0;
+	} else if ((m->force_op_rail_mv != 0) &&
+		   (m->rb_cmd == m->ctx.cfg.digipot_operating_code)) {
+		m->in.ina_vbus_mv[INA228_RAIL_VCC_RB] = m->force_op_rail_mv;
+	} else {
+		m->in.ina_vbus_mv[INA228_RAIL_VCC_RB] =
+			pwrseq_rb_expected_mv(&m->ctx.cfg.rb_xfer, m->rb_cmd);
+	}
+
+	m->in.rb_lock = !m->hold_no_lock;
+	m->in.extref_in_band = !m->hold_no_extref;
 }
 
 /* One step() call, draining every action into the log. */
 static void pump(model_t *m)
 {
 	pwrseq_act_t a;
+	size_t before = m->log_len;
 
 	TEST_ASSERT_EQUAL_INT(0, pwrseq_step(&m->ctx, &m->in));
 	while (pwrseq_action_get(&m->ctx, &a) == 0) {
 		TEST_ASSERT_TRUE_MESSAGE(m->log_len < LOG_MAX,
 					 "action log overflowed");
 		m->log[m->log_len++] = a;
+	}
+	if (m->rb_glue) {
+		glue_apply(m, before);
 	}
 }
 
@@ -506,11 +579,17 @@ static void test_full_bring_up_emits_the_documented_sequence(void)
 		PWRSEQ_ACT_PANEL_LED_PWM,
 		/* Stage 7 — discipline */
 		PWRSEQ_ACT_DISC_START,
-		/* Stage 8 — the guarded rubidium sequence */
-		PWRSEQ_ACT_DIGIPOT_WRITE,
-		PWRSEQ_ACT_DIGIPOT_VERIFY,
-		PWRSEQ_ACT_RB_PWR_EN,
-		PWRSEQ_ACT_RB_VCC_GATE_EN,
+		/* Stage 8 — the guarded rubidium sequence. Safe-low precharge
+		 * is written and verified and the rail brought up at it, THEN
+		 * the bounded operating code is written, verified and the rail
+		 * re-checked against the FE ceiling, and only then is the FE
+		 * connected. */
+		PWRSEQ_ACT_DIGIPOT_WRITE,    /* safe-low precharge */
+		PWRSEQ_ACT_DIGIPOT_VERIFY,   /* readback == safe */
+		PWRSEQ_ACT_RB_PWR_EN,        /* + soft-start, verify safe rail */
+		PWRSEQ_ACT_DIGIPOT_WRITE_OP, /* bounded operating setpoint */
+		PWRSEQ_ACT_DIGIPOT_VERIFY,   /* readback == operating */
+		PWRSEQ_ACT_RB_VCC_GATE_EN,   /* only after the op-window + vmax gate */
 		/* Stage 9 — watchdog, then the relay */
 		PWRSEQ_ACT_WDT_EN,
 		PWRSEQ_ACT_WDT_KICK_START,

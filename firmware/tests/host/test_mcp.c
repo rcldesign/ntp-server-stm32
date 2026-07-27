@@ -110,6 +110,9 @@ static struct {
 	} e[STORE_SLOTS];
 } g_store;
 
+/* When >= 0, fs_save refuses this key ID (drives the MEDIUM-5 persist path). */
+static int g_store_fail_save_id = -1;
+
 static int fs_load(void *ctx, uint16_t id, void *buf, size_t cap)
 {
 	size_t i;
@@ -133,6 +136,10 @@ static int fs_save(void *ctx, uint16_t id, const void *buf, size_t len)
 	size_t free_slot = STORE_SLOTS;
 
 	(void)ctx;
+	if ((g_store_fail_save_id >= 0) &&
+	    ((uint16_t)g_store_fail_save_id == id)) {
+		return -5;
+	}
 	if (len > STORE_REC) {
 		return -28;
 	}
@@ -280,6 +287,7 @@ static void wire_up(bool with_cfg, bool with_log, bool with_status)
 
 	memset(&w, 0, sizeof(w));
 	memset(&g_store, 0, sizeof(g_store));
+	g_store_fail_save_id = -1;
 	memset(g_tx, 0, sizeof(g_tx));
 	g_txn = 0U;
 	g_tx_block = false;

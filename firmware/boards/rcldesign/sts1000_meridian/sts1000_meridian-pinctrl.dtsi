@@ -56,7 +56,7 @@
  * network is a simple pull-down, so push-pull is correct here.
  */
 &pinctrl {
-	lptim2_ch2_pe0: lptim2_ch2_pe0 {
+	/omit-if-no-ref/ lptim2_ch2_pe0: lptim2_ch2_pe0 {
 		pinmux = <STM32_PINMUX('E', 0, AF3)>;
 	};
 };

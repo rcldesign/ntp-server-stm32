@@ -125,17 +125,19 @@ static bool rung(bool latched, int32_t t_mc, int32_t on_mc, int32_t hyst_mc)
 
 static uint8_t clamp_duty(const thermal_cfg_t *c, float duty)
 {
-	/* NaN must fail toward cooling, not toward the floor: `!(NaN > min)` is
-	 * true, so an unguarded compare would silently return min_duty on a
-	 * bad reading. A fan controller's safe direction is always maximum. */
-	if (isnan(duty)) {
+	/*
+	 * Order the comparisons so a NaN fails toward cooling. The ceiling test
+	 * is written `!(duty < max)`: for a NaN every ordered compare is false,
+	 * so the negation is true and NaN saturates to maximum airflow — the
+	 * safe direction for a fan. The naive `duty <= min` first would instead
+	 * send a NaN to the floor. No separate NaN branch is needed (and none
+	 * would be reachable through the integer-fed control law anyway).
+	 */
+	if (!(duty < (float)c->max_duty_pct)) {
 		return c->max_duty_pct;
 	}
 	if (duty <= (float)c->min_duty_pct) {
 		return c->min_duty_pct;
-	}
-	if (duty >= (float)c->max_duty_pct) {
-		return c->max_duty_pct;
 	}
 	return (uint8_t)(duty + 0.5f);
 }

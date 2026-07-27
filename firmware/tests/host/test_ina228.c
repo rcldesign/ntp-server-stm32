@@ -374,6 +374,18 @@ static void test_shunt_cal_trim_clamps_and_validates(void)
 		-EINVAL, ina228_shunt_cal_trim(4096U, 1000U, 0U, &cal));
 	TEST_ASSERT_EQUAL_INT(
 		-EINVAL, ina228_shunt_cal_trim(4096U, 1000U, 1000U, NULL));
+
+	/*
+	 * A zero reference current must be rejected, not accepted as a ratio of
+	 * 0. SHUNT_CAL = 0 is a legal register value the INA228 takes without
+	 * complaint, and then reports 0 A on every reading — a monitor that
+	 * looks calibrated and measures nothing. Refuse it rather than blind the
+	 * rail (finding L3).
+	 */
+	cal = 0xABCDU;
+	TEST_ASSERT_EQUAL_INT(
+		-EINVAL, ina228_shunt_cal_trim(4096U, 0U, 1000U, &cal));
+	TEST_ASSERT_EQUAL_UINT16(0xABCDU, cal); /* left untouched */
 }
 
 /* ------------------------------------------------- threshold code encoding */

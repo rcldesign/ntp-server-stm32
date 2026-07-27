@@ -365,6 +365,25 @@ static void test_ntp_short_saturates_and_floors(void)
 				quality_ntp_short_from_ns(INT64_MAX));
 }
 
+static void test_ntp_short_does_not_wrap_below_the_cap(void)
+{
+	/*
+	 * L1: for an ns just below the whole-second cap the scaled quotient
+	 * rounds up to exactly 2^32, which a bare 32-bit cast wraps to 0 — the
+	 * worst possible answer, reporting a huge dispersion as none. The
+	 * boundary is (65536e9 - 1e9/2^17) rounded, ~65535.9999924 s. Both the
+	 * carry point and the unit just below it must saturate high, never
+	 * wrap low.
+	 */
+	TEST_ASSERT_EQUAL_HEX32(UINT32_MAX,
+				quality_ntp_short_from_ns(65535999992371LL));
+	TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFu,
+				quality_ntp_short_from_ns(65535999992370LL));
+	/* One below the early cap must also not wrap. */
+	TEST_ASSERT_EQUAL_HEX32(UINT32_MAX,
+				quality_ntp_short_from_ns(65536LL * 1000000000LL - 1));
+}
+
 static void test_ntp_short_inverse(void)
 {
 	TEST_ASSERT_EQUAL_INT64(0, quality_ns_from_ntp_short(0u));
@@ -529,6 +548,29 @@ static void test_holdover_inverse_quadratic_agrees_with_the_forward_model(void)
 				 quality_holdover_err_ns(&m, t, 0.0f));
 }
 
+static void test_holdover_inverse_is_accurate_when_drift_dominates(void)
+{
+	/*
+	 * L7: with a large drift and a tiny ageing term, disc = rate^2 +
+	 * 2*a*budget rounds in float to exactly rate^2, so the textbook root
+	 * (sqrt(disc) - rate)/a evaluates the difference of two equal floats
+	 * and collapses to 0 — reporting "demote now" for a clock with an hour
+	 * of headroom. The conjugate form 2*budget/(rate + sqrt(disc)) adds
+	 * like-signed quantities and stays accurate. Here the linear term alone
+	 * gives budget/rate = 1e7/1e7 = 1 s, and the ageing correction is far
+	 * below one part in a million, so the answer must be ~1 s, not 0.
+	 */
+	quality_holdover_model_t m = {
+		.base_ns = 0.0f,
+		.drift_ns_per_s = 1.0e7f,
+		.aging_ns_per_s2 = 1.0e-4f,
+		.temp_ns_per_s_per_c = 0.0f,
+	};
+	float t = quality_holdover_time_to_ns(&m, 0.0f, 1.0e7f);
+
+	TEST_ASSERT_FLOAT_WITHIN(0.05f, 1.0f, t);
+}
+
 static void test_holdover_inverse_never_and_null(void)
 {
 	quality_holdover_model_t still = {
@@ -676,6 +718,7 @@ int main(void)
 	RUN_TEST(test_ntp_short_known_values);
 	RUN_TEST(test_ntp_short_rounds_to_nearest_at_the_lsb_boundary);
 	RUN_TEST(test_ntp_short_saturates_and_floors);
+	RUN_TEST(test_ntp_short_does_not_wrap_below_the_cap);
 	RUN_TEST(test_ntp_short_inverse);
 	RUN_TEST(test_ntp_short_round_trips_whole_units);
 	RUN_TEST(test_refid_packs_left_justified);
@@ -687,6 +730,7 @@ int main(void)
 	RUN_TEST(test_holdover_edge_inputs);
 	RUN_TEST(test_holdover_inverse_linear);
 	RUN_TEST(test_holdover_inverse_quadratic_agrees_with_the_forward_model);
+	RUN_TEST(test_holdover_inverse_is_accurate_when_drift_dominates);
 	RUN_TEST(test_holdover_inverse_never_and_null);
 
 	RUN_TEST(test_sqrtf_known_values);

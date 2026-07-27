@@ -1684,12 +1684,20 @@ int pwrseq_pfi(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 	 * hold-up left; make room for the park list instead. */
 	ctx->q_head = 0U;
 	ctx->q_len = 0U;
+	ctx->q_dropped = 0U;
 
 	emit(ctx, PWRSEQ_ACT_PARK_DAC);
 	emit(ctx, PWRSEQ_ACT_PERSIST_STATE);
-	if (ctx->rb_enabled) {
-		rb_shutdown(ctx);
-	}
+	/*
+	 * MEDIUM-3: quiesce the rubidium unconditionally, not gated on
+	 * rb_enabled. The supervisor may already have queued RB_VCC_GATE_DIS /
+	 * RB_PWR_DIS and cleared rb_enabled at emit time; the purge above just
+	 * deleted those un-drained actions, so a guard on rb_enabled would emit
+	 * nothing and the FE would stay connected through the brown-out. The
+	 * pin writes are idempotent (drive to the safe-off level), so
+	 * re-emitting them always is correct and cheap.
+	 */
+	rb_shutdown(ctx);
 	emit(ctx, PWRSEQ_ACT_SET_SHUTDOWN_FLAG);
 	return 0;
 }

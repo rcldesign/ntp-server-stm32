@@ -1,0 +1,138 @@
+# STS1000 "Meridian" — console area (USB, shell, MCP, storage, DFU).
+# SPDX-License-Identifier: Apache-2.0
+#
+# app/Kconfig must pull this in for the symbols below to exist:
+#
+#     rsource "src/zephyr/console/Kconfig"
+#
+# Every C tunable here has an #if defined() fallback in the source, so the area
+# still builds with sane defaults if that line is missing. The one symbol that
+# cannot be defaulted that way is a bool whose default is `y`
+# (STS1000_SHELL_MUTATING): "not set" and "not sourced" are indistinguishable
+# to the preprocessor, so STS1000_CONSOLE_KCONFIG below acts as the sentinel
+# that tells the source this file was actually read.
+
+if STS1000_CONSOLE
+
+config STS1000_CONSOLE_KCONFIG
+	bool
+	default y
+	help
+	  Hidden sentinel: present only when this fragment has been sourced.
+	  src/zephyr/console/sts_shell.c uses it to distinguish "the operator
+	  turned STS1000_SHELL_MUTATING off" from "app/Kconfig never sourced
+	  this file", which are otherwise the same absence of a #define.
+
+menu "STS1000 console area"
+
+config STS1000_SHELL_MUTATING
+	bool "Allow mutating shell commands"
+	default y
+	help
+	  Registers the state-changing half of the `sts` command set:
+	  cfg set/commit/revert, sec passwd, fw confirm/revert and reboot.
+	  Turn it off for an observation-only production image.
+
+	  This is only the compile-time gate. At runtime the cfg key
+	  sec.console.ro also has to permit the change — except while no admin
+	  credential has been provisioned, which is the window that lets a
+	  factory-fresh board be set up at all (see sts_shell.c).
+
+config STS1000_CONSOLE_THREAD_STACK
+	int "Console supervisor thread stack (bytes)"
+	default 2048
+	range 1024 8192
+	help
+	  Priority-14 supervisor: USB VBUS gate, §8.3 self-confirm poll and the
+	  periodic fast-save flush.
+
+config STS1000_MCP_THREAD_STACK
+	int "MCP thread stack (bytes)"
+	default 4096
+	range 2048 16384
+	help
+	  Priority-14 thread driving core/mcp. The engine context itself is
+	  static; this stack carries the command handlers, the DFU verify
+	  chunk buffer and the streaming SHA-256 context copies.
+
+config STS1000_LOGGER_THREAD_STACK
+	int "Logger thread stack (bytes)"
+	default 3072
+	range 1024 16384
+	help
+	  Priority-16 thread draining core/logring to the NOR spool. LittleFS
+	  write paths dominate the requirement.
+
+config STS1000_MCP_RX_RING
+	int "MCP receive ring (bytes)"
+	default 1024
+	range 256 8192
+
+config STS1000_MCP_TX_RING
+	int "MCP transmit ring (bytes)"
+	default 2048
+	range 1088 16384
+	help
+	  Must hold one complete COBS-encoded MCP frame (1052 B decoded, so
+	  1058 B encoded plus the delimiter) or a maximum-size response could
+	  never be transmitted. A build-time assertion enforces it.
+
+config STS1000_DFU_WRITE_BUF
+	int "DFU staging write buffer (bytes)"
+	default 256
+	range 32 4096
+	help
+	  Accumulated before each flash program. Must be a multiple of the
+	  flash write-block size (16 B on STM32H5); checked at runtime against
+	  the live geometry.
+
+config STS1000_LFS_MOUNT_ATTEMPTS
+	int "LittleFS mount attempts before giving up"
+	default 3
+	range 1 10
+	help
+	  Zephyr's LittleFS formats a volume it cannot mount, so an unbounded
+	  retry against a dead or mis-wired SPI-NOR would be an erase loop on
+	  32 MB of flash. After this many failures /lfs is abandoned for the
+	  rest of the boot and the log spool stays in RAM only.
+
+config STS1000_LOG_SPOOL_RECORDS
+	int "NOR log spool capacity (records)"
+	default 1024
+	range 64 65536
+	help
+	  /lfs/log/spool.bin is a fixed array of 128-byte records used as an
+	  oldest-evicted ring. 1024 records is 128 KB of the 32 MB device.
+
+config STS1000_FASTSAVE_PERIOD_S
+	int "Periodic fast-save interval (seconds)"
+	default 60
+	range 10 3600
+	help
+	  How often the volatile-critical record (last DAC code, leap state,
+	  log cursor) is written to NVS when it is dirty. The PFI early-warning
+	  edge writes it immediately regardless; this bounds the loss after a
+	  power cut with no PFI warning.
+
+config STS1000_SELF_CONFIRM_MIN_S
+	int "Earliest self-confirm (seconds of uptime)"
+	default 60
+	range 5 3600
+	help
+	  Spec §8.3. Proxy for "every core thread has registered and fed its
+	  liveness slot"; the slowest application thread runs at 1 Hz, so a
+	  minute is many cycles. The supervisor's own
+	  sts_update_self_confirm() bypasses this wait.
+
+config STS1000_SELF_CONFIRM_DEADLINE_S
+	int "Give up self-confirming after (seconds)"
+	default 600
+	range 60 86400
+	help
+	  Long enough to cover PHY autonegotiation and a DHCP lease. Past it
+	  the attempt is abandoned with a CRIT log line and MCUboot reverts on
+	  the next reboot. Must exceed STS1000_SELF_CONFIRM_MIN_S.
+
+endmenu
+
+endif # STS1000_CONSOLE

@@ -28,8 +28,11 @@ extern "C" {
 /* sts_usb.c — composite USB device, VBUS-gated                              */
 /* ------------------------------------------------------------------------- */
 
-/** Configure USB_VBUS_SENSE (PE2) and start the VBUS gate poller. */
+/** Configure USB_VBUS_SENSE (PE2) and attach if VBUS is already present. */
 int sts_usb_start(void);
+
+/** Re-evaluate the VBUS gate; called from the console supervisor thread. */
+void sts_usb_poll(void);
 
 /** True while VBUS is present on the USB-C port. */
 bool sts_usb_vbus_present(void);
@@ -64,8 +67,17 @@ const char *sts_dfu_swap_type_name(void);
 /* sts_selfconfirm.c — spec §8.3 test-image self-confirmation                */
 /* ------------------------------------------------------------------------- */
 
-/** Start the health-gate poller. No-op when the running image is confirmed. */
+/** Announce the image state at boot. No-op when the image is confirmed. */
 int sts_selfconfirm_start(void);
+
+/**
+ * Re-evaluate the health gate and confirm if it passes.
+ *
+ * Called from the console supervisor thread. The authoritative path is the
+ * supervisor's own sts_update_self_confirm() (sts_app.h); this poll is the
+ * fallback that keeps a healthy image from reverting if that call never comes.
+ */
+void sts_selfconfirm_poll(void);
 
 /** Latest gate evaluation, for the shell and for the log line. */
 typedef struct {
@@ -89,6 +101,13 @@ int sts_mcp_start(void);
 
 /** Engine counters, for `sts diag` and the shell. NULL before sts_mcp_start(). */
 const mcp_stats_t *sts_mcp_stats(void);
+
+/**
+ * Tell the MCP thread the physical link went away (VBUS loss).
+ *
+ * Safe from any context. The thread performs the actual mcp_reset_session().
+ */
+void sts_mcp_notify_link_down(void);
 
 /** Serial-link counters kept by the glue rather than the engine. */
 typedef struct {

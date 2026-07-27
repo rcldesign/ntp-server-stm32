@@ -14,19 +14,21 @@
  *
  * The node is enabled but no Zephyr driver binds it: `st,stm32-lptim` is only
  * claimed by the LPTIM kernel-tick driver, which is not in use here (SysTick
- * is the tick source). Enabling it makes the DT_ macros — reg, clocks,
- * pinctrl-0 — available so the platform can gate the clock, select the source
- * and apply the pin mux itself.
+ * is the tick source). Enabling it makes the DT_ macros — reg, clocks —
+ * available so the platform can gate the clock and select the source itself.
+ *
+ * pinctrl-0 is deliberately NOT set here: the `st,stm32-lptim` binding does not
+ * declare a pinctrl property (dtc rejects it), so the PE0->AF3 mux is applied
+ * from panel_pwm.c with LL_GPIO instead. The pin assignment is still recorded
+ * in devicetree as the lptim2_ch2_pe0 group in the board pinctrl overlay.
  *
  * The second clocks entry pins the kernel clock to PCLK1 rather than relying
  * on the RCC_CCIPR2 reset default, so the /128 prescaler and the ARR the
- * driver computes are derived from a source the devicetree states.
+ * platform computes are derived from a source the devicetree states.
  */
 &lptim2 {
 	clocks = <&rcc STM32_CLOCK(APB1_2, 5U)>,
 		 <&rcc STM32_SRC_PCLK1 LPTIM2_SEL(0)>;
-	pinctrl-0 = <&lptim2_ch2_pe0>;
-	pinctrl-names = "default";
 	status = "okay";
 };
 

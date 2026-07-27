@@ -22,7 +22,14 @@
  *
  * There is no Zephyr LPTIM PWM driver in 4.2, so the peripheral is programmed
  * through LL here: clock gate via clock_control_on() from the devicetree
- * clocks property, pin mux via pinctrl_apply_state(), then ARR/CMP.
+ * clocks property, then ARR/CMP.
+ *
+ * The PE0->AF3 mux is applied with LL_GPIO rather than the pinctrl subsystem
+ * because the `st,stm32-lptim` binding declares no pinctrl property, so a
+ * `pinctrl-0` on the node is rejected by dtc. The pin assignment is still
+ * recorded in devicetree (the lptim2_ch2_pe0 group in the board pinctrl
+ * overlay); this code applies exactly that mapping. GPIOE's clock is already
+ * gated by the Zephyr GPIO driver, which owns the port.
  *
  * Frequency: the INA228 on the panel-LED rail (U54, 0x4C) must average over
  * many PWM periods or its current reading beats against the duty cycle
@@ -43,10 +50,10 @@
 #include <zephyr/drivers/clock_control.h>
 #include <zephyr/drivers/clock_control/stm32_clock_control.h>
 #include <zephyr/drivers/gpio.h>
-#include <zephyr/drivers/pinctrl.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#include <stm32_ll_gpio.h>
 #include <stm32_ll_lptim.h>
 
 #include "zephyr/platform/platform.h"
@@ -59,16 +66,22 @@ LOG_MODULE_REGISTER(sts_panel_pwm, CONFIG_STS1000_LOG_LEVEL);
 BUILD_ASSERT(DT_NODE_HAS_STATUS(PANEL_LPTIM_NODE, okay),
 	     "lptim2 must be enabled for PANEL_LED_PWM (see app/dts/platform.overlay)");
 
-PINCTRL_DT_DEFINE(PANEL_LPTIM_NODE);
-
 static LPTIM_TypeDef *const panel_lptim =
 	(LPTIM_TypeDef *)DT_REG_ADDR(PANEL_LPTIM_NODE);
 
 static const struct stm32_pclken panel_pclken[] = STM32_DT_CLOCKS(PANEL_LPTIM_NODE);
-static const struct pinctrl_dev_config *panel_pcfg =
-	PINCTRL_DT_DEV_CONFIG_GET(PANEL_LPTIM_NODE);
 
 static const struct gpio_dt_spec panel_led_en = STS_USER_GPIO(panel_led_en_gpios);
+
+/* PANEL_LED_PWM: PE0 -> LPTIM2_CH2, AF3 (see the file banner). */
+static void panel_apply_pinmux(void)
+{
+	LL_GPIO_SetPinMode(GPIOE, LL_GPIO_PIN_0, LL_GPIO_MODE_ALTERNATE);
+	LL_GPIO_SetAFPin_0_7(GPIOE, LL_GPIO_PIN_0, LL_GPIO_AF_3);
+	LL_GPIO_SetPinOutputType(GPIOE, LL_GPIO_PIN_0, LL_GPIO_OUTPUT_PUSHPULL);
+	LL_GPIO_SetPinSpeed(GPIOE, LL_GPIO_PIN_0, LL_GPIO_SPEED_FREQ_VERY_HIGH);
+	LL_GPIO_SetPinPull(GPIOE, LL_GPIO_PIN_0, LL_GPIO_PULL_NO);
+}
 
 /*
  * LPTIM prescaler /128 off PCLK1. At the board's 250 MHz PCLK1 that is
@@ -159,11 +172,7 @@ int sts_panel_led_init(void)
 		return (rc != 0) ? rc : -EIO;
 	}
 
-	rc = pinctrl_apply_state(panel_pcfg, PINCTRL_STATE_DEFAULT);
-	if (rc != 0) {
-		LOG_ERR("PANEL_LED_PWM pinctrl failed (%d)", rc);
-		return rc;
-	}
+	panel_apply_pinmux();
 
 	/* ARR must be written with the peripheral enabled but the counter
 	 * stopped, and the period is (ARR + 1) counts. */

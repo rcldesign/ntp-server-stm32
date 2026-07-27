@@ -444,6 +444,19 @@ int ntp_init(ntp_ctx_t *ctx, const ntp_cfg_t *cfg, const port_crypto_t *crypto,
 
 	if (crypto != NULL) {
 		ctx->crypto = *crypto;
+		/* Salt the client-table hash from entropy (L14). Best-effort: a
+		 * rand() failure leaves the salt zero, which is no worse than the
+		 * previous unsalted hash and never blocks bring-up. */
+		if (crypto->rand != NULL) {
+			uint8_t seed[4];
+
+			if (crypto->rand(crypto->ctx, seed, sizeof(seed)) == 0) {
+				ctx->hash_seed = ((uint32_t)seed[0]) |
+						 ((uint32_t)seed[1] << 8) |
+						 ((uint32_t)seed[2] << 16) |
+						 ((uint32_t)seed[3] << 24);
+			}
+		}
 	}
 
 	ctx->g_tokens_ms = now_ms;
@@ -460,7 +473,22 @@ int ntp_set_ext_hook(ntp_ctx_t *ctx, const ntp_ext_hook_t *hook)
 	return 0;
 }
 
-int ntp_key_set(ntp_ctx_t *ctx, uint32_t keyid, const uint8_t *key, size_t key_len)
+/** Digest length a key's algorithm produces, in octets. */
+static size_t alg_digest_len(ntp_mac_alg_t alg)
+{
+	switch (alg) {
+	case NTP_MAC_AES_CMAC_128:
+	case NTP_MAC_HMAC_SHA256_128:
+		return NTP_MAC_DIGEST_128;
+	case NTP_MAC_HMAC_SHA256_160:
+		return NTP_MAC_DIGEST_160;
+	default:
+		return 0U;
+	}
+}
+
+int ntp_key_set(ntp_ctx_t *ctx, uint32_t keyid, ntp_mac_alg_t alg,
+		const uint8_t *key, size_t key_len)
 {
 	ntp_key_t *slot = NULL;
 
@@ -469,6 +497,14 @@ int ntp_key_set(ntp_ctx_t *ctx, uint32_t keyid, const uint8_t *key, size_t key_l
 	}
 	/* RFC 5905 §7.5: key id 0 marks a crypto-NAK, so it can never name a key. */
 	if (keyid == 0U || key_len == 0U || key_len > NTP_MAC_KEY_MAX) {
+		return -EINVAL;
+	}
+	if (alg_digest_len(alg) == 0U) {
+		return -EINVAL; /* unknown algorithm */
+	}
+	/* AES-CMAC-128 is keyed by exactly one AES-128 key; anything else would
+	 * be truncated or rejected by the block cipher, so refuse it up front. */
+	if (alg == NTP_MAC_AES_CMAC_128 && key_len != NTP_MAC_AES_KEY_LEN) {
 		return -EINVAL;
 	}
 
@@ -487,6 +523,7 @@ int ntp_key_set(ntp_ctx_t *ctx, uint32_t keyid, const uint8_t *key, size_t key_l
 
 	memset(slot, 0, sizeof(*slot));
 	slot->keyid = keyid;
+	slot->alg = (uint8_t)alg;
 	slot->key_len = (uint8_t)key_len;
 	memcpy(slot->key, key, key_len);
 	slot->used = true;
@@ -537,58 +574,180 @@ int ntp_stats_reset(ntp_ctx_t *ctx)
 
 /* --------------------------------------------------------------------- MAC */
 
+/*
+ * AES-CMAC-128 (RFC 4493), one-shot over a contiguous message, on top of the
+ * port's AES-ECB. core/nts already has a CMAC, but ARCHITECTURE.md §4 forbids
+ * an ntp→nts dependency edge, so this is a self-contained copy of the same
+ * algorithm; test_ntp pins it to the RFC 4493 example vector independently of
+ * test_aes_siv. RFC 8573 defines this as the modern NTP symmetric MAC.
+ */
+static void cmac_dbl(uint8_t b[16])
+{
+	uint8_t carry = (uint8_t)(b[0] >> 7);
+
+	for (size_t i = 0U; i < 15U; i++) {
+		b[i] = (uint8_t)((uint8_t)(b[i] << 1) | (uint8_t)(b[i + 1U] >> 7));
+	}
+	b[15] = (uint8_t)((uint8_t)(b[15] << 1) ^ (uint8_t)(0x87U * carry));
+}
+
+static int cmac_aes(const port_crypto_t *cr, const uint8_t key[16],
+		    const uint8_t in[16], uint8_t out[16])
+{
+	return cr->aes_ecb_encrypt(cr->ctx, key, 16U, in, out, 16U);
+}
+
+static int ntp_cmac128(const port_crypto_t *cr, const uint8_t key[16],
+		       const uint8_t *msg, size_t msg_len, uint8_t out[16])
+{
+	uint8_t k1[16] = { 0 };
+	uint8_t k2[16];
+	uint8_t x[16] = { 0 };
+	uint8_t last[16];
+	size_t off = 0U;
+	size_t rem;
+
+	/* Subkeys: L = AES(K, 0), K1 = dbl(L), K2 = dbl(K1). */
+	if (cmac_aes(cr, key, k1, k1) != 0) {
+		return -EIO;
+	}
+	cmac_dbl(k1);
+	memcpy(k2, k1, sizeof(k2));
+	cmac_dbl(k2);
+
+	/* CBC-MAC over every block but the last. */
+	while ((msg_len - off) > 16U) {
+		for (size_t i = 0U; i < 16U; i++) {
+			x[i] ^= msg[off + i];
+		}
+		if (cmac_aes(cr, key, x, x) != 0) {
+			return -EIO;
+		}
+		off += 16U;
+	}
+
+	/* Final block: a complete block is XORed with K1; a short (or empty)
+	 * block is padded with 0x80 and XORed with K2. */
+	rem = msg_len - off;
+	memset(last, 0, sizeof(last));
+	if (rem == 16U && msg_len != 0U) {
+		memcpy(last, &msg[off], 16U);
+		for (size_t i = 0U; i < 16U; i++) {
+			last[i] ^= k1[i];
+		}
+	} else {
+		if (rem != 0U) {
+			memcpy(last, &msg[off], rem);
+		}
+		last[rem] = 0x80U;
+		for (size_t i = 0U; i < 16U; i++) {
+			last[i] ^= k2[i];
+		}
+	}
+	for (size_t i = 0U; i < 16U; i++) {
+		x[i] ^= last[i];
+	}
+	if (cmac_aes(cr, key, x, x) != 0) {
+		return -EIO;
+	}
+	memcpy(out, x, 16U);
+	return 0;
+}
+
+/**
+ * Compute a key's MAC digest over @p pkt[0..len). @p out must hold at least
+ * NTP_MAC_DIGEST_MAX octets. Returns the digest length, or 0 on failure (the
+ * primitive the key's algorithm needs is absent, or the port failed).
+ */
+static size_t mac_digest(const ntp_ctx_t *ctx, const ntp_key_t *k,
+			 const uint8_t *pkt, size_t len, uint8_t *out)
+{
+	uint8_t full[32];
+	size_t dlen = alg_digest_len((ntp_mac_alg_t)k->alg);
+
+	switch ((ntp_mac_alg_t)k->alg) {
+	case NTP_MAC_AES_CMAC_128:
+		if (ctx->crypto.aes_ecb_encrypt == NULL ||
+		    k->key_len != NTP_MAC_AES_KEY_LEN) {
+			return 0U;
+		}
+		if (ntp_cmac128(&ctx->crypto, k->key, pkt, len, out) != 0) {
+			return 0U;
+		}
+		return dlen; /* 16 */
+	case NTP_MAC_HMAC_SHA256_128:
+	case NTP_MAC_HMAC_SHA256_160:
+		if (ctx->crypto.hmac_sha256 == NULL) {
+			return 0U;
+		}
+		if (ctx->crypto.hmac_sha256(ctx->crypto.ctx, k->key, k->key_len,
+					    pkt, len, full) != 0) {
+			return 0U;
+		}
+		memcpy(out, full, dlen); /* left-truncate to 16 or 20 */
+		return dlen;
+	default:
+		return 0U;
+	}
+}
+
 /**
  * Verify the MAC field of a request.
  *
- * MAC = HMAC-SHA-256(key, everything before the MAC field), left-truncated to
- * NTP_MAC_DIGEST_LEN octets. See the interop note in ntp.h; the truncation
- * length is the one that keeps the field the same 24 octets as the SHA-1 MACs
- * deployed clients already emit.
+ * The trailing field length fixes the digest length (16 → 20-octet field,
+ * 20 → 24-octet field); the key named by the key id must be configured for an
+ * algorithm producing exactly that length, or the packet is rejected. See the
+ * algorithm map in ntp.h. Comparison is constant time.
  */
 static bool mac_verify(const ntp_ctx_t *ctx, const uint8_t *pkt,
 		       const ntp_pkt_t *p)
 {
 	const ntp_key_t *k;
-	uint8_t digest[32];
+	uint8_t digest[NTP_MAC_DIGEST_MAX];
+	size_t dlen;
 
-	if (p->mac_len != MAC_LEN_20) {
-		/* A 4-octet field is a client-sent crypto-NAK and a 20-octet field
-		 * is an MD5 digest; neither is something to authenticate against. */
-		return false;
-	}
-	if (ctx->crypto.hmac_sha256 == NULL) {
+	/* Only the two verifiable field sizes reach here; 4 (crypto-NAK) and the
+	 * oversize digests are flagged mac_unsupported and rejected earlier. */
+	if (p->mac_len != MAC_LEN_128 && p->mac_len != MAC_LEN_160) {
 		return false;
 	}
 	k = key_find(ctx, p->keyid);
 	if (k == NULL) {
 		return false;
 	}
-	if (ctx->crypto.hmac_sha256(ctx->crypto.ctx, k->key, k->key_len, pkt,
-				    p->mac_off, digest) != 0) {
+	dlen = alg_digest_len((ntp_mac_alg_t)k->alg);
+	if (dlen != MAC_DIGEST_OF(p->mac_len)) {
+		/* The key's algorithm does not match the digest length on the wire.
+		 * A 16-octet field under a 160-bit key, or vice versa, is a wrong
+		 * key type, not a valid MAC. */
 		return false;
 	}
-	return ct_memeq(digest, &pkt[p->mac_off + 4U], NTP_MAC_DIGEST_LEN);
+	if (mac_digest(ctx, k, pkt, p->mac_off, digest) != dlen) {
+		return false;
+	}
+	return ct_memeq(digest, &pkt[p->mac_off + 4U], dlen);
 }
 
 static int mac_append(const ntp_ctx_t *ctx, uint32_t keyid, uint8_t *pkt,
 		      size_t *len, size_t cap)
 {
 	const ntp_key_t *k = key_find(ctx, keyid);
-	uint8_t digest[32];
+	uint8_t digest[NTP_MAC_DIGEST_MAX];
+	size_t dlen;
 
-	if (k == NULL || ctx->crypto.hmac_sha256 == NULL) {
+	if (k == NULL) {
 		return -ENOENT;
 	}
-	if (*len + NTP_MAC_FIELD_LEN > cap) {
+	dlen = alg_digest_len((ntp_mac_alg_t)k->alg);
+	if (*len + 4U + dlen > cap) {
 		return -ENOSPC;
 	}
-	if (ctx->crypto.hmac_sha256(ctx->crypto.ctx, k->key, k->key_len, pkt, *len,
-				    digest) != 0) {
+	if (mac_digest(ctx, k, pkt, *len, digest) != dlen) {
 		return -EIO;
 	}
 	bytes_put_be32(&pkt[*len], keyid);
-	memcpy(&pkt[*len + 4U], digest, NTP_MAC_DIGEST_LEN);
-	*len += NTP_MAC_FIELD_LEN;
+	memcpy(&pkt[*len + 4U], digest, dlen);
+	*len += 4U + dlen;
 	return 0;
 }
 

@@ -413,44 +413,104 @@ static void test_invalid_sensor_goes_to_full_speed(void)
 	TEST_ASSERT_EQUAL_UINT8(20u, out.duty_pct);
 }
 
-static void test_failsafe_holds_the_ladder_rather_than_escalating(void)
+/* Step one second with an invalid enclosure sensor and explicit secondaries. */
+static thermal_out_t step_no_enclosure(thermal_ctx_t *ctx, uint64_t *ms,
+				       int32_t osc_mc, bool osc_valid,
+				       int32_t die_mc, bool die_valid)
+{
+	thermal_in_t in;
+	thermal_out_t out;
+
+	*ms += 1000u;
+	in_defaults(&in, *ms, 25000);
+	in.enclosure_valid = false;
+	in.osc_mc = osc_mc;
+	in.osc_valid = osc_valid;
+	in.die_mc = die_mc;
+	in.die_valid = die_valid;
+	TEST_ASSERT_EQUAL_INT(0, thermal_step_1hz(ctx, &in, &out));
+	return out;
+}
+
+static void test_ladder_follows_secondary_sensors_when_enclosure_fails(void)
 {
 	thermal_ctx_t ctx;
-	thermal_in_t in;
 	thermal_out_t out;
 	uint64_t ms = 0u;
 
+	/*
+	 * MEDIUM-1: a dead enclosure sensor must not blind the over-temp
+	 * protection. With the primary gone the ladder runs on the hottest
+	 * secondary sensor (oscillator oven / die), so it can still hold, and
+	 * still escalate, while the fan is pinned at its fail-safe maximum.
+	 */
 	TEST_ASSERT_EQUAL_INT(0, thermal_init(&ctx, NULL));
 
-	/* Latch the alarm and the Rb shed. */
+	/* Latch alarm + Rb shed off the enclosure. */
 	out = soak(&ctx, &ms, 72000, 3u);
 	TEST_ASSERT_TRUE(out.alarm_overtemp);
 	TEST_ASSERT_TRUE(out.request_rb_shed);
 	TEST_ASSERT_FALSE(out.request_poe_kill);
 
-	/* Losing the sensor must neither clear those (the box is still hot)
-	 * nor escalate to a cold cycle on no evidence. */
-	ms += 1000u;
-	in_defaults(&in, ms, 72000);
-	in.enclosure_valid = false;
-	TEST_ASSERT_EQUAL_INT(0, thermal_step_1hz(&ctx, &in, &out));
+	/* Enclosure fails while the secondaries confirm a hot box (72 C): the
+	 * ladder holds the latched rungs, the fan is at max, and telemetry
+	 * says it is running on the fallback. */
+	out = step_no_enclosure(&ctx, &ms, 72000, true, 71000, true);
+	TEST_ASSERT_TRUE(out.failsafe);
+	TEST_ASSERT_EQUAL_UINT8(100u, out.duty_pct);
+	TEST_ASSERT_TRUE((out.flags & THERMAL_FLAG_LADDER_FALLBACK) != 0u);
+	TEST_ASSERT_EQUAL_INT32(72000, out.temp_mc); /* max(osc,die)+0 */
 	TEST_ASSERT_TRUE(out.alarm_overtemp);
 	TEST_ASSERT_TRUE(out.request_rb_shed);
 	TEST_ASSERT_FALSE(out.request_poe_kill);
-	TEST_ASSERT_TRUE((out.flags & THERMAL_FLAG_ALARM) != 0u);
-	TEST_ASSERT_TRUE((out.flags & THERMAL_FLAG_SHED_RB) != 0u);
-	TEST_ASSERT_TRUE((out.flags & THERMAL_FLAG_POE_KILL) == 0u);
 
-	/* A cold cycle already requested stays requested when the sensor
-	 * disappears: pwrseq must not see the request retracted while the
-	 * enclosure is, as far as anyone knows, still at 81 C. */
+	/* The box keeps heating, witnessed only by the secondaries: the ladder
+	 * must still be able to reach the cold-cycle rung. This is the
+	 * behaviour the old "freeze the ladder" fail-safe could not provide. */
+	out = step_no_enclosure(&ctx, &ms, 82000, true, 80000, true);
+	TEST_ASSERT_TRUE(out.request_poe_kill);
+	TEST_ASSERT_TRUE((out.flags & THERMAL_FLAG_POE_KILL) != 0u);
+
+	/* Only the die sensor survives, and it reads cool: the ladder follows
+	 * the evidence it has and releases (with hysteresis). */
+	out = step_no_enclosure(&ctx, &ms, 0, false, 50000, true);
+	TEST_ASSERT_EQUAL_INT32(50000, out.temp_mc);
+	TEST_ASSERT_FALSE(out.request_poe_kill);
+	TEST_ASSERT_FALSE(out.request_rb_shed);
+	TEST_ASSERT_FALSE(out.alarm_overtemp);
+}
+
+static void test_ladder_holds_when_no_sensor_is_readable(void)
+{
+	thermal_ctx_t ctx;
+	thermal_out_t out;
+	uint64_t ms = 0u;
+
+	/*
+	 * The genuine no-data case: every temperature sensor is out. The fan
+	 * still goes to maximum, but with no evidence at all the latched rungs
+	 * are held — neither released (the box may still be hot) nor escalated
+	 * (there is nothing to escalate on).
+	 */
+	TEST_ASSERT_EQUAL_INT(0, thermal_init(&ctx, NULL));
+	out = soak(&ctx, &ms, 72000, 3u);
+	TEST_ASSERT_TRUE(out.alarm_overtemp);
+	TEST_ASSERT_TRUE(out.request_rb_shed);
+	TEST_ASSERT_FALSE(out.request_poe_kill);
+
+	out = step_no_enclosure(&ctx, &ms, 0, false, 0, false);
+	TEST_ASSERT_TRUE(out.failsafe);
+	TEST_ASSERT_EQUAL_UINT8(100u, out.duty_pct);
+	TEST_ASSERT_TRUE((out.flags & THERMAL_FLAG_LADDER_FALLBACK) == 0u);
+	TEST_ASSERT_TRUE(out.alarm_overtemp);
+	TEST_ASSERT_TRUE(out.request_rb_shed);
+	TEST_ASSERT_FALSE(out.request_poe_kill);
+
+	/* A cold cycle already latched likewise survives a total sensor
+	 * blackout — pwrseq must not see it retracted on missing data. */
 	out = soak(&ctx, &ms, 81000, 2u);
 	TEST_ASSERT_TRUE(out.request_poe_kill);
-
-	ms += 1000u;
-	in_defaults(&in, ms, 81000);
-	in.enclosure_valid = false;
-	TEST_ASSERT_EQUAL_INT(0, thermal_step_1hz(&ctx, &in, &out));
+	out = step_no_enclosure(&ctx, &ms, 0, false, 0, false);
 	TEST_ASSERT_TRUE(out.request_poe_kill);
 	TEST_ASSERT_TRUE((out.flags & THERMAL_FLAG_POE_KILL) != 0u);
 }
@@ -649,7 +709,8 @@ int main(void)
 	RUN_TEST(test_irregular_cadence_is_tolerated);
 
 	RUN_TEST(test_invalid_sensor_goes_to_full_speed);
-	RUN_TEST(test_failsafe_holds_the_ladder_rather_than_escalating);
+	RUN_TEST(test_ladder_follows_secondary_sensors_when_enclosure_fails);
+	RUN_TEST(test_ladder_holds_when_no_sensor_is_readable);
 
 	RUN_TEST(test_ladder_rungs);
 	RUN_TEST(test_ladder_releases_only_with_hysteresis);

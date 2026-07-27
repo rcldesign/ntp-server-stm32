@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <string.h>
 
+#include "port/port.h"
 #include "util/bytes.h"
 #include "util/cobs.h"
 #include "util/crc.h"
@@ -120,25 +121,16 @@ uint8_t *mcp__rsp_buf(mcp_ctx_t *c)
  * the fixed PORT_* aliases declared in port/port.h. Those two agree on
  * glibc/newlib but not on Zephyr's minimal libc, where ENOTSUP is 134 rather
  * than 95, so both encodings are recognised.
- *
- * The aliases are spelled out here instead of including port/port.h: that
- * header does not currently survive -Wcomment (its banner contains a nested
- * comment opener inside a glob pattern) and it is outside this module's
- * ownership. Replace these two macros with the header's PORT_ENOTSUP /
- * PORT_EBUSY once that is fixed.
  */
-#define MCP_PORT_ENOTSUP (-95)
-#define MCP_PORT_EBUSY   (-16)
-
 uint8_t mcp__port_err(int rc)
 {
 	if (rc == 0) {
 		return (uint8_t)MCP_OK;
 	}
-	if ((rc == -ENOTSUP) || (rc == MCP_PORT_ENOTSUP)) {
+	if ((rc == -ENOTSUP) || (rc == PORT_ENOTSUP)) {
 		return (uint8_t)MCP_ERR_NOTSUP;
 	}
-	if ((rc == -EBUSY) || (rc == MCP_PORT_EBUSY)) {
+	if ((rc == -EBUSY) || (rc == PORT_EBUSY)) {
 		return (uint8_t)MCP_ERR_BUSY;
 	}
 	return (uint8_t)MCP_ERR_INTERNAL;

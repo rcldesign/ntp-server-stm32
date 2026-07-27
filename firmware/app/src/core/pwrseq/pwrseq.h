@@ -419,7 +419,20 @@ typedef struct {
 	/** Settle time after writing the operating code before the rail is
 	 *  judged, milliseconds — the buck ramps from precharge to setpoint. */
 	uint32_t rb_ramp_ms;
-	/** Headroom the PoE budget must show before the rubidium may start. */
+	/**
+	 * PoE headroom (granted − measured) the budget must show before the
+	 * rubidium may start, milliwatts. Default 16 000.
+	 *
+	 * This is a *gate*, not the peak draw. The FE-5680A warm-up transient is
+	 * ~2.1 A at ~15 V ≈ 31 W (root CLAUDE.md: "~25–30 W cold-start peak"
+	 * for both references together), which the port's bulk capacitance and
+	 * the staged bring-up (OCXO already warm, display sheddable) absorb; the
+	 * steady both-on draw is ~12–14 W. 16 W is chosen as the minimum
+	 * *sustained* headroom below which the rail should not even be attempted
+	 * — enough for the ~0.65 A steady FE draw plus margin, while a
+	 * Class-4/Type-2 budget that cannot clear it defers to OCXO-only rather
+	 * than browning out mid warm-up. Tune against the measured C_port.
+	 */
 	uint32_t rb_cold_start_mw;
 	pwrseq_rb_xfer_t rb_xfer;
 

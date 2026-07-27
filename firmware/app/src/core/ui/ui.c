@@ -1727,7 +1727,10 @@ static void page_sky(const ui_health_t *h, ui_surface_t *s)
 			break;
 		}
 		sb_init(&sb, buf, sizeof(buf));
-		sb_str(&sb, ui_gnss_sys_name(sv->sys));
+		sb_str(&sb, ui_gnss_sys_name(
+				    (sv->sys < (uint8_t)UI_GNSS__COUNT)
+					    ? sv->sys
+					    : (uint8_t)UI_GNSS_OTHER));
 		sb_rjust_i(&sb, sv->svid, 10u);
 		sb_rjust_i(&sb, sv->azim_deg, 16u);
 		sb_rjust_i(&sb, sv->elev_deg, 22u);

@@ -883,6 +883,7 @@ static void test_export_omits_secrets_unless_asked(void)
 	size_t plain = 0U;
 	size_t withs = 0U;
 
+	/* A plain export carries neither secret. */
 	TEST_ASSERT_EQUAL_INT(0,
 		cfg_export_all(&g_cfg, g_blob, sizeof(g_blob), false, &plain));
 	TEST_ASSERT_EQUAL_INT(-1, tlv_find(g_blob, plain, CFG_ID_SEC_ADMIN_PW));
@@ -890,11 +891,48 @@ static void test_export_omits_secrets_unless_asked(void)
 		tlv_find(g_blob, plain, CFG_ID_SNMP_COMMUNITY));
 	TEST_ASSERT_TRUE(tlv_find(g_blob, plain, CFG_ID_TIM_TAU_S) > 0);
 
+	/* A secrets export carries the SNMP community, but the admin credential
+	 * is CFG_F_NOEXPORT and never appears — not merely gated behind the
+	 * flag. It is provisioned out-of-band and must never reach the wire. */
 	TEST_ASSERT_EQUAL_INT(0,
 		cfg_export_all(&g_cfg, g_blob, sizeof(g_blob), true, &withs));
-	TEST_ASSERT_TRUE(tlv_find(g_blob, withs, CFG_ID_SEC_ADMIN_PW) > 0);
+	TEST_ASSERT_EQUAL_INT(-1, tlv_find(g_blob, withs, CFG_ID_SEC_ADMIN_PW));
 	TEST_ASSERT_TRUE(tlv_find(g_blob, withs, CFG_ID_SNMP_COMMUNITY) > 0);
 	TEST_ASSERT_TRUE(withs > plain);
+}
+
+static void test_noexport_key_never_leaves_even_with_secrets(void)
+{
+	const cfg_key_t *k = cfg_key_find(CFG_ID_SEC_ADMIN_PW);
+	size_t withs = 0U;
+	uint16_t hdr_count;
+	uint16_t noexport_count = 0U;
+	size_t i;
+
+	/* The schema marks the credential NOEXPORT (implying SECRET). */
+	TEST_ASSERT_NOT_NULL(k);
+	TEST_ASSERT_TRUE((k->flags & CFG_F_NOEXPORT) != 0U);
+	TEST_ASSERT_TRUE((k->flags & CFG_F_SECRET) != 0U);
+
+	/* Provision a value, then confirm a secrets export still omits it and
+	 * that its record count is exactly (keys - NOEXPORT count). */
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_set_bytes(&g_cfg, CFG_ID_SEC_ADMIN_PW,
+			      (const uint8_t *)"0123456789abcdef", 16U));
+	TEST_ASSERT_EQUAL_INT(0, cfg_commit(&g_cfg, NULL));
+
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_export_all(&g_cfg, g_blob, sizeof(g_blob), true, &withs));
+	TEST_ASSERT_EQUAL_INT(-1, tlv_find(g_blob, withs, CFG_ID_SEC_ADMIN_PW));
+
+	for (i = 0U; i < cfg_key_count(); i++) {
+		if ((cfg_key_at(i)->flags & CFG_F_NOEXPORT) != 0U) {
+			noexport_count++;
+		}
+	}
+	hdr_count = (uint16_t)(g_blob[6] | ((uint16_t)g_blob[7] << 8));
+	TEST_ASSERT_EQUAL_UINT16((uint16_t)cfg_key_count() - noexport_count,
+				 hdr_count);
 }
 
 static void test_export_chunks_at_the_minimum_size(void)
@@ -1354,6 +1392,7 @@ int main(void)
 
 	RUN_TEST(test_export_header_and_trailer_are_as_documented);
 	RUN_TEST(test_export_omits_secrets_unless_asked);
+	RUN_TEST(test_noexport_key_never_leaves_even_with_secrets);
 	RUN_TEST(test_export_chunks_at_the_minimum_size);
 	RUN_TEST(test_export_argument_errors);
 

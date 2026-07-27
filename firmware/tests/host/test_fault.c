@@ -583,6 +583,51 @@ static void test_repeat_never_bursts_when_scans_are_skipped(void)
 	TEST_ASSERT_EQUAL_UINT(3U, repeats);
 }
 
+static void test_auto_repeat_does_not_burst_when_scanning_resumes(void)
+{
+	model_t m;
+	unsigned int repeats = 0U;
+	unsigned int i;
+	fault_evt_t e;
+
+	/*
+	 * MEDIUM-2: the earlier "never bursts" test only ever advanced by one
+	 * huge step, so it never exercised the case that actually bites — a
+	 * scan stall followed by *resumed* 1 kHz scanning. If the repeat
+	 * deadline is advanced by one period per fire instead of re-anchored to
+	 * now, the deadline stays in the past and every subsequent 1 ms scan
+	 * fires a repeat until it catches up: 4 Hz becomes ~1 kHz.
+	 */
+	model_init(&m, NULL);
+	scan_for(&m, 1U);
+	m.f = clr(m.f, FAULT_SIG_BUTTON_1);
+	scan_for(&m, 26U);
+	drain(&m); /* discard the press + any early events */
+
+	/* Stall for 6 s (one delivered scan far in the future). */
+	m.ms += 6000U;
+	TEST_ASSERT_EQUAL_INT(0, fault_scan_input(&m.ctx, m.f, m.g, m.ms));
+	m.ms++;
+
+	/* Now resume normal 1 ms scanning for 300 ms and count repeats. */
+	for (i = 0U; i < 300U; i++) {
+		scan_for(&m, 1U);
+	}
+	while (fault_evt_get(&m.ctx, &e) == 0) {
+		if (e.type == FAULT_EVT_BUTTON_REPEAT) {
+			repeats++;
+		}
+	}
+
+	/*
+	 * Over the stall (1) plus 300 ms of resumed scanning at 4 Hz (~1 every
+	 * 250 ms), expect a small handful — not the ~24 a broken catch-up would
+	 * emit. Bound generously but well below the burst.
+	 */
+	TEST_ASSERT_TRUE_MESSAGE(repeats <= 3U, "auto-repeat burst after stall");
+	TEST_ASSERT_TRUE(repeats >= 1U);
+}
+
 static void test_the_encoder_switch_behaves_as_a_button(void)
 {
 	model_t m;
@@ -764,6 +809,89 @@ static void test_proximity_reports_both_directions(void)
 
 	/* Proximity is a UI wake, not an alarm. */
 	TEST_ASSERT_EQUAL_UINT64(0U, fault_alarms_latched(&m.ctx));
+}
+
+static void test_an_expected_off_rail_does_not_paint_the_ui_red(void)
+{
+	model_t m;
+	const fault_alarm_t *a;
+
+	/*
+	 * MEDIUM-1: a deferred or shed rubidium is a first-class non-fault
+	 * outcome, but its buck power-good (PG6 RB_PSU) reads low forever after.
+	 * Without the expected-off mask that alarm sits active and holds
+	 * fault_any_active() true — a healthy OCXO-only unit glowing red. pwrseq
+	 * marks the rail expected-off as it declines to power it.
+	 */
+	model_init(&m, NULL);
+	scan_for(&m, 2U);
+
+	TEST_ASSERT_EQUAL_INT(
+		0, fault_set_expected_off(&m.ctx, FAULT_SIG_PG_RB_PSU, true));
+	TEST_ASSERT_EQUAL_UINT32(FAULT_SIG_BIT(FAULT_SIG_PG_RB_PSU),
+				 fault_expected_off_mask(&m.ctx));
+
+	/* The rail drops. The level and the event are still real... */
+	m.g = clr(m.g, 6U); /* PG6 RB_PSU_PG */
+	scan_for(&m, 6U);
+	expect_evt(&m, FAULT_EVT_PG_FAULT, FAULT_SIG_PG_RB_PSU,
+		   FAULT_EDGE_ASSERT);
+	TEST_ASSERT_TRUE(fault_asserted(&m.ctx, FAULT_SIG_PG_RB_PSU));
+
+	/* ...but it is not a service alarm, so the UI stays green. */
+	TEST_ASSERT_EQUAL_UINT64(0U, fault_alarms(&m.ctx));
+	TEST_ASSERT_FALSE(fault_any_active(&m.ctx));
+	TEST_ASSERT_TRUE(fault_relay_eligible(&m.ctx));
+
+	/* The latch history still records that it changed. */
+	a = fault_alarm_get(&m.ctx, (fault_alarm_id_t)FAULT_SIG_PG_RB_PSU);
+	TEST_ASSERT_TRUE(a->latched);
+	TEST_ASSERT_TRUE((fault_alarms_latched(&m.ctx) &
+			  FAULT_ALARM_BIT(FAULT_SIG_PG_RB_PSU)) != 0U);
+
+	/* Clearing the mask (rubidium wanted again) re-exposes the live fault. */
+	TEST_ASSERT_EQUAL_INT(
+		0, fault_set_expected_off(&m.ctx, FAULT_SIG_PG_RB_PSU, false));
+	TEST_ASSERT_TRUE(fault_any_active(&m.ctx));
+	TEST_ASSERT_TRUE((fault_alarms(&m.ctx) &
+			  FAULT_ALARM_BIT(FAULT_SIG_PG_RB_PSU)) != 0U);
+
+	/* The mask only covers scanned signals, and validates its argument. */
+	TEST_ASSERT_EQUAL_INT(
+		0, fault_set_expected_off(&m.ctx, FAULT_SIG_INA_ALERT_VCC_RB,
+					  true));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      fault_set_expected_off(&m.ctx,
+						     (fault_sig_t)FAULT_SIG_COUNT,
+						     true));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      fault_set_expected_off(NULL, FAULT_SIG_PG_RB_PSU,
+						     true));
+	TEST_ASSERT_EQUAL_UINT32(0U, fault_expected_off_mask(NULL));
+}
+
+static void test_expected_off_mask_does_not_touch_software_alarms(void)
+{
+	fault_ctx_t ctx;
+
+	/*
+	 * The mask covers only the 32 scanned signals. A software-raised alarm
+	 * (id >= 32) shares no bit with any signal, so it can never be
+	 * suppressed by this mechanism — verify a same-numbered attempt is
+	 * rejected and the software alarm still shows.
+	 */
+	TEST_ASSERT_EQUAL_INT(0, fault_init(&ctx, NULL));
+	TEST_ASSERT_EQUAL_INT(
+		0, fault_alarm_set(&ctx, FAULT_ALARM_GNSS_LOST, true, 10U));
+
+	/* FAULT_ALARM_GNSS_LOST is id 33, outside the maskable 0..31 range. */
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      fault_set_expected_off(
+				      &ctx, (fault_sig_t)FAULT_ALARM_GNSS_LOST,
+				      true));
+	TEST_ASSERT_TRUE(fault_any_active(&ctx));
+	TEST_ASSERT_TRUE((fault_alarms(&ctx) &
+			  FAULT_ALARM_BIT(FAULT_ALARM_GNSS_LOST)) != 0U);
 }
 
 static void test_backup_rail_power_good_is_reported_and_alarmed(void)
@@ -1301,6 +1429,7 @@ int main(void)
 	RUN_TEST(test_long_press_fires_once_at_the_threshold);
 	RUN_TEST(test_auto_repeat_starts_after_one_second_at_four_hertz);
 	RUN_TEST(test_repeat_never_bursts_when_scans_are_skipped);
+	RUN_TEST(test_auto_repeat_does_not_burst_when_scanning_resumes);
 	RUN_TEST(test_the_encoder_switch_behaves_as_a_button);
 	RUN_TEST(test_buttons_are_independent);
 
@@ -1309,6 +1438,8 @@ int main(void)
 	RUN_TEST(test_all_nine_ina_alerts_dispatch_including_the_one_on_port_f);
 	RUN_TEST(test_en_fault_flags_raise_their_alarms);
 	RUN_TEST(test_proximity_reports_both_directions);
+	RUN_TEST(test_an_expected_off_rail_does_not_paint_the_ui_red);
+	RUN_TEST(test_expected_off_mask_does_not_touch_software_alarms);
 	RUN_TEST(test_backup_rail_power_good_is_reported_and_alarmed);
 	RUN_TEST(test_a_rail_already_down_at_boot_raises_its_fault);
 
