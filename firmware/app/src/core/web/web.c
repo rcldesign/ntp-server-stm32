@@ -166,23 +166,36 @@ int web_ct_streq(const char *a, const char *b, size_t max)
 {
 	uint8_t acc = 0U;
 	size_t i;
-	bool ended = false;
+	bool a_end = false;
+	bool b_end = false;
 
 	if (a == NULL || b == NULL) {
 		return 1;
 	}
 	/*
-	 * Walk the full window either way, so the timing reveals neither the
-	 * common prefix length nor the strings' lengths. Once both have ended,
-	 * subsequent bytes are compared as 0 == 0 and contribute nothing.
+	 * Walk the full window either way, so the loop count — and therefore the
+	 * timing — depends only on @p max, never on the common prefix length.
+	 *
+	 * Each string is tracked separately. Reading past a NUL would be an
+	 * out-of-bounds access whenever one side is a short literal, so once a
+	 * side's terminator has been seen its subsequent bytes are substituted
+	 * with '\0' rather than fetched. (A single shared "ended" flag is NOT
+	 * enough: it only trips when both terminators land on the same index.)
+	 *
+	 * The remaining data dependence is on the two *lengths*, which are not
+	 * secret here — the stored token is always exactly AUTH_WEB_TOKEN_LEN and
+	 * the candidate's length is the attacker's own input.
 	 */
 	for (i = 0U; i < max; i++) {
-		char ca = ended ? '\0' : a[i];
-		char cb = ended ? '\0' : b[i];
+		char ca = a_end ? '\0' : a[i];
+		char cb = b_end ? '\0' : b[i];
 
 		acc |= (uint8_t)(ca ^ cb);
-		if (ca == '\0' && cb == '\0') {
-			ended = true;
+		if (ca == '\0') {
+			a_end = true;
+		}
+		if (cb == '\0') {
+			b_end = true;
 		}
 	}
 	return (acc == 0U) ? 0 : 1;

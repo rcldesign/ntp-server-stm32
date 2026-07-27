@@ -682,10 +682,32 @@ static void test_hints_are_carried(void)
 	frame(&f, true, 1U);
 	TEST_ASSERT_EQUAL_UINT(3U, f.hint_count);
 
-	/* A count beyond the surface's own limit is clamped, not trusted. */
+	/*
+	 * A count above the surface's own maximum is impossible for a real
+	 * ui_surface_t, so the array length behind it is unknown. No hints are
+	 * emitted — clamping to UI_SURF_MAX_HINTS would read past a caller's
+	 * shorter array, which is exactly what ASan caught here.
+	 */
 	g_in.hint_count = 200U;
 	frame(&f, true, 2U);
-	TEST_ASSERT_EQUAL_UINT(UI_SURF_MAX_HINTS, f.hint_count);
+	TEST_ASSERT_EQUAL_UINT(0U, f.hint_count);
+
+	/* A full-length list is still carried whole. */
+	{
+		static ui_hint_t full[UI_SURF_MAX_HINTS];
+		unsigned int k;
+
+		for (k = 0U; k < UI_SURF_MAX_HINTS; k++) {
+			full[k].kind = (uint8_t)UI_HINT_RULE;
+			full[k].row = (uint8_t)k;
+			full[k].len = 4U;
+		}
+		g_in.hint = full;
+		g_in.hint_count = (uint8_t)UI_SURF_MAX_HINTS;
+		frame(&f, true, 4U);
+		TEST_ASSERT_EQUAL_UINT(UI_SURF_MAX_HINTS, f.hint_count);
+		g_in.hint = hints;
+	}
 
 	/* A NULL list with a non-zero count emits no hints. */
 	g_in.hint = NULL;

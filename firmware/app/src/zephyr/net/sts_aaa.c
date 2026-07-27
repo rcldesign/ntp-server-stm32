@@ -66,6 +66,10 @@
 #include "cfg/cfg.h"
 #include "net/sts_aaa.h"
 #include "net/sts_net.h"
+/* sts_store.h is the one header this area takes from another (see sts_net.h):
+ * it is where the net area gets its port_crypto_t, rather than standing up a
+ * second mbedTLS binding. */
+#include "storage/sts_store.h"
 #include "zephyr/sts_app.h"
 
 LOG_MODULE_REGISTER(sts_aaa, CONFIG_STS1000_LOG_LEVEL);

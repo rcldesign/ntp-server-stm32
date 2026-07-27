@@ -1001,6 +1001,11 @@ static void put(mp_jw_t *w, const char *s, size_t n)
 		w->err = -ENOSPC;
 		return;
 	}
+	if (n == 0U) {
+		/* An empty string is legal, and memcpy() with a NULL source is
+		 * undefined even for a zero length. */
+		return;
+	}
 	(void)memcpy(&w->buf[w->len], s, n);
 	w->len += n;
 }

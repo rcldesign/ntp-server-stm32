@@ -311,6 +311,38 @@ static void test_encode(void)
 	n = wss_encode((uint8_t)WSS_OP_PONG, true, NULL, 0U, out, sizeof(out));
 	TEST_ASSERT_EQUAL_INT(2, n);
 
+	/* The header-only form, used for payloads too big to stage. */
+	{
+		uint8_t h[WSS_HDR_MAX];
+
+		TEST_ASSERT_EQUAL_INT(2, wss_encode_header((uint8_t)WSS_OP_TEXT,
+							   true, 10U, h,
+							   sizeof(h)));
+		TEST_ASSERT_EQUAL_HEX8(0x81U, h[0]);
+		TEST_ASSERT_EQUAL_HEX8(10U, h[1]);
+		TEST_ASSERT_EQUAL_INT(4, wss_encode_header((uint8_t)WSS_OP_TEXT,
+							   true, 6000U, h,
+							   sizeof(h)));
+		TEST_ASSERT_EQUAL_HEX8(126U, h[1]);
+		TEST_ASSERT_EQUAL_INT(10, wss_encode_header((uint8_t)WSS_OP_BIN,
+							    true, 70000U, h,
+							    sizeof(h)));
+		TEST_ASSERT_EQUAL_HEX8(127U, h[1]);
+		TEST_ASSERT_EQUAL_INT(-ENOSPC,
+				      wss_encode_header((uint8_t)WSS_OP_TEXT,
+							true, 6000U, h, 3U));
+		TEST_ASSERT_EQUAL_INT(-EINVAL,
+				      wss_encode_header((uint8_t)WSS_OP_TEXT,
+							true, 10U, NULL,
+							sizeof(h)));
+		TEST_ASSERT_EQUAL_INT(-EINVAL, wss_encode_header(0x03U, true, 0U,
+								 h, sizeof(h)));
+		TEST_ASSERT_EQUAL_INT(-EINVAL,
+				      wss_encode_header((uint8_t)WSS_OP_PING,
+							true, 200U, h,
+							sizeof(h)));
+	}
+
 	/* Errors. */
 	TEST_ASSERT_EQUAL_INT(-EINVAL, wss_encode(0x03U, true, NULL, 0U, out,
 						  sizeof(out)));
@@ -714,9 +746,14 @@ static void test_txq(void)
 	TEST_ASSERT_EQUAL_INT(-EINVAL, wss_txq_push(NULL, frame, 4U, false));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, wss_txq_push(&q, NULL, 4U, false));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, wss_txq_push(&q, frame, 0U, false));
-	TEST_ASSERT_EQUAL_INT(-ENOSPC,
-			      wss_txq_push(&q, frame, WSS_TXQ_SLOT_BYTES + 1U,
-					   false));
+	{
+		uint8_t big[WSS_TXQ_SLOT_BYTES + 4U];
+
+		TEST_ASSERT_EQUAL_INT(-ENOSPC,
+				      wss_txq_push(&q, big,
+						   WSS_TXQ_SLOT_BYTES + 1U,
+						   false));
+	}
 
 	/* FIFO order. */
 	for (i = 0U; i < WSS_TXQ_SLOTS; i++) {

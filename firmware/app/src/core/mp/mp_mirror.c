@@ -181,8 +181,14 @@ static int encode_try(mp_mirror_ctx_t *c, const mp_mirror_in_t *in,
 	{
 		size_t hn = (in->hint != NULL) ? (size_t)in->hint_count : 0U;
 
+		/*
+		 * A count above the surface's own maximum cannot be honest — a
+		 * ui_surface_t can never hold more — so the *array* behind it is
+		 * of unknown length. Emit no hints rather than clamping to
+		 * UI_SURF_MAX_HINTS and reading entries the caller may not own.
+		 */
 		if (hn > UI_SURF_MAX_HINTS) {
-			hn = UI_SURF_MAX_HINTS;
+			hn = 0U;
 		}
 		(void)mp_cbor_arr(&w, hn);
 		for (i = 0U; i < hn; i++) {

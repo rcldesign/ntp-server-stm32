@@ -281,7 +281,16 @@ static void gnss_publish(uint32_t now_ms)
 
 	if ((gnssmgr_leap(&mgr, &leap) == 0) && leap.valid && leap.curr_ls_valid) {
 		s.leap_valid = true;
-		s.leap_current_s = (int16_t)leap.current_ls;
+		/*
+		 * gnssmgr_leap_t::current_ls is the receiver's GPS-UTC offset (18 s
+		 * today). quality_block_t::leap_current_s and every consumer of it
+		 * — the PTP-clock reference computation, the UI's TAI->UTC display
+		 * conversion, SNMP/web/shell/MCP telemetry and the PFI fast-save —
+		 * are all specified as TAI-UTC. TAI-GPS has been fixed at 19 s since
+		 * the GPS epoch, so the conversion is GPS-UTC + 19; publishing
+		 * current_ls raw understated the offset by 19 s everywhere.
+		 */
+		s.leap_current_s = (int16_t)leap.current_ls + STS_TAI_MINUS_GPS_S;
 		s.leap_pending = leap.event_pending ? leap.ls_change : 0;
 	}
 

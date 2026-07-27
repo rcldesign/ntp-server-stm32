@@ -43,6 +43,11 @@ static void raw(mp_cbor_t *w, const uint8_t *b, size_t n)
 		w->err = -ENOSPC;
 		return;
 	}
+	if (n == 0U) {
+		/* An empty byte or text string is legal, and memcpy() with a
+		 * NULL source is undefined even for a zero length. */
+		return;
+	}
 	(void)memcpy(&w->buf[w->len], b, n);
 	w->len += n;
 }

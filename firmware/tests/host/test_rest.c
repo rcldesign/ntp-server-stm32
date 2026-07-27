@@ -556,9 +556,20 @@ static void test_ct_and_spans(void)
 	TEST_ASSERT_EQUAL_INT(1, web_ct_memcmp("abc", "abd", 3U));
 	TEST_ASSERT_EQUAL_INT(1, web_ct_memcmp(NULL, "abd", 3U));
 	TEST_ASSERT_EQUAL_INT(1, web_ct_memcmp("abc", NULL, 3U));
+	/*
+	 * The window (8, 64) is deliberately much longer than the strings: the
+	 * comparator must walk it for constant time WITHOUT reading past either
+	 * terminator. ASan is what actually proves the second half — this case
+	 * caught a real out-of-bounds read.
+	 */
 	TEST_ASSERT_EQUAL_INT(0, web_ct_streq("abc", "abc", 8U));
+	TEST_ASSERT_EQUAL_INT(0, web_ct_streq("abc", "abc", 64U));
+	TEST_ASSERT_EQUAL_INT(0, web_ct_streq("", "", 64U));
 	TEST_ASSERT_EQUAL_INT(1, web_ct_streq("abc", "abcd", 8U));
 	TEST_ASSERT_EQUAL_INT(1, web_ct_streq("abcd", "abc", 8U));
+	TEST_ASSERT_EQUAL_INT(1, web_ct_streq("", "a", 64U));
+	TEST_ASSERT_EQUAL_INT(1, web_ct_streq("a", "", 64U));
+	TEST_ASSERT_EQUAL_INT(1, web_ct_streq("abc", "abd", 8U));
 	TEST_ASSERT_EQUAL_INT(1, web_ct_streq(NULL, "abc", 8U));
 	TEST_ASSERT_EQUAL_INT(1, web_ct_streq("abc", NULL, 8U));
 

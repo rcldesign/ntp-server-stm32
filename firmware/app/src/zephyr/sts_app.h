@@ -72,6 +72,40 @@ void sts_time_set_traceable(bool traceable);
  * mono_ms argument expects. */
 uint64_t sts_mono_ms(void);
 
+/* TAI - GPS, fixed at 19 s since the GPS epoch (1980-01-06). The receiver
+ * reports GPS-UTC; every timescale field in this firmware is TAI-UTC, so the
+ * platform adds this when publishing. Not a leap second and never changes. */
+#define STS_TAI_MINUS_GPS_S 19
+
+/* ---- GNSS wall-clock (absolute epoch source for the PTP clock) ----------- */
+/* The receiver's civil time, used ONCE per boot (and after any step) to place
+ * the ETH PTP counter's absolute epoch via ptp_clock_set(). The discipline loop
+ * steers rate from PPS; nothing in that path knows which second it is, so this
+ * is the only thing that makes a served timestamp traceable.
+ *
+ * Implemented by the platform area (GNSS thread). The net area's sts_ptpclk
+ * carries a __weak fallback returning -ENODATA so a build without the GNSS
+ * thread links and stays honestly unsynchronised rather than serving a
+ * power-on-relative timestamp as stratum 1.
+ *
+ * Consumers MUST reject the reading unless utc_valid && leap_valid &&
+ * time_locked, and MUST age it by (now - mono_ms) before comparing: this is
+ * when the receiver's time was decoded, not when the getter was called. */
+typedef struct {
+	int64_t  utc_unix_s;    /* UTC seconds since 1970-01-01, receiver-reported */
+	int32_t  utc_nano_ns;   /* signed sub-second correction, (-1e9, +1e9) */
+	int16_t  tai_minus_utc; /* TAI - UTC, seconds; valid iff leap_valid */
+	uint32_t tacc_ns;       /* receiver time-accuracy estimate; 0 = unknown */
+	uint64_t mono_ms;       /* sts_mono_ms() when this time was DECODED */
+	bool     utc_valid;     /* date and time fully resolved */
+	bool     leap_valid;    /* tai_minus_utc is a real receiver value */
+	bool     time_locked;   /* the fix is usable for timing */
+} sts_gnss_wallclock_t;
+
+/* Fill @p out from the receiver. 0 on success, -ENODATA when no GNSS time
+ * source exists in this build/boot, -EINVAL when @p out is NULL. */
+int sts_gnss_wallclock(sts_gnss_wallclock_t *out);
+
 /* ---- config ------------------------------------------------------------- */
 /* The single live cfg context (loaded before any area starts). Never NULL
  * once sts_platform_init() has returned.
