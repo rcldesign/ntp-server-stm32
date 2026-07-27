@@ -137,6 +137,15 @@ static int getter(void *ctx, uint16_t obj, uint16_t inst, snmp_value_t *out)
 	case SNMP_OBJ_SYS_DESCR:
 		snmp_val_str(out, SNMP_SYS_DESCR);
 		return 0;
+	case SNMP_OBJ_SYS_OBJECT_ID: {
+		/* sysObjectID.0 = the vendor's registration OID, i.e. the
+		 * enterprise root this MIB hangs under (1.3.6.1.4.1.<PEN>.1). */
+		static const uint32_t objid[] = { 1U, 3U, 6U, 1U, 4U,
+						  1U, SNMP_PEN, 1U };
+
+		snmp_val_oid(out, objid, sizeof(objid) / sizeof(objid[0]));
+		return 0;
+	}
 	case SNMP_OBJ_SYS_NAME:
 		snmp_val_str(out, hostname[0] ? hostname : "meridian");
 		return 0;

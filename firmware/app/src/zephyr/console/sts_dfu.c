@@ -13,14 +13,16 @@
  *
  * Write buffering
  * ---------------
- * STM32H5 internal flash programs in 16-byte quad-words, while FW_DATA chunks
- * are arbitrary lengths up to 1024 B. Writes are therefore accumulated in an
- * aligned buffer and pushed out a whole buffer at a time; the FINAL short block
- * is padded to the write-block size with 0xFF (the erased value) when core/mcp
- * sets `flush`. The stream is then *sealed*: any further write without an
- * intervening erase would have to re-program a partially-written block, which
- * NOR flash cannot do, so it is refused rather than silently corrupting the
- * image.
+ * STM32H5 internal flash programs in 16-byte quad-words. This port reports that
+ * write-block size to core/mcp via mcp_wiring_t::dfu_write_block, and core then
+ * guarantees every non-final FW_DATA chunk is a multiple of it. So the port is
+ * a write-block aligner that writes the aligned bulk straight through to flash
+ * (the H5 driver tolerates an unaligned source, so no bounce copy) and buffers
+ * only the FINAL short block, padding it to the write-block size with the
+ * erased value when core/mcp sets `flush`. The stream is then *sealed*: any
+ * further write without an intervening erase would have to re-program a
+ * partially-written block, which flash cannot do, so it is refused rather than
+ * silently corrupting the image.
  *
  * The write frontier is strictly sequential because core/mcp guarantees it —
  * a FW_DATA below the frontier is absorbed as a retransmit without reaching
@@ -66,13 +68,10 @@ BUILD_ASSERT(FIXED_PARTITION_EXISTS(slot0_partition) &&
 		     FIXED_PARTITION_EXISTS(slot1_partition),
 	     "the A/B slot partitions are missing from the board devicetree");
 
-/** Bytes accumulated before a flash program. Must be a multiple of the
- *  write-block size, which is checked against the live geometry at init. */
-#if defined(CONFIG_STS1000_DFU_WRITE_BUF)
-#define DFU_WBUF CONFIG_STS1000_DFU_WRITE_BUF
-#else
-#define DFU_WBUF 256
-#endif
+/** Upper bound on the flash write-block this aligner buffers. STM32H5 internal
+ *  flash is 16 B (a 128-bit quad-word); the headroom covers other NOR/flash
+ *  parts without making the buffer meaningfully larger. Checked at open. */
+#define DFU_ALIGN_MAX 32U
 
 /** Fallback erase granularity if the flash driver cannot describe the slot. */
 #define DFU_ERASE_GRAN_FALLBACK 8192U
@@ -82,17 +81,23 @@ struct dfu_ctx {
 	uint32_t erase_gran;         /* flash erase page, bytes */
 	uint32_t usable;             /* staging bytes offered to core/mcp */
 	uint32_t trailer_off;        /* start of the reserved trailer page */
-	uint32_t align;              /* flash write-block size, bytes */
+	uint32_t align;              /* flash write-block size (16 on STM32H5) */
 	uint8_t  erased_val;         /* what an erased byte reads back as */
 
-	uint32_t buf_off;            /* flash offset of buf[0] */
-	size_t   buf_n;              /* valid bytes in buf */
-	uint32_t stream_end;         /* == buf_off + buf_n, the accepted frontier */
+	/*
+	 * Write-block aligner state. `flushed` is the flash write frontier: a
+	 * multiple of `align` (until the final padded write). `tail_n` (< align)
+	 * is the sub-block remainder held in `tail`, not yet committed. The
+	 * accepted frontier — the next offset core may write — is
+	 * `flushed + tail_n`.
+	 */
+	uint32_t flushed;
+	uint32_t tail_n;
 	bool     sealed;             /* a padded flush closed the stream */
 	bool     ready;
 	bool     open_failed;        /* do not retry a hard geometry failure */
 
-	uint8_t buf[DFU_WBUF] __aligned(4);
+	uint8_t tail[DFU_ALIGN_MAX] __aligned(4);
 };
 
 static K_MUTEX_DEFINE(dfu_lock);
@@ -132,10 +137,10 @@ static int dfu_open(void)
 	}
 
 	dfu.align = flash_area_align(dfu.fa);
-	if ((dfu.align == 0U) || ((DFU_WBUF % dfu.align) != 0U)) {
-		LOG_ERR("flash write-block %u B does not divide the %u B DFU "
+	if ((dfu.align == 0U) || (dfu.align > DFU_ALIGN_MAX)) {
+		LOG_ERR("flash write-block %u B is 0 or exceeds the %u B aligner "
 			"buffer",
-			(unsigned int)dfu.align, (unsigned int)DFU_WBUF);
+			(unsigned int)dfu.align, (unsigned int)DFU_ALIGN_MAX);
 		flash_area_close(dfu.fa);
 		dfu.fa = NULL;
 		dfu.open_failed = true;
@@ -186,6 +191,15 @@ uint32_t sts_dfu_erase_granularity(void)
 	return dfu.erase_gran;
 }
 
+uint32_t sts_dfu_write_block(void)
+{
+	(void)dfu_open();
+	/* 16 on STM32H5. Reported to core/mcp as mcp_wiring_t::dfu_write_block
+	 * so it keeps every non-final FW_DATA chunk a multiple of this — the
+	 * guarantee that lets staging_write buffer only the final short block. */
+	return (dfu.align != 0U) ? dfu.align : 16U;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Staging slot                                                              */
 /* ------------------------------------------------------------------------- */
@@ -203,10 +217,15 @@ static uint32_t dfu_staging_size(void *ctx)
 /* Caller holds dfu_lock. */
 static void dfu_stream_reset(void)
 {
-	dfu.buf_off = 0U;
-	dfu.buf_n = 0U;
-	dfu.stream_end = 0U;
+	dfu.flushed = 0U;
+	dfu.tail_n = 0U;
 	dfu.sealed = false;
+}
+
+/* Accepted frontier: the next offset core may write. Caller holds dfu_lock. */
+static uint32_t dfu_accepted(void)
+{
+	return dfu.flushed + dfu.tail_n;
 }
 
 static int dfu_staging_erase(void *ctx, uint32_t off, uint32_t len)
@@ -234,10 +253,10 @@ static int dfu_staging_erase(void *ctx, uint32_t off, uint32_t len)
 
 	/*
 	 * core/mcp only ever erases ahead of the write frontier, so an erase
-	 * that reaches back into the buffered tail means the tool restarted the
-	 * transfer. Drop whatever the previous attempt left behind.
+	 * that reaches back into the accepted region means the tool restarted
+	 * the transfer. Drop whatever the previous attempt left behind.
 	 */
-	if (off < dfu.stream_end) {
+	if (off < dfu_accepted()) {
 		dfu_stream_reset();
 	}
 
@@ -252,21 +271,36 @@ static int dfu_staging_erase(void *ctx, uint32_t off, uint32_t len)
 	return rc;
 }
 
-/* Caller holds dfu_lock. Programs the whole buffer, which is align-sized. */
-static int dfu_buf_program(size_t n)
+/* Caller holds dfu_lock. Programs `n` bytes (a multiple of align) at the flash
+ * frontier from `src`, advancing the frontier. */
+static int dfu_program(const uint8_t *src, size_t n)
 {
-	int rc = flash_area_write(dfu.fa, (off_t)dfu.buf_off, dfu.buf, n);
+	int rc = flash_area_write(dfu.fa, (off_t)dfu.flushed, src, n);
 
 	if (rc != 0) {
 		LOG_ERR("slot1 write at 0x%x (%zu B) failed (%d)",
-			(unsigned int)dfu.buf_off, n, rc);
+			(unsigned int)dfu.flushed, n, rc);
 		return rc;
 	}
-	dfu.buf_off += (uint32_t)n;
-	dfu.buf_n = 0U;
+	dfu.flushed += (uint32_t)n;
 	return 0;
 }
 
+/*
+ * Write-block aligner (port_image.h: "impl handles write-block alignment
+ * buffering for the FINAL short block when flush=true").
+ *
+ * core/mcp reports the flash write-block via mcp_wiring_t::dfu_write_block and
+ * then guarantees every non-final FW_DATA chunk is a multiple of it, so in
+ * normal operation the only thing ever buffered is the last short block. The
+ * top-up branch below still handles a sub-block mid-stream remainder, so the
+ * port stays correct even if that guarantee is ever relaxed — it is just never
+ * exercised in the aligned-chunk hot path.
+ *
+ * The STM32H5 flash driver reads the source with UNALIGNED_GET, so the bulk is
+ * written straight from core's payload buffer with no bounce copy; only offset
+ * and length must be align-multiples, which they are by construction.
+ */
 static int dfu_staging_write(void *ctx, uint32_t off, const uint8_t *data,
 			     size_t len, bool flush)
 {
@@ -287,48 +321,72 @@ static int dfu_staging_write(void *ctx, uint32_t off, const uint8_t *data,
 	k_mutex_lock(&dfu_lock, K_FOREVER);
 
 	/*
-	 * Invariant: stream_end == buf_off + buf_n. A fresh (or just-erased)
-	 * stream has all three at zero, so the first chunk must start at 0 —
-	 * which is exactly what core/mcp does after FW_BEGIN.
+	 * Strictly sequential: the accepted frontier (flushed + tail_n) is the
+	 * only offset accepted. A fresh or just-erased stream has it at 0, which
+	 * is exactly where core/mcp starts after FW_BEGIN.
 	 */
-	if (dfu.sealed || (off != dfu.stream_end)) {
+	if (dfu.sealed || (off != dfu_accepted())) {
 		LOG_ERR("non-sequential staging write: got 0x%x, expected 0x%x%s",
-			(unsigned int)off, (unsigned int)dfu.stream_end,
+			(unsigned int)off, (unsigned int)dfu_accepted(),
 			dfu.sealed ? " (stream sealed)" : "");
 		k_mutex_unlock(&dfu_lock);
 		return PORT_EINVAL;
 	}
 
-	while (len > 0U) {
-		size_t n = MIN(len, sizeof(dfu.buf) - dfu.buf_n);
+	/* 1. Top up a pending sub-block tail to a full write block. */
+	if ((dfu.tail_n > 0U) && (len > 0U)) {
+		size_t n = MIN((size_t)(dfu.align - dfu.tail_n), len);
 
-		memcpy(&dfu.buf[dfu.buf_n], data, n);
-		dfu.buf_n += n;
-		dfu.stream_end += (uint32_t)n;
+		memcpy(&dfu.tail[dfu.tail_n], data, n);
+		dfu.tail_n += (uint32_t)n;
 		data += n;
 		len -= n;
 
-		if (dfu.buf_n == sizeof(dfu.buf)) {
-			rc = dfu_buf_program(sizeof(dfu.buf));
+		if (dfu.tail_n == dfu.align) {
+			rc = dfu_program(dfu.tail, dfu.align);
 			if (rc != 0) {
 				goto out;
 			}
+			dfu.tail_n = 0U;
 		}
 	}
 
-	if (flush) {
-		if (dfu.buf_n > 0U) {
-			size_t padded = ROUND_UP(dfu.buf_n, (size_t)dfu.align);
+	/* 2. Write the write-block-aligned bulk directly from core's buffer. */
+	if (len >= dfu.align) {
+		size_t bulk = (len / dfu.align) * (size_t)dfu.align;
 
-			memset(&dfu.buf[dfu.buf_n], dfu.erased_val,
-			       padded - dfu.buf_n);
-			rc = dfu_buf_program(padded);
+		rc = dfu_program(data, bulk);
+		if (rc != 0) {
+			goto out;
+		}
+		data += bulk;
+		len -= bulk;
+	}
+
+	/* 3. Buffer the sub-block remainder. Only the FINAL chunk leaves one
+	 *    here when core honours the alignment guarantee. */
+	if (len > 0U) {
+		memcpy(&dfu.tail[dfu.tail_n], data, len);
+		dfu.tail_n += (uint32_t)len;
+	}
+
+	/* 4. Flush: pad the buffered tail to a full write block and commit it,
+	 *    then advance the frontier by the real byte count so the accepted
+	 *    frontier equals the image size, not the padded block boundary. */
+	if (flush) {
+		if (dfu.tail_n > 0U) {
+			uint32_t real = dfu.tail_n;
+
+			memset(&dfu.tail[real], dfu.erased_val, dfu.align - real);
+			rc = flash_area_write(dfu.fa, (off_t)dfu.flushed,
+					      dfu.tail, dfu.align);
 			if (rc != 0) {
+				LOG_ERR("slot1 final write at 0x%x failed (%d)",
+					(unsigned int)dfu.flushed, rc);
 				goto out;
 			}
-			/* buf_off advanced by the padded length; wind it back
-			 * to the real end of data so the invariant holds. */
-			dfu.buf_off = dfu.stream_end;
+			dfu.flushed += real;
+			dfu.tail_n = 0U;
 		}
 		dfu.sealed = true;
 	}
@@ -362,15 +420,15 @@ static int dfu_staging_read(void *ctx, uint32_t off, uint8_t *data, size_t len)
 	rc = flash_area_read(dfu.fa, (off_t)off, data, len);
 
 	/*
-	 * Overlay anything still sitting in the write buffer. core/mcp only
-	 * reads back after a flush, so this should never fire — but a read that
-	 * silently returned erased flash for bytes the caller had already
-	 * handed us would turn a correct image into a hash mismatch, and that
-	 * failure is far too expensive to leave to convention.
+	 * Overlay the buffered sub-block tail. core/mcp only reads back after a
+	 * flush (tail_n == 0 then), so this normally does nothing — but a read
+	 * that returned erased flash for bytes the caller had already handed us
+	 * would turn a correct image into a hash mismatch, and that failure is
+	 * far too expensive to leave to convention.
 	 */
-	if ((rc == 0) && (dfu.buf_n > 0U)) {
-		uint32_t bs = dfu.buf_off;
-		uint32_t be = dfu.buf_off + (uint32_t)dfu.buf_n;
+	if ((rc == 0) && (dfu.tail_n > 0U)) {
+		uint32_t bs = dfu.flushed;
+		uint32_t be = dfu.flushed + dfu.tail_n;
 		uint32_t rs = off;
 		uint32_t re = off + (uint32_t)len;
 
@@ -378,7 +436,7 @@ static int dfu_staging_read(void *ctx, uint32_t off, uint8_t *data, size_t len)
 			uint32_t s = MAX(rs, bs);
 			uint32_t e = MIN(re, be);
 
-			memcpy(&data[s - rs], &dfu.buf[s - bs], (size_t)(e - s));
+			memcpy(&data[s - rs], &dfu.tail[s - bs], (size_t)(e - s));
 		}
 	}
 

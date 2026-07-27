@@ -113,6 +113,7 @@ static int sock6 = -1;
 static struct {
 	uint64_t xmt_field;
 	uint32_t client_id;
+	int32_t tai_minus_utc; /* the offset the response was built with */
 	bool used;
 } tx_pending[TX_PENDING_SLOTS];
 static uint8_t tx_pending_next;
@@ -244,7 +245,8 @@ static uint32_t client_id_of(const struct sockaddr *sa)
 /* TX timestamp feedback                                                     */
 /* ------------------------------------------------------------------------- */
 
-static void tx_pending_add(uint64_t xmt_field, uint32_t client_id)
+static void tx_pending_add(uint64_t xmt_field, uint32_t client_id,
+			   int32_t tai_minus_utc)
 {
 	if (xmt_field == 0U) {
 		return;
@@ -252,6 +254,7 @@ static void tx_pending_add(uint64_t xmt_field, uint32_t client_id)
 	K_SPINLOCK(&tx_lock) {
 		tx_pending[tx_pending_next].xmt_field = xmt_field;
 		tx_pending[tx_pending_next].client_id = client_id;
+		tx_pending[tx_pending_next].tai_minus_utc = tai_minus_utc;
 		tx_pending[tx_pending_next].used = true;
 		tx_pending_next =
 			(uint8_t)((tx_pending_next + 1U) % TX_PENDING_SLOTS);
@@ -266,6 +269,7 @@ static void tx_pending_add(uint64_t xmt_field, uint32_t client_id)
 static void on_tx_timestamp(uint64_t xmt_field, uint64_t tai_ns)
 {
 	uint32_t client_id = 0U;
+	int32_t tai_minus_utc = 0;
 	bool found = false;
 	size_t i;
 
@@ -274,6 +278,7 @@ static void on_tx_timestamp(uint64_t xmt_field, uint64_t tai_ns)
 			if (tx_pending[i].used &&
 			    tx_pending[i].xmt_field == xmt_field) {
 				client_id = tx_pending[i].client_id;
+				tai_minus_utc = tx_pending[i].tai_minus_utc;
 				tx_pending[i].used = false;
 				found = true;
 				break;
@@ -286,13 +291,19 @@ static void on_tx_timestamp(uint64_t xmt_field, uint64_t tai_ns)
 	}
 
 	/*
+	 * The measured egress instant must be reported on the same UTC-based
+	 * NTP timescale the response's transmit field used, i.e. with the same
+	 * TAI-UTC offset (ntp_ts_from_tai subtracts it). Passing 0 would shift
+	 * the interleaved reply by the whole leap-second offset.
+	 *
 	 * ntp_tx_complete() only touches that client's cached interleave state
 	 * and takes no lock of its own; the NTP thread is the only other writer
 	 * and this callback runs cooperatively above it, so the update cannot
 	 * interleave with a request being handled.
 	 */
 	if (ntp_tx_complete(&ntp, client_id,
-			    ntp_ts_from_tai((int64_t)tai_ns, 0)) == 0) {
+			    ntp_ts_from_tai((int64_t)tai_ns, tai_minus_utc)) ==
+	    0) {
 		gstat.txts_matched++;
 	}
 }
@@ -442,7 +453,7 @@ static void serve_one(int fd)
 	/* Arm the interleave feedback only for a real response: a KoD carries
 	 * no timestamps a client may use. */
 	if (res.action == NTP_ACT_RESPOND) {
-		tx_pending_add(res.xmt, rx.client_id);
+		tx_pending_add(res.xmt, rx.client_id, qv.tai_minus_utc);
 	}
 }
 

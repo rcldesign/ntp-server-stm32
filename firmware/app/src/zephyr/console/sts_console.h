@@ -51,6 +51,15 @@ const port_image_t *sts_dfu_port(void);
 uint32_t sts_dfu_erase_granularity(void);
 
 /**
+ * Flash write-block size of the staging slot, in bytes (16 on STM32H5).
+ *
+ * Passed to core/mcp as mcp_wiring_t::dfu_write_block so it keeps every
+ * non-final FW_DATA chunk a multiple of this; staging_write then buffers only
+ * the final short block.
+ */
+uint32_t sts_dfu_write_block(void);
+
+/**
  * Read one slot's image table entry.
  *
  * Shared by the MCP FW_INFO handler (through the port) and the `sts fw info`

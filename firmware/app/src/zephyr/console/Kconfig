@@ -77,15 +77,6 @@ config STS1000_MCP_TX_RING
 	  1058 B encoded plus the delimiter) or a maximum-size response could
 	  never be transmitted. A build-time assertion enforces it.
 
-config STS1000_DFU_WRITE_BUF
-	int "DFU staging write buffer (bytes)"
-	default 256
-	range 32 4096
-	help
-	  Accumulated before each flash program. Must be a multiple of the
-	  flash write-block size (16 B on STM32H5); checked at runtime against
-	  the live geometry.
-
 config STS1000_LFS_MOUNT_ATTEMPTS
 	int "LittleFS mount attempts before giving up"
 	default 3

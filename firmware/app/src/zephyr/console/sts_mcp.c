@@ -408,6 +408,10 @@ int sts_mcp_start(void)
 	w.diag_cb = sts_diag_encode;
 	w.tx = mcp_tx;
 	w.dfu_erase_gran = sts_dfu_erase_granularity();
+	/* Report the true flash write-block (16 B on STM32H5). Core keeps every
+	 * non-final FW_DATA chunk a multiple of it, so the DFU port only ever
+	 * buffers the final short block. */
+	w.dfu_write_block = sts_dfu_write_block();
 	fill_ident(&w.ident);
 
 	rc = mcp_init(&mcp, &w);

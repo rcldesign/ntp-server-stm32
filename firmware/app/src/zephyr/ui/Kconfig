@@ -1,0 +1,36 @@
+# STS1000 "Meridian" — local-UI area tunables.
+# SPDX-License-Identifier: Apache-2.0
+#
+# app/Kconfig must pull this in for the symbols below to exist:
+#
+#     rsource "src/zephyr/ui/Kconfig"
+#
+# That line is not yet present (app/Kconfig is outside this area's scope), which
+# is deliberately harmless: every symbol here has an #if defined() fallback in
+# src/zephyr/ui/sts_ui.h, so the area builds with its documented defaults until
+# the line lands. This mirrors src/zephyr/console/Kconfig, which is wired the
+# same way.
+
+if STS1000_UI
+
+config STS1000_UI_RENDER_STACK_SIZE
+	int "Local-UI render thread stack (bytes)"
+	default 3072
+	range 1536 8192
+	help
+	  Stack for the ui_local render/nav thread (ARCHITECTURE.md §6,
+	  priority 15). It owns the tile rasteriser's locals and the FT6336U
+	  I2C transaction; the surface, shadow and blit scratch are static BSS,
+	  not stack.
+
+config STS1000_UI_RENDER_HZ
+	int "Local-UI render rate (Hz)"
+	default 10
+	range 2 30
+	help
+	  Nav/render tick rate. Spec §6.5 calls for 4-10 Hz; 10 Hz keeps touch
+	  and encoder response crisp while staying far under the ST7796 partial-
+	  update bandwidth. The blank-timeout and identify timers are driven from
+	  this same tick.
+
+endif # STS1000_UI
