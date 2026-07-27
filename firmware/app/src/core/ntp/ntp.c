@@ -798,6 +798,16 @@ int ntp_handle_request(ntp_ctx_t *ctx, const ntp_rx_t *rx,
 		cl->xl_pend_rx = rx_ntp;
 		cl->xl_pend_tx_field = xmt;
 		cl->xl_pending = true;
+	} else {
+		/*
+		 * A Kiss-o'-Death is still a datagram, so the caller will report
+		 * its transmit timestamp. Disarming here makes that report a
+		 * no-op instead of letting it pair an *older* response's
+		 * transmit field with the KoD's measured instant — which would
+		 * hand the client's next interleaved request a timestamp from a
+		 * packet it never saw.
+		 */
+		cl->xl_pending = false;
 	}
 
 	res->action = (kod_refid != 0U) ? NTP_ACT_KOD : NTP_ACT_RESPOND;

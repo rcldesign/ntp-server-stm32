@@ -132,13 +132,13 @@ static int ensure_erased(mcp_ctx_t *c, uint32_t need_end)
 		limit = cap;
 	}
 
+	/* FW_BEGIN refuses an image larger than the slot, so need_end <= total
+	 * <= cap <= limit holds here and clamping to `limit` can never fall
+	 * short of the request. */
 	target = (need_end > (UINT32_MAX - gran)) ? limit : (need_end + gran);
 	target = align_up(target, gran);
 	if (target > limit) {
 		target = limit;
-	}
-	if (target < need_end) {
-		target = need_end; /* a granule bigger than the slot */
 	}
 	if (target <= c->dfu.erased) {
 		return 0;

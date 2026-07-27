@@ -472,8 +472,9 @@ typedef struct {
 typedef struct {
 	pwrseq_cfg_t cfg;
 
-	uint8_t stage; /* pwrseq_stage_t */
-	int16_t step;  /* index into the internal step table, -1 = none */
+	uint8_t stage;   /* pwrseq_stage_t */
+	int16_t step;    /* index into the internal step table, -1 = none */
+	bool step_armed; /* the current step's entry action has been emitted */
 	uint8_t retries;
 	uint32_t stage_entered_ms;
 	uint32_t step_entered_ms;
@@ -609,6 +610,33 @@ uint32_t pwrseq_actions_dropped(const pwrseq_ctx_t *ctx);
  * @retval 0        Written to @p out.
  * @retval -EINVAL  @p ctx or @p out is NULL. */
 int pwrseq_status(const pwrseq_ctx_t *ctx, pwrseq_status_t *out);
+
+/* -------------------------------------------------------- derived readings */
+
+/**
+ * PoE headroom in milliwatts: granted minus measured, floored at zero so an
+ * over-budget reading cannot wrap into an apparently huge allowance. 0 for a
+ * NULL @p in.
+ */
+uint32_t pwrseq_poe_headroom_mw(const pwrseq_in_t *in);
+
+/**
+ * True when the OCXO oven has reached setpoint.
+ *
+ * Either the discipline loop says so outright, or the INA228 0x46 draw has
+ * settled below `ocxo_warm_current_ma` *and* the oscillator TMP117 has
+ * stabilised. Current alone is not enough — an oven that has only just been
+ * switched on also draws little for a moment, and a stratum-1 advertisement
+ * that jumped the gun would be worse than a slow one (spec §3.4).
+ */
+bool pwrseq_ocxo_is_warm(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in);
+
+/**
+ * True while the oven is still pulling warm-up current (at or above
+ * `ocxo_warmup_current_ma`). Feeds the amber RGB state and the PoE budget
+ * estimate during the cold-start peak.
+ */
+bool pwrseq_ocxo_is_warming(const pwrseq_ctx_t *ctx, const pwrseq_in_t *in);
 
 /** Current stage. PWRSEQ_STAGE_IDLE when @p ctx is NULL. */
 pwrseq_stage_t pwrseq_stage(const pwrseq_ctx_t *ctx);

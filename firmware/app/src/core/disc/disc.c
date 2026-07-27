@@ -114,7 +114,16 @@ int disc_cfg_defaults(disc_cfg_t *cfg)
 	cfg->vc_tol_mv = 100;
 	cfg->vc_fault_dwell_s = 3u;
 
-	cfg->base_disp_ns = 1000.0f;
+	/*
+	 * Dispersion floor while locked. RFC 5905 §11.1 makes every server add
+	 * PHI = 15 ppm times the age of its last update, which for a 1 Hz PPS
+	 * is already 15 us; the measurement residual, the receiver's own time
+	 * accuracy and the cable-delay calibration error are all far below
+	 * that. 16 us is therefore both honest and just over one unit of the
+	 * NTP short format (1/65536 s = 15.26 us), so the served value never
+	 * quantises to a zero dispersion.
+	 */
+	cfg->base_disp_ns = 16000.0f;
 
 	return 0;
 }
@@ -794,6 +803,19 @@ static void publish(const disc_ctx_t *ctx, const disc_env_t *env,
 	(void)quality_publish(qs, &b);
 }
 
+/* §3.6: holdover or recovery that has spent its error budget is demoted. */
+static uint32_t demoted_flag(const disc_ctx_t *ctx, uint8_t stratum)
+{
+	if (stratum == (uint8_t)QUALITY_STRATUM_PRIMARY) {
+		return 0u;
+	}
+	if (ctx->state != DISC_STATE_HOLDOVER &&
+	    ctx->state != DISC_STATE_RECOVERING) {
+		return 0u;
+	}
+	return QUALITY_FLAG_DEMOTED;
+}
+
 /* Flags common to every tick. */
 static uint32_t base_flags(const disc_ctx_t *ctx, const disc_env_t *env)
 {
@@ -866,8 +888,9 @@ static void tick_no_sample(disc_ctx_t *ctx, const disc_env_t *env,
 	}
 
 	ctx->last_e_valid = false;
-	flags = base_flags(ctx, env) | extra_flags;
 	stratum = served_stratum(ctx);
+	flags = base_flags(ctx, env) | extra_flags |
+		demoted_flag(ctx, stratum);
 	fill_out(ctx, &o, flags, false, stratum);
 	ctx->flags = flags;
 
@@ -1255,11 +1278,7 @@ int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
 		flags |= QUALITY_FLAG_DAC_SLEW;
 	}
 	stratum = served_stratum(ctx);
-	if (stratum != (uint8_t)QUALITY_STRATUM_PRIMARY &&
-	    (ctx->state == DISC_STATE_HOLDOVER ||
-	     ctx->state == DISC_STATE_RECOVERING)) {
-		flags |= QUALITY_FLAG_DEMOTED;
-	}
+	flags |= demoted_flag(ctx, stratum);
 	ctx->flags = flags;
 
 	fill_out(ctx, &o, flags, true, stratum);
