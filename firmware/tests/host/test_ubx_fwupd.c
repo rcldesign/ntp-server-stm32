@@ -43,10 +43,15 @@ typedef struct {
 	unsigned int reset_pulses;
 	unsigned int safeboot_asserts;
 	unsigned int safeboot_releases;
-	/* True if a reset was ever released while safeboot was still asserted
-	 * AFTER the session ended — i.e. the receiver was left in the loader. */
-	bool left_in_loader;
-	bool session_over;
+	/*
+	 * State of GPS_SAFEBOOT_N at the MOST RECENT release of GPS_RST_N.
+	 *
+	 * The receiver samples safeboot as it comes out of reset, so this is the
+	 * bit that decides where it actually booted. Recorded rather than latched
+	 * because entering safeboot legitimately releases reset with the pin
+	 * asserted; what matters is where the *last* pulse left it.
+	 */
+	bool last_release_safeboot;
 
 	/* behaviour */
 	uint32_t loader_baud;   /**< baud at which IDENT is answered; 0 = never */
@@ -301,9 +306,7 @@ static int o_reset(void *u, bool assert_low)
 	if (r->in_reset && !assert_low) {
 		r->reset_pulses++;
 		/* Coming out of reset with safeboot still low = into the loader. */
-		if (r->safeboot && r->session_over) {
-			r->left_in_loader = true;
-		}
+		r->last_release_safeboot = r->safeboot;
 	}
 	r->in_reset = assert_low;
 	return 0;
@@ -355,6 +358,12 @@ static void assert_recovered(const ubx_fwupd_t *u, const rcv_t *r)
 	TEST_ASSERT_TRUE(r->reset_pulses >= 1U);
 	/* The UART is back at the operating baud. */
 	TEST_ASSERT_EQUAL_UINT32(38400U, r->baud);
+	/*
+	 * And — the invariant that matters — the last time reset was released,
+	 * safeboot was NOT asserted, so the receiver booted its application and
+	 * not the loader.
+	 */
+	TEST_ASSERT_FALSE(r->last_release_safeboot);
 }
 
 static uint8_t img[1024];
@@ -539,13 +548,11 @@ static void test_full_update(void)
 	}
 	TEST_ASSERT_EQUAL_UINT(sizeof(img) / 256U, r.writes_seen);
 
-	r.session_over = true;
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_finish(&u));
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)UBX_FWUPD_ST_DONE, ubx_fwupd_state(&u));
 
 	/* Left safeboot, rebooted, and confirmed the version. */
 	assert_recovered(&u, &r);
-	TEST_ASSERT_FALSE(r.left_in_loader);
 	TEST_ASSERT_NOT_NULL(ubx_fwupd_version(&u));
 	TEST_ASSERT_EQUAL_STRING("TIM 2.30",
 		ubx_mon_ver_ext(ubx_fwupd_version(&u), "FWVER"));
@@ -584,11 +591,9 @@ static void test_write_argument_rules(void)
 			&img[256], 256U + 1U));
 
 	/* finish() before the whole image is written is an error, and recovers. */
-	r.session_over = true;
 	TEST_ASSERT_EQUAL_INT(-EIO, ubx_fwupd_finish(&u));
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)UBX_FWUPD_ST_FAILED, ubx_fwupd_state(&u));
 	assert_recovered(&u, &r);
-	TEST_ASSERT_FALSE(r.left_in_loader);
 }
 
 /* ===================================================================== *
@@ -619,7 +624,6 @@ static void test_chunk_retry_on_nak_then_succeeds(void)
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)UBX_FWUPD_ST_WRITE, ubx_fwupd_state(&u));
 	TEST_ASSERT_TRUE(ubx_fwupd_in_safeboot(&u));
 
-	r.session_over = true;
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_finish(&u));
 	assert_recovered(&u, &r);
 }
@@ -663,7 +667,6 @@ static void test_chunk_exhausts_retries_and_recovers(void)
 	armed_cfg(&cfg);
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_init(&u, &cfg, &ops));
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_begin(&u, 512U));
-	r.session_over = true;
 
 	TEST_ASSERT_EQUAL_INT(-EIO, ubx_fwupd_write(&u, 0U, img, 256U));
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)UBX_FWUPD_ST_FAILED, ubx_fwupd_state(&u));
@@ -671,7 +674,6 @@ static void test_chunk_exhausts_retries_and_recovers(void)
 	TEST_ASSERT_EQUAL_UINT((unsigned int)UBX_FWUPD_CHUNK_RETRIES + 1U,
 			       r.writes_seen);
 	assert_recovered(&u, &r);
-	TEST_ASSERT_FALSE(r.left_in_loader);
 }
 
 /* ===================================================================== *
@@ -690,7 +692,6 @@ static void test_no_loader_recovers(void)
 	ops_from(&ops, &r);
 	armed_cfg(&cfg);
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_init(&u, &cfg, &ops));
-	r.session_over = true;
 
 	TEST_ASSERT_EQUAL_INT(-ENODEV, ubx_fwupd_begin(&u, 1024U));
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)UBX_FWUPD_ST_FAILED, ubx_fwupd_state(&u));
@@ -699,7 +700,6 @@ static void test_no_loader_recovers(void)
 			       (unsigned int)UBX_FWUPD_PROBE_RETRIES,
 			       r.idents_seen);
 	assert_recovered(&u, &r);
-	TEST_ASSERT_FALSE(r.left_in_loader);
 }
 
 /* Baud negotiation finds a loader that is not at the first rate tried. */
@@ -740,20 +740,16 @@ static void test_erase_failures_recover(void)
 	ops_from(&ops, &r);
 	armed_cfg(&cfg);
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_init(&u, &cfg, &ops));
-	r.session_over = true;
 	TEST_ASSERT_EQUAL_INT(-EIO, ubx_fwupd_begin(&u, 1024U));
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)UBX_FWUPD_ST_FAILED, ubx_fwupd_state(&u));
 	assert_recovered(&u, &r);
-	TEST_ASSERT_FALSE(r.left_in_loader);
 
 	/* Silence. */
 	rcv_reset(&r);
 	r.silent_erase = true;
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_init(&u, &cfg, &ops));
-	r.session_over = true;
 	TEST_ASSERT_EQUAL_INT(-ETIMEDOUT, ubx_fwupd_begin(&u, 1024U));
 	assert_recovered(&u, &r);
-	TEST_ASSERT_FALSE(r.left_in_loader);
 }
 
 static void test_finalise_and_verify_failures_recover(void)
@@ -773,10 +769,8 @@ static void test_finalise_and_verify_failures_recover(void)
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_init(&u, &cfg, &ops));
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_begin(&u, 256U));
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_write(&u, 0U, img, 256U));
-	r.session_over = true;
 	TEST_ASSERT_EQUAL_INT(-EIO, ubx_fwupd_finish(&u));
 	assert_recovered(&u, &r);
-	TEST_ASSERT_FALSE(r.left_in_loader);
 
 	/*
 	 * The image committed but the receiver never came back. This must NOT be
@@ -789,11 +783,9 @@ static void test_finalise_and_verify_failures_recover(void)
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_init(&u, &cfg, &ops));
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_begin(&u, 256U));
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_write(&u, 0U, img, 256U));
-	r.session_over = true;
 	TEST_ASSERT_EQUAL_INT(-ETIMEDOUT, ubx_fwupd_finish(&u));
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)UBX_FWUPD_ST_FAILED, ubx_fwupd_state(&u));
 	assert_recovered(&u, &r);
-	TEST_ASSERT_FALSE(r.left_in_loader);
 }
 
 static void test_abort_at_every_phase(void)
@@ -820,11 +812,10 @@ static void test_abort_at_every_phase(void)
 				ubx_fwupd_write(&u, 0U, img, 256U));
 		}
 
-		r.session_over = true;
 		TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_abort(&u));
 		TEST_ASSERT_FALSE(ubx_fwupd_in_safeboot(&u));
 		TEST_ASSERT_FALSE(r.safeboot);
-		TEST_ASSERT_FALSE(r.left_in_loader);
+		TEST_ASSERT_FALSE(r.last_release_safeboot);
 
 		/* Abort is idempotent. */
 		TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_abort(&u));
@@ -852,7 +843,6 @@ static void test_stalled_session_times_out_and_recovers(void)
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_init(&u, &cfg, &ops));
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_begin(&u, 4096U));
 	TEST_ASSERT_TRUE(ubx_fwupd_in_safeboot(&u));
-	r.session_over = true;
 
 	/* step() reports -EAGAIN while inside the budget, then fails. */
 	for (i = 0U; i < 10000U; i++) {
@@ -865,7 +855,6 @@ static void test_stalled_session_times_out_and_recovers(void)
 	TEST_ASSERT_EQUAL_INT(-ETIMEDOUT, rc);
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)UBX_FWUPD_ST_FAILED, ubx_fwupd_state(&u));
 	assert_recovered(&u, &r);
-	TEST_ASSERT_FALSE(r.left_in_loader);
 
 	/* step() on a finished session is a no-op. */
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_step(&u));
@@ -924,7 +913,6 @@ static void test_enter_safeboot_failure_recovers(void)
 	rcv_reset(&r);
 	r.rc_tx = -EIO;
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_init(&u, &cfg, &ops));
-	r.session_over = true;
 	TEST_ASSERT_EQUAL_INT(-EIO, ubx_fwupd_begin(&u, 1024U));
 	assert_recovered(&u, &r);
 
@@ -932,7 +920,6 @@ static void test_enter_safeboot_failure_recovers(void)
 	rcv_reset(&r);
 	r.rc_rx = -EIO;
 	TEST_ASSERT_EQUAL_INT(0, ubx_fwupd_init(&u, &cfg, &ops));
-	r.session_over = true;
 	TEST_ASSERT_EQUAL_INT(-EIO, ubx_fwupd_begin(&u, 1024U));
 	assert_recovered(&u, &r);
 }

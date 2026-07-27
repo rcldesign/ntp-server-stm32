@@ -110,10 +110,9 @@ static struct {
 	 * mutates at arm time and another mutates thereafter.
 	 */
 	pwrseq_wdt_t wdt;
-	/* Snapshot of the kicker's violation counters, so the housekeeping thread
-	 * can log them (the kicker must not, it holds a coop priority). */
-	uint32_t logged_early;
-	uint32_t logged_late;
+	/* Snapshot of the kicker's violation counter, so the housekeeping thread can
+	 * log it (the kicker must not, it holds a cooperative priority). */
+	uint32_t logged_violations;
 } super;
 
 void sts_supervisor_set_seq_eligible(bool eligible)
@@ -382,19 +381,17 @@ void sts_supervisor_step(uint32_t now_ms)
 	 * ever happens say so at CRIT with the measured interval rather than
 	 * leaving an unexplained reboot loop for someone to reverse-engineer.
 	 */
-	if (super.wdt.early != super.logged_early) {
-		super.logged_early = super.wdt.early;
+	if (super.wdt.violations != super.logged_violations) {
+		super.logged_violations = super.wdt.violations;
 		sts_log(LOGR_SUB_SYS, LOGR_CRIT,
-			"WDT kick EARLY (below %u ms): %u total — TPS3430 runaway "
-			"boundary, expect POE_KILL",
-			PWRSEQ_WDT_WINDOW_MIN_MS, super.wdt.early);
-	}
-	if (super.wdt.late != super.logged_late) {
-		super.logged_late = super.wdt.late;
-		sts_log(LOGR_SUB_SYS, LOGR_CRIT,
-			"WDT kick LATE (above %u ms): %u total — TPS3430 stall "
-			"boundary, expect POE_KILL",
-			PWRSEQ_WDT_WINDOW_MAX_MS, super.wdt.late);
+			"WDT kick %s the %u-%u ms window: %u total — the TPS3430 "
+			"will drive WDO_N and POE_KILL",
+			(super.wdt.last_verdict ==
+			 (uint8_t)PWRSEQ_WDT_INTERVAL_EARLY)
+				? "below"
+				: "above",
+			PWRSEQ_WDT_WINDOW_MIN_MS, PWRSEQ_WDT_WINDOW_MAX_MS,
+			super.wdt.violations);
 	}
 
 	(void)sts_quality_snapshot(&q);

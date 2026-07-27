@@ -2332,10 +2332,11 @@ static int h_fw_data(rest_ctx_t *c, const http_req_t *req,
 	rc = PV(c)->fw_data(PV(c)->u, off, (const uint8_t *)body, body_len,
 			    &next);
 	c->st.fw_chunks++;
-	if (rc == -EBADE) {
+	if (rc == -EPROTO) {
 		/*
 		 * Offset gap: answer 409 with the frontier so the client rewinds,
-		 * mirroring MCP's ERR_OFFSET contract exactly.
+		 * mirroring MCP's ERR_OFFSET contract exactly. -EPROTO rather
+		 * than -EBADE because the target libc has no EBADE.
 		 */
 		web_jw_init(&w, r->body, r->body_cap);
 		web_jw_obj_begin(&w);
@@ -2636,7 +2637,7 @@ static int h_sec_tls_post(rest_ctx_t *c, const http_req_t *req,
 		return fail(c, r, 422, "bad_pem",
 			    "expected a PEM certificate and matching private key");
 	}
-	if (rc == -EKEYREJECTED) {
+	if (rc == -EPERM) {
 		return fail(c, r, 422, "key_mismatch",
 			    "the private key does not match the certificate");
 	}
@@ -2770,7 +2771,7 @@ static int h_auth_login(rest_ctx_t *c, const http_req_t *req,
 		c->st.unauthorized++;
 		return 0;
 	}
-	if (rc == -ENOKEY) {
+	if (rc == -ENOENT) {
 		c->st.unauthorized++;
 		return fail(c, r, 503, "no_credential",
 			    "no administrator credential is provisioned; set one "

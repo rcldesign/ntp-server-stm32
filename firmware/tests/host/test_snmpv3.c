@@ -510,7 +510,7 @@ static void test_aes_cfb_guards(void)
 	static const uint8_t iv[16] = { 0 };
 	snmp_usm_ports_t no_aes = g_ports;
 	port_crypto_t crippled = g_port;
-	uint8_t buf[16];
+	uint8_t buf[16] = { 0 };
 
 	TEST_ASSERT_EQUAL_INT(-EINVAL, snmp_usm_aes_cfb(NULL, key, iv, buf, buf,
 							16U, true));
@@ -838,12 +838,23 @@ static void test_user_set_guards(void)
 					       SNMP_AUTH_HMAC_SHA256_192, "",
 					       1U, false, SNMP_PRIV_NONE, NULL,
 					       0U, false));
-	/* A privacy key too short to yield an AES-128 key. */
-	TEST_ASSERT_EQUAL_INT(-EINVAL,
-			      snmp_v3_user_set(&g_v3, "a",
+	/*
+	 * A SHA-1 authPriv user is legal: RFC 3826 §3.1.2.1 localises the
+	 * privacy key with the *auth* protocol's hash, so it is 20 octets long
+	 * and AES-128 takes the first 16.
+	 */
+	TEST_ASSERT_EQUAL_INT(0,
+			      snmp_v3_user_set(&g_v3, "sha1priv",
 					       SNMP_AUTH_HMAC_SHA1_96, kul, 20U,
 					       true, SNMP_PRIV_AES128_CFB, kul,
 					       20U, true));
+	{
+		uint8_t level = 0U;
+
+		TEST_ASSERT_EQUAL_INT(0, snmp_v3_user_level(&g_v3, "sha1priv",
+							    &level));
+		TEST_ASSERT_EQUAL_UINT8(SNMP_SEC_AUTH_PRIV, level);
+	}
 }
 
 static void test_user_set_needs_an_engine_id(void)

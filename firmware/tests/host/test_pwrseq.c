@@ -2149,8 +2149,7 @@ static void test_wdt_cadence_at_the_real_250ms_call_rate(void)
 				 "a kick landed inside the runaway boundary");
 	TEST_ASSERT_TRUE_MESSAGE(max_i <= PWRSEQ_WDT_WINDOW_MAX_MS,
 				 "a kick landed past the stall boundary");
-	TEST_ASSERT_EQUAL_UINT32(0U, w.early);
-	TEST_ASSERT_EQUAL_UINT32(0U, w.late);
+	TEST_ASSERT_EQUAL_UINT32(0U, w.violations);
 
 	/*
 	 * At most one kick per window: 60 s of a 1100 ms cadence quantised to the
@@ -2328,8 +2327,8 @@ static void test_wdt_window_violations_are_counted_not_hidden(void)
 	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_service(&w, PWRSEQ_LIVE_ALL, 5000U, &t));
 	TEST_ASSERT_TRUE(t.kick);
 	TEST_ASSERT_EQUAL_UINT8(PWRSEQ_WDT_INTERVAL_LATE, t.verdict);
-	TEST_ASSERT_EQUAL_UINT32(1U, w.late);
-	TEST_ASSERT_EQUAL_UINT32(0U, w.early);
+	TEST_ASSERT_EQUAL_UINT32(1U, w.violations);
+	TEST_ASSERT_EQUAL_UINT8(PWRSEQ_WDT_INTERVAL_LATE, w.last_verdict);
 }
 
 static void test_wdt_is_not_armed_until_liveness_passes(void)
@@ -3143,6 +3142,273 @@ static void test_a_headless_unit_does_not_gain_a_display_by_restoring(void)
 			      pwrseq_shed_track(NULL, PWRSEQ_SHED_NONE, false, 0U));
 }
 
+
+/* ------------------------------- queue-full behaviour on every emit path */
+
+/* Fill the queue to leave exactly @p free slots. */
+static void wedge_queue(model_t *m, unsigned int free_slots)
+{
+	unsigned int i;
+	unsigned int fill = (unsigned int)PWRSEQ_ACT_QUEUE_LEN - free_slots;
+
+	while (pwrseq_action_count(&m->ctx) > 0U) {
+		pwrseq_act_t a;
+
+		(void)pwrseq_action_get(&m->ctx, &a);
+	}
+	for (i = 0U; i < fill; i++) {
+		TEST_ASSERT_EQUAL_INT(
+			0, pwrseq_poe_kill(&m->ctx, PWRSEQ_POE_KILL_MAGIC,
+					   m->in.mono_ms));
+	}
+	TEST_ASSERT_EQUAL_size_t((size_t)fill, pwrseq_action_count(&m->ctx));
+}
+
+static void test_every_emit_path_refuses_rather_than_half_applying(void)
+{
+	model_t m;
+
+	/*
+	 * MEDIUM-4, exhaustively. Each of these paths emits one or two actions and
+	 * folds state on the strength of them; with the queue full every one must
+	 * refuse and leave the model untouched, so a later retry still describes the
+	 * board. A path that folded state and dropped the action would leave the
+	 * rubidium running while pwrseq believed it off — and every piece of Rb
+	 * supervision is behind `if (ctx->rb_enabled)`.
+	 */
+	model_init(&m, NULL);
+	run_out_realtime(&m, 400U);
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+
+	/* rb_retry needs two slots for the shutdown pair. */
+	wedge_queue(&m, 1U);
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, pwrseq_rb_retry(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
+
+	/* restart_stage into a stage that re-traverses stage 8, same requirement. */
+	TEST_ASSERT_EQUAL_INT(-EAGAIN,
+			      pwrseq_restart_stage(&m.ctx, PWRSEQ_STAGE_8_RB,
+						   m.in.mono_ms));
+	TEST_ASSERT_TRUE(m.ctx.rb_gated);
+
+	/* The OV pulse is a single action. */
+	m.in.rb_ov_det = true;
+	(void)pwrseq_ov_observe(&m.ctx, true, m.in.mono_ms);
+	m.in.rb_ov_det = false;
+	(void)pwrseq_ov_observe(&m.ctx, false, m.in.mono_ms);
+	wedge_queue(&m, 0U);
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, pwrseq_ov_clear(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_TRUE(pwrseq_ov_latched(&m.ctx));
+	/* With room it succeeds, so the refusal above was about space, not state. */
+	wedge_queue(&m, 4U);
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_ov_clear(&m.ctx, m.in.mono_ms));
+}
+
+static void test_the_shed_ladder_refuses_every_rung_without_queue_room(void)
+{
+	model_t m;
+
+	model_init(&m, NULL);
+	run_out_realtime(&m, 400U);
+
+	/* Rung 1: one action. */
+	wedge_queue(&m, 0U);
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, pwrseq_shed_step(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_NONE, pwrseq_shed_level(&m.ctx));
+	wedge_queue(&m, 1U);
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_step(&m.ctx, m.in.mono_ms));
+
+	/* Rung 2: one action. */
+	wedge_queue(&m, 0U);
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, pwrseq_shed_step(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_DISPLAY, pwrseq_shed_level(&m.ctx));
+	wedge_queue(&m, 1U);
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_step(&m.ctx, m.in.mono_ms));
+
+	/* Rung 3: the rubidium pair, which must go out whole. */
+	wedge_queue(&m, 1U);
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, pwrseq_shed_step(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_PANEL_LED, pwrseq_shed_level(&m.ctx));
+	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
+	wedge_queue(&m, 2U);
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_step(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
+
+	/*
+	 * Restoring the rubidium rung queues nothing itself — the load is already
+	 * off, so it only re-enters stage 8 and the guarded sequence does the work.
+	 * That is the point: a restore can never be a bare RB_PWR_EN.
+	 */
+	wedge_queue(&m, 0U);
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_restore(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_PANEL_LED, pwrseq_shed_level(&m.ctx));
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
+
+	wedge_queue(&m, 1U);
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, pwrseq_shed_restore(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_PANEL_LED, pwrseq_shed_level(&m.ctx));
+	wedge_queue(&m, 2U);
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_restore(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_DISPLAY, pwrseq_shed_level(&m.ctx));
+
+	wedge_queue(&m, 0U);
+	TEST_ASSERT_EQUAL_INT(-EAGAIN, pwrseq_shed_restore(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_DISPLAY, pwrseq_shed_level(&m.ctx));
+	wedge_queue(&m, 1U);
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_restore(&m.ctx, m.in.mono_ms));
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_NONE, pwrseq_shed_level(&m.ctx));
+
+	/* shed_track's own refusal path, and the ends of the ladder. */
+	wedge_queue(&m, 0U);
+	TEST_ASSERT_EQUAL_INT(-EAGAIN,
+			      pwrseq_shed_track(&m.ctx, PWRSEQ_SHED_DISPLAY, true,
+						m.in.mono_ms));
+	TEST_ASSERT_EQUAL_INT(-ENOENT, pwrseq_shed_restore(&m.ctx, m.in.mono_ms));
+}
+
+static void test_the_step_machine_defers_a_failure_it_cannot_queue(void)
+{
+	model_t m;
+	unsigned int i;
+
+	/*
+	 * A wedged queue must stop the walk at the reservation check, before the row
+	 * is touched at all — so the stage is never abandoned with the load the
+	 * failure was supposed to drop still enabled. That reservation
+	 * (PWRSEQ_ACT_PER_STEP_MAX) is what lets the failure path itself assume room.
+	 * Drive the GPS rail failure (failact GPS_OFF) with a full queue.
+	 */
+	model_init(&m, NULL);
+	m.in.pg_mask = (uint8_t)~PWRSEQ_PG_3V3_GPS_LDO;
+	run_to_stage(&m, PWRSEQ_STAGE_5_GNSS, HK_TICK_MS, 200U);
+
+	wedge_queue(&m, 0U);
+	for (i = 0U; i < 20U; i++) {
+		m.in.mono_ms += HK_TICK_MS;
+		TEST_ASSERT_EQUAL_INT(0, pwrseq_step(&m.ctx, &m.in));
+	}
+	/* Stuck in stage 5, nothing dropped, no alarm raised on a promise it could
+	 * not keep. */
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_5_GNSS, pwrseq_stage(&m.ctx));
+	TEST_ASSERT_EQUAL_UINT32(0U, pwrseq_actions_dropped(&m.ctx));
+
+	/* Draining lets the failure policy run and the sequence continue. */
+	wedge_queue(&m, (unsigned int)PWRSEQ_ACT_QUEUE_LEN);
+	run_out_realtime(&m, 200U);
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_GPS_RAIL)) != 0U);
+	TEST_ASSERT_FALSE(m.ctx.gps_on);
+	TEST_ASSERT_EQUAL_UINT32(0U, pwrseq_actions_dropped(&m.ctx));
+}
+
+static void test_a_stale_stall_that_cannot_queue_its_shutdown_waits(void)
+{
+	model_t m;
+	unsigned int i;
+
+	/* Same reservation rule on the RB_TELEMETRY path: a wedged queue holds the
+	 * walk at the reservation check rather than half-applying the shutdown. */
+	model_init(&m, NULL);
+	run_to_stage(&m, PWRSEQ_STAGE_8_RB, HK_TICK_MS, 400U);
+	m.no_ina_refresh = true;
+	wedge_queue(&m, 1U);
+
+	for (i = 0U; i < 60U; i++) {
+		m.in.mono_ms += HK_TICK_MS;
+		m.in.ina_age_ms[INA228_RAIL_VCC_RB] =
+			m.in.mono_ms - m.cache_stamp_ms;
+		TEST_ASSERT_EQUAL_INT(0, pwrseq_step(&m.ctx, &m.in));
+	}
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
+	TEST_ASSERT_EQUAL_UINT32(0U, pwrseq_actions_dropped(&m.ctx));
+
+	wedge_queue(&m, (unsigned int)PWRSEQ_ACT_QUEUE_LEN);
+	for (i = 0U; i < 20U; i++) {
+		advance(&m, HK_TICK_MS);
+	}
+	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
+			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_TELEMETRY)) != 0U);
+}
+
+static void test_the_retry_policy_declines_when_the_rubidium_is_unwanted(void)
+{
+	model_t m;
+	unsigned int i;
+
+	/* A pending retry must not resurrect a rubidium nobody wants, and must not
+	 * fight a shed that deliberately dropped it. */
+	model_init(&m, NULL);
+	m.force_op_rail_mv = 20000; /* a genuine hard fault */
+	run_out_realtime(&m, 400U);
+	TEST_ASSERT_TRUE(pwrseq_rb_fault(&m.ctx));
+
+	{
+		uint8_t before = pwrseq_rb_auto_retries(&m.ctx);
+
+		m.in.rb_wanted = false;
+		for (i = 0U; i < 60U; i++) {
+			advance(&m, m.ctx.cfg.rb_auto_retry_delay_ms / 2U);
+		}
+		TEST_ASSERT_EQUAL_UINT8(before, pwrseq_rb_auto_retries(&m.ctx));
+	}
+
+	m.in.rb_wanted = true;
+	m.in.thermal_shed_rb = true; /* shed to the RB rung */
+	for (i = 0U; i < 60U; i++) {
+		advance(&m, HK_TICK_MS);
+	}
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_RB, pwrseq_shed_level(&m.ctx));
+	{
+		uint8_t before = pwrseq_rb_auto_retries(&m.ctx);
+
+		for (i = 0U; i < 20U; i++) {
+			advance(&m, m.ctx.cfg.rb_auto_retry_delay_ms);
+		}
+		TEST_ASSERT_EQUAL_UINT8(before, pwrseq_rb_auto_retries(&m.ctx));
+
+		/* A halted sequencer refuses too: a halt is a hard fault that must
+		 * not be cleared by a routine rubidium retry. */
+		m.in.thermal_shed_rb = false;
+		m.ctx.halted = true;
+		for (i = 0U; i < 20U; i++) {
+			advance(&m, m.ctx.cfg.rb_auto_retry_delay_ms);
+		}
+		TEST_ASSERT_EQUAL_UINT8(before, pwrseq_rb_auto_retries(&m.ctx));
+	}
+}
+
+static void test_poe_headroom_between_the_thresholds_neither_sheds_nor_restores(void)
+{
+	model_t m;
+	unsigned int i;
+
+	model_init(&m, NULL);
+	run_out_realtime(&m, 400U);
+
+	/* Shed one rung under real pressure. */
+	m.in.poe_measured_mw = m.in.poe_granted_mw;
+	for (i = 0U; i < 60U; i++) {
+		advance(&m, HK_TICK_MS);
+		if (pwrseq_shed_level(&m.ctx) >= PWRSEQ_SHED_DISPLAY) {
+			break;
+		}
+	}
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_DISPLAY, pwrseq_shed_level(&m.ctx));
+
+	/*
+	 * Now sit between the two thresholds: some headroom, but less than
+	 * poe_relief_mw. A rail on the boundary must neither escalate nor release,
+	 * or the ladder oscillates.
+	 */
+	m.in.poe_measured_mw = m.in.poe_granted_mw -
+			       (m.ctx.cfg.poe_relief_mw / 2U);
+	for (i = 0U; i < 400U; i++) {
+		advance(&m, HK_TICK_MS);
+	}
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_DISPLAY, pwrseq_shed_level(&m.ctx));
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -3237,6 +3503,13 @@ int main(void)
 	RUN_TEST(test_the_step_machine_stalls_rather_than_overflowing);
 	RUN_TEST(test_an_out_of_band_caller_that_never_drains_is_counted);
 	RUN_TEST(test_rb_shutdown_waits_for_queue_room_rather_than_half_applying);
+
+	RUN_TEST(test_every_emit_path_refuses_rather_than_half_applying);
+	RUN_TEST(test_the_shed_ladder_refuses_every_rung_without_queue_room);
+	RUN_TEST(test_the_step_machine_defers_a_failure_it_cannot_queue);
+	RUN_TEST(test_a_stale_stall_that_cannot_queue_its_shutdown_waits);
+	RUN_TEST(test_the_retry_policy_declines_when_the_rubidium_is_unwanted);
+	RUN_TEST(test_poe_headroom_between_the_thresholds_neither_sheds_nor_restores);
 
 	RUN_TEST(test_null_and_bounds_handling);
 	RUN_TEST(test_names_are_present_for_every_action_and_alarm);

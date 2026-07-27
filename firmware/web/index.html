@@ -1,0 +1,90 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<title>STS1000 Meridian</title>
+<link rel="stylesheet" href="app.css">
+
+<div id="app" hidden>
+  <aside id="nav">
+    <div class="brand">
+      <div class="brand-mark">STS<span>1000</span></div>
+      <div class="brand-sub">Meridian grandmaster</div>
+    </div>
+    <nav id="navlinks">
+      <a href="#/dashboard" data-page="dashboard"><b>DSH</b> Dashboard</a>
+      <a href="#/timing" data-page="timing"><b>TIM</b> Timing</a>
+      <a href="#/calibration" data-page="calibration"><b>CAL</b> Calibration</a>
+      <a href="#/gnss" data-page="gnss"><b>GNS</b> GNSS</a>
+      <a href="#/network" data-page="network"><b>NET</b> Network</a>
+      <a href="#/security" data-page="security"><b>SEC</b> Security</a>
+      <a href="#/power" data-page="power"><b>PWR</b> Power &amp; Health</a>
+      <a href="#/logs" data-page="logs"><b>LOG</b> Logs</a>
+      <a href="#/firmware" data-page="firmware"><b>FW&nbsp;</b> Firmware</a>
+    </nav>
+    <div class="nav-foot">
+      <div class="nav-foot-row"><span>model</span><b id="nf-model">&mdash;</b></div>
+      <div class="nav-foot-row"><span>firmware</span><b id="nf-fw">&mdash;</b></div>
+      <div class="nav-foot-row"><span>board</span><b id="nf-board">&mdash;</b></div>
+      <div class="nav-foot-row"><span>uptime</span><b id="nf-uptime">&mdash;</b></div>
+    </div>
+  </aside>
+
+  <div id="main">
+    <header id="topbar">
+      <div id="pills">
+        <span class="pill" id="p-lock"><i>lock</i><b>&mdash;</b></span>
+        <span class="pill" id="p-stratum"><i>stratum</i><b>&mdash;</b></span>
+        <span class="pill" id="p-ref"><i>ref</i><b>&mdash;</b></span>
+        <span class="pill" id="p-gnss"><i>gnss</i><b>&mdash;</b></span>
+        <span class="pill" id="p-offset"><i>offset</i><b>&mdash;</b></span>
+        <span class="pill" id="p-alarms"><i>alarms</i><b>&mdash;</b></span>
+      </div>
+      <div id="topright">
+        <span class="pill link" id="p-link"><i>feed</i><b>init</b></span>
+        <span class="pill" id="p-role"><i>role</i><b>&mdash;</b></span>
+        <button id="btn-logout" class="btn sm" type="button" hidden>Sign out</button>
+      </div>
+    </header>
+    <main id="view" tabindex="-1"></main>
+  </div>
+</div>
+
+<div id="stagebar" hidden>
+  <span class="sb-txt">Staged configuration changes: <b id="sb-count">0</b></span>
+  <span class="sb-note" id="sb-note"></span>
+  <span class="sb-spacer"></span>
+  <button id="sb-revert" class="btn" type="button">Discard</button>
+  <button id="sb-commit" class="btn primary" type="button">Commit</button>
+</div>
+
+<div id="login">
+  <form id="login-form" autocomplete="on">
+    <div class="lg-brand">STS<span>1000</span> Meridian</div>
+    <div class="lg-sub">Operator management interface</div>
+    <label for="lg-user">User</label>
+    <input id="lg-user" name="username" type="text" autocomplete="username" value="admin" required>
+    <label for="lg-pass">Password</label>
+    <input id="lg-pass" name="password" type="password" autocomplete="current-password" required>
+    <div id="lg-msg" class="lg-msg" role="alert"></div>
+    <button id="lg-go" class="btn primary wide" type="submit">Sign in</button>
+    <div class="lg-foot">Session is a HttpOnly cookie. All requests are same-origin.</div>
+  </form>
+</div>
+
+<div id="modal" hidden>
+  <div class="mdl-card" role="dialog" aria-modal="true" aria-labelledby="mdl-title">
+    <div class="mdl-title" id="mdl-title"></div>
+    <div class="mdl-body" id="mdl-body"></div>
+    <div class="mdl-foot">
+      <button id="mdl-cancel" class="btn" type="button">Cancel</button>
+      <button id="mdl-ok" class="btn danger" type="button">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+<div id="tooltip" hidden></div>
+
+<script src="app.js"></script>

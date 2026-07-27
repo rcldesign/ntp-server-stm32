@@ -453,7 +453,8 @@ static void test_login_failures(void)
 	/* An account with no credential fails closed with its own code. */
 	TEST_ASSERT_EQUAL_INT(1, auth_web_user_add(&g_auth, "opr",
 						   WEB_ROLE_OPERATOR, 0U));
-	TEST_ASSERT_EQUAL_INT(-ENOKEY, auth_web_login(&g_auth, "opr", 3U,
+	/* -ENOENT ("no credential"), because picolibc has no ENOKEY. */
+	TEST_ASSERT_EQUAL_INT(-ENOENT, auth_web_login(&g_auth, "opr", 3U,
 						      (const uint8_t *)PW,
 						      PW_LEN, 0U, &g));
 

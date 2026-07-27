@@ -1846,22 +1846,46 @@ static void test_secret_never_served(void)
 	memset(&res, 0, sizeof(res));
 	TEST_ASSERT_EQUAL_INT(0, cfg_commit(&g_cfg, &res));
 
-	/* The whole listing, as admin, without asking for secrets. */
-	get_auth("/api/v1/config");
+	/*
+	 * The security group (0x0A holds the NOEXPORT credential) and the SNMP
+	 * group (0x0B holds the SECRET community), as admin, without asking for
+	 * secrets. A group-scoped listing is emitted whole, so this really does
+	 * cover the two keys rather than whichever ones land on page one.
+	 */
+	get_auth("/api/v1/config?group=10");
 	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+	TEST_ASSERT_TRUE(body_has("\"name\":\"sec.admin.pw\""));
 	TEST_ASSERT_TRUE(body_has("\"secrets_included\":false"));
 	TEST_ASSERT_NULL(strstr(body_str(), "a5a5a5"));
-	TEST_ASSERT_NULL(strstr(body_str(), "s3cr3t"));
 	TEST_ASSERT_TRUE(body_has("\"value_withheld\":true"));
 	TEST_ASSERT_TRUE(body_has("\"value_set\":true"));
 
-	/* Asking for secrets as admin reveals the SECRET key but NEVER the
-	 * NOEXPORT one. */
-	get_auth("/api/v1/config?secrets=1");
+	get_auth("/api/v1/config?group=11");
+	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+	TEST_ASSERT_TRUE(body_has("\"name\":\"snmp.community\""));
+	TEST_ASSERT_NULL(strstr(body_str(), "s3cr3t"));
+	TEST_ASSERT_TRUE(body_has("\"value_withheld\":true"));
+
+	/* Asking for secrets as admin reveals the SECRET key... */
+	get_auth("/api/v1/config?group=11&secrets=1");
 	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
 	TEST_ASSERT_TRUE(body_has("\"secrets_included\":true"));
 	TEST_ASSERT_TRUE(body_has("s3cr3t"));
+	/* ...but NEVER the NOEXPORT one, even with the flag and the role. */
+	get_auth("/api/v1/config?group=10&secrets=1");
+	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+	TEST_ASSERT_TRUE(body_has("\"secrets_included\":true"));
+	TEST_ASSERT_TRUE(body_has("\"value_withheld\":true"));
 	TEST_ASSERT_NULL(strstr(body_str(), "a5a5a5"));
+
+	/* An unqualified listing pages instead of overflowing the buffer. */
+	get_auth("/api/v1/config");
+	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+	TEST_ASSERT_TRUE(body_has("\"count\":32"));
+	TEST_ASSERT_TRUE(body_has("\"next_id\":"));
+	TEST_ASSERT_FALSE(body_has("\"next_id\":0"));
+	TEST_ASSERT_NULL(strstr(body_str(), "a5a5a5"));
+	TEST_ASSERT_NULL(strstr(body_str(), "s3cr3t"));
 
 	/* Single-key reads behave the same way. */
 	get_auth("/api/v1/config/sec.admin.pw");
@@ -1895,8 +1919,9 @@ static void test_secret_never_served(void)
 					       (const uint8_t *)"s3cr3t", 6U));
 	memset(&res, 0, sizeof(res));
 	TEST_ASSERT_EQUAL_INT(0, cfg_commit(&g_cfg, &res));
-	get_auth("/api/v1/config?secrets=1");
+	get_auth("/api/v1/config?group=11&secrets=1");
 	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+	TEST_ASSERT_TRUE(body_has("\"name\":\"snmp.community\""));
 	TEST_ASSERT_TRUE(body_has("\"secrets_included\":false"));
 	TEST_ASSERT_NULL(strstr(body_str(), "s3cr3t"));
 }
@@ -1916,7 +1941,9 @@ static void test_config_read(void)
 	TEST_ASSERT_TRUE(body_has("\"name\":\"net.dhcp\""));
 	TEST_ASSERT_NULL(strstr(body_str(), "\"name\":\"ntp.enable\""));
 
-	/* Paging. */
+	/* Paging: an unqualified listing pages at REST_CONFIG_PAGE_DEFAULT. */
+	get_auth("/api/v1/config");
+	TEST_ASSERT_TRUE(body_has("\"count\":32"));
 	get_auth("/api/v1/config?max=2");
 	TEST_ASSERT_TRUE(body_has("\"count\":2"));
 	TEST_ASSERT_TRUE(body_has("\"next_id\":259")); /* 0x0103 */
@@ -2399,7 +2426,7 @@ static void test_firmware_routes(void)
 	TEST_ASSERT_TRUE(body_has("empty_chunk"));
 
 	/* An offset gap returns the frontier so the client can rewind. */
-	fk.fw_data_rc = -EBADE;
+	fk.fw_data_rc = -EPROTO;
 	fk.fw_next = 512U;
 	request("POST", "/api/v1/firmware/data?offset=4096",
 		REQ_COOKIE | REQ_CSRF, "application/octet-stream", "abcd", 4U);
@@ -2507,7 +2534,7 @@ static void test_security_routes(void)
 	post_auth("/api/v1/security/tls", "junk");
 	TEST_ASSERT_EQUAL_UINT(422U, g_resp.status);
 	TEST_ASSERT_TRUE(body_has("bad_pem"));
-	fk.cert_install_rc = -EKEYREJECTED;
+	fk.cert_install_rc = -EPERM;
 	post_auth("/api/v1/security/tls", "junk");
 	TEST_ASSERT_EQUAL_UINT(422U, g_resp.status);
 	TEST_ASSERT_TRUE(body_has("key_mismatch"));

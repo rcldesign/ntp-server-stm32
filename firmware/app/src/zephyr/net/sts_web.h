@@ -191,10 +191,10 @@ int sts_cert_info(rest_cert_t *out);
  * the key must match the certificate's public key — and only then written to
  * /lfs and re-registered.
  *
- * @retval 0             Installed.
- * @retval -EBADMSG      Not a usable PEM certificate + key pair.
- * @retval -EKEYREJECTED The key does not match the certificate.
- * @retval -EROFS        /lfs is unavailable, so it could not be persisted.
+ * @retval 0        Installed.
+ * @retval -EBADMSG Not a usable PEM certificate + key pair.
+ * @retval -EPERM   The key does not match the certificate.
+ * @retval -EROFS   Accepted and live, but /lfs could not persist it.
  */
 int sts_cert_install(const char *pem, size_t len);
 

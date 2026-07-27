@@ -48,6 +48,13 @@
  *
  * Threading: not internally locked. The Zephyr glue serialises access from the
  * web worker threads with one mutex, exactly as core/cfg is serialised.
+ *
+ * Portable errno only
+ * -------------------
+ * Every code returned from this module exists in picolibc, which is the target
+ * libc. That rules out the Linux-only key-management family (ENOKEY,
+ * EKEYEXPIRED, ...) even where it would read better: a host build would accept
+ * it and the target link would not.
  */
 
 #ifndef STS1000_CORE_WEB_AUTH_WEB_H_
@@ -318,7 +325,9 @@ typedef struct {
  *                  password is NOT tested in this case, so the answer carries no
  *                  information about it.
  * @retval -ENOSPC  No free session slot.
- * @retval -ENOKEY  The account has no credential provisioned.
+ * @retval -ENOENT  The account has no credential provisioned. (Not -ENOKEY:
+ *                  picolibc, the target libc, does not define it — see the
+ *                  portable-errno note at the top of this header.)
  * @retval -EIO     The KDF failed.
  */
 int auth_web_login(auth_web_ctx_t *c, const char *user, size_t user_len,

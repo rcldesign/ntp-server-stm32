@@ -55,8 +55,14 @@
 /** Largest serialised USM security-parameters blob. */
 #define V3_USM_PARAMS_MAX 160U
 
-/** Largest contextEngineID/contextName pair plus the scopedPDU SEQUENCE header. */
-#define V3_SCOPED_OVERHEAD (3U + 2U + SNMP_V3_ENGINEID_MAX + 2U)
+/*
+ * RFC 3826 §3.1.2.1 takes the AES-128 key from the *first* 16 octets of the
+ * privacy key, which is localised with the authentication protocol's hash. Both
+ * hashes this module supports produce at least that much, which is what lets
+ * snmp_v3_user_set() skip a short-key check.
+ */
+_Static_assert(20U >= SNMP_V3_PRIV_KEY_LEN,
+	       "the shortest supported digest must cover an AES-128 key");
 
 /* ========================================================================= */
 /* usmStats OIDs                                                             */
@@ -371,9 +377,10 @@ int snmp_v3_user_set(snmp_v3_ctx_t *c, const char *name, uint8_t auth_proto,
 		if (rc != 0) {
 			return rc;
 		}
-		if (tmp.priv_key_len < SNMP_V3_PRIV_KEY_LEN) {
-			return -EINVAL;
-		}
+		/* load_key() only ever produces a key of the auth protocol's
+		 * digest length — 20 for SHA-1, 32 for SHA-256 — and both are
+		 * at least the 16 octets AES-128 needs, so there is no
+		 * short-key case left to check here. */
 	}
 	tmp.used = true;
 

@@ -23,6 +23,14 @@
  *   3. Every mutating request that is accepted writes one audit record to the
  *      log ring (LOGR_SUB_SEC), including the route, the outcome and the role.
  *   4. A provider that is NULL yields 501, never a half-answer.
+ *
+ * Portable errno only
+ * -------------------
+ * Every code this module returns or interprets exists in picolibc AND in
+ * Zephyr's minimal libc. That deliberately excludes several codes that would
+ * read better — ENOKEY, EKEYREJECTED, EBADE — because a host build accepts them
+ * and the target link does not. If a provider needs a new outcome, pick from the
+ * portable set rather than the Linux one.
  */
 
 #ifndef STS1000_CORE_WEB_REST_H_
@@ -337,9 +345,9 @@ typedef struct {
 	 * not to a second staging implementation (see sts_web.c).
 	 *
 	 * Error contract, so the router can produce the right status code:
-	 *   fw_begin  -ENOSPC   image larger than the staging slot   -> 413
-	 *   fw_data   -EBADE    offset gap; *out_next is the frontier -> 409
-	 *   fw_end    -EBADMSG  SHA-256 / MCUboot header mismatch    -> 422
+	 *   fw_begin  -ENOSPC   image larger than the staging slot    -> 413
+	 *   fw_data   -EPROTO   offset gap; @p out_next is the frontier -> 409
+	 *   fw_end    -EBADMSG  SHA-256 / MCUboot header mismatch     -> 422
 	 * Anything else negative becomes 409 (or 500 for fw_data).
 	 */
 	int (*fw_info)(void *u, rest_fw_t *out);
@@ -353,8 +361,8 @@ typedef struct {
 
 	/*
 	 * TLS. cert_install() error contract:
-	 *   -EBADMSG       the body is not a PEM cert + key pair  -> 422
-	 *   -EKEYREJECTED  the key does not match the certificate -> 422
+	 *   -EBADMSG  the body is not a PEM cert + key pair  -> 422
+	 *   -EPERM    the key does not match the certificate -> 422
 	 */
 	int (*cert_info)(void *u, rest_cert_t *out);
 	int (*cert_install)(void *u, const char *pem, size_t len);

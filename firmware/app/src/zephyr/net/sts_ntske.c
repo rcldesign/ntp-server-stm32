@@ -105,6 +105,23 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/net/socket.h>
 
+#if defined(CONFIG_MBEDTLS)
+/*
+ * MUST come before the #if that tests MBEDTLS_SSL_KEYING_MATERIAL_EXPORT.
+ *
+ * That macro is not a Kconfig symbol: it reaches this translation unit only
+ * through mbedTLS's own configuration chain (MBEDTLS_CONFIG_FILE →
+ * config-mbedtls.h → CONFIG_MBEDTLS_USER_CONFIG_FILE → sts_mbedtls_user.h), and
+ * build_info.h is what starts that chain. Every mbedTLS header this file needs
+ * used to be included *inside* the guarded block, so the guard was evaluated
+ * before any mbedTLS configuration existed and was therefore false no matter how
+ * the tree was configured — the NTS-KE server could not be compiled in even with
+ * the exporter fully wired. Pulling build_info.h in first is what makes the
+ * guard mean what it says.
+ */
+#include <mbedtls/build_info.h>
+#endif
+
 #include "cfg/cfg.h"
 #include "net/sts_net.h"
 #include "zephyr/sts_app.h"
@@ -159,6 +176,9 @@ void sts_ntske_stats(sts_ntske_stats_t *out)
 #include <mbedtls/pk.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
+#if !defined(MBEDTLS_ECP_C)
+#include <psa/crypto.h>
+#endif
 
 #include "storage/sts_store.h"
 
@@ -201,12 +221,19 @@ BUILD_ASSERT(NTSKE_SOCK_TIMEOUT_MS * 4 < NTSKE_CONN_BUDGET_MS,
 	     "the socket timeout must be small beside the connection budget");
 
 /** ALPN protocol id required by RFC 8915 §4. */
-static const char *const alpn_list[] = { "ntske/1", NULL };
+/* Not `const char *const`: mbedtls_ssl_conf_alpn_protocols() takes
+ * `const char **`, and it only reads the list. */
+static const char *alpn_list[] = { "ntske/1", NULL };
 
 static ntske_ctx_t ke;
 static mbedtls_ssl_config tls_conf;
 static mbedtls_x509_crt srv_cert;
 static mbedtls_pk_context srv_key;
+#if !defined(MBEDTLS_ECP_C)
+/* The PSA key behind srv_key. mbedtls_pk_free() does not destroy it (pk.h
+ * §mbedtls_pk_free), so tls_teardown() must. */
+static mbedtls_svc_key_id_t srv_key_id = MBEDTLS_SVC_KEY_ID_INIT;
+#endif
 static mbedtls_entropy_context entropy;
 static mbedtls_ctr_drbg_context drbg;
 
@@ -233,7 +260,10 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
 			return MBEDTLS_ERR_SSL_WANT_WRITE;
 		}
-		return MBEDTLS_ERR_NET_SEND_FAILED;
+		/* MBEDTLS_ERR_NET_* live in mbedtls/net_sockets.h, which Zephyr does
+		 * not build (it has its own socket layer), so the idiomatic fatal
+		 * BIO error here is the one Zephyr's own sockets_tls.c returns. */
+		return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
 	}
 	return (int)n;
 }
@@ -247,7 +277,7 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len)
 		if (errno == EAGAIN || errno == EWOULDBLOCK) {
 			return MBEDTLS_ERR_SSL_WANT_READ;
 		}
-		return MBEDTLS_ERR_NET_RECV_FAILED;
+		return MBEDTLS_ERR_SSL_INTERNAL_ERROR; /* see bio_send() */
 	}
 	if (n == 0) {
 		return MBEDTLS_ERR_SSL_CONN_EOF;
@@ -276,6 +306,54 @@ static int exporter_cb(void *ctx, const char *label, const uint8_t *context,
 /* self-signed certificate                                                   */
 /* ------------------------------------------------------------------------- */
 
+/**
+ * Generate the server's P-256 key into @ref srv_key.
+ *
+ * Two paths, chosen by what mbedTLS was actually built with rather than by
+ * assumption. The legacy path (mbedtls_ecp_gen_key over mbedtls_pk_ec()) only
+ * exists when MBEDTLS_ECP_C is enabled; Zephyr's PSA-backed configuration —
+ * which is the one that comes with TLS 1.3 — turns ECP_C off and keeps EC keys
+ * inside PSA, where mbedtls_pk_ec() is not merely deprecated but absent. The
+ * file previously used the legacy call unconditionally, which is one of the
+ * reasons the guarded body had never been compiled (F13).
+ */
+static int gen_p256_key(void)
+{
+#if defined(MBEDTLS_ECP_C)
+	int rc = mbedtls_pk_setup(&srv_key,
+				  mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));
+
+	if (rc != 0) {
+		return rc;
+	}
+	return mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1,
+				   mbedtls_pk_ec(srv_key),
+				   mbedtls_ctr_drbg_random, &drbg);
+#else
+	psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+	psa_status_t st_psa;
+	int rc;
+
+	psa_set_key_type(&attr,
+			 PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1));
+	psa_set_key_bits(&attr, 256U);
+	psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_HASH);
+	psa_set_key_algorithm(&attr, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
+
+	st_psa = psa_generate_key(&attr, &srv_key_id);
+	if (st_psa != PSA_SUCCESS) {
+		LOG_ERR("psa_generate_key: %d", (int)st_psa);
+		return MBEDTLS_ERR_PK_ALLOC_FAILED;
+	}
+	rc = mbedtls_pk_setup_opaque(&srv_key, srv_key_id);
+	if (rc != 0) {
+		(void)psa_destroy_key(srv_key_id);
+		srv_key_id = MBEDTLS_SVC_KEY_ID_INIT;
+	}
+	return rc;
+#endif
+}
+
 static int make_self_signed_cert(void)
 {
 	mbedtls_x509write_cert w;
@@ -289,14 +367,7 @@ static int make_self_signed_cert(void)
 	mbedtls_x509write_crt_init(&w);
 	mbedtls_mpi_init(&serial);
 
-	rc = mbedtls_pk_setup(&srv_key,
-			      mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY));
-	if (rc != 0) {
-		goto out;
-	}
-	rc = mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1,
-				 mbedtls_pk_ec(srv_key),
-				 mbedtls_ctr_drbg_random, &drbg);
+	rc = gen_p256_key();
 	if (rc != 0) {
 		goto out;
 	}
@@ -361,6 +432,12 @@ static void tls_teardown(void)
 	mbedtls_ssl_config_free(&tls_conf);
 	mbedtls_x509_crt_free(&srv_cert);
 	mbedtls_pk_free(&srv_key);
+#if !defined(MBEDTLS_ECP_C)
+	if (mbedtls_svc_key_id_is_null(srv_key_id) == 0) {
+		(void)psa_destroy_key(srv_key_id);
+		srv_key_id = MBEDTLS_SVC_KEY_ID_INIT;
+	}
+#endif
 	mbedtls_ctr_drbg_free(&drbg);
 	mbedtls_entropy_free(&entropy);
 }

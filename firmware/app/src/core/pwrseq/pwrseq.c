@@ -30,6 +30,15 @@
 
 _Static_assert(PWRSEQ_ACT_QUEUE_LEN >= (2 * PWRSEQ_ACT_PER_STEP_MAX),
 	       "action queue must hold more than one step's worth");
+/*
+ * The step loop reserves PWRSEQ_ACT_PER_STEP_MAX slots before touching a row, and
+ * the worst row emits one entry action plus the two-action rubidium shutdown on
+ * its failure path. That reservation is what lets emit(), do_failact() and
+ * handle_stall() be called from inside the loop without each one re-checking for
+ * space: within a reserved step, they cannot run out.
+ */
+_Static_assert(PWRSEQ_ACT_PER_STEP_MAX >= 3,
+	       "a step emits at most one entry action plus the Rb shutdown pair");
 
 /* -------------------------------------------------------------------- names */
 
@@ -1264,23 +1273,6 @@ static int rb_shutdown(pwrseq_ctx_t *ctx)
 	return 0;
 }
 
-/** Queue slots @p fa needs, so a failure path can be deferred as a whole. */
-static size_t failact_slots(uint8_t fa)
-{
-	switch ((pwrseq_failact_t)fa) {
-	case PWRSEQ_FAILACT_RB_OFF:
-		return 2U;
-	case PWRSEQ_FAILACT_GPS_OFF:
-	case PWRSEQ_FAILACT_ANT_OFF:
-	case PWRSEQ_FAILACT_DISP_OFF:
-	case PWRSEQ_FAILACT_PANEL_OFF:
-		return 1U;
-	case PWRSEQ_FAILACT_NONE:
-	default:
-		return 0U;
-	}
-}
-
 static void do_failact(pwrseq_ctx_t *ctx, uint8_t fa)
 {
 	switch ((pwrseq_failact_t)fa) {
@@ -1367,29 +1359,20 @@ static void arm_rb_retry(pwrseq_ctx_t *ctx, uint32_t ms)
 	ctx->rb_retry_at_ms = ms + ctx->cfg.rb_auto_retry_delay_ms;
 }
 
-/**
- * Apply @p def's failure policy.
- *
- * @retval true   Handled; the caller may continue walking the table.
- * @retval false  The failure action needs queue room it does not have. Nothing
- *                was recorded, so the caller must stop and retry next tick —
- *                otherwise the stage would be abandoned while the load the
- *                failure was supposed to drop stays enabled.
+/*
+ * Apply @p def's failure policy. Called only from inside a reserved step, so the
+ * failure action always has room (see the PWRSEQ_ACT_PER_STEP_MAX assertion).
  */
-static bool handle_failure(pwrseq_ctx_t *ctx, const pwrseq_step_def_t *def,
+static void handle_failure(pwrseq_ctx_t *ctx, const pwrseq_step_def_t *def,
 			   uint32_t ms)
 {
 	if ((pwrseq_onfail_t)def->onfail == PWRSEQ_ONFAIL_RETRY) {
 		if (ctx->retries < def->retries) {
 			ctx->retries++;
 			ctx->step_armed = false; /* re-emit on the next pass */
-			return true;
+			return;
 		}
 		/* Retries exhausted: escalate exactly as ALARM would. */
-	}
-
-	if (act_free(ctx) < failact_slots(def->failact)) {
-		return false;
 	}
 
 	raise_alarm(ctx, def->alarm);
@@ -1415,8 +1398,6 @@ static bool handle_failure(pwrseq_ctx_t *ctx, const pwrseq_step_def_t *def,
 		abandon_stage(ctx, ms);
 		break;
 	}
-
-	return true;
 }
 
 /*
@@ -1428,18 +1409,13 @@ static bool handle_failure(pwrseq_ctx_t *ctx, const pwrseq_step_def_t *def,
  * inadequate PoE budget — so the sequence reaches stage 9 (and arms the
  * watchdog) and the retry path can try the whole guarded sequence again.
  */
-static bool handle_stall(pwrseq_ctx_t *ctx, uint32_t ms)
+static void handle_stall(pwrseq_ctx_t *ctx, uint32_t ms)
 {
-	if (act_free(ctx) < 2U) {
-		return false; /* the RB_OFF pair must go out whole */
-	}
-
 	raise_alarm(ctx, (uint8_t)PWRSEQ_ALARM_RB_TELEMETRY);
 	(void)rb_shutdown(ctx);
 	ctx->rb_deferred = true;
 	arm_rb_retry(ctx, ms);
 	abandon_stage(ctx, ms);
-	return true;
 }
 
 /* ------------------------------------------------------------------- init */
@@ -1546,11 +1522,9 @@ pwrseq_shed_level_t pwrseq_shed_target(const pwrseq_ctx_t *ctx,
 		}
 	}
 
-	/* Thermal rung 2 is an absolute floor of PWRSEQ_SHED_RB. */
+	/* Thermal rung 2 is an absolute floor of PWRSEQ_SHED_RB, which is also the
+	 * top of the ladder — so it dominates any PoE demand by construction. */
 	want = in->thermal_shed_rb ? (uint8_t)PWRSEQ_SHED_RB : poe;
-	if (poe > want) {
-		want = poe;
-	}
 
 	return (pwrseq_shed_level_t)want;
 }
@@ -1659,12 +1633,12 @@ static void rb_retry_policy(pwrseq_ctx_t *ctx, const pwrseq_in_t *in, uint32_t m
 		return;
 	}
 
-	if (pwrseq_rb_retry(ctx, ms) != 0) {
-		return; /* no queue room; try again next tick */
+	/* Every path that arms a retry has already shut the rubidium down, so
+	 * pwrseq_rb_retry() has nothing to queue and cannot be refused for space. */
+	if (pwrseq_rb_retry(ctx, ms) == 0) {
+		ctx->rb_auto_retries++;
+		ctx->rb_retry_pending = false;
 	}
-
-	ctx->rb_auto_retries++;
-	ctx->rb_retry_pending = false;
 }
 
 int pwrseq_step(pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
@@ -1765,9 +1739,9 @@ int pwrseq_step(pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 				advance_step(ctx, ms);
 				continue;
 			}
-			if ((def->action != (uint8_t)PWRSEQ_ACT_NONE) &&
-			    (emit(ctx, (pwrseq_action_t)def->action) != 0)) {
-				break; /* no room: re-arm next tick, nothing lost */
+			if (def->action != (uint8_t)PWRSEQ_ACT_NONE) {
+				/* Room was reserved above. */
+				(void)emit(ctx, (pwrseq_action_t)def->action);
 			}
 			ctx->step_entered_ms = ms;
 			ctx->step_stall_ms = 0U;
@@ -1786,9 +1760,7 @@ int pwrseq_step(pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 			ctx->step_stall_ms += dt_ms;
 
 			if (ctx->step_stall_ms >= ctx->cfg.rb_stale_stall_ms) {
-				if (!handle_stall(ctx, ms)) {
-					break;
-				}
+				handle_stall(ctx, ms);
 				continue;
 			}
 			break;
@@ -1809,9 +1781,7 @@ int pwrseq_step(pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 		}
 		if ((def->timeout != NULL) &&
 		    (elapsed >= def->timeout(&ctx->cfg))) {
-			if (!handle_failure(ctx, def, ms)) {
-				break; /* drain, then apply the failure policy */
-			}
+			handle_failure(ctx, def, ms);
 			continue;
 		}
 		break; /* waiting on the exit condition */
@@ -1994,7 +1964,7 @@ int pwrseq_shed_restore(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 	ctx->now_ms = mono_ms;
 
 	switch ((pwrseq_shed_level_t)ctx->shed) {
-	case PWRSEQ_SHED_RB: {
+	case PWRSEQ_SHED_RB:
 		/*
 		 * Never a bare RB_PWR_EN. Re-entering stage 8 runs the digipot
 		 * write, the readback verify and the rail-window check again,
@@ -2002,18 +1972,13 @@ int pwrseq_shed_restore(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 		 * keep — a shed-and-restore cycle must not become a back door
 		 * around it.
 		 *
-		 * The level is lowered only on success: a queue-full refusal must
-		 * not leave the ladder claiming a rung it never restored.
+		 * The level drops first because the g_rb guard reads it — re-entering
+		 * stage 8 at PWRSEQ_SHED_RB would skip every row. Nothing is queued
+		 * here: reaching this rung required rb_shutdown() to have succeeded,
+		 * so the load is already off.
 		 */
-		int rc;
-
 		ctx->shed = (uint8_t)PWRSEQ_SHED_PANEL_LED;
-		rc = pwrseq_rb_retry(ctx, mono_ms);
-		if (rc != 0) {
-			ctx->shed = (uint8_t)PWRSEQ_SHED_RB;
-		}
-		return rc;
-	}
+		return pwrseq_rb_retry(ctx, mono_ms);
 	case PWRSEQ_SHED_PANEL_LED:
 		if (act_free(ctx) < 2U) {
 			return -EAGAIN;
@@ -2240,10 +2205,9 @@ int pwrseq_wdt_service(pwrseq_wdt_t *w, uint32_t liveness, uint32_t mono_ms,
 		pwrseq_wdt_interval_t v = pwrseq_wdt_classify_interval(since);
 
 		out->verdict = (uint8_t)v;
-		if (v == PWRSEQ_WDT_INTERVAL_EARLY) {
-			w->early++;
-		} else if (v == PWRSEQ_WDT_INTERVAL_LATE) {
-			w->late++;
+		w->last_verdict = (uint8_t)v;
+		if (v != PWRSEQ_WDT_INTERVAL_OK) {
+			w->violations++;
 		}
 	}
 

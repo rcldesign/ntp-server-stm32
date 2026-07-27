@@ -434,7 +434,8 @@ int auth_web_login(auth_web_ctx_t *c, const char *user, size_t user_len,
 	if (!u->has_blob) {
 		audit(c, (uint8_t)LOGR_WARN, now_ms,
 		      "web auth: account has no credential");
-		return -ENOKEY;
+		/* -ENOENT, not -ENOKEY: picolibc has no ENOKEY. */
+		return -ENOENT;
 	}
 
 	rc = c->kdf->derive(c->kdf->user, u->blob, AUTH_WEB_SALT_LEN, pw, pw_len,

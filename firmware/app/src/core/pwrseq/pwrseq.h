@@ -367,8 +367,16 @@ typedef struct {
 	uint32_t last_kick_ms;  /* monotonic ms of the last issued edge */
 	uint32_t kicks;         /* edges issued */
 	uint32_t withheld;      /* times a due kick was refused by liveness */
-	uint32_t early;         /* observed intervals below the window */
-	uint32_t late;          /* observed intervals above the window */
+	/*
+	 * Kicks whose measured interval left the TPS3430 window, with the most
+	 * recent verdict. A validated cadence makes an EARLY interval impossible
+	 * from pwrseq_wdt_service() itself — the only way to produce one is a second
+	 * writer on the pin, which is exactly what a single owner rules out — so
+	 * this is a tripwire, not an expected event. Non-zero means the board is
+	 * being cold-cycled by its own supervisor.
+	 */
+	uint32_t violations;
+	uint8_t last_verdict;   /* pwrseq_wdt_interval_t of the last kick */
 	bool armed;             /* WDT_EN is asserted; the TPS3430 is watching */
 	bool have_kicked;       /* at least one edge has been issued since arming */
 } pwrseq_wdt_t;
