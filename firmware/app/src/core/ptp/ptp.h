@@ -402,13 +402,19 @@ ptp_recommended_t ptp_bmca_state_decision(const ptp_dataset_t *d0,
 /** One foreign-master record, §9.3.2.4. */
 typedef struct {
 	bool in_use;
-	bool qualified;              /* >= PTP_FOREIGN_MASTER_THRESHOLD in the window */
+	/**
+	 * Latched once @ref count reaches PTP_FOREIGN_MASTER_THRESHOLD. Given up
+	 * only by losing the record — ptp_foreign_prune() or ptp_foreign_clear()
+	 * — never by a dip in the count, so a master announcing on cadence stays
+	 * a candidate instead of blinking out of Erbest.
+	 */
+	bool qualified;
 	ptp_port_id_t source_port;   /* sourcePortIdentity of its Announces */
 	ptp_announce_t announce;     /* the most recent Announce body */
 	uint16_t flags;              /* its most recent flagField */
 	int8_t log_announce_interval;/* its advertised logMessageInterval */
-	uint16_t count;              /* Announces inside the current window */
-	uint64_t window_start_ms;
+	/** Consecutive Announces no more than one window apart; saturates. */
+	uint16_t count;
 	uint64_t last_rx_ms;
 } ptp_foreign_t;
 
@@ -441,10 +447,13 @@ void ptp_foreign_clear(ptp_foreign_tbl_t *t);
  * Record an Announce, creating or refreshing the sender's entry.
  *
  * Qualification follows §9.3.2.4.5: a record becomes qualified once
- * PTP_FOREIGN_MASTER_THRESHOLD Announces land inside a window of
- * PTP_FOREIGN_MASTER_TIME_WINDOW announce intervals. A gap longer than the
- * window restarts the count. A full table evicts its least recently heard
- * record, which is also the one closest to expiry.
+ * PTP_FOREIGN_MASTER_THRESHOLD Announces arrive no more than
+ * PTP_FOREIGN_MASTER_TIME_WINDOW announce intervals apart. The window slides
+ * against the previous Announce, so an on-cadence master accumulates without
+ * ever falling back; a gap longer than the window restarts the count, and
+ * qualification itself is surrendered only by prune or clear. A full table
+ * evicts its least recently heard record, which is also the one closest to
+ * expiry.
  *
  * @return The record, or NULL on a NULL argument.
  */
@@ -512,9 +521,18 @@ typedef enum {
 /**
  * One outbound PDU.
  *
- * @p buf points into the context's scratch buffer and is valid only for the
+ * @p buf points into a scratch buffer owned by the context and is valid for the
  * duration of the callback: the glue must copy it or hand it to the stack
  * synchronously.
+ *
+ * Re-entrancy: the engine never reuses the buffer backing an in-flight
+ * descriptor, so a driver that reads its own egress timestamp synchronously may
+ * call ptp_on_sync_txts() from inside the Sync callback — the Follow_Up it
+ * emits is built in separate storage and the Sync bytes under @p buf do not
+ * move. That nested Follow_Up is transmitted *before* the outer Sync callback
+ * returns; a driver that queues rather than sends must account for the
+ * ordering, and one that then reports the Sync as failed leaves the Follow_Up
+ * orphaned on the wire (counted in @ref ptp_counters_t::followup_orphaned).
  */
 typedef struct {
 	const uint8_t *buf;
@@ -567,8 +585,12 @@ typedef struct {
 	uint32_t foreign_evicted;
 	uint32_t foreign_expired;
 	uint32_t followup_missed;  /* a Sync egress timestamp never arrived */
+	/** A synchronously released Follow_Up whose Sync then failed to send. */
+	uint32_t followup_orphaned;
 	uint32_t txts_unmatched;   /* ptp_on_sync_txts() for an unknown sequenceId */
 	uint32_t tx_errors;
+	/** Event message dropped for want of a hardware ingress timestamp. */
+	uint32_t rx_no_timestamp;
 } ptp_counters_t;
 
 /** Engine state. Caller-owned; initialise with ptp_port_init(). */
@@ -602,7 +624,17 @@ typedef struct {
 	ptp_foreign_tbl_t foreign;
 
 	ptp_counters_t counters;
+	/** Scratch for the message being transmitted. */
 	uint8_t txbuf[PTP_MSG_MAX_LEN];
+	/**
+	 * Separate scratch for Follow_Up.
+	 *
+	 * ptp_on_sync_txts() may legitimately be called from inside the Sync
+	 * transmit callback, while the Sync still occupies @ref txbuf and the
+	 * glue still holds a pointer into it. Encoding the Follow_Up anywhere
+	 * else keeps that pointer honest.
+	 */
+	uint8_t fubuf[PTP_TSMSG_LEN];
 } ptp_port_ctx_t;
 
 /**

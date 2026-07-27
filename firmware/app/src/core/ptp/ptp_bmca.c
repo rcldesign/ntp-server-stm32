@@ -295,30 +295,47 @@ ptp_foreign_t *ptp_foreign_update(ptp_foreign_tbl_t *t,
 		memset(f, 0, sizeof(*f));
 		f->in_use = true;
 		f->source_port = *src;
-		f->window_start_ms = now_ms;
 		t->added++;
 	}
 
 	f->announce = *a;
 	f->flags = flags;
 	f->log_announce_interval = log_announce_interval;
-	f->last_rx_ms = now_ms;
 
 	window_ms = (uint64_t)PTP_FOREIGN_MASTER_TIME_WINDOW *
 		    (uint64_t)foreign_interval_ms(pol, f);
 
-	if ((now_ms < f->window_start_ms) ||
-	    ((now_ms - f->window_start_ms) > window_ms)) {
-		/* The window lapsed: qualification starts again from this one. */
-		f->window_start_ms = now_ms;
+	/*
+	 * The window slides against the *previous* Announce, not against a fixed
+	 * origin. A tumbling window would drop the count back to 1 every fourth
+	 * interval even for a master announcing perfectly on cadence, briefly
+	 * emptying Erbest and making this port flap out of PASSIVE and transmit
+	 * as a second grandmaster alongside a healthy one.
+	 *
+	 * A new record has last_rx_ms == 0 and count == 0, so either branch
+	 * leaves it at 1, which is what §9.3.2.4.5 wants for a first Announce.
+	 */
+	if ((now_ms < f->last_rx_ms) || ((now_ms - f->last_rx_ms) > window_ms)) {
 		f->count = 1U;
 	} else if (f->count < UINT16_MAX) {
 		f->count++;
 	} else {
-		/* saturated; already long qualified */
+		/* saturated; long since qualified */
 	}
+	f->last_rx_ms = now_ms;
 
-	f->qualified = (f->count >= PTP_FOREIGN_MASTER_THRESHOLD);
+	/*
+	 * Qualification latches. It is given up only by losing the record
+	 * entirely — ptp_foreign_prune() at the announce receipt timeout, or
+	 * ptp_foreign_clear() — never by a momentary dip in the count. The
+	 * receipt timeout (announceReceiptTimeout intervals) is shorter than
+	 * this window (PTP_FOREIGN_MASTER_TIME_WINDOW intervals) under any sane
+	 * policy, so in practice a gap long enough to reset the count has
+	 * already dropped the record.
+	 */
+	if (f->count >= PTP_FOREIGN_MASTER_THRESHOLD) {
+		f->qualified = true;
+	}
 	return f;
 }
 
