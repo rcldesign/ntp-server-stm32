@@ -572,8 +572,15 @@ static int pps_reference(bool coarse_ok, int64_t coarse_ns, int64_t *out_off_ns)
 	int prc;
 
 	if (sts_pps_epoch_get(&cap) != 0) {
-		/* No PPS capture in this build or this boot. Not a refusal worth
-		 * counting — there is nothing to refuse. */
+		/*
+		 * No PPS capture path in this build, or it has not started. Still
+		 * recorded as a refusal: the reason field is what note_ref_src()
+		 * prints when the servo falls back, and leaving it holding a
+		 * previous tick's verdict — or the zero-initialised STS_PPSCORR_OK
+		 * — would annotate the fallback with a lie.
+		 */
+		memset(&res, 0, sizeof(res));
+		pps_note(STS_PPSCORR_NO_CAPTURE, &res);
 		return -EAGAIN;
 	}
 
@@ -1017,6 +1024,10 @@ int sts_ptpclk_init(void)
 	}
 
 	st.clock_ok = true;
+	/* Before the first servo tick nothing has been correlated, and 0 would
+	 * read as STS_PPSCORR_OK. Say so explicitly. */
+	st.pps_last_rc = (uint8_t)STS_PPSCORR_NO_CAPTURE;
+	st.ref_src = (uint8_t)STS_PTPCLK_REF_NONE;
 	sts_time_register_source(tai_source, NULL);
 	LOG_INF("PTP clock %s bound as the TAI source", dev->name);
 	return 0;

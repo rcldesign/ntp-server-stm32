@@ -70,6 +70,7 @@
 #include <zephyr/sys/util.h>
 
 #include "console/sts_console.h"
+#include "console/sts_rollback.h"
 #include "console/sts_stage_geom.h"
 #include "port/port.h"
 
@@ -564,9 +565,23 @@ static int dfu_mark_pending(void *ctx)
 		return PORT_ENOTSUP;
 	}
 
-	rc = dfu_erase_trailer();
+	/*
+	 * Refuse here what the bootloader would refuse silently.
+	 *
+	 * MCUboot re-checks the security counter at the next boot, so skipping
+	 * this costs nothing in security — but its logging is compiled out, so
+	 * the operator's experience of a rolled-back image is "upload OK",
+	 * "staged, pending", reboot, and the same version still running, with
+	 * nothing anywhere saying why. Checking before the trailer is written
+	 * turns that into an error at the moment the decision is made.
+	 *
+	 * Deliberately before boot_request_upgrade() and after the erase: the
+	 * erase is idempotent, whereas a trailer already marked pending would
+	 * have to be un-marked.
+	 */
+	rc = sts_rollback_check_staged();
 	if (rc != 0) {
-		return rc;
+		return (rc == -EPERM) ? PORT_ENOTSUP : rc;
 	}
 
 	rc = boot_request_upgrade(BOOT_UPGRADE_TEST);

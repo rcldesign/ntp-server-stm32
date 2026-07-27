@@ -16,12 +16,43 @@
  *   - the same escalating brute-force throttle core/mcp uses, per user, with
  *     the counters surviving a connection drop (an attacker must not be able
  *     to reset the throttle by reconnecting);
- *   - constant-time verification of the stored credential.
+ *   - constant-time verification of the stored credential;
+ *   - an OPTIONAL remote authority (@ref auth_web_remote_fn) consulted when the
+ *     local table cannot accept the credential.
+ *
+ * The remote authority
+ * --------------------
+ * RADIUS / TACACS+ / LDAP live behind one function pointer, for the same reason
+ * core/auth puts them behind one: this module must stay platform-neutral and
+ * socket-free. The Zephyr glue wires the hook to sts_aaa_check(); a host test
+ * wires a table. Leaving it NULL reproduces the pre-hook behaviour byte for
+ * byte, which is what makes "an unwired hook changes nothing" testable rather
+ * than merely asserted.
+ *
+ * Three rules the hook's callers depend on, all of them security properties:
+ *
+ *   1. It is consulted ONLY when the local table could not accept — the account
+ *      is unknown, holds no credential, or the password did not verify. A local
+ *      success never leaves the box.
+ *   2. Every non-zero return is a DENIAL. -EHOSTUNREACH in particular means "no
+ *      authority could answer" and is never an allow-on-failure. Only -EBUSY is
+ *      distinguishable in the answer (it is a lockout, and the caller needs it
+ *      to populate Retry-After); everything else collapses into -EACCES so the
+ *      reply cannot tell an attacker which half of the credential was right.
+ *   3. It is called with the caller's own state on the stack only, so the glue
+ *      may block in it. It WILL block: sts_aaa_check() runs a DNS lookup and up
+ *      to three network round trips. See the threading note below.
+ *
+ * Threading: not internally locked. The Zephyr glue serialises access from the
+ * web worker threads with one mutex, exactly as core/cfg is serialised. That
+ * mutex is held across @ref auth_web_login, and therefore across the remote
+ * hook, so the glue's implementation must keep its watchdog participant fed
+ * rather than simply blocking (src/zephyr/net/sts_secops.c does).
  *
  * Credential format — deliberately IDENTICAL to core/mcp
  * -----------------------------------------------------
  * The stored blob is exactly what core/mcp stores, in exactly the same cfg key
- * (`sec.admin.pw`, CFG_F_SECRET | CFG_F_NOEXPORT, 48 bytes):
+ * shape (`sec.admin.pw`, CFG_F_SECRET | CFG_F_NOEXPORT, 48 bytes):
  *
  *     salt[16] || tag[32]        tag = KDF(salt, password)
  *
@@ -32,22 +63,24 @@
  * The upgrade path is plumbed rather than guessed at: @ref auth_kdf_t is a
  * swappable derivation whose output is the same 32-byte tag in the same
  * 48-byte envelope, so an Argon2id implementation drops in without touching
- * this module, the schema, or the blob layout. What it CANNOT do is change one
- * credential store without the other: the web plane and the MCP console read
- * the same key, so switching the KDF is a coordinated change to both (and needs
- * either a schema flag byte or a re-provisioning step, since the envelope has
- * no room to record which KDF produced the tag). That is written down here
- * because silently diverging the two stores would lock the operator out of one
- * channel while leaving the other open — a worse outcome than keeping the
- * weaker KDF until both move together.
+ * this module, the schema, or the blob layout.
+ *
+ * All three accounts use that one shape and one set of key flags, so a single
+ * verification path serves every role: `sec.admin.pw` (admin),
+ * `sec.operator.pw` (operator) and `sec.viewer.pw` (viewer). The KDF swap
+ * therefore reaches all of them at once — which is the point, because what it
+ * CANNOT do is change one credential store without the other: the web plane and
+ * the MCP console read the same keys, so switching the KDF is a coordinated
+ * change to both (and needs either a schema flag byte or a re-provisioning step,
+ * since the envelope has no room to record which KDF produced the tag). That is
+ * written down here because silently diverging the two stores would lock the
+ * operator out of one channel while leaving the other open — a worse outcome
+ * than keeping the weaker KDF until both move together.
  *
  * TODO(argon2id): land an Argon2id auth_kdf_t (m=64 MiB is impossible on this
  * part; m=16..32 KiB, t=3, p=1 is the realistic envelope), add a cfg key
  * recording the KDF id, and move core/mcp onto the same table in the same
  * change. Tracked as a firmware open item.
- *
- * Threading: not internally locked. The Zephyr glue serialises access from the
- * web worker threads with one mutex, exactly as core/cfg is serialised.
  *
  * Portable errno only
  * -------------------
@@ -168,6 +201,30 @@ typedef struct {
  */
 int auth_kdf_hmac_sha256(auth_kdf_t *out, const port_crypto_t *crypto);
 
+/* --------------------------------------------------------- remote authority */
+
+/**
+ * Ask a remote authority about a credential the local table could not accept.
+ *
+ * Implemented by the glue over sts_aaa_check() (RADIUS / TACACS+ / LDAP behind
+ * core/auth's chain, cache and lockout). Optional: a NULL hook keeps this module
+ * behaving exactly as it did before the hook existed.
+ *
+ * @param name      NUL-terminated account name, at most AUTH_WEB_NAME_MAX bytes.
+ * @param secret    NUL-terminated password, at most AUTH_WEB_PW_MAX bytes.
+ * @param out_role  Set to a web_role_t on acceptance; the caller has already
+ *                  set it to WEB_ROLE_NONE, and clamps whatever comes back.
+ *
+ * @retval 0               Accepted.
+ * @retval -EBUSY          The authority is holding this principal in a lockout.
+ *                         Reported distinctly so the caller can send
+ *                         Retry-After; it says nothing about the password.
+ * @retval <0 (any other)  Denied. -EHOSTUNREACH ("no authority could answer")
+ *                         is a denial like every other — never allow-on-failure.
+ */
+typedef int (*auth_web_remote_fn)(void *user, const char *name,
+				  const char *secret, uint8_t *out_role);
+
 /* ------------------------------------------------------------------- state */
 
 /** One account. */
@@ -180,10 +237,11 @@ typedef struct {
 	/**
 	 * cfg key holding the credential, or 0 for a RAM-only account.
 	 *
-	 * Only the admin account has a schema key today (`sec.admin.pw`).
-	 * Additional roles therefore live in RAM until the schema grows keys for
-	 * them — cfg_schema.h is not this module's to extend. Reported honestly
-	 * by @ref auth_web_user_persistent().
+	 * All three shipped roles now have a schema key of their own —
+	 * `sec.admin.pw`, `sec.operator.pw`, `sec.viewer.pw` — so an account
+	 * created against one of them survives a reboot. An account created with
+	 * 0 is still legal (tests, bring-up images) and is reported honestly by
+	 * @ref auth_web_user_persistent().
 	 */
 	uint16_t cfg_key;
 
@@ -192,12 +250,28 @@ typedef struct {
 	uint64_t lock_until_ms;
 } auth_web_user_t;
 
+/**
+ * A session slot index that names no local account.
+ *
+ * @ref auth_web_sess_t::user carries it when the principal was authenticated by
+ * the remote authority and has no entry in the local table. It is deliberately
+ * out of range, so auth_web_user_at() answers NULL for it and every existing
+ * caller that maps a session to an account already fails safe. Use
+ * @ref auth_web_sess_name() to get the principal's name in that case.
+ */
+#define AUTH_WEB_NO_USER ((uint8_t)AUTH_WEB_USERS)
+
 /** One session. */
 typedef struct {
 	char     token[AUTH_WEB_TOKEN_LEN + 1U];
 	char     csrf[AUTH_WEB_CSRF_LEN + 1U];
-	uint8_t  user;      /**< index into auth_web_ctx_t::users */
+	/** Index into auth_web_ctx_t::users, or @ref AUTH_WEB_NO_USER. */
+	uint8_t  user;
 	uint8_t  role;      /**< snapshot of the role at login */
+	/** Authenticated principal, always populated (local or remote). */
+	char     name[AUTH_WEB_NAME_MAX + 1U];
+	/** True when a remote authority, not the local table, decided. */
+	bool     remote;
 	uint64_t created_ms;
 	uint64_t last_ms;
 	uint32_t requests;
@@ -216,6 +290,13 @@ typedef struct {
 	uint32_t expired_absolute;
 	uint32_t csrf_rejected;
 	uint32_t token_rejected;
+	/** Logins the remote authority accepted. */
+	uint32_t logins_remote_ok;
+	/** Logins the remote authority refused (every reason, including
+	 *  "no authority could answer" — which is a refusal). */
+	uint32_t logins_remote_denied;
+	/** Local misses/failures that were referred to the remote authority. */
+	uint32_t remote_consults;
 } auth_web_stats_t;
 
 /** Registry. Caller-owned; zeroed and populated by auth_web_init(). */
@@ -227,6 +308,10 @@ typedef struct {
 
 	uint32_t idle_s;
 	uint32_t absolute_s;
+
+	/** Optional remote authority; see @ref auth_web_set_remote(). */
+	auth_web_remote_fn remote;
+	void              *remote_user;
 
 	auth_web_user_t users[AUTH_WEB_USERS];
 	auth_web_sess_t sess[AUTH_WEB_SESSIONS];
@@ -251,6 +336,19 @@ typedef struct {
  */
 int auth_web_init(auth_web_ctx_t *c, const port_crypto_t *crypto,
 		  const auth_kdf_t *kdf, cfg_ctx_t *cfg, logr_t *log);
+
+/**
+ * Attach (or detach, with @p fn NULL) the remote authority.
+ *
+ * Separate from auth_web_init() on purpose: the hook is optional, and every
+ * existing caller of auth_web_init() keeps working unchanged and keeps the
+ * pre-hook behaviour. Call it once, from the same init path, before the worker
+ * threads exist.
+ *
+ * @retval 0        Stored.
+ * @retval -EINVAL  @p c is NULL.
+ */
+int auth_web_set_remote(auth_web_ctx_t *c, auth_web_remote_fn fn, void *user);
 
 /**
  * Create or update an account.
