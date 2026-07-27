@@ -900,7 +900,14 @@
 				if (self.extra.logs) { return self.pollLogs(); }
 				return null;
 			}).catch(function (e) {
-				if (e && e.code === 'unauthenticated') { return; }
+				/* The poll is 'quiet' so a transient outage does not throw the
+				 * login overlay up, but a 401 means the session really is gone
+				 * and the operator must be told - otherwise the UI just sits
+				 * there looking offline forever. */
+				if (e && e.code === 'unauthenticated') {
+					Session.requireLogin('Session ended. Sign in again.');
+					return;
+				}
 				if (self.mode !== 'ws') { self.setMode('down'); }
 			}).then(function () { self.pollBusy = false; });
 		},
