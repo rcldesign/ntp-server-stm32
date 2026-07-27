@@ -1,9 +1,9 @@
 /*
  * STS1000 Meridian — port interfaces (core ↔ platform boundary).
  *
- * Core modules (app/src/core/**) are platform-neutral: they never include
- * Zephyr/HAL headers. Anything that touches hardware, time, crypto, flash,
- * or the network is reached through the typedefs in port/*.h. On target the
+ * Core modules (everything under app/src/core) are platform-neutral: they
+ * never include Zephyr/HAL headers. Anything that touches hardware, time,
+ * crypto, flash, or the network is reached through the port headers. On target the
  * implementations live in app/src/zephyr/portz/; host unit tests supply
  * fakes/fixtures.
  *
