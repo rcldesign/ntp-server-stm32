@@ -5,6 +5,42 @@
 
 cmake_minimum_required(VERSION 3.20.0)
 
+# ---------------------------------------------------------------------------
+# Drop-in configuration fragments  (MUST precede find_package(Zephyr))
+#
+# The Zephyr glue is split into four ownership areas (platform, net, console,
+# ui) worked on in parallel. So that adding an area never means editing a
+# shared file, each area drops its own Kconfig fragment into `conf/` and its
+# own devicetree overlay into `dts/`; both directories are globbed here and
+# merged into EXTRA_CONF_FILE / EXTRA_DTC_OVERLAY_FILE.
+#
+# Ordering is the sorted filename, so a fragment can rely on being applied
+# after an alphabetically earlier one. `prj.conf` is always applied first
+# (Zephyr applies CONF_FILE before EXTRA_CONF_FILE), and a later fragment
+# overrides an earlier one — that is the intended override direction.
+#
+# configuration_files.cmake reads both variables with `zephyr_get(... MERGE)`,
+# which unions the local scope value set here with any CACHE/env/sysbuild
+# value, so a `-DEXTRA_CONF_FILE=...` on the west command line still applies.
+#
+# CONFIGURE_DEPENDS makes CMake re-glob on every build, so a newly added
+# fragment is picked up without a manual `cmake` re-run. Changing an already
+# merged Kconfig default still needs a pristine build.
+# ---------------------------------------------------------------------------
+file(GLOB sts1000_conf_fragments CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/conf/*.conf)
+if(sts1000_conf_fragments)
+  list(SORT sts1000_conf_fragments)
+  list(APPEND EXTRA_CONF_FILE ${sts1000_conf_fragments})
+endif()
+
+file(GLOB sts1000_dts_overlays CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/dts/*.overlay)
+if(sts1000_dts_overlays)
+  list(SORT sts1000_dts_overlays)
+  list(APPEND EXTRA_DTC_OVERLAY_FILE ${sts1000_dts_overlays})
+endif()
+
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sts1000_meridian LANGUAGES C)
 
@@ -15,33 +51,14 @@ project(sts1000_meridian LANGUAGES C)
 #   src/core/    platform-neutral C11, host-testable, no Zephyr headers
 #   src/zephyr/  Zephyr glue (threads, ISRs, driver + port implementations)
 #
-# core/ is listed PER MODULE, deliberately — not with a recursive glob. The §5
-# modules land across several waves and are written in parallel, so a recursive
-# glob would drag a half-written module into the target link and break a build
-# that has nothing to do with it. Adding a module is a one-line edit here.
+# Both are recursive globs. During the wave-2 build-out core/ was listed per
+# module so a half-written module could not break an unrelated build; every
+# ARCHITECTURE.md §5 module now compiles for the target, so that exception is
+# gone and adding a module (or an area's glue file) is a no-edit operation.
 # ---------------------------------------------------------------------------
+file(GLOB_RECURSE sts1000_core_sources CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.c)
 
-# --- core/ modules: add one file(GLOB ...) + list(APPEND ...) pair per module
-#     as each ARCHITECTURE.md §5 module lands (WAVE 3 EXTENSION POINT) --------
-set(sts1000_core_sources)
-
-file(GLOB sts1000_core_util_sources CONFIGURE_DEPENDS
-     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/util/*.c)
-list(APPEND sts1000_core_sources ${sts1000_core_util_sources})
-
-# WAVE 3 EXTENSION POINT — append the remaining ARCHITECTURE.md §5 modules here
-# in the same shape, e.g.:
-#
-#   file(GLOB sts1000_core_cfg_sources CONFIGURE_DEPENDS
-#        ${CMAKE_CURRENT_SOURCE_DIR}/src/core/cfg/*.c)
-#   list(APPEND sts1000_core_sources ${sts1000_core_cfg_sources})
-#
-# Remaining modules: cfg quality disc refsel ubx gnssmgr ntp nts ptp ina228
-#                    fault pwrseq thermal mcp logring snmp ui
-# ---------------------------------------------------------------------------
-
-# --- Zephyr glue: recursive glob is safe here, this tree is owned by the
-#     platform waves and every file in it is expected to compile. -------------
 file(GLOB_RECURSE sts1000_glue_sources CONFIGURE_DEPENDS
      ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/*.c)
 
@@ -61,7 +78,7 @@ target_sources(app PRIVATE
 # NOTE: having src/ on the include path means <zephyr/...> resolves against
 # src/zephyr/ first. Do not create a header directly under src/zephyr/ whose
 # name matches a Zephyr header (device.h, kernel.h, ...) — glue headers belong
-# in src/zephyr/{threads,drv,portz}/ per ARCHITECTURE.md §2.
+# in src/zephyr/<area>/ per ARCHITECTURE.md §2.
 target_include_directories(app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/src/core

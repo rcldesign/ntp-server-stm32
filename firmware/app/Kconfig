@@ -3,6 +3,43 @@
 
 mainmenu "STS1000 Meridian"
 
+menu "STS1000 Meridian glue areas"
+
+# The Zephyr glue layer (ARCHITECTURE.md §2 src/zephyr/) is split into four
+# ownership areas. `platform` is unconditional — it owns bring-up, the timing
+# engine glue, the 1 kHz scan and housekeeping, so there is no build without
+# it. The other three are switchable so a bring-up image can be cut down to
+# the timing path alone (useful for ADEV runs and for isolating a fault to an
+# area). Each area's entry point has a __weak no-op fallback in
+# src/zephyr/platform/sts_area_weak.c, so disabling one only removes its code.
+
+config STS1000_NET
+	bool "Network area (Ethernet, NTP/NTS, PTP, SNMP)"
+	default y
+	help
+	  Builds src/zephyr/net/ and calls sts_net_start() from the bring-up
+	  sequencer. Covers the RMII interface, DHCPv4/link management, the
+	  NTP/NTS server, the PTP grandmaster and the SNMP agent.
+
+config STS1000_CONSOLE
+	bool "Console area (USB CDC-ACM, shell, MCP, storage)"
+	default y
+	help
+	  Builds src/zephyr/console/ and calls sts_console_start() from the
+	  bring-up sequencer. Covers the composite USB device, the Zephyr
+	  shell on CDC-ACM #0, the binary Meridian Console Protocol channel on
+	  CDC-ACM #1, settings/NVS persistence and the LittleFS mount.
+
+config STS1000_UI
+	bool "Local UI area (display, touch, encoder, panel)"
+	default y
+	help
+	  Builds src/zephyr/ui/ and calls sts_ui_start() from the bring-up
+	  sequencer. Covers the ST7796 TFT, the FT6336 touch controller, the
+	  rotary encoder and the front-panel LEDs.
+
+endmenu
+
 menu "STS1000 Meridian bring-up"
 
 config STS1000_NOR_RESET_RECOVERY_US
