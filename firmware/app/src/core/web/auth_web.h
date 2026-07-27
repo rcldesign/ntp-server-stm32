@@ -416,14 +416,34 @@ typedef struct {
 /**
  * Verify a credential and open a session.
  *
+ * Order of authorities, and why it is this one:
+ *
+ *   1. the per-account lockout — a throttled account never reaches a password
+ *      test NOR the network, so a brute-force attempt costs the attacker no
+ *      RADIUS round trips;
+ *   2. the local credential — a local success never leaves the box;
+ *   3. the remote authority, if one is wired, for every case the local table
+ *      could not accept: unknown account, account with no credential, wrong
+ *      password.
+ *
  * @retval 0        Granted; @p out describes the session (pointers alias @p c).
  * @retval -EINVAL  Bad argument.
- * @retval -EACCES  Unknown user or wrong password.
- * @retval -EBUSY   Throttled — do not retry until the window expires. The
- *                  password is NOT tested in this case, so the answer carries no
- *                  information about it.
+ * @retval -EACCES  Refused. Deliberately ONE answer for an unknown user, a
+ *                  wrong password, an unprovisioned account on a commissioned
+ *                  box, and every remote refusal including "no authority could
+ *                  answer" — so the reply cannot be used to enumerate accounts
+ *                  or to learn which half of a credential was right.
+ * @retval -EBUSY   Throttled, locally or by the remote authority — do not retry
+ *                  until the window expires. The password is NOT tested
+ *                  locally in this case, so the answer carries no information
+ *                  about it.
  * @retval -ENOSPC  No free session slot.
- * @retval -ENOENT  The account has no credential provisioned. (Not -ENOKEY:
+ * @retval -ENOENT  NO account on this box holds a credential and no remote
+ *                  authority is wired, i.e. the box has never been
+ *                  commissioned. Once ANY account is provisioned, an
+ *                  unprovisioned one answers -EACCES like everything else,
+ *                  because otherwise the reply would report per-account
+ *                  provisioning state to an unauthenticated peer. (Not -ENOKEY:
  *                  picolibc, the target libc, does not define it — see the
  *                  portable-errno note at the top of this header.)
  * @retval -EIO     The KDF failed.
@@ -448,6 +468,14 @@ int auth_web_validate(auth_web_ctx_t *c, const char *token, uint64_t now_ms,
 const auth_web_sess_t *auth_web_sess_at(const auth_web_ctx_t *c, size_t idx);
 
 /**
+ * Name of the principal behind session @p idx, or NULL when the slot is dead.
+ *
+ * Works for a remote principal, which has no entry in the local account table
+ * and therefore cannot be named through auth_web_user_at().
+ */
+const char *auth_web_sess_name(const auth_web_ctx_t *c, size_t idx);
+
+/**
  * Constant-time CSRF check for session @p idx.
  *
  * @retval 0        Match.
@@ -462,6 +490,22 @@ int auth_web_logout(auth_web_ctx_t *c, size_t idx);
 
 /** Close every session (password change, factory reset, TLS key rotation). */
 void auth_web_logout_all(auth_web_ctx_t *c);
+
+/**
+ * Secure-erase every secret this context holds.
+ *
+ * Closes every session (tokens and CSRF tokens are bearer secrets), zeroizes
+ * every stored credential blob, and clears the brute-force counters. The
+ * account NAMES, roles and cfg-key bindings survive, so the table is still the
+ * one the box boots with — only the secrets are gone.
+ *
+ * Written through a volatile pointer, not memset(), for the reason the whole
+ * codebase does it: a plain memset over a buffer nothing reads again is a dead
+ * store the compiler may delete.
+ *
+ * Called from the factory-reset path. Idempotent; safe on a NULL context.
+ */
+void auth_web_wipe(auth_web_ctx_t *c);
 
 /** Expire idle/aged sessions. Returns the number closed. */
 int auth_web_tick(auth_web_ctx_t *c, uint64_t now_ms);

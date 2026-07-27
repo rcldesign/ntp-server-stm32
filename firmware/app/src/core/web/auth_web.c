@@ -14,6 +14,30 @@
 #include <string.h>
 
 /* ------------------------------------------------------------------------- */
+/* secret hygiene                                                            */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Wipe a buffer that holds key material.
+ *
+ * Through a volatile pointer, matching core/mp's wipe(): a plain memset() over
+ * a buffer that is about to leave scope, or that nothing reads again, is a dead
+ * store the compiler is entitled to delete — which is exactly how a password
+ * survives in a stack frame. core/ stays platform-neutral, so this cannot be
+ * mbedtls_platform_zeroize(); the glue uses that where mbedTLS is in scope.
+ */
+static void wipe(void *p, size_t n)
+{
+	volatile uint8_t *q = (volatile uint8_t *)p;
+
+	while (n != 0U) {
+		*q = 0U;
+		q++;
+		n--;
+	}
+}
+
+/* ------------------------------------------------------------------------- */
 /* audit                                                                     */
 /* ------------------------------------------------------------------------- */
 
@@ -135,6 +159,16 @@ int auth_web_init(auth_web_ctx_t *c, const port_crypto_t *crypto,
 	c->log = log;
 	c->idle_s = AUTH_WEB_IDLE_S_DEFAULT;
 	c->absolute_s = AUTH_WEB_ABSOLUTE_S_DEFAULT;
+	return 0;
+}
+
+int auth_web_set_remote(auth_web_ctx_t *c, auth_web_remote_fn fn, void *user)
+{
+	if (c == NULL) {
+		return -EINVAL;
+	}
+	c->remote = fn;
+	c->remote_user = (fn != NULL) ? user : NULL;
 	return 0;
 }
 
