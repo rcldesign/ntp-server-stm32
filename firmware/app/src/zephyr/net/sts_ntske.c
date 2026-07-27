@@ -24,39 +24,47 @@
  * exporter requirement and documented here and in the report.
  *
  * ---------------------------------------------------------------------------
+ * The exporter macro, and why the whole body is guarded
+ * ---------------------------------------------------------------------------
+ *
+ * mbedtls_ssl_export_keying_material() exists only when mbedTLS was built with
+ * MBEDTLS_SSL_KEYING_MATERIAL_EXPORT. Zephyr's mbedTLS config does not enable
+ * it and offers no Kconfig for it; sts_mbedtls_user.h turns it on, but wiring
+ * that header onto the mbedTLS include path is a one-line app/CMakeLists.txt
+ * edit owned by the platform area (see that header and the W3b report). Until
+ * it lands the macro is undefined, so this entire TLS implementation is behind
+ * `#if defined(...)`: the file always compiles, and sts_ntske_start() cleanly
+ * reports the listener unavailable rather than standing up a server that could
+ * not derive a single key.
+ *
+ * ---------------------------------------------------------------------------
  * Cert / key persistence (spec §9.2)
  * ---------------------------------------------------------------------------
  *
  * A self-signed P-256 certificate and its key are generated once per boot, in
- * RAM, the first time the listener starts. They are NOT persisted this phase.
- * Two reasons, both structural rather than expedient:
+ * RAM. They are NOT persisted this phase. Two reasons, both structural:
  *
- *   1. Persistence storage belongs to the console area (src/zephyr/storage),
- *      and the area boundary (ARCHITECTURE.md §2) forbids this area reaching
- *      into it; sts_app.h exposes no key-blob store. Wiring one is a clean
- *      follow-up, not a hack to add here.
- *   2. NTS clients treat the KE server's certificate as a TOFU/pinned or
- *      operator-provisioned trust anchor, not a web PKI leaf. A per-boot
- *      self-signed cert means a client must re-pin after a reboot, which is
- *      acceptable for the bring-up phase and is exactly what spec §9.2 defers.
+ *   1. Persistence belongs to the console area (src/zephyr/storage); the area
+ *      boundary (ARCHITECTURE.md §2) forbids this area reaching into it and
+ *      sts_app.h exposes no key-blob store.
+ *   2. NTS clients treat the KE server's cert as a pinned / operator-provisioned
+ *      trust anchor, not a web-PKI leaf, so a per-boot self-signed cert only
+ *      means a client re-pins after a reboot — acceptable for bring-up and
+ *      exactly what spec §9.2 defers.
  *
  * TODO(persistence): once sts_app.h grows a sealed-blob store (PSA ITS or an
  * ATECC608B-wrapped NVS record, spec §4.2/§9.1), generate the key on first ever
- * boot, seal it, and reload it here so cookies and the server identity survive
- * a reboot. The generation code below already isolates the one call that would
- * change (make_self_signed_cert()).
+ * boot, seal it, and reload it in make_self_signed_cert().
  *
  * ---------------------------------------------------------------------------
  * Threading and DoS posture
  * ---------------------------------------------------------------------------
  *
- * One acceptor thread in the web/TLS priority band (12, spec §1.2), one
- * connection at a time. NTS-KE is a rare, bursty operation — a client runs it
- * once and then serves itself cookies over NTP for the cookie lifetime (a week
- * by default) — so serialising handshakes trades negligible throughput for a
- * bounded RAM footprint (one ~16 KB TLS session rather than N). A per-handshake
- * wall-clock cap (NTSKE_HANDSHAKE_TIMEOUT_MS) keeps a stalled client from
- * holding the single slot.
+ * One acceptor thread (priority 12, spec §1.2 web/TLS band), one connection at
+ * a time. NTS-KE is rare and bursty — a client runs it once, then serves itself
+ * cookies over NTP for the cookie lifetime — so serialising handshakes trades
+ * negligible throughput for a bounded RAM footprint (one ~16 KB session, not
+ * N). A per-handshake wall-clock cap keeps a stalled client off the slot.
  */
 
 #include <errno.h>
@@ -66,46 +74,14 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/net/socket.h>
 
-#include <mbedtls/ctr_drbg.h>
-#include <mbedtls/ecp.h>
-#include <mbedtls/entropy.h>
-#include <mbedtls/error.h>
-#include <mbedtls/pk.h>
-#include <mbedtls/ssl.h>
-#include <mbedtls/x509_crt.h>
-
 #include "cfg/cfg.h"
 #include "net/sts_net.h"
-#include "storage/sts_store.h"
 #include "zephyr/sts_app.h"
 
 LOG_MODULE_REGISTER(sts_ntske, CONFIG_STS1000_LOG_LEVEL);
 
-#define NTSKE_STACK_SIZE 8192
-#define NTSKE_PRIORITY 12
-#define NTSKE_BACKLOG 2
-#define NTSKE_HANDSHAKE_TIMEOUT_MS 8000
-#define NTSKE_REQ_MAX 2048U
-#define NTSKE_RSP_MAX NTSKE_RSP_RECOMMENDED
-
-/** ALPN protocol id required by RFC 8915 §4. */
-static const char *const alpn_list[] = { "ntske/1", NULL };
-
-static ntske_ctx_t ke;
-static bool ke_ready;
-
-static mbedtls_ssl_config tls_conf;
-static mbedtls_x509_crt srv_cert;
-static mbedtls_pk_context srv_key;
-static mbedtls_entropy_context entropy;
-static mbedtls_ctr_drbg_context drbg;
-
-static int listen_fd = -1;
-static uint16_t ke_port;
-
-static uint8_t req_buf[NTSKE_REQ_MAX];
-static uint8_t rsp_buf[NTSKE_RSP_MAX];
-
+/* Statistics are visible in every build so the status/SNMP layers can report
+ * "NTS-KE not running" uniformly. */
 static struct {
 	uint32_t accepted;
 	uint32_t handshakes_ok;
@@ -118,6 +94,57 @@ static struct {
 } st;
 static struct k_spinlock st_lock;
 
+void sts_ntske_stats(sts_ntske_stats_t *out)
+{
+	if (out == NULL) {
+		return;
+	}
+	K_SPINLOCK(&st_lock) {
+		out->accepted = st.accepted;
+		out->handshakes_ok = st.handshakes_ok;
+		out->handshakes_failed = st.handshakes_failed;
+		out->negotiations_ok = st.negotiations_ok;
+		out->cookies_issued = st.cookies_issued;
+		out->running = st.running;
+		out->cert_ready = st.cert_ready;
+		out->exporter_available = st.exporter_available;
+	}
+}
+
+#if defined(MBEDTLS_SSL_KEYING_MATERIAL_EXPORT)
+
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/ecp.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509_crt.h>
+
+#include "storage/sts_store.h"
+
+#define NTSKE_STACK_SIZE 8192
+#define NTSKE_PRIORITY 12
+#define NTSKE_BACKLOG 2
+#define NTSKE_HANDSHAKE_TIMEOUT_MS 8000
+#define NTSKE_REQ_MAX 2048U
+#define NTSKE_RSP_MAX NTSKE_RSP_RECOMMENDED
+
+/** ALPN protocol id required by RFC 8915 §4. */
+static const char *const alpn_list[] = { "ntske/1", NULL };
+
+static ntske_ctx_t ke;
+static mbedtls_ssl_config tls_conf;
+static mbedtls_x509_crt srv_cert;
+static mbedtls_pk_context srv_key;
+static mbedtls_entropy_context entropy;
+static mbedtls_ctr_drbg_context drbg;
+
+static int listen_fd = -1;
+static uint16_t ke_port;
+
+static uint8_t req_buf[NTSKE_REQ_MAX];
+static uint8_t rsp_buf[NTSKE_RSP_MAX];
+
 static K_THREAD_STACK_DEFINE(ke_stack, NTSKE_STACK_SIZE);
 static struct k_thread ke_thread;
 static int live_id = -1;
@@ -125,21 +152,6 @@ static int live_id = -1;
 /* ------------------------------------------------------------------------- */
 /* mbedTLS plumbing                                                          */
 /* ------------------------------------------------------------------------- */
-
-/** f_rng shim: mbedTLS RNG callback backed by the board CSPRNG. */
-static int rng_cb(void *ctx, unsigned char *out, size_t len)
-{
-	ARG_UNUSED(ctx);
-	const port_crypto_t *c = sts_port_crypto();
-
-	if (c == NULL || c->rand == NULL) {
-		return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
-	}
-	if (c->rand(c->ctx, out, len) != 0) {
-		return MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
-	}
-	return 0;
-}
 
 static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 {
@@ -172,19 +184,10 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len)
 	return (int)n;
 }
 
-/**
- * RFC 8915 §4.3 TLS exporter, bound into ntske_cfg_t.
- *
- * ntske_handle() calls this twice per negotiation (C2S then S2C) with the
- * five-octet context ntske_exporter_context() built. On a build without the
- * exporter macro this returns -ENOTSUP and ntske_handle() answers Internal
- * Server Error — the listener never starts in that case (see cert init), so
- * this branch is defensive only.
- */
+/** RFC 8915 §4.3 TLS exporter, bound into ntske_cfg_t. */
 static int exporter_cb(void *ctx, const char *label, const uint8_t *context,
 		       size_t context_len, uint8_t *out, size_t out_len)
 {
-#if defined(MBEDTLS_SSL_KEYING_MATERIAL_EXPORT)
 	mbedtls_ssl_context *ssl = ctx;
 	int rc;
 
@@ -196,15 +199,6 @@ static int exporter_cb(void *ctx, const char *label, const uint8_t *context,
 		return -EIO;
 	}
 	return 0;
-#else
-	ARG_UNUSED(ctx);
-	ARG_UNUSED(label);
-	ARG_UNUSED(context);
-	ARG_UNUSED(context_len);
-	ARG_UNUSED(out);
-	ARG_UNUSED(out_len);
-	return -ENOTSUP;
-#endif
 }
 
 /* ------------------------------------------------------------------------- */
@@ -230,7 +224,8 @@ static int make_self_signed_cert(void)
 		goto out;
 	}
 	rc = mbedtls_ecp_gen_key(MBEDTLS_ECP_DP_SECP256R1,
-				 mbedtls_pk_ec(srv_key), rng_cb, NULL);
+				 mbedtls_pk_ec(srv_key),
+				 mbedtls_ctr_drbg_random, &drbg);
 	if (rc != 0) {
 		goto out;
 	}
@@ -248,7 +243,6 @@ static int make_self_signed_cert(void)
 	if (rc != 0) {
 		goto out;
 	}
-
 	rc = mbedtls_mpi_lset(&serial, 1);
 	if (rc != 0) {
 		goto out;
@@ -258,7 +252,7 @@ static int make_self_signed_cert(void)
 		goto out;
 	}
 	/* A device with no wall clock at first boot cannot honour a tight
-	 * validity window; NTS clients pin the key, they do not chain to a CA
+	 * validity window; NTS clients pin the key rather than chain to a CA
 	 * clock, so a wide window is correct rather than lax. */
 	rc = mbedtls_x509write_crt_set_validity(&w, "20260101000000",
 						"20360101000000");
@@ -266,7 +260,8 @@ static int make_self_signed_cert(void)
 		goto out;
 	}
 
-	len = mbedtls_x509write_crt_der(&w, der, sizeof(der), rng_cb, NULL);
+	len = mbedtls_x509write_crt_der(&w, der, sizeof(der),
+					mbedtls_ctr_drbg_random, &drbg);
 	if (len < 0) {
 		rc = len;
 		goto out;
@@ -309,12 +304,8 @@ static int tls_setup(void)
 		return -EIO;
 	}
 
-	/* TLS 1.3 only (RFC 8915 §4). */
 	mbedtls_ssl_conf_min_tls_version(&tls_conf, MBEDTLS_SSL_VERSION_TLS1_3);
 	mbedtls_ssl_conf_max_tls_version(&tls_conf, MBEDTLS_SSL_VERSION_TLS1_3);
-
-	/* The server presents its cert; it does not demand one from the client
-	 * (an NTS client authenticates the server, not the reverse). */
 	mbedtls_ssl_conf_authmode(&tls_conf, MBEDTLS_SSL_VERIFY_NONE);
 	mbedtls_ssl_conf_rng(&tls_conf, mbedtls_ctr_drbg_random, &drbg);
 
@@ -323,12 +314,10 @@ static int tls_setup(void)
 		LOG_ERR("conf_own_cert: -0x%04x", (unsigned int)-rc);
 		return -EIO;
 	}
-
 	rc = mbedtls_ssl_conf_alpn_protocols(&tls_conf, alpn_list);
 	if (rc != 0) {
 		return -EIO;
 	}
-
 	return 0;
 }
 
@@ -355,8 +344,7 @@ static void handle_conn(int fd)
 	mbedtls_ssl_set_bio(&ssl, (void *)(intptr_t)fd, bio_send, bio_recv,
 			    NULL);
 
-	/* The exporter callback needs this exact ssl context. */
-	ke.cfg.export_ctx = &ssl;
+	ke.cfg.export_ctx = &ssl; /* the exporter needs this exact context */
 
 	do {
 		rc = mbedtls_ssl_handshake(&ssl);
@@ -376,8 +364,7 @@ static void handle_conn(int fd)
 
 	alpn = mbedtls_ssl_get_alpn_protocol(&ssl);
 	if (alpn == NULL || strcmp(alpn, "ntske/1") != 0) {
-		/* RFC 8915 §4: the client MUST offer "ntske/1"; without it this
-		 * is not an NTS-KE session and we decline rather than guess. */
+		/* RFC 8915 §4: the client MUST offer "ntske/1". */
 		K_SPINLOCK(&st_lock) {
 			st.handshakes_failed++;
 		}
@@ -388,9 +375,6 @@ static void handle_conn(int fd)
 		st.handshakes_ok++;
 	}
 
-	/* Read the client's NTS-KE records. They are small and arrive in one
-	 * flight; a short bounded read loop tolerates TLS-record fragmentation
-	 * without inviting a slowloris (the handshake deadline still applies). */
 	for (;;) {
 		rc = mbedtls_ssl_read(&ssl, &req_buf[total],
 				      sizeof(req_buf) - total);
@@ -405,13 +389,11 @@ static void handle_conn(int fd)
 			break;
 		}
 		total += (size_t)rc;
-		if (total >= sizeof(req_buf)) {
-			break;
-		}
-		/* A well-formed request ends in an End-of-Message record
-		 * (type 0, critical). Stop as soon as we can see one rather
-		 * than blocking for a close the client will not send first. */
-		if (total >= 4U) {
+		if (total >= sizeof(req_buf) || total >= 4U) {
+			/* A well-formed request ends in an End-of-Message
+			 * record; stop once one flight is in rather than
+			 * waiting for a close the client sends only after our
+			 * response. */
 			break;
 		}
 	}
@@ -421,7 +403,6 @@ static void handle_conn(int fd)
 	if (rc != 0) {
 		goto close_notify;
 	}
-
 	if (res.ok) {
 		K_SPINLOCK(&st_lock) {
 			st.negotiations_ok++;
@@ -429,8 +410,6 @@ static void handle_conn(int fd)
 		}
 	}
 
-	/* ntske_handle() always produces a response (success or an Error
-	 * record); write it, then close. */
 	{
 		size_t off = 0U;
 
@@ -469,9 +448,6 @@ static int open_listener(void)
 	int fd;
 	int on = 1;
 
-	/* One dual-stack v6 listener: NTS-KE is a management-plane service, not
-	 * the time-serving datapath, so the v4-mapped-address handling the NTP
-	 * server avoids is harmless here and one socket is simpler. */
 	fd = zsock_socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
 	if (fd < 0) {
 		return -errno;
@@ -515,17 +491,16 @@ static void ke_loop(void *a, void *b, void *c)
 			.revents = 0,
 		};
 		int rc = zsock_poll(&pfd, 1, 500);
+		int cfd;
 
 		if (live_id >= 0) {
 			sts_liveness_feed(live_id);
 		}
-
 		if (rc <= 0 || (pfd.revents & ZSOCK_POLLIN) == 0) {
 			continue;
 		}
 
-		int cfd = zsock_accept(listen_fd, NULL, NULL);
-
+		cfd = zsock_accept(listen_fd, NULL, NULL);
 		if (cfd < 0) {
 			continue;
 		}
@@ -536,40 +511,11 @@ static void ke_loop(void *a, void *b, void *c)
 	}
 }
 
-/* ------------------------------------------------------------------------- */
-/* public                                                                    */
-/* ------------------------------------------------------------------------- */
-
-void sts_ntske_stats(sts_ntske_stats_t *out)
-{
-	if (out == NULL) {
-		return;
-	}
-	K_SPINLOCK(&st_lock) {
-		out->accepted = st.accepted;
-		out->handshakes_ok = st.handshakes_ok;
-		out->handshakes_failed = st.handshakes_failed;
-		out->negotiations_ok = st.negotiations_ok;
-		out->cookies_issued = st.cookies_issued;
-		out->running = st.running;
-		out->cert_ready = st.cert_ready;
-		out->exporter_available = st.exporter_available;
-	}
-}
-
 int sts_ntske_start(void)
 {
 	ntske_cfg_t cfg;
 	int rc;
 
-#if !defined(MBEDTLS_SSL_KEYING_MATERIAL_EXPORT)
-	/* Without the RFC 8446 exporter NTS-KE cannot derive keys; standing up
-	 * a listener that answers every handshake with Internal Server Error
-	 * would be worse than not listening. See sts_mbedtls_user.h. */
-	LOG_WRN("NTS-KE disabled: mbedTLS built without the TLS exporter "
-		"(MBEDTLS_SSL_KEYING_MATERIAL_EXPORT); see sts_mbedtls_user.h");
-	return 0;
-#else
 	if (!sts_net_cfg_bool(CFG_ID_NTS_ENABLE, true)) {
 		LOG_INF("NTS disabled by configuration");
 		return 0;
@@ -595,7 +541,7 @@ int sts_ntske_start(void)
 	cfg.export_fn = exporter_cb;
 	cfg.export_ctx = NULL; /* set per connection to the live ssl context */
 	cfg.server_name = NULL;
-	cfg.port = 0U; /* clients use the same address on port 123 by default */
+	cfg.port = 0U;
 	cfg.cookies = NTSKE_COOKIES_DEFAULT;
 
 	rc = ntske_init(&ke, &cfg);
@@ -603,7 +549,6 @@ int sts_ntske_start(void)
 		LOG_ERR("ntske_init: %d", rc);
 		return rc;
 	}
-	ke_ready = true;
 
 	listen_fd = open_listener();
 	if (listen_fd < 0) {
@@ -612,7 +557,6 @@ int sts_ntske_start(void)
 	}
 
 	live_id = sts_liveness_register("ntske");
-
 	k_thread_create(&ke_thread, ke_stack, K_THREAD_STACK_SIZEOF(ke_stack),
 			ke_loop, NULL, NULL, NULL, NTSKE_PRIORITY, 0,
 			K_NO_WAIT);
@@ -620,5 +564,21 @@ int sts_ntske_start(void)
 
 	LOG_INF("NTS-KE (TLS 1.3) on :%u", ke_port);
 	return 0;
-#endif /* MBEDTLS_SSL_KEYING_MATERIAL_EXPORT */
 }
+
+#else /* !MBEDTLS_SSL_KEYING_MATERIAL_EXPORT */
+
+int sts_ntske_start(void)
+{
+	/*
+	 * Without the RFC 8446 exporter NTS-KE cannot derive C2S/S2C keys, so
+	 * standing up a listener that answers every handshake with an Internal
+	 * Server Error would be worse than not listening. Enable it by wiring
+	 * sts_mbedtls_user.h onto the mbedTLS include path — see that header.
+	 */
+	LOG_WRN("NTS-KE disabled: mbedTLS built without the TLS exporter "
+		"(MBEDTLS_SSL_KEYING_MATERIAL_EXPORT); see sts_mbedtls_user.h");
+	return 0;
+}
+
+#endif /* MBEDTLS_SSL_KEYING_MATERIAL_EXPORT */

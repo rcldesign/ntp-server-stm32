@@ -212,23 +212,16 @@ static void on_v4(struct net_mgmt_event_callback *cb, uint64_t ev,
 {
 	ARG_UNUSED(cb);
 
-	if (ev == NET_EVENT_IPV4_DHCP_BOUND) {
-		struct net_if_ipv4 *v4 = NULL;
+	ARG_UNUSED(iface);
 
+	if (ev == NET_EVENT_IPV4_DHCP_BOUND) {
 		K_SPINLOCK(&link_lock) {
 			link.dhcp_bound = true;
 			link.ipv4_ok = true;
 		}
-		if (iface != NULL) {
-			v4 = iface->config.ip.ipv4;
-		}
-		if (v4 != NULL) {
-			K_SPINLOCK(&link_lock) {
-				link.ipv4_addr =
-					ntohl(v4->unicast[0].ipv4.address.in_addr
-						      .s_addr);
-			}
-		}
+		/* The bound address is reported through the NET status group
+		 * from net_if APIs rather than fished out of the event's
+		 * internal structs, which vary across Zephyr revisions. */
 		sts_log(LOGR_SUB_NET, LOGR_NOTICE, "DHCPv4 bound");
 	} else if (ev == NET_EVENT_IPV4_ADDR_ADD) {
 		K_SPINLOCK(&link_lock) {

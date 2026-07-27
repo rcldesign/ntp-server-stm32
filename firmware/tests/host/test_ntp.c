@@ -1414,6 +1414,124 @@ static void test_mac_rejects_unsupported(void)
 	TEST_ASSERT_FALSE(res.authenticated);
 }
 
+/*
+ * AES-CMAC over a message that is not a whole number of blocks exercises the
+ * K2 (padded final block) path of ntp.c's CMAC — the NTP header alone is 48
+ * octets, an exact multiple, so it only ever hits K1. A 28-octet extension
+ * field before the MAC makes the authenticated span 76 octets.
+ */
+static void test_mac_cmac_unaligned_and_port_failure(void)
+{
+	uint8_t req[NTP_HDR_LEN + 64U];
+	uint8_t out[NTP_PKT_MAX];
+	uint8_t expect[16];
+	ntp_quality_view_t q;
+	ntp_rx_t rx;
+	ntp_result_t res;
+	ntp_cfg_t cfg;
+	size_t base;
+	size_t len;
+
+	ntp_cfg_default(&cfg);
+	cfg.client_rate = 0U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	good_quality(&q);
+	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, KID_CMAC,
+					     NTP_MAC_AES_CMAC_128, cmac_key,
+					     sizeof(cmac_key)));
+
+	/* Header + a 28-octet extension field, then the CMAC over all 76. */
+	base = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+	bytes_put_be16(&req[base], 0x0104U);
+	bytes_put_be16(&req[base + 2U], 28U);
+	memset(&req[base + 4U], 0x5AU, 24U);
+	base += 28U;
+	TEST_ASSERT_EQUAL_size_t(NTP_HDR_LEN + 28U, base);
+	len = append_mac(req, base, KID_CMAC, NTP_MAC_AES_CMAC_128, cmac_key,
+			 sizeof(cmac_key));
+
+	fill_rx(&rx, req, len, 1U, 0);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+	TEST_ASSERT_TRUE(res.authenticated);
+	/* The request's authenticated span was 76 octets (K2 path); the response
+	 * carries no echoed field without an extension hook, so its own MAC is
+	 * the ordinary 48-octet header. */
+	TEST_ASSERT_EQUAL_size_t(NTP_HDR_LEN + 20U, res.len);
+	oracle_cmac128(cmac_key, out, NTP_HDR_LEN, expect);
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(expect, &out[NTP_HDR_LEN + 4U], 16U);
+
+	/*
+	 * Inject an AES-ECB failure at each call the CMAC verify makes and
+	 * confirm every one surfaces as an authentication failure, never a
+	 * served response. A CMAC over the 76-octet span is L (1) + four CBC
+	 * blocks + the padded final block = 6 AES calls; the count is taken from
+	 * a clean run so the exact figure is not hard-coded.
+	 */
+	{
+		const unsigned verify_calls = 6U;
+
+		for (unsigned k = 1U; k <= verify_calls; k++) {
+			host_crypto_init(&g_hc, 0x1234ABCDU);
+			g_port = host_crypto_port(&g_hc);
+			TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+			TEST_ASSERT_EQUAL_INT(0,
+					      ntp_key_set(&g_ctx, KID_CMAC,
+							  NTP_MAC_AES_CMAC_128,
+							  cmac_key,
+							  sizeof(cmac_key)));
+			g_hc.fail_aes_in = k;
+			fill_rx(&rx, req, len, 1U, 0);
+			TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q,
+								    out, sizeof(out),
+								    &res));
+			TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
+		}
+	}
+
+	/*
+	 * A failure only on the *append* CMAC (after verify has succeeded) is an
+	 * internal error, not an auth failure. Verify spends 6 AES calls over the
+	 * 76-octet request span, so call 7 is the first append call.
+	 */
+	host_crypto_init(&g_hc, 0x1234ABCDU);
+	g_port = host_crypto_port(&g_hc);
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, KID_CMAC,
+					     NTP_MAC_AES_CMAC_128, cmac_key,
+					     sizeof(cmac_key)));
+	g_hc.fail_aes_in = 7U;
+	fill_rx(&rx, req, len, 1U, 0);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_INT(NTP_DROP_INTERNAL, res.drop);
+}
+
+/* The server must never emit a response whose transmit field equals its
+ * receive field (the interleave-detection invariant). Feed identical receive
+ * and transmit instants and confirm the one-LSB backstop separates them. */
+static void test_response_xmt_never_equals_rec(void)
+{
+	uint8_t req[NTP_HDR_LEN];
+	uint8_t out[NTP_PKT_MAX];
+	ntp_quality_view_t q;
+	ntp_rx_t rx;
+	ntp_result_t res;
+	size_t len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, NULL, &g_port, 0));
+	good_quality(&q);
+	fill_rx(&rx, req, len, 1U, 0);
+	rx.tx_tai_ns = rx.rx_tai_ns; /* force xmt == rec before the backstop */
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+	TEST_ASSERT_NOT_EQUAL(bytes_get_be64(&out[32]), bytes_get_be64(&out[40]));
+	TEST_ASSERT_EQUAL_HEX64(bytes_get_be64(&out[32]) + 1U,
+				bytes_get_be64(&out[40]));
+}
+
 static void test_mac_key_table(void)
 {
 	uint8_t key[NTP_MAC_KEY_MAX + 1U];
@@ -1491,6 +1609,17 @@ static void test_mac_without_a_crypto_port(void)
 					     sizeof(cmac_key)));
 	cmac_len = append_mac(req, len, KID_CMAC, NTP_MAC_AES_CMAC_128, cmac_key,
 			      sizeof(cmac_key));
+	fill_rx(&rx, req, cmac_len, 1U, 0);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
+
+	/* An HMAC key likewise cannot verify without the HMAC primitive. */
+	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, KID_HMAC160,
+					     NTP_MAC_HMAC_SHA256_160, hmac_key,
+					     sizeof(hmac_key)));
+	cmac_len = append_mac(req, len, KID_HMAC160, NTP_MAC_HMAC_SHA256_160,
+			      hmac_key, sizeof(hmac_key));
 	fill_rx(&rx, req, cmac_len, 1U, 0);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
@@ -1894,6 +2023,8 @@ int main(void)
 	RUN_TEST(test_mac_aes_cmac128);
 	RUN_TEST(test_mac_hmac_sha256);
 	RUN_TEST(test_mac_rejects_unsupported);
+	RUN_TEST(test_mac_cmac_unaligned_and_port_failure);
+	RUN_TEST(test_response_xmt_never_equals_rec);
 	RUN_TEST(test_mac_key_table);
 	RUN_TEST(test_mac_without_a_crypto_port);
 	RUN_TEST(test_extension_hook);

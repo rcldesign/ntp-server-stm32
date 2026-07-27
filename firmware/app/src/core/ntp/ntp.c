@@ -706,11 +706,9 @@ static bool mac_verify(const ntp_ctx_t *ctx, const uint8_t *pkt,
 	uint8_t digest[NTP_MAC_DIGEST_MAX];
 	size_t dlen;
 
-	/* Only the two verifiable field sizes reach here; 4 (crypto-NAK) and the
-	 * oversize digests are flagged mac_unsupported and rejected earlier. */
-	if (p->mac_len != MAC_LEN_128 && p->mac_len != MAC_LEN_160) {
-		return false;
-	}
+	/* Reached only for the two verifiable field sizes: the crypto-NAK and the
+	 * oversize digests are flagged mac_unsupported and rejected before here,
+	 * and the dlen check below rejects any other length regardless. */
 	k = key_find(ctx, p->keyid);
 	if (k == NULL) {
 		return false;
