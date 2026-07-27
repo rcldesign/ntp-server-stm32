@@ -194,6 +194,18 @@ static void console_thread_entry(void *p1, void *p2, void *p3)
 		 */
 		sts_mp_tick();
 
+		/*
+		 * The orchestrator's pump: what advances a transfer whose
+		 * target needs time (an erase, a receiver reboot, a VERIFY)
+		 * rather than answering inline. It does NOT spend the pass's one
+		 * lock wait — sts_fwupd_step() takes the fwupd mutex with
+		 * K_NO_WAIT and returns on contention, because contention here
+		 * means a request is inside the orchestrator right now, which is
+		 * exactly when nothing needs pumping. So the BUILD_ASSERT above
+		 * still holds with sts_mp_tick() as the only waiter.
+		 */
+		(void)sts_fwupd_step();
+
 		since_selfconfirm += CONSOLE_PERIOD_MS;
 		if (since_selfconfirm >= SELFCONFIRM_PERIOD_MS) {
 			since_selfconfirm = 0U;
@@ -284,6 +296,25 @@ int sts_console_start(void)
 	rc = sts_mcp_start();
 	if (rc != 0) {
 		LOG_ERR("MCP channel failed to start (%d)", rc);
+	}
+
+	/*
+	 * Before sts_mp_start(), which reads sts_fwupd_mp_port() into its
+	 * wiring: the port is a static vtable and would be valid either way, but
+	 * an orchestrator that is ready before the plane that drives it is one
+	 * fewer ordering question.
+	 *
+	 * Non-fatal for the same reason as MCP and MP below. A box that cannot
+	 * accept a firmware update must still serve time and must still be
+	 * manageable — refusing to bring the console up would remove the very
+	 * surface an operator would use to work out why.
+	 */
+	rc = sts_fwupd_init();
+	if (rc != 0) {
+		LOG_ERR("firmware-update orchestrator failed to start (%d): "
+			"`fw.*` and the `fw` shell group will report "
+			"unavailable; nothing else is affected",
+			rc);
 	}
 
 	/*

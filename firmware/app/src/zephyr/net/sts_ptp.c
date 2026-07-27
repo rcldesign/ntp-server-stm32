@@ -98,6 +98,7 @@
 #include "cfg/cfg.h"
 #include "net/sts_net.h"
 #include "net/sts_ptp_icv_policy.h"
+#include "net/sts_ptp_profile_policy.h"
 #include "storage/sts_store.h"
 #include "util/bytes.h"
 #include "zephyr/sts_app.h"
@@ -1114,8 +1115,30 @@ void sts_ptp_stats(sts_ptp_stats_t *out)
 	}
 }
 
+/*
+ * A key's schema default, so the profile/operator pick below compares against
+ * the schema rather than against a literal repeated at the call site. A missing
+ * row cannot happen for a compiled-in CFG_ID_*, but returning a value the stored
+ * one will differ from is the safe way to be wrong: the operator's value wins,
+ * which is what the old code did unconditionally.
+ */
+static uint64_t schema_def_u64(uint16_t id)
+{
+	const cfg_key_t *k = cfg_key_find(id);
+
+	return (k != NULL) ? k->def.u : UINT64_MAX;
+}
+
+static int32_t schema_def_i32(uint16_t id)
+{
+	const cfg_key_t *k = cfg_key_find(id);
+
+	return (k != NULL) ? k->def.i : INT32_MIN;
+}
+
 int sts_ptp_start(void)
 {
+	uint8_t requested_profile;
 	int rc;
 
 	if (!sts_net_cfg_bool(CFG_ID_PTP_ENABLE, true)) {
@@ -1127,33 +1150,75 @@ int sts_ptp_start(void)
 	k_mutex_init(&peers_lock);
 
 	ptp_cfg_defaults(&port_cfg);
-	port_cfg.domain = (uint8_t)sts_net_cfg_u64(CFG_ID_PTP_DOMAIN, 0U);
-	port_cfg.priority1 = (uint8_t)sts_net_cfg_u64(CFG_ID_PTP_PRIORITY1, 128U);
-	port_cfg.priority2 = (uint8_t)sts_net_cfg_u64(CFG_ID_PTP_PRIORITY2, 128U);
-	port_cfg.log_announce_interval =
-		(int8_t)sts_net_cfg_i32(CFG_ID_PTP_LOG_ANNOUNCE, 1);
-	port_cfg.log_sync_interval =
-		(int8_t)sts_net_cfg_i32(CFG_ID_PTP_LOG_SYNC, 0);
-	port_cfg.log_min_delay_req_interval =
-		(int8_t)sts_net_cfg_i32(CFG_ID_PTP_LOG_DELAYREQ, 0);
 
-	transport = (uint8_t)sts_net_cfg_u64(CFG_ID_PTP_TRANSPORT,
-					     (uint64_t)PTP_TRANSPORT_UDP_IPV6);
+	/*
+	 * The profile BEFORE the individual keys, because a profile is a
+	 * parameter set and not a label — see net/sts_ptp_profile_policy.h for
+	 * what this used to do instead and why the result was a Default-profile
+	 * grandmaster wearing a telecom profile's name.
+	 */
+	requested_profile = sts_ptp_prof_clamp(
+		sts_net_cfg_u64(CFG_ID_PTP_PROFILE, (uint64_t)PTP_PROFILE_DEFAULT),
+		(uint8_t)PTP_PROFILE_COUNT, (uint8_t)PTP_PROFILE_DEFAULT);
+	(void)ptp_cfg_apply_profile(&port_cfg, requested_profile);
+
+	/*
+	 * Then the operator on top. sts_ptp_prof_pick_*() takes the stored value
+	 * when it differs from the key's schema default and the profile's
+	 * otherwise; the header states what that costs. The schema default is
+	 * read from the schema rather than repeated here, so adding a key or
+	 * changing a default cannot leave a second copy behind.
+	 */
+	port_cfg.domain = (uint8_t)sts_ptp_prof_pick_u64(
+		sts_net_cfg_u64(CFG_ID_PTP_DOMAIN, port_cfg.domain),
+		schema_def_u64(CFG_ID_PTP_DOMAIN), port_cfg.domain);
+	port_cfg.priority1 = (uint8_t)sts_ptp_prof_pick_u64(
+		sts_net_cfg_u64(CFG_ID_PTP_PRIORITY1, port_cfg.priority1),
+		schema_def_u64(CFG_ID_PTP_PRIORITY1), port_cfg.priority1);
+	port_cfg.priority2 = (uint8_t)sts_ptp_prof_pick_u64(
+		sts_net_cfg_u64(CFG_ID_PTP_PRIORITY2, port_cfg.priority2),
+		schema_def_u64(CFG_ID_PTP_PRIORITY2), port_cfg.priority2);
+	port_cfg.log_announce_interval = (int8_t)sts_ptp_prof_pick_i32(
+		sts_net_cfg_i32(CFG_ID_PTP_LOG_ANNOUNCE,
+				port_cfg.log_announce_interval),
+		schema_def_i32(CFG_ID_PTP_LOG_ANNOUNCE),
+		port_cfg.log_announce_interval);
+	port_cfg.log_sync_interval = (int8_t)sts_ptp_prof_pick_i32(
+		sts_net_cfg_i32(CFG_ID_PTP_LOG_SYNC, port_cfg.log_sync_interval),
+		schema_def_i32(CFG_ID_PTP_LOG_SYNC), port_cfg.log_sync_interval);
+	port_cfg.log_min_delay_req_interval = (int8_t)sts_ptp_prof_pick_i32(
+		sts_net_cfg_i32(CFG_ID_PTP_LOG_DELAYREQ,
+				port_cfg.log_min_delay_req_interval),
+		schema_def_i32(CFG_ID_PTP_LOG_DELAYREQ),
+		port_cfg.log_min_delay_req_interval);
+
+	transport = (uint8_t)sts_ptp_prof_pick_u64(
+		sts_net_cfg_u64(CFG_ID_PTP_TRANSPORT, (uint64_t)port_cfg.transport),
+		schema_def_u64(CFG_ID_PTP_TRANSPORT), (uint64_t)port_cfg.transport);
 	if (transport >= (uint8_t)PTP_TRANSPORT_COUNT) {
 		transport = (uint8_t)PTP_TRANSPORT_UDP_IPV4;
 	}
 	port_cfg.transport = (ptp_transport_t)transport;
 
-	port_cfg.profile =
-		(ptp_profile_t)sts_net_cfg_u64(CFG_ID_PTP_PROFILE,
-					       (uint64_t)PTP_PROFILE_DEFAULT);
-	if ((unsigned int)port_cfg.profile >= (unsigned int)PTP_PROFILE_COUNT) {
-		port_cfg.profile = PTP_PROFILE_DEFAULT;
-	}
-
 	rc = ptp_cfg_validate(&port_cfg);
 	if (rc != 0) {
-		LOG_ERR("ptp cfg rejected (%d); falling back to defaults", rc);
+		/*
+		 * Name the profile before ptp_cfg_defaults() erases it. The
+		 * fallback is unavoidable — the engine will not start on a
+		 * configuration it rejected — but "your G.8275.1 selection was
+		 * discarded" is the sentence an operator needs, and the old code
+		 * only said "falling back to defaults".
+		 */
+		if (sts_ptp_prof_report_discard(requested_profile,
+						(uint8_t)PTP_PROFILE_DEFAULT)) {
+			LOG_ERR("ptp cfg rejected (%d) for profile %s: the "
+				"profile selection is DISCARDED and this unit "
+				"is running the Default profile",
+				rc, ptp_profile_name(requested_profile));
+		} else {
+			LOG_ERR("ptp cfg rejected (%d); falling back to defaults",
+				rc);
+		}
 		ptp_cfg_defaults(&port_cfg);
 		transport = (uint8_t)port_cfg.transport;
 	}

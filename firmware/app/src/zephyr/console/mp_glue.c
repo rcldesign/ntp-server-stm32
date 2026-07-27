@@ -1540,6 +1540,14 @@ int sts_mp_start(void)
 	w.cfg_commit = prov_cfg_commit;
 	w.auth = prov_auth;
 	w.img = sts_dfu_port();
+	/*
+	 * The multi-IC orchestrator behind the six FMT §9 `fw.*` methods. A NULL
+	 * here is not an error — mp.h makes every `fw.*` method answer
+	 * MP_E_NOTSUP — which is precisely why it has to be set deliberately:
+	 * the failure mode of forgetting is a protocol that politely reports the
+	 * feature does not exist, on a build that contains all of it.
+	 */
+	w.fwupd = sts_fwupd_mp_port();
 	w.cfg = sts_cfg();
 	w.log = sts_logring();
 	w.scratch = mp_scratch;

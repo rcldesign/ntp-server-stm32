@@ -227,6 +227,14 @@ module_deps(secops_policy)
 # collision check, and links nothing from it.
 module_deps(ldap_ca)
 
+# `ptp_profile_policy` (app/src/zephyr/net/sts_ptp_profile_policy.h) is the
+# precedence rule between a PTP profile's parameter set and the operator's cfg
+# keys. Zephyr-free and compiling no core module — it takes PTP_PROFILE_COUNT
+# and the descriptor's numbers as plain values rather than including the engine,
+# so the suite states what G.8275.1 requires instead of asking the code that
+# implements it. Hence the empty dependency list.
+module_deps(ptp_profile_policy)
+
 # The Wave-4c security cluster. `core/auth` holds the AAA chain plus the RADIUS,
 # TACACS+ and LDAP codecs, so all four suites compile the same source set; the
 # LDAP codec has no suite of its own and is covered from test_auth.c, next to
