@@ -39,3 +39,24 @@
 &spi4_mosi_pe14 {
 	slew-rate = "very-high-speed";
 };
+
+/*
+ * PANEL_LED_PWM on PE0 is LPTIM2_CH2 (AF3).  genpinctrl.py does not emit LPTIM
+ * pin groups for any STM32 family — the in-tree LPTIM driver is only ever a
+ * kernel-tick source and needs no pins — so the group the platform's panel-PWM
+ * glue references is declared here rather than pulled from the SoC package.
+ *
+ * AF3 = LPTIM2_CH2 is from the STM32H563 alternate-function table
+ * (modm-devices `stm32h5-62_63_73.xml`, the source CLAUDE.md nominates when ST
+ * pin data is not to hand: PE0 carries AF1 LPTIM1_ETR, AF2 TIM4_ETR, AF3
+ * LPTIM2_CH2, AF4 LPTIM2_ETR, ...).  This corrects the earlier board note that
+ * claimed no timer output reaches PE0.
+ *
+ * Open-drain would need an external pull to the LED-string gate; the Q23 base
+ * network is a simple pull-down, so push-pull is correct here.
+ */
+&pinctrl {
+	lptim2_ch2_pe0: lptim2_ch2_pe0 {
+		pinmux = <STM32_PINMUX('E', 0, AF3)>;
+	};
+};

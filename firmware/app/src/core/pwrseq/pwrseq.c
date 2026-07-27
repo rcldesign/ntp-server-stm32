@@ -820,11 +820,16 @@ static const pwrseq_step_def_t step_tbl[] = {
 		.name = "8.0b warm+supercaps",
 	},
 	{
-		/* Step 11: write a known safe-low digipot code. */
+		/*
+		 * Step 11: write the known safe-low precharge code. The buck is
+		 * always brought up at safe-low first — never at the operating
+		 * setpoint — so if anything downstream is wrong the FE sees the
+		 * minimum rail, not the maximum.
+		 */
 		.stage = PWRSEQ_STAGE_8_RB,
 		.guard = g_rb,
 		.action = PWRSEQ_ACT_DIGIPOT_WRITE,
-		.name = "8.11 digipot-write",
+		.name = "8.11 digipot-write-safe",
 	},
 	{
 		/*
@@ -839,7 +844,7 @@ static const pwrseq_step_def_t step_tbl[] = {
 		.onfail = PWRSEQ_ONFAIL_RETRY, .retries = 2,
 		.failact = PWRSEQ_FAILACT_RB_OFF,
 		.alarm = PWRSEQ_ALARM_RB_DIGIPOT,
-		.name = "8.11b digipot-verify",
+		.name = "8.11b digipot-verify-safe",
 	},
 	{
 		/* Step 12: RB_PWR_EN, then let the buck soft-start. */
@@ -850,14 +855,54 @@ static const pwrseq_step_def_t step_tbl[] = {
 		.name = "8.12 rb-pwr-en",
 	},
 	{
-		/* Step 13: verify VCC_RB on INA228 0x47 before trusting it. */
+		/*
+		 * Step 13: verify the precharged rail on INA228 0x47 sits at the
+		 * safe-low point before commanding anything higher — this proves
+		 * the buck and the digipot are healthy at the known-safe end.
+		 */
 		.stage = PWRSEQ_STAGE_8_RB,
 		.guard = g_rb,
 		.exit = p_rb_window, .timeout = t_rb_win,
 		.onfail = PWRSEQ_ONFAIL_ALARM,
 		.failact = PWRSEQ_FAILACT_RB_OFF,
 		.alarm = PWRSEQ_ALARM_RB_WINDOW,
-		.name = "8.13 rail-window",
+		.name = "8.13 rail-window-safe",
+	},
+	{
+		/* Step 13b: now command the bounded operating setpoint. */
+		.stage = PWRSEQ_STAGE_8_RB,
+		.guard = g_rb,
+		.action = PWRSEQ_ACT_DIGIPOT_WRITE_OP,
+		.name = "8.13b digipot-write-op",
+	},
+	{
+		/* Step 13c: prove the operating code took (SPI integrity). */
+		.stage = PWRSEQ_STAGE_8_RB,
+		.guard = g_rb,
+		.action = PWRSEQ_ACT_DIGIPOT_VERIFY,
+		.exit = p_digipot_op, .timeout = t_rb_win,
+		.onfail = PWRSEQ_ONFAIL_RETRY, .retries = 2,
+		.failact = PWRSEQ_FAILACT_RB_OFF,
+		.alarm = PWRSEQ_ALARM_RB_DIGIPOT,
+		.name = "8.13c digipot-verify-op",
+	},
+	{
+		/*
+		 * Step 13d: the trust gate. After the ramp settles, require the
+		 * rail to match the operating setpoint AND the measured rail to
+		 * be at or below the FE ceiling — the code-independent check
+		 * that stops a wrong or runaway rail from validating itself
+		 * (BLOCKER-1). Only when this holds does the next row connect
+		 * the FE.
+		 */
+		.stage = PWRSEQ_STAGE_8_RB,
+		.guard = g_rb,
+		.delay = t_ramp,
+		.exit = p_rb_operating_ok, .timeout = t_rb_win,
+		.onfail = PWRSEQ_ONFAIL_ALARM,
+		.failact = PWRSEQ_FAILACT_RB_OFF,
+		.alarm = PWRSEQ_ALARM_RB_WINDOW,
+		.name = "8.13d rail-window-op",
 	},
 	{
 		/* Step 14: only now connect VCC_RB_G to the FE. */
@@ -953,6 +998,9 @@ static uint16_t action_arg(const pwrseq_ctx_t *ctx, pwrseq_action_t a)
 	if (a == PWRSEQ_ACT_DIGIPOT_WRITE) {
 		return ctx->cfg.digipot_safe_code;
 	}
+	if (a == PWRSEQ_ACT_DIGIPOT_WRITE_OP) {
+		return ctx->cfg.digipot_operating_code;
+	}
 	if (a == PWRSEQ_ACT_PANEL_LED_PWM) {
 		return ctx->cfg.panel_led_duty_pct;
 	}
@@ -999,12 +1047,23 @@ static void emit(pwrseq_ctx_t *ctx, pwrseq_action_t a)
 	case PWRSEQ_ACT_DISC_START:
 		ctx->disc_started = true;
 		break;
+	case PWRSEQ_ACT_DIGIPOT_WRITE:
+		/* The rail is now commanded to the safe-low precharge point, so
+		 * the window checks judge it against that until the operating
+		 * code is written. */
+		ctx->rb_current_code = ctx->cfg.digipot_safe_code;
+		break;
+	case PWRSEQ_ACT_DIGIPOT_WRITE_OP:
+		ctx->rb_current_code = ctx->cfg.digipot_operating_code;
+		break;
 	case PWRSEQ_ACT_RB_PWR_EN:
 		ctx->rb_enabled = true;
 		break;
 	case PWRSEQ_ACT_RB_PWR_DIS:
 		ctx->rb_enabled = false;
 		ctx->rb_locked = false;
+		/* Back to the safe-low assumption for any later re-attempt. */
+		ctx->rb_current_code = ctx->cfg.digipot_safe_code;
 		break;
 	case PWRSEQ_ACT_RB_VCC_GATE_EN:
 		ctx->rb_gated = true;
@@ -1230,6 +1289,38 @@ int pwrseq_init(pwrseq_ctx_t *ctx, const pwrseq_cfg_t *cfg)
 		return -EINVAL;
 	}
 
+	if (ctx->cfg.rb_vmax_mv == 0U) {
+		return -EINVAL; /* a zero FE ceiling can never be satisfied */
+	}
+
+	/*
+	 * BLOCKER-1: bound both digipot codes at boot. A code at or above the
+	 * 10-bit range is a misconfiguration, and a code whose commanded rail
+	 * would exceed the FE ceiling would — if it ever reached the FE —
+	 * destroy it. Rejecting here means such a config never runs, rather
+	 * than being discovered as a dead rubidium. The safe code is bounded
+	 * too: a "safe" code that is not actually low is a config error.
+	 */
+	if ((ctx->cfg.digipot_safe_code >= ctx->cfg.rb_xfer.steps) ||
+	    (ctx->cfg.digipot_operating_code >= ctx->cfg.rb_xfer.steps)) {
+		return -EINVAL;
+	}
+	if ((pwrseq_rb_expected_mv(&ctx->cfg.rb_xfer,
+				   ctx->cfg.digipot_safe_code) >
+	     (int32_t)ctx->cfg.rb_vmax_mv) ||
+	    (pwrseq_rb_expected_mv(&ctx->cfg.rb_xfer,
+				   ctx->cfg.digipot_operating_code) >
+	     (int32_t)ctx->cfg.rb_vmax_mv)) {
+		return -EINVAL;
+	}
+
+	/* L4: percentages that exceed 100 are nonsense and would widen a rail
+	 * window past its own nominal. */
+	if ((ctx->cfg.rail_tol_pct > 100U) ||
+	    (ctx->cfg.rb_vbus_tol_pct > 100U)) {
+		return -EINVAL;
+	}
+
 	/*
 	 * A windowed watchdog punishes an early kick exactly as hard as a late
 	 * one, so a cadence outside 920-1360 ms is rejected here rather than
@@ -1240,6 +1331,7 @@ int pwrseq_init(pwrseq_ctx_t *ctx, const pwrseq_cfg_t *cfg)
 		return -EINVAL;
 	}
 
+	ctx->rb_current_code = ctx->cfg.digipot_safe_code;
 	ctx->stage = (uint8_t)PWRSEQ_STAGE_IDLE;
 	ctx->step = -1;
 	return 0;
@@ -1274,21 +1366,44 @@ int pwrseq_step(pwrseq_ctx_t *ctx, const pwrseq_in_t *in)
 
 	/*
 	 * Rubidium supervision, ahead of the step machine and independent of
-	 * the stage: an over-voltage latch or a rail that has left its window
-	 * drops the load now, whether that happens during stage 8 or hours into
-	 * service. Deferred if the caller has not drained enough room to queue
-	 * both halves — a half-applied shutdown is worse than a late one.
+	 * the stage: once RB_PWR_EN is asserted the buck is running and must be
+	 * actively managed until explicitly shut down, whether that is during
+	 * stage 8 or hours into service. Deferred only if the caller has not
+	 * drained enough room to queue both halves of the shutdown — a
+	 * half-applied shutdown (gate opened, buck still on) is worse than a
+	 * late one. The three cases, highest priority first:
+	 *
+	 *   1. Intent withdrawn (rb_wanted went false). This is the HIGH-1 fix:
+	 *      previously the g_rb guard would simply skip the remaining stage-8
+	 *      rows and leave RB_PWR_EN asserted forever, because the old window
+	 *      branch required rb_gated and the load was not yet gated. Keying
+	 *      the shutdown on rb_enabled closes that hole. Deliberate, so no
+	 *      alarm.
+	 *   2. The autonomous 26 V OV latch tripped — the hardware already
+	 *      killed the buck; drop our enables and record it.
+	 *   3. Post-gate, the FE is connected, so protect it: drop on a rail
+	 *      that has left its window OR that measures above the FE ceiling
+	 *      (the code-independent check).
 	 */
 	if (ctx->rb_enabled && (act_free(ctx) >= 2U)) {
-		if (ctx->ov_latched) {
+		bool drop = false;
+		uint8_t alarm = (uint8_t)PWRSEQ_ALARM_NONE;
+
+		if (!in->rb_wanted) {
+			drop = true; /* HIGH-1: deliberate, no alarm */
+		} else if (ctx->ov_latched) {
+			drop = true;
+			alarm = (uint8_t)PWRSEQ_ALARM_RB_OV;
+		} else if (ctx->rb_gated &&
+			   (!rb_rail_in_window(ctx, in) ||
+			    !rb_measured_le_vmax(ctx, in))) {
+			drop = true;
+			alarm = (uint8_t)PWRSEQ_ALARM_RB_WINDOW;
+		}
+
+		if (drop) {
 			rb_shutdown(ctx);
-			raise_alarm(ctx, (uint8_t)PWRSEQ_ALARM_RB_OV);
-			if (ctx->stage == (uint8_t)PWRSEQ_STAGE_8_RB) {
-				abandon_stage(ctx, ms);
-			}
-		} else if (ctx->rb_gated && !rb_rail_in_window(ctx, in)) {
-			rb_shutdown(ctx);
-			raise_alarm(ctx, (uint8_t)PWRSEQ_ALARM_RB_WINDOW);
+			raise_alarm(ctx, alarm);
 			if (ctx->stage == (uint8_t)PWRSEQ_STAGE_8_RB) {
 				abandon_stage(ctx, ms);
 			}
@@ -1405,6 +1520,17 @@ int pwrseq_rb_retry(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 	if (ctx == NULL) {
 		return -EINVAL;
 	}
+	/*
+	 * HIGH-2: a halt is a hard fault (e.g. a failed 3V3 rail verify) that
+	 * left every gated load off and the relay de-energized. A routine
+	 * rubidium retry — which jumps straight to stage 8, RB_PWR_EN and
+	 * RB_VCC_GATE — must not silently clear that halt and resurrect the
+	 * board into the most power-hungry stage there is. Only
+	 * pwrseq_restart_stage(), an explicit operator action, clears a halt.
+	 */
+	if (ctx->halted) {
+		return -EPERM;
+	}
 
 	ctx->rb_deferred = false;
 	ctx->alarms &= ~(uint32_t)PWRSEQ_ALARM_RB_MASK;
@@ -1451,6 +1577,16 @@ int pwrseq_shed_restore(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 {
 	if (ctx == NULL) {
 		return -EINVAL;
+	}
+	/*
+	 * HIGH-2: restoring a load on a halted board is wrong in every case —
+	 * the loads were never up, and the RB level would re-enter stage 8 and
+	 * clear the halt (via pwrseq_rb_retry -> restart_stage). Refuse the
+	 * whole operation while halted; recovery from a halt is an explicit
+	 * pwrseq_restart_stage().
+	 */
+	if (ctx->halted) {
+		return -EPERM;
 	}
 
 	ctx->now_ms = mono_ms;
@@ -1519,6 +1655,16 @@ int pwrseq_ov_clear(pwrseq_ctx_t *ctx, uint32_t mono_ms)
 	emit(ctx, PWRSEQ_ACT_RB_OV_RESET_PULSE);
 	ctx->ov_latched = false;
 	ctx->alarms &= ~PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_OV);
+	/*
+	 * L1: drop the RB_FAULT umbrella too, unless some other rubidium
+	 * hard-fault still stands. Without this a cleared over-voltage would
+	 * leave pwrseq_rb_fault() true forever, so the board would read as
+	 * permanently Rb-faulted after a fault the operator has acknowledged
+	 * and cleared.
+	 */
+	if ((ctx->alarms & RB_HARD_FAULT_MASK) == 0U) {
+		ctx->alarms &= ~PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RB_FAULT);
+	}
 	return 0;
 }
 

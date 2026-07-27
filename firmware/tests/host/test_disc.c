@@ -1201,9 +1201,13 @@ static void test_holdover_temperature_term_and_unreachable_budget(void)
 	TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, out.holdover_t_demote_s);
 	TEST_ASSERT_INT64_WITHIN(1, 50, out.holdover_est_err_ns);
 
-	/* Now let the enclosure move 4 C from where holdover started: the
-	 * temperature term adds 4 ns/s. After another 100 s the estimate is
-	 * 50 + 4*100 = 450 ns. */
+	/*
+	 * Hold the enclosure 4 C from where holdover started: the temperature
+	 * term contributes 4 ns/s. The estimate is ACCUMULATED, so over 100 s
+	 * it grows by 4*100 = 400, reaching 450. (The old from-scratch closed
+	 * form would have read 50 + 4*110 = 490, wrongly attributing the 4 C
+	 * excursion to the first 10 s it did not yet exist for — HIGH-2.)
+	 */
 	for (i = 0u; i < 100u; i++) {
 		ms += 1000u;
 		env_defaults(&in.env, ms);
@@ -1211,16 +1215,106 @@ static void test_holdover_temperature_term_and_unreachable_budget(void)
 		TEST_ASSERT_EQUAL_INT(0,
 				      disc_tick_no_pps(&ctx, &in.env, NULL, &out));
 	}
-	TEST_ASSERT_INT64_WITHIN(20, 490, out.holdover_est_err_ns);
+	TEST_ASSERT_INT64_WITHIN(5, 450, out.holdover_est_err_ns);
 	/* Finite now, and enormous rather than clamped to zero. */
 	TEST_ASSERT_TRUE(out.holdover_t_demote_s > 100000u);
 
-	/* A missing temperature reading falls back to no excursion. */
-	ms += 1000u;
-	env_defaults(&in.env, ms);
-	in.env.osc_temp_valid = false;
-	TEST_ASSERT_EQUAL_INT(0, disc_tick_no_pps(&ctx, &in.env, NULL, &out));
-	TEST_ASSERT_INT64_WITHIN(1, 50, out.holdover_est_err_ns);
+	/*
+	 * HIGH-2, inverted from the old assertion: a dropped TMP117 read must
+	 * NOT zero the excursion and make the estimate fall back to the base.
+	 * The last known excursion is held, so the estimate keeps rising — a
+	 * lost sensor can never let root dispersion (and the advertised
+	 * stratum) recover with no reference behind it.
+	 */
+	{
+		int64_t before = out.holdover_est_err_ns;
+
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		in.env.osc_temp_valid = false;
+		TEST_ASSERT_EQUAL_INT(0,
+				      disc_tick_no_pps(&ctx, &in.env, NULL, &out));
+		TEST_ASSERT_TRUE(out.holdover_est_err_ns >= before);
+		TEST_ASSERT_INT64_WITHIN(5, 454, out.holdover_est_err_ns);
+	}
+
+	/*
+	 * And when the temperature returns all the way to the entry value, the
+	 * accumulated error stays put — a real excursion did real damage that
+	 * does not un-happen. The estimate is monotonic for the life of the
+	 * holdover.
+	 */
+	{
+		int64_t peak = out.holdover_est_err_ns;
+
+		for (i = 0u; i < 10u; i++) {
+			ms += 1000u;
+			env_defaults(&in.env, ms);
+			in.env.osc_temp_mc = 45000; /* back to entry */
+			TEST_ASSERT_EQUAL_INT(
+				0, disc_tick_no_pps(&ctx, &in.env, NULL, &out));
+			TEST_ASSERT_TRUE(out.holdover_est_err_ns >= peak);
+		}
+	}
+}
+
+static void test_holdover_estimate_is_monotonic_across_a_sensor_dropout(void)
+{
+	disc_ctx_t ctx;
+	disc_cfg_t cfg;
+	struct osc p;
+	uint64_t ms = 0u;
+	uint32_t expected = 0x72500000u;
+	unsigned int i;
+	disc_out_t out;
+	disc_in_t in;
+	int64_t est_prev = 0;
+	uint32_t disp_prev = 0u;
+
+	/*
+	 * HIGH-2 regression, matching the reviewer's reproduction: a warming
+	 * enclosure during holdover, then a single dropped temperature read.
+	 * Neither the estimate nor the published root dispersion may ever
+	 * decrease, and the served stratum may not un-demote — RFC 5905
+	 * requires dispersion to grow monotonically through an outage.
+	 */
+	(void)disc_cfg_defaults(&cfg);
+	cfg.holdover.base_ns = 1000.0f;
+	cfg.holdover.drift_ns_per_s = 20.0f;
+	cfg.holdover.temp_ns_per_s_per_c = 30.0f;
+	cfg.demote_threshold_ns = 5.0e6f;
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
+	noise_seed(44u);
+	osc_init(&p, 0.0, -30.0);
+	(void)run_to_lock(&ctx, &p, &ms, 10.0, &expected, 1500u);
+
+	{
+		quality_state_t qs;
+		quality_block_t b;
+
+		TEST_ASSERT_EQUAL_INT(0, quality_state_init(&qs));
+
+		for (i = 0u; i < 200u; i++) {
+			ms += 1000u;
+			env_defaults(&in.env, ms);
+			/* A steadily warming box, then one missing reading at
+			 * the 150th second — the exact glitch that used to make
+			 * the estimate collapse. */
+			in.env.osc_temp_mc = 45000 + (int32_t)(i * 30u);
+			if (i == 150u) {
+				in.env.osc_temp_valid = false;
+			}
+			TEST_ASSERT_EQUAL_INT(
+				0, disc_tick_no_pps(&ctx, &in.env, &qs, &out));
+
+			TEST_ASSERT_TRUE(out.holdover_est_err_ns >= est_prev);
+			est_prev = out.holdover_est_err_ns;
+
+			TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+			TEST_ASSERT_TRUE(b.root_disp_q16 >= disp_prev);
+			disp_prev = b.root_disp_q16;
+		}
+	}
 }
 
 static void test_gnss_time_unlock_forces_holdover_even_with_pulses(void)
@@ -1321,6 +1415,92 @@ static void test_recovery_is_rate_limited_and_never_steps(void)
 	 * and the unlimited one is visibly faster at the client's expense. */
 	TEST_ASSERT_TRUE(max_rate[0] <= 55.0);
 	TEST_ASSERT_TRUE(max_rate[1] > 70.0);
+}
+
+static void test_large_post_holdover_excursion_stays_rate_limited(void)
+{
+	disc_ctx_t ctx;
+	disc_cfg_t cfg;
+	struct osc p;
+	uint64_t ms = 0u;
+	uint32_t expected = 0x88000000u;
+	unsigned int i;
+	disc_out_t out;
+	disc_in_t in;
+	uint16_t prev_code;
+	int max_step = 0;
+
+	/*
+	 * HIGH-1 regression. A long holdover of a real drift builds an
+	 * excursion well past acq_reentry_ns (50 us). The old code shared
+	 * LOCKING's re-acquire escape, so the first accepted sample dropped the
+	 * loop into ACQUIRING — 400 ppb ramp, 256 LSB/s slew (~50 ppb/s), and
+	 * served stratum 16 — i.e. a healthy GNSS return jump-stepped a
+	 * stratum-1 server. The loop must instead stay in RECOVERING, hold the
+	 * DAC to slew_lsb_per_s, and keep serving while the error is inside the
+	 * demote threshold.
+	 */
+	(void)disc_cfg_defaults(&cfg);
+	cfg.tau_s = 100.0f;
+	cfg.holdover.base_ns = 100.0f;
+	cfg.holdover.drift_ns_per_s = 20.0f; /* 20 ppb */
+	cfg.demote_threshold_ns = 1.0e6f;    /* 1 ms */
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
+	noise_seed(63u);
+	osc_init(&p, 0.0, -30.0);
+	(void)run_to_lock(&ctx, &p, &ms, 5.0, &expected, 1500u);
+
+	/* ~1 h of holdover at 20 ppb of uncorrected drift => ~72 us of phase
+	 * error by the time GNSS returns. */
+	p.intrinsic_ppb -= 20.0;
+	for (i = 0u; i < 3600u; i++) {
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		TEST_ASSERT_EQUAL_INT(0,
+				      disc_tick_no_pps(&ctx, &in.env, NULL, &out));
+		osc_step(&p, out.dac_code, 1.0);
+	}
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_HOLDOVER, out.state);
+	TEST_ASSERT_TRUE(d_abs(p.e_ns) > 60000.0); /* > acq_reentry_ns */
+
+	/* First accepted sample back: RECOVERING, not ACQUIRING; still serving
+	 * a primary stratum because the error is well inside the 1 ms policy;
+	 * and the DAC did not move more than the serving slew limit. */
+	prev_code = ctx.dac_code;
+	out = loop_second(&ctx, &p, &ms, 5.0, &expected);
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_RECOVERING, out.state);
+	TEST_ASSERT_EQUAL_UINT8(QUALITY_STRATUM_PRIMARY, out.stratum);
+	TEST_ASSERT_TRUE((out.flags & QUALITY_FLAG_DEMOTED) == 0u);
+	{
+		int step = (int)out.dac_code - (int)prev_code;
+
+		if (step < 0) {
+			step = -step;
+		}
+		TEST_ASSERT_TRUE(step <= (int)(cfg.slew_lsb_per_s + 0.5f));
+	}
+
+	/* Across the whole pull-in: never a step beyond slew_lsb_per_s, never a
+	 * demotion, and it converges without ever visiting ACQUIRING. */
+	prev_code = ctx.dac_code;
+	for (i = 0u; i < 3000u; i++) {
+		int step;
+
+		out = loop_second(&ctx, &p, &ms, 5.0, &expected);
+		TEST_ASSERT_NOT_EQUAL_INT(DISC_STATE_ACQUIRING, out.state);
+		TEST_ASSERT_TRUE((out.flags & QUALITY_FLAG_DEMOTED) == 0u);
+		step = (int)out.dac_code - (int)prev_code;
+		if (step < 0) {
+			step = -step;
+		}
+		if (step > max_step) {
+			max_step = step;
+		}
+		prev_code = out.dac_code;
+	}
+	TEST_ASSERT_TRUE(max_step <= (int)(cfg.slew_lsb_per_s + 0.5f));
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_LOCKED, out.state);
+	TEST_ASSERT_TRUE(d_abs(p.e_ns) < 500.0);
 }
 
 /* --------------------------------------------------------------- Vc sense */
@@ -2055,8 +2235,10 @@ int main(void)
 	RUN_TEST(test_missed_pulses_enter_holdover_and_freeze_the_actuator);
 	RUN_TEST(test_holdover_demotes_when_the_budget_is_spent);
 	RUN_TEST(test_holdover_temperature_term_and_unreachable_budget);
+	RUN_TEST(test_holdover_estimate_is_monotonic_across_a_sensor_dropout);
 	RUN_TEST(test_gnss_time_unlock_forces_holdover_even_with_pulses);
 	RUN_TEST(test_recovery_is_rate_limited_and_never_steps);
+	RUN_TEST(test_large_post_holdover_excursion_stays_rate_limited);
 
 	RUN_TEST(test_vc_sense_divergence_raises_a_dac_fault);
 

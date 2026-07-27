@@ -37,7 +37,7 @@ _Static_assert((NTP_CLIENT_SLOTS & (NTP_CLIENT_SLOTS - 1U)) == 0U,
 	       "NTP_CLIENT_SLOTS must be a power of two");
 _Static_assert(NTP_CLIENT_WAYS >= 1U && NTP_CLIENT_WAYS <= NTP_CLIENT_SLOTS,
 	       "NTP_CLIENT_WAYS must fit inside the table");
-_Static_assert(NTP_PKT_MAX >= NTP_HDR_LEN + NTP_MAC_FIELD_LEN,
+_Static_assert(NTP_PKT_MAX >= NTP_HDR_LEN + NTP_MAC_FIELD_MAX,
 	       "NTP_PKT_MAX must hold a header plus a MAC");
 
 /* Header field offsets. */
@@ -53,10 +53,24 @@ _Static_assert(NTP_PKT_MAX >= NTP_HDR_LEN + NTP_MAC_FIELD_LEN,
 #define OFF_REC_TS    32U
 #define OFF_XMT_TS    40U
 
-/* Tail remainders that mean "MAC field", not "extension field". */
-#define MAC_LEN_NAK 4U  /* key id only: a crypto-NAK */
-#define MAC_LEN_MD5 20U /* key id + 16-octet MD5 digest */
-#define MAC_LEN_20  24U /* key id + 20-octet digest: what we speak */
+/*
+ * Trailing lengths that mean "MAC field", not "extension field"
+ * (RFC 7822 §7.5.1). Each is 4 (the key id) plus a digest length. The short
+ * ones are unambiguous — an extension field beside a MAC is ≥ 28 octets — so
+ * 4/20/24 are always MACs. The longer ones (36/52/68 = key id + a 32/48/64
+ * octet SHA-2 digest) are ≥ 28 and so could instead be a legitimate extension
+ * field; the parser tries an extension-field parse first and only calls them a
+ * MAC when that fails.
+ */
+#define MAC_LEN_NAK 4U   /* key id only: a crypto-NAK, no digest to verify */
+#define MAC_LEN_128 20U  /* key id + 16-octet digest: AES-CMAC-128 / HMAC-128 */
+#define MAC_LEN_160 24U  /* key id + 20-octet digest: HMAC-SHA-256/160 */
+#define MAC_LEN_256 36U  /* key id + 32-octet digest: SHA-256 — unimplemented */
+#define MAC_LEN_384 52U  /* key id + 48-octet digest: SHA-384 — unimplemented */
+#define MAC_LEN_512 68U  /* key id + 64-octet digest: SHA-512 — unimplemented */
+
+/* The digest length carried by a MAC field of a given total length. */
+#define MAC_DIGEST_OF(field_len) ((field_len) - 4U)
 
 /* Milli-tokens per request. Sub-token accumulation is what lets a 8 req/s
  * bucket refill smoothly at millisecond granularity instead of in 125 ms steps. */
@@ -214,7 +228,7 @@ void ntp_cfg_default(ntp_cfg_t *cfg)
 	cfg->global_burst = 40000U;
 	cfg->kod_min_interval_ms = 1000U;
 	cfg->kod_on_limit = true;
-	cfg->interleave = true;
+	cfg->interleave = false; /* opt-in, RFC 9769 — see ntp_cfg_t.interleave */
 	cfg->serve_unsync = true;
 }
 
@@ -249,20 +263,33 @@ int ntp_parse(const uint8_t *pkt, size_t len, ntp_pkt_t *out)
 	out->ext_off = NTP_HDR_LEN;
 
 	/*
-	 * Walk the tail. At each step the remaining octets are either a MAC field
-	 * (one of three fixed sizes — the disambiguation RFC 7822 §7.5.1 relies
-	 * on, and the reason no extension field may be 4, 20 or 24 octets long)
-	 * or another extension field.
+	 * Walk the tail (RFC 7822 §7.5.1). At each step the remainder is either a
+	 * MAC field or an extension field.
+	 *
+	 *  - A remainder of 4, 20 or 24 octets is a MAC: these are shorter than
+	 *    the 28-octet minimum for an extension field beside a MAC, so there is
+	 *    no ambiguity. 4 is a crypto-NAK (no digest); 20 and 24 carry digests
+	 *    we can verify.
+	 *  - A remainder of 36/52/68 octets is a keyid + a 32/48/64-octet digest —
+	 *    a MAC algorithm this server does not implement. It is ≥ 28, so it
+	 *    could instead be an extension field (an NTS Unique Identifier is
+	 *    exactly 36 octets); try the extension-field parse first, and only if
+	 *    that fails treat it as an unsupported MAC to be rejected. That is the
+	 *    fix for the defect where a 36-octet SHA-256 MAC parsed as garbage and
+	 *    the request was served unauthenticated.
+	 *  - Otherwise it is an extension field; the walk is tolerant of a broken
+	 *    tail and simply stops, since nothing past ext_len is echoed.
 	 */
 	off = NTP_HDR_LEN;
 	while (off < len) {
 		size_t rem = len - off;
 		uint16_t flen;
 
-		if (rem == MAC_LEN_NAK || rem == MAC_LEN_MD5 || rem == MAC_LEN_20) {
+		if (rem == MAC_LEN_NAK || rem == MAC_LEN_128 || rem == MAC_LEN_160) {
 			out->mac_off = off;
 			out->mac_len = rem;
 			out->keyid = bytes_get_be32(&pkt[off]);
+			out->mac_unsupported = (rem == MAC_LEN_NAK);
 			break;
 		}
 		if (rem < 4U) {
@@ -270,11 +297,22 @@ int ntp_parse(const uint8_t *pkt, size_t len, ntp_pkt_t *out)
 		}
 
 		flen = bytes_get_be16(&pkt[off + 2U]);
-		if (flen < 4U || (flen & 3U) != 0U || (size_t)flen > rem) {
-			break; /* malformed from here on: tolerated, not echoed */
+		if (flen >= 4U && (flen & 3U) == 0U && (size_t)flen <= rem) {
+			off += flen;
+			out->ext_len = off - NTP_HDR_LEN;
+			continue;
 		}
-		off += flen;
-		out->ext_len = off - NTP_HDR_LEN;
+
+		/* Not a valid extension field. If the whole remainder is a
+		 * MAC-shaped length for a digest we do not implement, say so — the
+		 * handler rejects it rather than answering unauthenticated. */
+		if (rem == MAC_LEN_256 || rem == MAC_LEN_384 || rem == MAC_LEN_512) {
+			out->mac_off = off;
+			out->mac_len = rem;
+			out->keyid = bytes_get_be32(&pkt[off]);
+			out->mac_unsupported = true;
+		}
+		break; /* malformed tail otherwise: tolerated, not echoed */
 	}
 
 	return 0;
@@ -315,9 +353,16 @@ int ntp_ef_iter_next(ntp_ef_iter_t *it, ntp_ef_t *ef)
 
 /* ------------------------------------------------------------- client table */
 
+/* Salted so an attacker cannot precompute a set of source addresses that all
+ * hash into one NTP_CLIENT_WAYS set and evict a target's entry at will (L14). */
+static uint32_t client_slot(const ntp_ctx_t *ctx, uint32_t id)
+{
+	return mix32(id ^ ctx->hash_seed) & (NTP_CLIENT_SLOTS - 1U);
+}
+
 static ntp_client_t *client_find(ntp_ctx_t *ctx, uint32_t id)
 {
-	uint32_t base = mix32(id) & (NTP_CLIENT_SLOTS - 1U);
+	uint32_t base = client_slot(ctx, id);
 
 	for (uint32_t w = 0U; w < NTP_CLIENT_WAYS; w++) {
 		ntp_client_t *e = &ctx->clients[(base + w) & (NTP_CLIENT_SLOTS - 1U)];
@@ -345,7 +390,7 @@ static ntp_client_t *client_find(ntp_ctx_t *ctx, uint32_t id)
  */
 static ntp_client_t *client_get(ntp_ctx_t *ctx, uint32_t id, int64_t now_ms)
 {
-	uint32_t base = mix32(id) & (NTP_CLIENT_SLOTS - 1U);
+	uint32_t base = client_slot(ctx, id);
 	ntp_client_t *victim = NULL;
 
 	for (uint32_t w = 0U; w < NTP_CLIENT_WAYS; w++) {

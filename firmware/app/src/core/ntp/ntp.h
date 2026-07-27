@@ -11,9 +11,12 @@
  *   - Request parse/validate, response build from the §3.8 quality block.
  *   - TAI → NTP 64-bit timestamp conversion with explicit era semantics.
  *   - Per-client and aggregate token-bucket rate limiting with Kiss-o'-Death.
- *   - Interleaved client/server mode (draft-ietf-ntp-interleaved-modes, the
- *     variant ntpd and chrony ship).
- *   - Symmetric-key authentication (HMAC-SHA-256 truncated to 20 octets).
+ *   - Interleaved client/server mode (RFC 9769), off by default and detected
+ *     strictly per §2: the origin echoes the previous response's *receive*
+ *     timestamp, never its transmit timestamp — the distinction from a basic
+ *     RFC 5905 client, which echoes the transmit timestamp.
+ *   - Symmetric-key authentication: RFC 8573 AES-CMAC-128, plus HMAC-SHA-256
+ *     truncated to 128 or 160 bits, selectable per key.
  *   - An extension-field hook so core/nts can protect the same datapath
  *     without ntp and nts depending on one another (ARCHITECTURE.md §4 fixes
  *     `ntp→util,quality` and `nts→util`; there is deliberately no edge between
@@ -29,9 +32,11 @@
  *     server, not a peer; only mode 3 is answered, with mode 4.
  *   - NTPv1/v2 (VN 1, 2). Their mode-field overloading has no useful client
  *     population left. Only VN 3 and VN 4 are served.
- *   - MD5 MACs (RFC 5905 Appendix A). MD5 is broken for authentication; a
- *     20-octet MAC field is recognised so it can be counted as an auth failure
- *     rather than mis-parsed as an extension field, and then dropped.
+ *   - MD5 MACs (RFC 5905 Appendix A). MD5 is broken for authentication. A
+ *     MAC-shaped tail of an unimplemented digest length (including MD5's
+ *     16-octet digest presented under a key configured for it, or a 32-octet
+ *     SHA-256 digest) is recognised as a MAC and rejected — never mis-parsed
+ *     as an extension field and answered unauthenticated.
  *   - Autokey (RFC 5906). Deprecated; NTS (core/nts) is the authenticated path.
  *   - Crypto-NAK responses. Answering an unauthenticated packet with a
  *     distinguishable "your key is wrong" reply is an oracle and an
@@ -660,24 +665,35 @@ int ntp_handle_request(ntp_ctx_t *ctx, const ntp_rx_t *rx,
 		       uint8_t *out, size_t out_cap, ntp_result_t *res);
 
 /**
- * Record the measured transmit timestamp of a response, arming interleaved
- * mode for that client's next request.
+ * Record the measured transmit timestamp of a response, committing the
+ * interleave pair for that client's next request (RFC 9769).
  *
  * Call this once the driver reports the hardware TX timestamp of the datagram
- * ntp_handle_request() just produced. Until it is called, the client's cached
- * state is unchanged and a subsequent interleaved request falls back to a basic
- * response — which is exactly the required behaviour, because the server has no
- * precise timestamp to report.
+ * ntp_handle_request() produced, passing the @p token from that call's
+ * ntp_result_t. Until it is called, the client has no committed pair and a
+ * subsequent interleaved request falls back to a basic response — correct,
+ * because the server has no precise transmit timestamp to report yet.
+ *
+ * The token guards against the realistic async case (SO_TIMESTAMPING delivers
+ * the transmit timestamp later, via the socket error queue): if a second
+ * request from the same client is handled before this call arrives, it arms a
+ * new pending response with a new token, and this call — carrying the old
+ * token — is rejected as stale rather than pairing this timestamp with the
+ * newer exchange. The measurement for the superseded response is simply
+ * dropped; that exchange just does not become interleave-eligible.
  *
  * @param client_id  The same value passed in ntp_rx_t.
+ * @param token      ntp_result_t.xl_token from the corresponding response.
  * @param xmt_ntp    Measured transmit timestamp, NTP 64-bit format.
  *
- * @retval 0        Recorded.
- * @retval -EINVAL  @p ctx is NULL.
- * @retval -ENOENT  No pending response for that client (evicted, or the caller
- *                  never handled a request for it).
+ * @retval 0        Committed.
+ * @retval -EINVAL  @p ctx is NULL, or @p token is 0.
+ * @retval -ENOENT  No pending response for that client, or @p token is stale
+ *                  (the client was evicted, the response was a KoD, interleave
+ *                  is disabled, or a later request superseded this one).
  */
-int ntp_tx_complete(ntp_ctx_t *ctx, uint32_t client_id, uint64_t xmt_ntp);
+int ntp_tx_complete(ntp_ctx_t *ctx, uint32_t client_id, uint32_t token,
+		    uint64_t xmt_ntp);
 
 /** Snapshot the counters. @p out is untouched on -EINVAL. */
 int ntp_stats_get(const ntp_ctx_t *ctx, ntp_stats_t *out);

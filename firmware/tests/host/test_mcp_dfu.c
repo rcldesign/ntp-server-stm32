@@ -894,21 +894,25 @@ static void test_non_final_chunk_must_be_write_block_aligned(void)
 	make_image(22U, true);
 	fw_begin(IMAGE_SIZE, g_image_sha);
 
-	/* 1000 is not a multiple of 16 and does not reach the end. */
+	/* 1000 is not a multiple of 16 and does not reach the end. ERR_ARG is
+	 * status-only (only ERR_OFFSET carries an offset), so check the frontier
+	 * through the session snapshot rather than the reply body. */
 	fw_data(0U, g_image, 1000U);
 	expect((uint8_t)MCP_ERR_ARG);
-	TEST_ASSERT_EQUAL_UINT32(0U, rsp_next_expected());
+	TEST_ASSERT_EQUAL_UINT32(0U, mcp_dfu_status(&g_mcp)->written);
 
-	/* The aligned form of the same prefix is accepted. */
+	/* The aligned form of the same prefix is accepted, and the transfer
+	 * then completes normally. (A genuinely short, non-block-aligned final
+	 * chunk is exercised by test_odd_sized_image_with_odd_chunks, whose
+	 * total is not a write-block multiple.) */
 	fw_data(0U, g_image, 1008U); /* 63 * 16 */
 	expect((uint8_t)MCP_OK);
 	TEST_ASSERT_EQUAL_UINT32(1008U, rsp_next_expected());
 
-	/* A short *final* chunk is fine even though it is not block-aligned. */
-	upload_range(1008U, IMAGE_SIZE - 5U, MCP_FW_CHUNK_MAX);
-	fw_data(IMAGE_SIZE - 5U, &g_image[IMAGE_SIZE - 5U], 5U);
+	upload_range(1008U, IMAGE_SIZE, MCP_FW_CHUNK_MAX);
+	feed_req(MCP_CMD_FW_END, NULL, 0U);
 	expect((uint8_t)MCP_OK);
-	TEST_ASSERT_EQUAL_UINT32(IMAGE_SIZE, rsp_next_expected());
+	TEST_ASSERT_TRUE(g_pending);
 }
 
 static void test_trailing_payloads_are_rejected(void)
@@ -1150,8 +1154,11 @@ int main(void)
 	RUN_TEST(test_end_is_idempotent);
 
 	RUN_TEST(test_begin_argument_validation);
+	RUN_TEST(test_begin_honours_the_trailer_reserve);
 	RUN_TEST(test_data_argument_validation);
+	RUN_TEST(test_non_final_chunk_must_be_write_block_aligned);
 	RUN_TEST(test_port_failures_are_reported);
+	RUN_TEST(test_write_failure_resets_so_rebegin_re_erases);
 	RUN_TEST(test_trailing_payloads_are_rejected);
 
 	RUN_TEST(test_fw_info_reports_slots_and_session);
