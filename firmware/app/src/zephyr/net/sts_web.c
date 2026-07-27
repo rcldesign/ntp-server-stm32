@@ -75,6 +75,7 @@
 #include "mcp/mcp.h"
 #include "mcp/mcp_wire.h"
 #include "net/sts_net.h"
+#include "net/sts_secops.h"
 #include "net/sts_web.h"
 #include "storage/sts_store.h"
 #include "util/cobs.h"
@@ -543,22 +544,100 @@ static int pv_reboot(void *u, uint8_t mode)
 	return 0;
 }
 
+/*
+ * ---------------------------------------------------------------------------
+ * Factory reset: config AND key material (spec §9.6 secure-erase)
+ * ---------------------------------------------------------------------------
+ *
+ * What a factory reset now ERASES:
+ *
+ *   1. Every cfg key, back to its schema default, in the live tree and in NVS —
+ *      sts_cfg_factory_reset(). That covers every CFG_F_SECRET blob: the three
+ *      management credentials (sec.admin.pw, sec.operator.pw, sec.viewer.pw),
+ *      the SNMPv3 USM auth/priv keys, the four NTP symmetric MAC keys, and the
+ *      RADIUS/TACACS+ shared secrets and LDAP bind password. cfg.c's
+ *      val_default() memsets the WHOLE cfg_val_t, so the secret bytes go, not
+ *      just the length.
+ *   2. Every subsystem's RAM copy of those, because the same call then runs
+ *      every registered group's appliers — which is how the emptied keys reach
+ *      core/snmp's USM table, core/ntp's key slots and sts_aaa.c's local blob.
+ *   3. The web plane's own credential blobs and every live session, token and
+ *      CSRF token — auth_web_wipe(), through a volatile pointer.
+ *   4. The persisted TLS server identity: private key and certificate on
+ *      /lfs, the ACME account key, the Zephyr credential-store entries, and the
+ *      in-RAM PEM buffers — sts_cert_reset(). This is the one place sts_cert.c's
+ *      deliberate persistence is reversed.
+ *   5. Everything that lives only in RAM — the NTS cookie master keyring
+ *      (src/zephyr/net/sts_net.c), the per-boot NTS-KE server key, mbedTLS and
+ *      PSA volatile keys — by REBOOTING. That reboot is not a convenience: it
+ *      is what makes the claim in (5) true, and it is also what mints the fresh
+ *      TLS identity that (4) deleted.
+ *
+ * What it deliberately does NOT erase, and why:
+ *
+ *   - the ATECC608B device key and its slots. That is the hardware root of
+ *     identity and attestation (spec §9.1); its key is non-exportable and was
+ *     provisioned at manufacture, not by the operator. Erasing it would not
+ *     un-deploy a secret an operator put there — it would permanently destroy
+ *     the board's ability to attest to what it is, with no way back in the
+ *     field. Spec §9.6 puts secure-erase of the secure element behind a
+ *     separate, physically-gated policy for exactly that reason;
+ *   - the MCUboot signing trust anchor and the anti-rollback security counter.
+ *     Neither is a secret (one is a public key, one is a monotonic counter), and
+ *     rolling the counter back would re-enable installing a firmware image that
+ *     was withdrawn for a security defect;
+ *   - the log ring and the NOR syslog spool. They are an audit record, and the
+ *     factory reset itself is one of the events in it. They hold no key
+ *     material: core/logring stores messages, and every credential path logs
+ *     outcomes rather than values.
+ */
 static int pv_factory_reset(void *u)
 {
+	int rc = 0;
+
 	ARG_UNUSED(u);
 	/*
 	 * sts_cfg_factory_reset() clears the tree, erases the store and then runs
 	 * every registered group's appliers, so no subsystem is left serving
 	 * pre-reset configuration until the next reboot — the bare
-	 * cfg_factory_reset() this used to call told nobody. Key zeroization
-	 * (spec §9.6) still belongs to the security area and is still not wired
-	 * here, so this remains a config-only reset; the route's audit record and
-	 * the response say what happened.
+	 * cfg_factory_reset() this used to call told nobody.
 	 */
 	if (sts_cfg_factory_reset() != 0) {
-		return -EIO;
+		rc = -EIO;
 	}
-	return 0;
+	if (sts_sec_factory_wipe() != 0) {
+		rc = -EIO;
+	}
+
+	/*
+	 * Deferred well past the response, like pv_reboot(): the browser is owed
+	 * the answer to the request that caused this, and the worker that owes it
+	 * is this one.
+	 */
+	pending_reboot_mode = 0U;
+	(void)k_work_reschedule(&reboot_work, K_MSEC(1500));
+
+	return rc;
+}
+
+int sts_sec_factory_wipe(void)
+{
+	int rc = 0;
+
+	/* The credential blobs and every session. Under api_lock, because the
+	 * auth registry is not internally locked and a worker may be in it. */
+	k_mutex_lock(&api_lock, K_FOREVER);
+	auth_web_wipe(&auth_ctx);
+	k_mutex_unlock(&api_lock);
+
+	if (sts_cert_reset() != 0) {
+		rc = -EIO;
+	}
+
+	sts_log((uint8_t)LOGR_SUB_SEC, (uint8_t)LOGR_ALERT,
+		"factory reset: key material zeroized (credentials, sessions, "
+		"TLS identity); rebooting to clear RAM-only keys");
+	return rc;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -915,7 +994,73 @@ static void cfg_applied(void *ctx, uint8_t group)
 	k_mutex_lock(&api_lock, K_FOREVER);
 	(void)auth_web_reload(&auth_ctx);
 	k_mutex_unlock(&api_lock);
-	LOG_INF("security config applied; credential reloaded");
+	LOG_INF("security config applied; credentials reloaded");
+}
+
+/*
+ * ---------------------------------------------------------------------------
+ * The remote authority, and the two hazards of reaching it from here
+ * ---------------------------------------------------------------------------
+ *
+ * core/web asks this when the local account table could not accept a
+ * credential. One line of substance, and that is the point: the backend chain,
+ * the positive cache, the hard lockout and the role mapping all live in
+ * sts_aaa_check(), shared with the MCP console and the maintenance planes
+ * rather than reimplemented three times.
+ *
+ * Every non-zero return is a denial, -EHOSTUNREACH included — that one means no
+ * authority could answer, and it is never an allow-on-failure (sts_aaa.h).
+ * Only -EBUSY keeps its identity, because core/web reports a lockout distinctly
+ * so the route can send Retry-After; every other refusal reaches the browser as
+ * one indistinguishable 401.
+ *
+ * Hazard 1 — the watchdog. This runs on a web worker, and the workers feed a
+ * liveness participant. sts_aaa_check() blocks for the operator's whole
+ * configured chain timeout (up to ~540 s; see sts_secops.h for the arithmetic)
+ * against an unreachable server, and CONFIG_STS1000_LIVENESS_DEADLINE_MS is
+ * 5 000. A direct call would therefore let one unauthenticated POST cold-cycle
+ * the board. sts_aaa_check_fed() runs the lookup on its own thread and feeds
+ * `live_id` while this worker sleeps, which is why it is used here and a bare
+ * sts_aaa_check() must never be.
+ *
+ * Hazard 2 — api_lock, which this thread holds across rest_dispatch() and
+ * therefore across this call. It is held ON PURPOSE and is NOT released here,
+ * unlike the maintenance plane's engine lock:
+ *
+ *   - it is the mutual exclusion for auth_web_ctx_t AND rest_ctx_t, neither of
+ *     which is internally locked. Dropping it mid-login would let a second
+ *     worker enter auth_web_login(), auth_web_reload() or auth_web_set_password()
+ *     while this one is suspended inside the first — memory corruption in the
+ *     credential store, which is a far worse outcome than the delay;
+ *   - the watchdog does not need it released, because hazard 1 is already
+ *     solved: the STS_WEB_WORKERS share ONE liveness id, and this worker keeps
+ *     feeding it throughout.
+ *
+ * The cost is honest and bounded: while a remote lookup is outstanding, REST
+ * requests queue behind api_lock for as long as the operator's own configured
+ * backend timeouts allow. That happens only on a unit configured for remote AAA
+ * whose server is unreachable — the default chain is `local`, which never
+ * blocks at all — and a slow management plane is the correct trade against
+ * either a corrupted credential table or a rebooting grandmaster.
+ */
+static int web_remote_auth(void *user, const char *name, const char *secret,
+			   uint8_t *out_role)
+{
+	int rc;
+
+	ARG_UNUSED(user);
+
+	rc = sts_aaa_check_fed(name, secret, out_role, live_id);
+	if (rc != 0) {
+		*out_role = (uint8_t)WEB_ROLE_NONE;
+		return (rc == -EBUSY) ? -EBUSY : -EACCES;
+	}
+	/*
+	 * auth_role_t and web_role_t are the same four numbers by construction
+	 * (auth.h, web.h), so the value passes straight through; core/web clamps
+	 * anything outside the range to the least privilege regardless.
+	 */
+	return 0;
 }
 
 /* ========================================================================= */
@@ -1771,22 +1916,57 @@ static int web_bring_up(void)
 		return rc;
 	}
 	/*
-	 * One account today: `admin`, bound to cfg key sec.admin.pw — the SAME
-	 * credential and the SAME {salt,HMAC} blob core/mcp uses, deliberately
-	 * (see auth_web.h). Operator and viewer accounts need their own schema
-	 * keys before they can persist, so they are not created here rather than
-	 * being created as RAM-only ghosts that vanish on reboot.
+	 * All three roles, each bound to a cfg key of its own, each holding the
+	 * SAME {salt,HMAC} blob core/mcp uses (see auth_web.h). `admin` shares
+	 * sec.admin.pw with the console deliberately; operator and viewer got
+	 * schema keys of their own (sec.operator.pw, sec.viewer.pw) so they are
+	 * real persistent accounts rather than the RAM-only ghosts they would
+	 * have had to be before.
+	 *
+	 * They ship UNPROVISIONED, which fails closed: an account with no
+	 * credential cannot be logged into, and — once any account is set up —
+	 * is refused with exactly the answer a wrong password gets, so the
+	 * login reply does not report which of the three have been commissioned.
+	 * An administrator provisions them over POST /api/v1/security/password.
 	 */
-	rc = auth_web_user_add(&auth_ctx, "admin", (uint8_t)WEB_ROLE_ADMIN,
-			       (uint16_t)CFG_ID_SEC_ADMIN_PW);
-	if (rc < 0) {
-		return rc;
+	static const struct {
+		const char *name;
+		uint8_t     role;
+		uint16_t    key;
+	} accounts[] = {
+		{ "admin", (uint8_t)WEB_ROLE_ADMIN,
+		  (uint16_t)CFG_ID_SEC_ADMIN_PW },
+		{ "operator", (uint8_t)WEB_ROLE_OPERATOR,
+		  (uint16_t)CFG_ID_SEC_OPERATOR_PW },
+		{ "viewer", (uint8_t)WEB_ROLE_VIEWER,
+		  (uint16_t)CFG_ID_SEC_VIEWER_PW },
+	};
+
+	for (i = 0U; i < ARRAY_SIZE(accounts); i++) {
+		rc = auth_web_user_add(&auth_ctx, accounts[i].name,
+				       accounts[i].role, accounts[i].key);
+		if (rc < 0) {
+			LOG_ERR("account '%s': %d", accounts[i].name, rc);
+			return rc;
+		}
 	}
 	if (auth_web_reload(&auth_ctx) == 0) {
-		LOG_WRN("no administrator credential provisioned; the web plane "
+		LOG_WRN("no management credential provisioned; the web plane "
 			"is read-only until one is set over the console or the "
 			"local UI");
 	}
+
+	/*
+	 * The remote authority. Without this the web plane could reach only the
+	 * local blob, so RADIUS / TACACS+ / LDAP — built, host-tested and
+	 * configured through cfg group 0x0A — were reachable from exactly one of
+	 * the three management surfaces.
+	 *
+	 * Wired to sts_aaa_check_fed(), NOT sts_aaa_check(): this runs on a web
+	 * worker, under api_lock, and the workers share one liveness
+	 * participant. See web_remote_auth() and sts_secops.h.
+	 */
+	(void)auth_web_set_remote(&auth_ctx, web_remote_auth, NULL);
 
 	rc = rest_init(&rest_ctx, sts_cfg(), sts_logring(), &auth_ctx,
 		       &providers);

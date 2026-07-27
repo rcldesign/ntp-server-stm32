@@ -812,6 +812,432 @@ static void test_rand_failure(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* the remote authority                                                      */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A stand-in for sts_aaa_check(), with the same three-valued contract: 0
+ * accepts and names a role, -EBUSY is a lockout, and every other code — most
+ * importantly -EHOSTUNREACH, "no authority could answer" — is a refusal.
+ */
+static struct {
+	unsigned int calls;
+	char         last_name[AUTH_WEB_NAME_MAX + 1U];
+	char         last_secret[AUTH_WEB_PW_MAX + 1U];
+	int          rc;   /* what the authority answers */
+	uint8_t      role; /* the role it names when rc == 0 */
+} g_remote;
+
+static int remote_stub(void *user, const char *name, const char *secret,
+		       uint8_t *out_role)
+{
+	(void)user;
+	g_remote.calls++;
+	web_span_copy(g_remote.last_name, sizeof(g_remote.last_name), name,
+		      strlen(name));
+	web_span_copy(g_remote.last_secret, sizeof(g_remote.last_secret), secret,
+		      strlen(secret));
+	if (g_remote.rc == 0) {
+		*out_role = g_remote.role;
+	}
+	return g_remote.rc;
+}
+
+static void remote_reset(int rc, uint8_t role)
+{
+	memset(&g_remote, 0, sizeof(g_remote));
+	g_remote.rc = rc;
+	g_remote.role = role;
+}
+
+/* A local MISS falls through to the authority; a local SUCCESS never does. */
+static void test_remote_consulted_only_on_local_miss(void)
+{
+	auth_web_grant_t g;
+
+	fixture(true);
+	provision_admin();
+	TEST_ASSERT_EQUAL_INT(0, auth_web_set_remote(&g_auth, remote_stub, NULL));
+
+	/* A correct local password must not put the credential on the wire. */
+	remote_reset(0, (uint8_t)WEB_ROLE_ADMIN);
+	TEST_ASSERT_EQUAL_INT(0, auth_web_login(&g_auth, "admin", 5U,
+						(const uint8_t *)PW, PW_LEN, 0U,
+						&g));
+	TEST_ASSERT_EQUAL_UINT32(0U, g_remote.calls);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)WEB_ROLE_ADMIN, g.role);
+	TEST_ASSERT_EQUAL_UINT32(0U, auth_web_stats(&g_auth)->remote_consults);
+
+	/* An unknown account does, and is granted the role the authority named. */
+	remote_reset(0, (uint8_t)WEB_ROLE_OPERATOR);
+	TEST_ASSERT_EQUAL_INT(0, auth_web_login(&g_auth, "alice", 5U,
+						(const uint8_t *)"from-radius",
+						11U, 0U, &g));
+	TEST_ASSERT_EQUAL_UINT32(1U, g_remote.calls);
+	TEST_ASSERT_EQUAL_STRING("alice", g_remote.last_name);
+	TEST_ASSERT_EQUAL_STRING("from-radius", g_remote.last_secret);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)WEB_ROLE_OPERATOR, g.role);
+	TEST_ASSERT_EQUAL_UINT32(1U, auth_web_stats(&g_auth)->logins_remote_ok);
+
+	/* A KNOWN account with the WRONG password does too. */
+	remote_reset(0, (uint8_t)WEB_ROLE_VIEWER);
+	TEST_ASSERT_EQUAL_INT(0, auth_web_login(&g_auth, "admin", 5U,
+						(const uint8_t *)"not-the-local-one",
+						17U, 0U, &g));
+	TEST_ASSERT_EQUAL_UINT32(1U, g_remote.calls);
+	/* The authority is authoritative about authorisation: the session gets
+	 * the role it named, not the local account's. */
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)WEB_ROLE_VIEWER, g.role);
+}
+
+/* -EHOSTUNREACH is a DENIAL. Never an allow-on-failure. */
+static void test_remote_unreachable_denies(void)
+{
+	auth_web_grant_t g;
+
+	fixture(true);
+	provision_admin();
+	TEST_ASSERT_EQUAL_INT(0, auth_web_set_remote(&g_auth, remote_stub, NULL));
+
+	remote_reset(-EHOSTUNREACH, (uint8_t)WEB_ROLE_ADMIN);
+	TEST_ASSERT_EQUAL_INT(-EACCES, auth_web_login(&g_auth, "alice", 5U,
+						      (const uint8_t *)"anything",
+						      8U, 0U, &g));
+	TEST_ASSERT_EQUAL_UINT32(1U, g_remote.calls);
+	TEST_ASSERT_EQUAL_UINT32(0U, auth_web_session_count(&g_auth));
+	TEST_ASSERT_EQUAL_UINT32(1U,
+				 auth_web_stats(&g_auth)->logins_remote_denied);
+
+	/* The role the authority left in *out_role must not leak into a grant
+	 * either: a refused login writes no session at all. */
+	TEST_ASSERT_NULL(auth_web_sess_at(&g_auth, 0U));
+
+	/* Same for a refused-but-reachable authority, and for a broken one that
+	 * answers with a code nobody documented. */
+	remote_reset(-EACCES, 0U);
+	TEST_ASSERT_EQUAL_INT(-EACCES, auth_web_login(&g_auth, "alice", 5U,
+						      (const uint8_t *)"anything",
+						      8U, 0U, &g));
+	remote_reset(-EPROTO, 0U);
+	TEST_ASSERT_EQUAL_INT(-EACCES, auth_web_login(&g_auth, "alice", 5U,
+						      (const uint8_t *)"anything",
+						      8U, 0U, &g));
+	TEST_ASSERT_EQUAL_UINT32(0U, auth_web_session_count(&g_auth));
+
+	/* -EBUSY is the one code that keeps its identity: it is a lockout, and
+	 * the caller needs it to populate Retry-After. It says nothing about
+	 * the password. */
+	remote_reset(-EBUSY, 0U);
+	TEST_ASSERT_EQUAL_INT(-EBUSY, auth_web_login(&g_auth, "alice", 5U,
+						     (const uint8_t *)"anything",
+						     8U, 0U, &g));
+}
+
+/* An authority that accepts without naming a usable role gets LEAST privilege. */
+static void test_remote_role_is_clamped(void)
+{
+	auth_web_grant_t g;
+
+	fixture(true);
+	provision_admin();
+	TEST_ASSERT_EQUAL_INT(0, auth_web_set_remote(&g_auth, remote_stub, NULL));
+
+	remote_reset(0, (uint8_t)WEB_ROLE_NONE);
+	TEST_ASSERT_EQUAL_INT(0, auth_web_login(&g_auth, "alice", 5U,
+						(const uint8_t *)"pw", 2U, 0U,
+						&g));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)WEB_ROLE_VIEWER, g.role);
+
+	auth_web_logout_all(&g_auth);
+	remote_reset(0, 200U); /* out of range */
+	TEST_ASSERT_EQUAL_INT(0, auth_web_login(&g_auth, "alice", 5U,
+						(const uint8_t *)"pw", 2U, 0U,
+						&g));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)WEB_ROLE_VIEWER, g.role);
+}
+
+/*
+ * A remote principal has no local account. The session must still name it, and
+ * every existing caller that maps a session index to an account must fail safe
+ * rather than read a neighbouring account's row.
+ */
+static void test_remote_session_has_no_local_account(void)
+{
+	auth_web_grant_t g;
+	const auth_web_sess_t *s;
+	size_t sess = 0U;
+
+	fixture(true);
+	provision_admin();
+	TEST_ASSERT_EQUAL_INT(0, auth_web_set_remote(&g_auth, remote_stub, NULL));
+
+	remote_reset(0, (uint8_t)WEB_ROLE_OPERATOR);
+	TEST_ASSERT_EQUAL_INT(0, auth_web_login(&g_auth, "alice", 5U,
+						(const uint8_t *)"pw", 2U, 0U,
+						&g));
+	TEST_ASSERT_EQUAL_INT(0, auth_web_validate(&g_auth, g.token, 0U, &sess));
+
+	s = auth_web_sess_at(&g_auth, sess);
+	TEST_ASSERT_NOT_NULL(s);
+	TEST_ASSERT_TRUE(s->remote);
+	TEST_ASSERT_EQUAL_UINT8(AUTH_WEB_NO_USER, s->user);
+	/* The whole point of the sentinel: this must be NULL, not users[0]. */
+	TEST_ASSERT_NULL(auth_web_user_at(&g_auth, s->user));
+	TEST_ASSERT_EQUAL_STRING("alice", auth_web_sess_name(&g_auth, sess));
+
+	/* A local login still names its account both ways. */
+	remote_reset(-EHOSTUNREACH, 0U);
+	TEST_ASSERT_EQUAL_INT(0, auth_web_login(&g_auth, "admin", 5U,
+						(const uint8_t *)PW, PW_LEN, 0U,
+						&g));
+	TEST_ASSERT_EQUAL_INT(0, auth_web_validate(&g_auth, g.token, 0U, &sess));
+	s = auth_web_sess_at(&g_auth, sess);
+	TEST_ASSERT_NOT_NULL(s);
+	TEST_ASSERT_FALSE(s->remote);
+	TEST_ASSERT_NOT_NULL(auth_web_user_at(&g_auth, s->user));
+	TEST_ASSERT_EQUAL_STRING("admin", auth_web_sess_name(&g_auth, sess));
+}
+
+/*
+ * A wrong password and an unknown user must be ONE answer — with a remote
+ * authority wired, which is where they could most easily diverge (an unknown
+ * user could short-circuit before the authority is asked, a known one could
+ * report the authority's own code).
+ */
+static void test_wrong_password_and_unknown_user_are_identical(void)
+{
+	auth_web_grant_t g;
+	const auth_web_stats_t *st;
+	int rc_unknown;
+	int rc_wrong;
+	int rc_unprovisioned;
+	unsigned int calls_unknown;
+	unsigned int calls_wrong;
+
+	fixture(true);
+	provision_admin();
+	/* A second, deliberately UNPROVISIONED account, which is what the new
+	 * operator/viewer schema keys make the normal state of a half-set-up
+	 * box. */
+	TEST_ASSERT_EQUAL_INT(1, auth_web_user_add(&g_auth, "operator",
+						   (uint8_t)WEB_ROLE_OPERATOR,
+						   0U));
+	TEST_ASSERT_EQUAL_INT(0, auth_web_set_remote(&g_auth, remote_stub, NULL));
+
+	remote_reset(-EHOSTUNREACH, 0U);
+	rc_unknown = auth_web_login(&g_auth, "nosuchuser", 10U,
+				    (const uint8_t *)"guess", 5U, 0U, &g);
+	calls_unknown = g_remote.calls;
+
+	remote_reset(-EHOSTUNREACH, 0U);
+	rc_wrong = auth_web_login(&g_auth, "admin", 5U,
+				  (const uint8_t *)"guess", 5U, 0U, &g);
+	calls_wrong = g_remote.calls;
+
+	remote_reset(-EHOSTUNREACH, 0U);
+	rc_unprovisioned = auth_web_login(&g_auth, "operator", 8U,
+					  (const uint8_t *)"guess", 5U, 0U, &g);
+
+	TEST_ASSERT_EQUAL_INT(-EACCES, rc_unknown);
+	TEST_ASSERT_EQUAL_INT(rc_unknown, rc_wrong);
+	TEST_ASSERT_EQUAL_INT(rc_unknown, rc_unprovisioned);
+
+	/* Not just the same code: all three must actually reach the authority,
+	 * so the answer does not differ in latency either. */
+	TEST_ASSERT_EQUAL_UINT32(1U, calls_unknown);
+	TEST_ASSERT_EQUAL_UINT32(1U, calls_wrong);
+	TEST_ASSERT_EQUAL_UINT32(1U, g_remote.calls);
+
+	/* And nothing was granted. */
+	st = auth_web_stats(&g_auth);
+	TEST_ASSERT_EQUAL_UINT32(0U, st->logins_ok);
+	TEST_ASSERT_EQUAL_UINT32(0U, auth_web_session_count(&g_auth));
+}
+
+/*
+ * The bootstrap signal that rest.c turns into its "commission this box" 503.
+ * It is a global property — a box with NO credential at all — never a
+ * per-account one.
+ */
+static void test_virgin_box_still_reports_unprovisioned(void)
+{
+	auth_web_grant_t g;
+
+	fixture(true);
+	TEST_ASSERT_EQUAL_INT(0, auth_web_user_add(&g_auth, "admin",
+						   (uint8_t)WEB_ROLE_ADMIN,
+						   (uint16_t)CFG_ID_SEC_ADMIN_PW));
+	TEST_ASSERT_EQUAL_INT(1, auth_web_user_add(&g_auth, "operator",
+						   (uint8_t)WEB_ROLE_OPERATOR,
+						   0U));
+	TEST_ASSERT_EQUAL_INT(0, auth_web_reload(&g_auth));
+
+	/* No remote wired: a known name on a virgin box asks to be commissioned. */
+	TEST_ASSERT_EQUAL_INT(-ENOENT, auth_web_login(&g_auth, "admin", 5U,
+						      (const uint8_t *)PW,
+						      PW_LEN, 0U, &g));
+
+	/*
+	 * With a remote wired it STILL does, once the authority has refused.
+	 * The production glue always wires one, so a condition that tested for
+	 * the hook would have deleted this message from every shipped image.
+	 */
+	TEST_ASSERT_EQUAL_INT(0, auth_web_set_remote(&g_auth, remote_stub, NULL));
+	remote_reset(-EHOSTUNREACH, 0U);
+	TEST_ASSERT_EQUAL_INT(-ENOENT, auth_web_login(&g_auth, "admin", 5U,
+						      (const uint8_t *)PW,
+						      PW_LEN, 0U, &g));
+	TEST_ASSERT_EQUAL_UINT32(1U, g_remote.calls);
+
+	/* An UNKNOWN name gets nothing but -EACCES even here, so the signal
+	 * cannot be probed with arbitrary names. */
+	remote_reset(-EHOSTUNREACH, 0U);
+	TEST_ASSERT_EQUAL_INT(-EACCES, auth_web_login(&g_auth, "probe", 5U,
+						      (const uint8_t *)PW,
+						      PW_LEN, 0U, &g));
+
+	/* Commission ONE account and the global signal goes away for the other. */
+	TEST_ASSERT_EQUAL_INT(0, auth_web_set_password(&g_auth, 0U,
+						       (const uint8_t *)PW,
+						       PW_LEN));
+	remote_reset(-EHOSTUNREACH, 0U);
+	TEST_ASSERT_EQUAL_INT(-EACCES, auth_web_login(&g_auth, "operator", 8U,
+						      (const uint8_t *)PW,
+						      PW_LEN, 0U, &g));
+}
+
+/* An unwired hook must leave the pre-hook behaviour exactly as it was. */
+static void test_unwired_hook_changes_nothing(void)
+{
+	auth_web_grant_t g;
+
+	fixture(true);
+	provision_admin();
+	/* Explicitly wired to NULL — the documented "no authority" state. */
+	TEST_ASSERT_EQUAL_INT(0, auth_web_set_remote(&g_auth, NULL, NULL));
+
+	/* Correct password still opens a session with the local role. */
+	TEST_ASSERT_EQUAL_INT(0, auth_web_login(&g_auth, "admin", 5U,
+						(const uint8_t *)PW, PW_LEN, 0U,
+						&g));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)WEB_ROLE_ADMIN, g.role);
+
+	/* Wrong password and unknown user are still -EACCES, and nothing is
+	 * consulted. */
+	TEST_ASSERT_EQUAL_INT(-EACCES, auth_web_login(&g_auth, "admin", 5U,
+						      (const uint8_t *)"nope", 4U,
+						      0U, &g));
+	TEST_ASSERT_EQUAL_INT(-EACCES, auth_web_login(&g_auth, "ghost", 5U,
+						      (const uint8_t *)PW, PW_LEN,
+						      0U, &g));
+	TEST_ASSERT_EQUAL_UINT32(0U, auth_web_stats(&g_auth)->remote_consults);
+
+	/* The local throttle still escalates to a hard lockout on its own. */
+	{
+		unsigned int i;
+
+		for (i = 0U; i < AUTH_WEB_LOCK_TRIES + 2U; i++) {
+			(void)auth_web_login(&g_auth, "admin", 5U,
+					     (const uint8_t *)"nope", 4U, 0U, &g);
+		}
+		TEST_ASSERT_EQUAL_INT(-EBUSY, auth_web_login(&g_auth, "admin", 5U,
+							     (const uint8_t *)PW,
+							     PW_LEN, 0U, &g));
+	}
+}
+
+/*
+ * A throttled account must not reach the network: the whole point of testing
+ * the lockout first is that a brute-force attempt costs the AAA server nothing.
+ */
+static void test_throttled_account_never_reaches_the_authority(void)
+{
+	auth_web_grant_t g;
+	unsigned int i;
+
+	fixture(true);
+	provision_admin();
+	TEST_ASSERT_EQUAL_INT(0, auth_web_set_remote(&g_auth, remote_stub, NULL));
+	remote_reset(-EACCES, 0U);
+
+	for (i = 0U; i < AUTH_WEB_LOCK_TRIES + 2U; i++) {
+		(void)auth_web_login(&g_auth, "admin", 5U,
+				     (const uint8_t *)"nope", 4U, 0U, &g);
+	}
+	TEST_ASSERT_EQUAL_INT(-EBUSY, auth_web_login(&g_auth, "admin", 5U,
+						     (const uint8_t *)"nope", 4U,
+						     0U, &g));
+	{
+		unsigned int before = g_remote.calls;
+
+		TEST_ASSERT_EQUAL_INT(-EBUSY,
+				      auth_web_login(&g_auth, "admin", 5U,
+						     (const uint8_t *)"nope", 4U,
+						     0U, &g));
+		TEST_ASSERT_EQUAL_UINT32(before, g_remote.calls);
+	}
+}
+
+/*
+ * A password carrying an embedded NUL must be refused, not truncated at it:
+ * the hook and sts_aaa_check() below it speak C strings, so "pw\0junk" would
+ * otherwise authenticate as "pw".
+ */
+static void test_embedded_nul_password_is_refused(void)
+{
+	static const uint8_t split_pw[] = { 'p', 'w', 0x00, 'j', 'u', 'n', 'k' };
+	auth_web_grant_t g;
+
+	fixture(true);
+	provision_admin();
+	TEST_ASSERT_EQUAL_INT(0, auth_web_set_remote(&g_auth, remote_stub, NULL));
+	remote_reset(0, (uint8_t)WEB_ROLE_ADMIN); /* would accept anything */
+
+	TEST_ASSERT_EQUAL_INT(-EACCES, auth_web_login(&g_auth, "alice", 5U,
+						      split_pw, sizeof(split_pw),
+						      0U, &g));
+	TEST_ASSERT_EQUAL_UINT32(0U, g_remote.calls);
+	TEST_ASSERT_EQUAL_UINT32(0U, auth_web_session_count(&g_auth));
+}
+
+/* A factory reset must leave no credential and no session behind. */
+static void test_wipe_erases_credentials_and_sessions(void)
+{
+	auth_web_grant_t g;
+	const auth_web_user_t *u;
+	size_t i;
+
+	fixture(true);
+	provision_admin();
+	TEST_ASSERT_EQUAL_INT(0, auth_web_login(&g_auth, "admin", 5U,
+						(const uint8_t *)PW, PW_LEN, 0U,
+						&g));
+	TEST_ASSERT_EQUAL_UINT32(1U, auth_web_session_count(&g_auth));
+
+	auth_web_wipe(&g_auth);
+
+	TEST_ASSERT_EQUAL_UINT32(0U, auth_web_session_count(&g_auth));
+	u = auth_web_user_at(&g_auth, 0U);
+	TEST_ASSERT_NOT_NULL(u);           /* the account itself survives */
+	TEST_ASSERT_EQUAL_STRING("admin", u->name);
+	TEST_ASSERT_FALSE(u->has_blob);
+	for (i = 0U; i < AUTH_WEB_BLOB_LEN; i++) {
+		TEST_ASSERT_EQUAL_UINT8(0U, u->blob[i]);
+	}
+	/* No stale token bytes anywhere in the session table. */
+	for (i = 0U; i < AUTH_WEB_SESSIONS; i++) {
+		TEST_ASSERT_EQUAL_UINT8(0U, (uint8_t)g_auth.sess[i].token[0]);
+		TEST_ASSERT_EQUAL_UINT8(0U, (uint8_t)g_auth.sess[i].csrf[0]);
+	}
+	/* And the credential really is gone: the old password no longer works. */
+	TEST_ASSERT_EQUAL_INT(-ENOENT, auth_web_login(&g_auth, "admin", 5U,
+						      (const uint8_t *)PW,
+						      PW_LEN, 0U, &g));
+	auth_web_wipe(&g_auth); /* idempotent */
+	auth_web_wipe(NULL);    /* and NULL-safe */
+}
+
+/* ------------------------------------------------------------------------- */
 
 int main(void)
 {
@@ -835,6 +1261,17 @@ int main(void)
 	RUN_TEST(test_auth_required_policy);
 	RUN_TEST(test_ram_only_build);
 	RUN_TEST(test_rand_failure);
+
+	RUN_TEST(test_remote_consulted_only_on_local_miss);
+	RUN_TEST(test_remote_unreachable_denies);
+	RUN_TEST(test_remote_role_is_clamped);
+	RUN_TEST(test_remote_session_has_no_local_account);
+	RUN_TEST(test_wrong_password_and_unknown_user_are_identical);
+	RUN_TEST(test_virgin_box_still_reports_unprovisioned);
+	RUN_TEST(test_unwired_hook_changes_nothing);
+	RUN_TEST(test_throttled_account_never_reaches_the_authority);
+	RUN_TEST(test_embedded_nul_password_is_refused);
+	RUN_TEST(test_wipe_erases_credentials_and_sessions);
 
 	return UNITY_END();
 }

@@ -186,7 +186,14 @@ static void test_schema_group_census(void)
 		{ CFG_G_NET, 9 },   { CFG_G_NTP, 7 },  { CFG_G_NTS, 4 },
 		{ CFG_G_PTP, 10 },  { CFG_G_GNSS, 7 }, { CFG_G_TIMING, 8 },
 		{ CFG_G_POWER, 5 }, { CFG_G_UI, 3 },   { CFG_G_LOG, 5 },
-		{ CFG_G_SEC, 61 },  { CFG_G_SNMP, 4 }, { CFG_G_CAL, 13 },
+		/* 61 -> 63: sec.operator.pw (0x0A3E) and sec.viewer.pw (0x0A3F)
+		 * gave the operator and viewer roles a persistent credential of
+		 * their own, in the same envelope as sec.admin.pw. Purely
+		 * additive — no key changed type, moved or vanished — so
+		 * CFG_SCHEMA_VERSION does not move and no migration is owed:
+		 * an export written by an older image still imports, and a new
+		 * export read by an older image loses only the two new keys. */
+		{ CFG_G_SEC, 63 },  { CFG_G_SNMP, 4 }, { CFG_G_CAL, 13 },
 	};
 	size_t i;
 	uint16_t total = 0U;
@@ -204,8 +211,8 @@ static void test_schema_group_census(void)
 		total = (uint16_t)(total + n);
 	}
 
-	TEST_ASSERT_EQUAL_size_t(136U, cfg_key_count());
-	TEST_ASSERT_EQUAL_UINT16(136U, total); /* no key outside a known group */
+	TEST_ASSERT_EQUAL_size_t(138U, cfg_key_count());
+	TEST_ASSERT_EQUAL_UINT16(138U, total); /* no key outside a known group */
 }
 
 static void test_schema_is_sorted_and_well_formed(void)

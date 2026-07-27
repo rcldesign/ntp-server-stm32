@@ -39,6 +39,15 @@ uint8_t mcp__port_err(int rc);
 /** Log to the wired ring under LOGR_SUB_MCP; a no-op when no ring is wired. */
 void mcp__log(mcp_ctx_t *c, uint8_t level, const char *msg);
 
+/**
+ * Wipe a buffer that held key material.
+ *
+ * Through a volatile pointer, matching core/mp's wipe(): a plain memset() over a
+ * buffer that is about to leave scope is a dead store the compiler is entitled
+ * to delete — which is exactly how a password survives in a stack frame.
+ */
+void mcp__wipe(void *p, size_t n);
+
 /* --------------------------------------------------------------- mcp_dfu.c */
 
 /** Handle FW_INFO/BEGIN/DATA/END/CONFIRM/REVERT. Same return as mcp__reply(). */

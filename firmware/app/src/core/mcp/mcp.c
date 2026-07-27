@@ -349,6 +349,47 @@ static bool cmd_mutating(uint8_t cmd)
 	}
 }
 
+/*
+ * The role a command needs. MCP_ROLE_NONE means "no role floor" — the command
+ * is either read-only or already gated by cmd_mutating() alone.
+ *
+ * The destructive family sits above the merely-mutating one: staging and
+ * confirming firmware, moving the whole config tree in or out, and wiping the
+ * unit are the operations that can end a deployment, so they need the box's
+ * administrator rather than whoever a directory called an operator.
+ *
+ * Every command named here is also in cmd_mutating(), and the two sets are
+ * exactly equal — which is what lets handle_frame() apply the floor inside the
+ * one gate it already has. CFG_EXPORT is deliberately NOT here: it mutates
+ * nothing, so it never reaches that gate, and its one privileged aspect (the
+ * secrets flag) is checked in h_cfg_export() where it can actually be reached.
+ *
+ * A local-credential session is MCP_ROLE_ADMIN, so nothing an operator could do
+ * over this port before can be refused now — the floor only bites a session a
+ * remote authority mapped to something less.
+ */
+static uint8_t cmd_role_floor(uint8_t cmd)
+{
+	switch (cmd) {
+	case MCP_CMD_FACTORY_RESET:
+	case MCP_CMD_CFG_IMPORT:
+	case MCP_CMD_FW_BEGIN:
+	case MCP_CMD_FW_DATA:
+	case MCP_CMD_FW_END:
+	case MCP_CMD_FW_CONFIRM:
+	case MCP_CMD_FW_REVERT:
+		return (uint8_t)MCP_ROLE_ADMIN;
+	case MCP_CMD_REBOOT:
+	case MCP_CMD_CFG_SET:
+	case MCP_CMD_CFG_COMMIT:
+	case MCP_CMD_CFG_REVERT:
+	case MCP_CMD_LOG_LEVEL:
+		return (uint8_t)MCP_ROLE_OPERATOR;
+	default:
+		return (uint8_t)MCP_ROLE_NONE;
+	}
+}
+
 static bool auth_required(const mcp_ctx_t *c)
 {
 	bool req = true;
@@ -370,6 +411,23 @@ static bool session_ok(const mcp_ctx_t *c)
 	return c->authed || !auth_required(c);
 }
 
+/*
+ * Does the current session clear @p cmd's role floor?
+ *
+ * Only asked of an authenticated session. A build with auth NOT required has no
+ * session and therefore no role, and gating it on one would lock every command
+ * out of exactly the bring-up and unit-test configurations mcp.h says that mode
+ * is for — so the floor applies to sessions, not to the policy-off case, which
+ * session_ok() has already let through.
+ */
+static bool role_ok(const mcp_ctx_t *c, uint8_t cmd)
+{
+	if (!c->authed) {
+		return true;
+	}
+	return c->auth_role >= cmd_role_floor(cmd);
+}
+
 static uint32_t session_seconds(const mcp_ctx_t *c)
 {
 	uint64_t s = MCP_DEFAULT_SESSION_S;
@@ -378,6 +436,17 @@ static uint32_t session_seconds(const mcp_ctx_t *c)
 		(void)cfg_get_u64(c->w.cfg, (uint16_t)CFG_ID_SEC_SESSION_S, &s);
 	}
 	return (uint32_t)s;
+}
+
+void mcp__wipe(void *p, size_t n)
+{
+	volatile uint8_t *q = (volatile uint8_t *)p;
+
+	while (n != 0U) {
+		*q = 0U;
+		q++;
+		n--;
+	}
 }
 
 /* Constant-time equality: the comparison itself must not leak how much of a
@@ -495,12 +564,72 @@ static void auth_penalise(mcp_ctx_t *c)
 	}
 }
 
+/**
+ * Refer a credential the local blob could not accept to the remote authority.
+ *
+ * Called with the cfg critical section HELD; drops it across the call and
+ * retakes it, for the reason mcp.h spells out — sts_aaa_check() blocks for a
+ * DNS lookup plus up to three network round trips, and holding the config mutex
+ * for that would stall the shell, the panel UI and the web plane behind one
+ * console login attempt. Nothing in mcp_ctx_t is live across the window: the
+ * engine is single-threaded (one glue thread drives mcp_input() and mcp_tick()),
+ * so releasing the CONFIG lock lets other threads touch the config tree and
+ * nothing else. The blob has already been read and wiped by this point.
+ *
+ * @retval 0        Accepted; @p out_role holds a clamped MCP_ROLE_* value.
+ * @retval -EBUSY   The authority holds this principal in a lockout.
+ * @retval -EACCES  Refused. Every other code the delegate can return lands
+ *                  here, -EHOSTUNREACH included.
+ */
+static int auth_remote(mcp_ctx_t *c, const uint8_t *pw, size_t pw_len,
+		       uint8_t *out_role)
+{
+	char secret[MCP_PW_MAX + 1U];
+	const char *name;
+	uint8_t role = (uint8_t)MCP_ROLE_NONE;
+	int rc;
+
+	/*
+	 * The delegate speaks C strings, and so does sts_aaa_check() beneath it.
+	 * A password carrying an embedded NUL would be truncated at it, and
+	 * "pw\0junk" would authenticate as "pw". Refuse rather than truncate.
+	 */
+	if (memchr(pw, 0, pw_len) != NULL) {
+		return -EACCES;
+	}
+	memcpy(secret, pw, pw_len);
+	secret[pw_len] = '\0';
+
+	name = (c->w.auth_user[0] != '\0') ? c->w.auth_user
+					   : MCP_AUTH_USER_DEFAULT;
+
+	cfg_leave(c);
+	rc = c->w.auth_remote_cb(c->w.auth_remote_user, name, secret, &role);
+	cfg_enter(c);
+	mcp__wipe(secret, sizeof(secret));
+
+	if (rc != 0) {
+		return (rc == -EBUSY) ? -EBUSY : -EACCES;
+	}
+	/* An authority that accepts without naming a usable role gets the LEAST
+	 * privilege, not the most. */
+	if ((role == (uint8_t)MCP_ROLE_NONE) ||
+	    (role > (uint8_t)MCP_ROLE_ADMIN)) {
+		role = (uint8_t)MCP_ROLE_VIEWER;
+	}
+	*out_role = role;
+	return 0;
+}
+
 static int h_auth(mcp_ctx_t *c, const mcp_frame_t *f)
 {
 	uint8_t blob[MCP_PW_BLOB_LEN];
 	uint8_t mac[MCP_PW_MAC_LEN];
 	uint8_t *p = mcp__rsp_buf(c);
 	size_t blob_len = 0U;
+	uint8_t role = (uint8_t)MCP_ROLE_NONE;
+	bool by_remote = false;
+	int rrc;
 
 	if ((c->w.cfg == NULL) || (c->w.crypto == NULL) ||
 	    (c->w.crypto->hmac_sha256 == NULL)) {
@@ -529,34 +658,67 @@ static int h_auth(mcp_ctx_t *c, const mcp_frame_t *f)
 		return mcp__reply_status(c, f->cmd, f->seq,
 					 (uint8_t)MCP_ERR_INTERNAL);
 	}
-	if (blob_len != MCP_PW_BLOB_LEN) {
-		/*
-		 * No credential provisioned. Refusing rather than falling open
-		 * is the whole point: a box with auth required and no password
-		 * is locked, not wide open.
-		 *
-		 * The answer is deliberately indistinguishable from a wrong
-		 * password, and carries the same penalty. A distinct status here
-		 * told an unauthenticated peer whether the box had ever been
-		 * commissioned, and — because it returned before auth_penalise()
-		 * — did so as fast as the link allowed. Provisioning state is
-		 * reported to the local shell (`sts sec`) and to an
-		 * authenticated session, not to the world.
-		 */
-		c->stats.auth_fail++;
-		auth_penalise(c);
-		mcp__log(c, (uint8_t)LOGR_WARN,
-			 "auth: rejected (no credential provisioned)");
-		return mcp__reply_status(c, f->cmd, f->seq,
-					 (uint8_t)MCP_ERR_AUTH);
+	if (blob_len == MCP_PW_BLOB_LEN) {
+		if (c->w.crypto->hmac_sha256(c->w.crypto->ctx, blob,
+					     MCP_PW_SALT_LEN, f->payload,
+					     f->len, mac) != 0) {
+			mcp__wipe(blob, sizeof(blob));
+			return mcp__reply_status(c, f->cmd, f->seq,
+						 (uint8_t)MCP_ERR_INTERNAL);
+		}
+		if (ct_eq(mac, &blob[MCP_PW_SALT_LEN], MCP_PW_MAC_LEN)) {
+			/* The local blob IS this box's administrator. */
+			role = (uint8_t)MCP_ROLE_ADMIN;
+		}
+		mcp__wipe(mac, sizeof(mac));
+	}
+	/*
+	 * Wiped before the remote call, which releases the config lock: nothing
+	 * that ran during that window can find the credential on this stack.
+	 */
+	mcp__wipe(blob, sizeof(blob));
+
+	/*
+	 * The remote authority sees only what the local blob could not accept —
+	 * no credential provisioned, or a mismatch. A local success never leaves
+	 * the box.
+	 */
+	if ((role == (uint8_t)MCP_ROLE_NONE) &&
+	    (c->w.auth_remote_cb != NULL)) {
+		rrc = auth_remote(c, f->payload, f->len, &role);
+		if (rrc == -EBUSY) {
+			/*
+			 * The authority is holding this principal in a lockout.
+			 * Reported as ERR_BUSY, the same code the local throttle
+			 * uses, so the two are one answer — and it costs no
+			 * local penalty, because no password was tested.
+			 */
+			c->stats.auth_throttled++;
+			c->stats.auth_remote_denied++;
+			mcp__log(c, (uint8_t)LOGR_WARN,
+				 "auth: refused, authority holds a lockout");
+			return mcp__reply_status(c, f->cmd, f->seq,
+						 (uint8_t)MCP_ERR_BUSY);
+		}
+		if (rrc != 0) {
+			c->stats.auth_remote_denied++;
+		} else {
+			by_remote = true;
+			c->stats.auth_remote_ok++;
+		}
 	}
 
-	if (c->w.crypto->hmac_sha256(c->w.crypto->ctx, blob, MCP_PW_SALT_LEN,
-				     f->payload, f->len, mac) != 0) {
-		return mcp__reply_status(c, f->cmd, f->seq,
-					 (uint8_t)MCP_ERR_INTERNAL);
-	}
-	if (!ct_eq(mac, &blob[MCP_PW_SALT_LEN], MCP_PW_MAC_LEN)) {
+	if (role == (uint8_t)MCP_ROLE_NONE) {
+		/*
+		 * One refusal for every reason: a wrong password, a box that was
+		 * never commissioned, and an authority that could not be
+		 * reached. A distinct status for "no credential provisioned"
+		 * told an unauthenticated peer whether the box had ever been
+		 * commissioned, and — because it returned before
+		 * auth_penalise() — did so as fast as the link allowed.
+		 * Provisioning state is reported to the local shell (`sts sec`)
+		 * and to an authenticated session, not to the world.
+		 */
 		c->stats.auth_fail++;
 		auth_penalise(c);
 		mcp__log(c, (uint8_t)LOGR_WARN, "auth: rejected");
@@ -565,11 +727,14 @@ static int h_auth(mcp_ctx_t *c, const mcp_frame_t *f)
 	}
 
 	c->authed = true;
+	c->auth_role = role;
 	c->last_activity_ms = c->now_ms;
 	c->auth_fails = 0U;
 	c->auth_lock_until_ms = 0U;
 	c->stats.auth_ok++;
-	mcp__log(c, (uint8_t)LOGR_NOTICE, "auth: session granted");
+	mcp__log(c, (uint8_t)LOGR_NOTICE,
+		 by_remote ? "auth: session granted (remote authority)"
+			   : "auth: session granted");
 
 	p[0] = (uint8_t)MCP_OK;
 	p[1] = 1U;
@@ -859,9 +1024,17 @@ static int h_cfg_export(mcp_ctx_t *c, const mcp_frame_t *f)
 	flags = f->payload[4];
 	secrets = (flags & 0x01U) != 0U;
 
-	if (secrets && !c->authed) {
-		/* A real session, not session_ok(): a box with auth disabled
-		 * must not hand out secrets. */
+	if (secrets && (!c->authed ||
+			(c->auth_role < (uint8_t)MCP_ROLE_ADMIN))) {
+		/*
+		 * A real session, not session_ok(): a box with auth disabled
+		 * must not hand out secrets. And an ADMIN one at that — an
+		 * export with this flag carries every CFG_F_SECRET value on the
+		 * box, so it is a credential read, not a config read, and a
+		 * directory that mapped somebody to operator did not authorise
+		 * it. A local-credential session is admin, so the console's own
+		 * administrator is unaffected.
+		 */
 		return mcp__reply_status(c, f->cmd, f->seq,
 					 (uint8_t)MCP_ERR_AUTH);
 	}
@@ -1046,8 +1219,10 @@ static int h_factory_reset(mcp_ctx_t *c, const mcp_frame_t *f)
 	c->exp_active = false;
 	c->imp_active = false;
 	/* The credential this session authenticated against no longer
-	 * exists — the session must not outlive it. */
+	 * exists — the session must not outlive it, and neither may the role
+	 * it was granted. */
 	c->authed = false;
+	c->auth_role = (uint8_t)MCP_ROLE_NONE;
 	mcp__log(c, (uint8_t)LOGR_ALERT, "cfg: factory reset");
 
 	return mcp__reply_status(c, f->cmd, f->seq, cfg_err(rc));
@@ -1479,6 +1654,23 @@ static void handle_frame(mcp_ctx_t *c, const uint8_t *buf, size_t n)
 						(uint8_t)MCP_ERR_AUTH);
 			return;
 		}
+
+		/*
+		 * Authenticated, but perhaps not privileged enough. Refused with
+		 * ERR_AUTH rather than a code of its own: the session already
+		 * knows it is authenticated, so a distinct status would only tell
+		 * it which commands sit above its role — and the honest place to
+		 * learn that is documentation, not probing. The counter is
+		 * separate so an operator can see the difference in `diag`.
+		 */
+		if (!role_ok(c, f.cmd)) {
+			c->stats.auth_role_denied++;
+			mcp__log(c, (uint8_t)LOGR_WARN,
+				 "auth: command refused, session role too low");
+			(void)mcp__reply_status(c, f.cmd, f.seq,
+						(uint8_t)MCP_ERR_AUTH);
+			return;
+		}
 	}
 
 	c->last_activity_ms = c->now_ms;
@@ -1615,6 +1807,7 @@ void mcp_reset_session(mcp_ctx_t *c)
 	}
 
 	c->authed = false;
+	c->auth_role = (uint8_t)MCP_ROLE_NONE;
 	c->telem_mask = 0U;
 	c->telem_rate = 0U;
 	c->log_follow = false;
@@ -1697,6 +1890,7 @@ int mcp_tick(mcp_ctx_t *c, uint64_t now_ms)
 
 		if ((now_ms - c->last_activity_ms) >= limit) {
 			c->authed = false;
+			c->auth_role = (uint8_t)MCP_ROLE_NONE;
 			c->stats.session_expired++;
 			mcp__log(c, (uint8_t)LOGR_NOTICE,
 				 "auth: session expired");
@@ -1725,6 +1919,14 @@ int mcp_tick(mcp_ctx_t *c, uint64_t now_ms)
 bool mcp_authenticated(const mcp_ctx_t *c)
 {
 	return (c != NULL) && c->authed;
+}
+
+uint8_t mcp_session_role(const mcp_ctx_t *c)
+{
+	if ((c == NULL) || !c->authed) {
+		return (uint8_t)MCP_ROLE_NONE;
+	}
+	return c->auth_role;
 }
 
 const mcp_stats_t *mcp_stats(const mcp_ctx_t *c)

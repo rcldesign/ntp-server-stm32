@@ -174,6 +174,7 @@ void sts_ntske_stats(sts_ntske_stats_t *out)
 #include <mbedtls/ecp.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/pk.h>
+#include <mbedtls/platform_util.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 #if !defined(MBEDTLS_ECP_C)
@@ -679,6 +680,16 @@ done:
 	ke.cfg.export_ctx = NULL;
 	mbedtls_ssl_free(&ssl);
 	(void)zsock_close(fd);
+	/*
+	 * req_buf/rsp_buf are file-scope statics shared by every connection, and
+	 * rsp_buf has just carried this client's freshly-sealed NTS cookies.
+	 * Leaving them populated means the last negotiation's material sits in
+	 * .bss indefinitely — until the next client happens to overwrite it —
+	 * for no benefit at all, since both are refilled from scratch on the
+	 * next connection.
+	 */
+	mbedtls_platform_zeroize(req_buf, sizeof(req_buf));
+	mbedtls_platform_zeroize(rsp_buf, sizeof(rsp_buf));
 	conn_alive();
 }
 

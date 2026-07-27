@@ -65,6 +65,7 @@
  * so CONFIG_STS1000_MP=n and CONFIG_STS1000_CONSOLE=n both still link.
  */
 #include "console/mp_glue.h"
+#include "zephyr/platform/gnss_tee.h"
 #include "zephyr/platform/platform.h"
 #include "zephyr/sts_app.h"
 
@@ -490,61 +491,23 @@ bool sts_gnss_cfg_ack(void)
  * capture, so a PPS edge inside that window is still timestamped by the timer
  * at the edge — the delay shifts when the capture register is read, not what it
  * recorded. Nothing on this path takes a mutex, allocates, or waits.
+ *
+ * The classifier itself is platform/gnss_tee.h, Zephyr-free so tests/host can
+ * drive it (suite `gnss_tee`) — the arrangement net/sts_ppscorr.h uses, for the
+ * same reason: a misclassified run is invisible until someone cannot parse a
+ * capture. This file supplies only the sink and the parser-state evidence.
  */
-#define GNSS_TEE_STAGE 64U
+static gnss_tee_t gtee;
 
-static struct {
-	uint8_t ch;   /**< MP_CH_NMEA or MP_CH_UBX; meaningful only while len > 0 */
-	uint8_t len;
-	bool in_nmea; /**< inside a '$'..LF sentence */
-	uint8_t buf[GNSS_TEE_STAGE];
-} gtee;
-
-static void gnss_tee_flush(void)
+/** Route a classified run onto its MP channel. */
+static void gnss_tee_sink(void *user, bool nmea, const uint8_t *data, size_t len)
 {
-	if (gtee.len == 0U) {
-		return;
-	}
-	if (gtee.ch == (uint8_t)MP_CH_NMEA) {
-		sts_mp_tee_nmea(gtee.buf, gtee.len);
+	ARG_UNUSED(user);
+
+	if (nmea) {
+		sts_mp_tee_nmea(data, len);
 	} else {
-		sts_mp_tee_ubx(gtee.buf, gtee.len);
-	}
-	gtee.len = 0U;
-}
-
-/** Drop whatever is staged. Used wherever the byte stream loses continuity. */
-static void gnss_tee_reset(void)
-{
-	gtee.len = 0U;
-	gtee.in_nmea = false;
-}
-
-static void gnss_tee_byte(uint8_t b, bool hunting)
-{
-	uint8_t ch;
-
-	if (gtee.in_nmea) {
-		ch = (uint8_t)MP_CH_NMEA;
-		if (b == (uint8_t)'\n') {
-			gtee.in_nmea = false;
-		}
-	} else if (hunting && (b == (uint8_t)'$')) {
-		gtee.in_nmea = true;
-		ch = (uint8_t)MP_CH_NMEA;
-	} else {
-		ch = (uint8_t)MP_CH_UBX;
-	}
-
-	/* A run belongs to one channel: close the old one before switching. */
-	if ((gtee.len != 0U) && (gtee.ch != ch)) {
-		gnss_tee_flush();
-	}
-	gtee.ch = ch;
-	gtee.buf[gtee.len] = b;
-	gtee.len++;
-	if (gtee.len >= (uint8_t)GNSS_TEE_STAGE) {
-		gnss_tee_flush();
+		sts_mp_tee_ubx(data, len);
 	}
 }
 
@@ -602,7 +565,8 @@ static void gnss_drain_rx(uint32_t now_ms)
 		if (tee_on) {
 			/* Before the parser consumes it — the classifier needs the
 			 * state the byte is about to change. */
-			gnss_tee_byte(b, parser.state == (uint8_t)UBX_PS_SYNC1);
+			gnss_tee_byte(&gtee, b,
+				      parser.state == (uint8_t)UBX_PS_SYNC1);
 		}
 
 		if (ubx_parse_byte(&parser, b) != 1) {
@@ -636,7 +600,7 @@ static void gnss_drain_rx(uint32_t now_ms)
 	 * It costs a compare when nothing is staged, and when something is the
 	 * tee's own arming test drops it.
 	 */
-	gnss_tee_flush();
+	gnss_tee_flush(&gtee);
 }
 
 /* ========================================================================= */
@@ -813,6 +777,10 @@ int sts_gnss_start(void)
 		return rc;
 	}
 
+	/* Bind the maintenance tees' run classifier. It stays inert until a
+	 * channel is armed, so this costs nothing on a board nobody is servicing. */
+	gnss_tee_init(&gtee, gnss_tee_sink, NULL);
+
 	if (gpio_is_ready_dt(&ant_off_mon)) {
 		(void)gpio_pin_configure_dt(&ant_off_mon, GPIO_INPUT);
 	}
@@ -869,7 +837,7 @@ int sts_gnss_notify_reset(uint32_t now_ms)
 	 * the tee's sentence/frame classifier. */
 	ubx_parser_reset(&parser);
 	ring_reset(&rx_ring);
-	gnss_tee_reset();
+	gnss_tee_reset(&gtee);
 	gs.have_pvt = false;
 
 	return gnssmgr_notify_reset(&mgr, now_ms);
@@ -1096,7 +1064,7 @@ int sts_gnss_uart_suspend(void)
 	gs.fw_mode = true;
 	ubx_parser_reset(&parser);
 	ring_reset(&rx_ring);
-	gnss_tee_reset();
+	gnss_tee_reset(&gtee);
 	gs.have_pvt = false;
 
 	return gnssmgr_fw_enter(&mgr);
@@ -1114,7 +1082,7 @@ int sts_gnss_uart_resume(void)
 	/* Anything in flight belongs to the loader session, not to UBX. */
 	ubx_parser_reset(&parser);
 	ring_reset(&rx_ring);
-	gnss_tee_reset();
+	gnss_tee_reset(&gtee);
 	gs.have_pvt = false;
 	gs.fw_mode = false;
 

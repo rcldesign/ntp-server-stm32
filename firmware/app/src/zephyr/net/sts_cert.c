@@ -24,6 +24,13 @@
  * wrapped by the ATECC608B per spec §9.1/§9.6), and the sealing layer does not
  * exist in the tree yet. See the TODO below and the report.
  *
+ * There is exactly ONE place that intent is reversed: sts_cert_reset(), the
+ * factory-reset path (spec §9.6 secure-erase). Persisting the key is right for
+ * every boot of a deployed unit and wrong at the moment the unit is wiped, so
+ * that function deletes both PEM files, the ACME account key, the Zephyr
+ * credential entries and the in-RAM copies. Nothing else on any normal path
+ * removes them.
+ *
  * ---------------------------------------------------------------------------
  * ACME
  * ---------------------------------------------------------------------------
@@ -47,11 +54,13 @@
 #include <mbedtls/entropy.h>
 #include <mbedtls/oid.h>
 #include <mbedtls/pk.h>
+#include <mbedtls/platform_util.h>
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/x509_csr.h>
 
 #include "cfg/cfg.h"
 #include "net/sts_net.h"
+#include "net/sts_secops.h"
 #include "net/sts_web.h"
 #include "storage/sts_store.h"
 #include "web/web.h"
@@ -573,6 +582,66 @@ int sts_cert_init(void)
 	rc = -ENOTSUP;
 #endif
 	k_mutex_unlock(&lock);
+	return rc;
+}
+
+int sts_cert_reset(void)
+{
+	int rc = 0;
+	int frc;
+
+	k_mutex_lock(&lock, K_FOREVER);
+
+	/*
+	 * Order matters. The credential store goes first, so nothing can pick up
+	 * the old key for a new TLS session while the files are being unlinked;
+	 * then the RAM copies, so the key is not sitting in .bss waiting to be
+	 * read out; then the files.
+	 */
+	(void)tls_credential_delete(STS_WEB_SEC_TAG,
+				    TLS_CREDENTIAL_SERVER_CERTIFICATE);
+	(void)tls_credential_delete(STS_WEB_SEC_TAG, TLS_CREDENTIAL_PRIVATE_KEY);
+
+	/* The WHOLE buffer, not just the used prefix: a shorter PEM written over
+	 * a longer one would otherwise leave the tail of the old key behind. */
+	mbedtls_platform_zeroize(key_pem, sizeof(key_pem));
+	mbedtls_platform_zeroize(crt_pem, sizeof(crt_pem));
+	key_pem_len = 0U;
+	crt_pem_len = 0U;
+
+	memset(&st, 0, sizeof(st));
+	st.acme_state = (uint8_t)REST_ACME_DISABLED;
+
+	if (sts_fs_ready()) {
+		/* -ENOENT is the desired end state, not a failure. */
+		frc = fs_unlink(STS_CERT_KEY_PATH);
+		if (frc != 0 && frc != -ENOENT) {
+			LOG_ERR("unlink %s: %d", STS_CERT_KEY_PATH, frc);
+			rc = -EIO;
+		}
+		frc = fs_unlink(STS_CERT_CRT_PATH);
+		if (frc != 0 && frc != -ENOENT) {
+			LOG_ERR("unlink %s: %d", STS_CERT_CRT_PATH, frc);
+			rc = -EIO;
+		}
+		/* The ACME account key identifies this box to a CA, so it is
+		 * key material like any other even when ACME is compiled out. */
+		frc = fs_unlink(STS_CERT_ACME_KEY_PATH);
+		if (frc != 0 && frc != -ENOENT) {
+			LOG_ERR("unlink %s: %d", STS_CERT_ACME_KEY_PATH, frc);
+			rc = -EIO;
+		}
+	}
+	/*
+	 * A dead /lfs is NOT reported as a failure: there is then nothing
+	 * persisted to erase, and the RAM copy and the credential store — the
+	 * only places the key could still be — have already been cleared.
+	 */
+
+	k_mutex_unlock(&lock);
+
+	LOG_WRN("TLS server credential erased; HTTPS has no certificate until "
+		"the next boot regenerates one");
 	return rc;
 }
 

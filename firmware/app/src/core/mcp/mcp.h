@@ -53,6 +53,36 @@
  * required. That configuration is for unit tests and minimal builds; the
  * production wiring always passes a cfg_ctx_t.
  *
+ * Remote authorities, and the role that comes back
+ * ------------------------------------------------
+ * The local blob is not the only authority. mcp_wiring_t::auth_remote_cb is an
+ * optional delegate the glue wires to sts_aaa_check(), so RADIUS / TACACS+ /
+ * LDAP reach this plane exactly as they reach the web plane and the maintenance
+ * plane, sharing one lockout table and one role mapping instead of three. NULL
+ * falls back to the local blob alone — byte-for-byte the pre-delegate
+ * behaviour, which is what makes "an unwired hook changes nothing" testable.
+ *
+ * The delegate is consulted ONLY when the local blob could not accept: no
+ * credential provisioned, or a MAC mismatch. A local success never leaves the
+ * box. Every non-zero return is a denial; only -EBUSY is reported distinctly
+ * (as MCP_ERR_BUSY, the code the local throttle already uses), because it is a
+ * lockout and carries no information about the password. Everything else —
+ * including -EHOSTUNREACH, "no authority could answer" — becomes the same
+ * MCP_ERR_AUTH a wrong password gets.
+ *
+ * AUTH carries no user name on the wire (mcp_wire.h), because the channel is a
+ * physically-present point-to-point serial port with one implicit account. The
+ * name presented to the remote authority is therefore configuration, not
+ * protocol: mcp_wiring_t::auth_user, defaulting to MCP_AUTH_USER_DEFAULT.
+ *
+ * Authentication now yields a ROLE, not just a boolean. The local blob is the
+ * box's own administrator, so it grants MCP_ROLE_ADMIN; a remote authority
+ * grants whatever it mapped. Mutating commands need MCP_ROLE_OPERATOR and the
+ * destructive family (firmware staging, config import/export, factory reset)
+ * needs MCP_ROLE_ADMIN — so a directory that hands somebody read-only rights
+ * cannot reflash the grandmaster from the console. A local-credential session
+ * is unaffected: it is admin, as it always was.
+ *
  * Config locking
  * --------------
  * A cfg_ctx_t is not internally locked (cfg.h) and on target it is shared with
@@ -185,6 +215,31 @@ extern "C" {
 /** Longest password AUTH accepts. */
 #define MCP_PW_MAX 64U
 
+/* --------------------------------------------------------------- roles */
+
+/*
+ * Authorisation roles, ordered so a numeric comparison is a privilege
+ * comparison: a command needing operator rights accepts `role >=
+ * MCP_ROLE_OPERATOR`.
+ *
+ * The values are deliberately identical to core/auth's auth_role_t and
+ * core/web's web_role_t. They are restated rather than included because
+ * ARCHITECTURE.md §4 gives core/mcp no edge to core/auth, and one enum's worth
+ * of duplication is a smaller price than a dependency this module does not
+ * otherwise need. mcp_role_matches_auth() in the glue is not required — the
+ * numbers ARE the contract, and tests/host/test_mcp.c pins them.
+ */
+#define MCP_ROLE_NONE     0U
+#define MCP_ROLE_VIEWER   1U
+#define MCP_ROLE_OPERATOR 2U
+#define MCP_ROLE_ADMIN    3U
+
+/** Longest principal name presented to a remote authority, excluding the NUL. */
+#define MCP_AUTH_USER_MAX 31U
+
+/** Principal name used when mcp_wiring_t::auth_user is empty. */
+#define MCP_AUTH_USER_DEFAULT "admin"
+
 /* ----------------------------------------------------------- callbacks */
 
 /**
@@ -259,6 +314,33 @@ typedef int (*mcp_cfg_commit_fn)(void *user, cfg_commit_res_t *res);
  */
 typedef int (*mcp_cfg_factory_fn)(void *user);
 
+/**
+ * Ask a remote authority about a credential the local blob could not accept.
+ *
+ * Wired by the glue to sts_aaa_check(); a host test wires a table. Optional —
+ * NULL leaves AUTH answering from the local blob alone.
+ *
+ * Blocking contract: this WILL block. sts_aaa_check() runs a DNS lookup and up
+ * to three network round trips, so a dead server holds it for the operator's
+ * whole configured chain timeout. The engine therefore calls it with the cfg
+ * critical section RELEASED — the same terms as @ref mcp_cfg_commit_fn — and
+ * the glue is responsible for keeping its watchdog participant fed across the
+ * call rather than simply blocking on it. src/zephyr/console/sts_mcp.c does.
+ *
+ * @param name      NUL-terminated principal name (mcp_wiring_t::auth_user).
+ * @param secret    NUL-terminated password as received on the wire.
+ * @param out_role  Set to an MCP_ROLE_* value on acceptance.
+ *
+ * @retval 0               Accepted.
+ * @retval -EBUSY          The authority holds this principal in a lockout.
+ *                         Reported distinctly (MCP_ERR_BUSY); says nothing
+ *                         about the password.
+ * @retval <0 (any other)  Denied. -EHOSTUNREACH ("no authority could answer")
+ *                         is a denial like every other — never allow-on-failure.
+ */
+typedef int (*mcp_auth_remote_fn)(void *user, const char *name,
+				  const char *secret, uint8_t *out_role);
+
 /* ------------------------------------------------------------- wiring */
 
 /** Device identity reported by HELLO. */
@@ -305,6 +387,22 @@ typedef struct {
 	 */
 	mcp_cfg_factory_fn cfg_factory_cb;
 	void              *cfg_factory_user;
+
+	/**
+	 * Remote-authority delegate. Optional; NULL leaves AUTH answering from
+	 * the local credential blob alone, exactly as it did before this
+	 * existed. Invoked with the cfg critical section RELEASED, and it
+	 * blocks — see @ref mcp_auth_remote_fn.
+	 */
+	mcp_auth_remote_fn auth_remote_cb;
+	void              *auth_remote_user;
+
+	/**
+	 * Principal name presented to @ref auth_remote_cb. Empty selects
+	 * MCP_AUTH_USER_DEFAULT. Ignored when no delegate is wired, because the
+	 * AUTH command carries no user name on the wire.
+	 */
+	char auth_user[MCP_AUTH_USER_MAX + 1U];
 
 	mcp_tx_fn tx;       /* required */
 	void     *tx_user;
@@ -368,6 +466,9 @@ typedef struct {
 	uint32_t auth_fail;
 	uint32_t auth_denied;   /* mutating command refused for lack of a session */
 	uint32_t auth_throttled;/* AUTH refused by the brute-force backoff window */
+	uint32_t auth_role_denied;/* command refused: session role below the floor */
+	uint32_t auth_remote_ok;  /* AUTH granted by the remote authority */
+	uint32_t auth_remote_denied;/* AUTH the remote authority refused */
 	uint32_t session_expired;
 } mcp_stats_t;
 
@@ -386,6 +487,8 @@ typedef struct {
 
 	/* Session. */
 	bool     authed;
+	/** MCP_ROLE_* granted at AUTH; MCP_ROLE_NONE while unauthenticated. */
+	uint8_t  auth_role;
 	uint64_t now_ms;
 	uint64_t last_activity_ms;
 	uint16_t evt_seq;
@@ -496,6 +599,12 @@ int mcp_tick(mcp_ctx_t *c, uint64_t now_ms);
 
 /** True when a session is authenticated right now. */
 bool mcp_authenticated(const mcp_ctx_t *c);
+
+/**
+ * Role of the current session: an MCP_ROLE_* value, MCP_ROLE_NONE when there
+ * is no authenticated session.
+ */
+uint8_t mcp_session_role(const mcp_ctx_t *c);
 
 /** Counters snapshot. */
 const mcp_stats_t *mcp_stats(const mcp_ctx_t *c);

@@ -135,6 +135,16 @@ module_deps(glue_policy)
 # here. It compiles no core module, hence the empty dependency list.
 module_deps(ppscorr)
 
+# `gnss_tee` is the same idea for the platform area's NMEA/UBX run classifier
+# (app/src/zephyr/platform/gnss_tee.h): the split that decides which of the
+# maintenance tool's two capture channels each received byte belongs to. It runs
+# on the priority-6 GNSS thread, so it is written to be countable rather than
+# clever, and every way it can be wrong is silent — a '$' inside a NAV-SAT
+# payload misread as a sentence start does not fail, it just quietly corrupts a
+# technician's capture. Zephyr-free by construction, hence the empty dependency
+# list.
+module_deps(gnss_tee)
+
 # `ntp_keys` is the same idea for the net area's key reconciliation
 # (app/src/zephyr/net/sts_ntp_keys.h): Zephyr-free by construction so the
 # revocation decision can be tested here. It drives core/ntp's real key table

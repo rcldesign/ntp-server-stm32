@@ -44,11 +44,24 @@
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/sys/util.h>
 
+#include "auth/auth.h"
 #include "console/sts_console.h"
 #include "mcp/mcp.h"
 #include "port/port_time.h"
 #include "storage/sts_store.h"
 #include "zephyr/sts_app.h"
+
+/*
+ * The AAA lookup and the factory-reset key wipe are net-area implementations
+ * (src/zephyr/net/sts_secops.c, sts_web.c). Declared WEAK rather than reached
+ * through a cross-area header, exactly as sts_web.c declares sts_dfu_port():
+ * with CONFIG_STS1000_NET=n the symbols resolve to NULL, the console falls back
+ * to the local credential alone and reports the reset as config-only, and the
+ * image still links.
+ */
+extern int sts_aaa_check_fed(const char *user, const char *secret,
+			     uint8_t *out_role, int live_id) __attribute__((weak));
+extern int sts_sec_factory_wipe(void) __attribute__((weak));
 
 LOG_MODULE_REGISTER(sts_mcp, CONFIG_STS1000_LOG_LEVEL);
 

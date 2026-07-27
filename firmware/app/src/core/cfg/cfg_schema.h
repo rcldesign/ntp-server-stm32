@@ -419,6 +419,25 @@ typedef enum {
 	  1, 0, 2)                                                                             \
 	B(SEC_NTPKEY3_KEY,   0x0A3D, "sec.ntpkey3.key",                                        \
 	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                                 \
+	/* -- management accounts (spec §9.4) -------------------------------------------- */ \
+	/* The operator and viewer credentials, in the SAME 48-octet envelope and with the  */ \
+	/* SAME flags as `sec.admin.pw` (0x0A02): salt[16] || KDF(salt, password). One      */ \
+	/* verification path in core/web/auth_web.c therefore serves all three roles, and   */ \
+	/* a future Argon2id swap reaches all three at once.                                */ \
+	/*                                                                                  */ \
+	/* They are numbered here rather than beside `sec.admin.pw` because IDs must stay   */ \
+	/* ascending — cfg.c binary-searches the table and CFG_LIST pages through it in ID  */ \
+	/* order — and 0x0A03..0x0A3D are taken. Position in the table is not meaning.      */ \
+	/*                                                                                  */ \
+	/* Empty by default, which fails CLOSED: an account with no credential cannot be    */ \
+	/* logged into, and (once any account IS provisioned) is refused with exactly the   */ \
+	/* same answer as a wrong password, so the reply does not report which accounts     */ \
+	/* have been set up. Purely additive, so CFG_SCHEMA_VERSION does not move and an    */ \
+	/* export written by an older image still imports.                                  */ \
+	B(SEC_OPERATOR_PW,   0x0A3E, "sec.operator.pw",                                        \
+	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 48)                                 \
+	B(SEC_VIEWER_PW,     0x0A3F, "sec.viewer.pw",                                          \
+	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 48)                                 \
 	                                                                                       \
 	/* -- 0x0B snmp ----------------------------------------------------------------- */  \
 	U(SNMP_ENABLE,       0x0B01, "snmp.enable",     BOOL, CFG_F_REBOOT_REQUIRED,           \
