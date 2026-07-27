@@ -480,6 +480,14 @@ static void expect_status(uint8_t cmd, uint16_t seq, uint8_t status)
 
 void setUp(void)
 {
+	/*
+	 * g_remote is static, so a test that arms the remote authority would
+	 * otherwise leave it armed for every test after it — and wire_up()
+	 * consults g_remote.wired, so the next test would silently get a
+	 * remote-wired engine. Reset before wiring, not after: the remote tests
+	 * set `wired` and then call wire_up() themselves.
+	 */
+	memset(&g_remote, 0, sizeof(g_remote));
 	wire_up(true, true, true);
 }
 
@@ -948,6 +956,181 @@ static void test_auth_needs_a_credential_store_and_crypto(void)
 	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_NOTSUP);
 	(void)feed_req(MCP_CMD_CFG_COMMIT, NULL, 0U);
 	expect_status(MCP_CMD_CFG_COMMIT, g_seq, (uint8_t)MCP_ERR_AUTH);
+}
+
+/* ------------------------------------------------- remote authority (AAA) */
+
+/*
+ * The local blob wins, and the authority is only asked when it does not.
+ *
+ * Order matters for more than efficiency: sts_aaa_check() blocks for a whole
+ * DNS/RADIUS/TACACS+/LDAP chain timeout, so consulting it on every AUTH would
+ * put that stall in front of an operator who typed the right local password.
+ */
+static void test_remote_authority_consulted_only_on_local_miss(void)
+{
+	g_remote.wired = true;
+	wire_up(true, true, true);
+	provision_password("correct horse");
+
+	/* Local success: the authority must not be reached at all. */
+	remote_answer(0, (uint8_t)MCP_ROLE_ADMIN);
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"correct horse", 13U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_TRUE(mcp_authenticated(&g_mcp));
+	TEST_ASSERT_EQUAL_UINT(0U, g_remote.calls);
+
+	/* Local miss: consulted, and its role is the session's role. */
+	g_remote.wired = true;
+	wire_up(true, true, true);
+	provision_password("correct horse");
+	remote_answer(0, (uint8_t)MCP_ROLE_OPERATOR);
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"from-radius", 11U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_TRUE(mcp_authenticated(&g_mcp));
+	TEST_ASSERT_EQUAL_UINT(1U, g_remote.calls);
+	TEST_ASSERT_EQUAL_STRING("from-radius", g_remote.last_secret);
+}
+
+/*
+ * "No authority could answer" is a denial, never an allow.
+ *
+ * sts_aaa.h is explicit that -EHOSTUNREACH is "never an allow-on-failure". A
+ * console that opened up when the RADIUS server went away would turn a network
+ * outage into an authentication bypass on a physically reachable port.
+ */
+static void test_remote_unreachable_denies_the_console(void)
+{
+	g_remote.wired = true;
+	wire_up(true, true, true);
+	provision_password("correct horse");
+
+	remote_answer(-EHOSTUNREACH, (uint8_t)MCP_ROLE_ADMIN);
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"anything", 8U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_AUTH);
+	TEST_ASSERT_FALSE(mcp_authenticated(&g_mcp));
+	TEST_ASSERT_EQUAL_UINT(1U, g_remote.calls);
+
+	/* Even when it names a role, a non-zero return grants nothing. */
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MCP_ROLE_NONE, g_mcp.auth_role);
+}
+
+/* A lockout is reported distinctly: telling an operator to wait reveals
+ * nothing an attacker who caused the lockout does not already know. */
+static void test_remote_lockout_is_reported_as_busy(void)
+{
+	g_remote.wired = true;
+	wire_up(true, true, true);
+	provision_password("correct horse");
+
+	remote_answer(-EBUSY, (uint8_t)MCP_ROLE_NONE);
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"locked-out", 10U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_BUSY);
+	TEST_ASSERT_FALSE(mcp_authenticated(&g_mcp));
+}
+
+/*
+ * An unwired hook leaves the pre-hook engine exactly as it was.
+ *
+ * This is the regression guard for every box that never configures AAA: adding
+ * the hook must not change local authentication in any observable way.
+ */
+static void test_unwired_remote_hook_changes_nothing(void)
+{
+	g_remote.wired = false;
+	wire_up(true, true, true);
+	provision_password("correct horse");
+	remote_answer(0, (uint8_t)MCP_ROLE_ADMIN); /* zeroes calls; hook is NULL */
+
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"wrong", 5U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_AUTH);
+	TEST_ASSERT_FALSE(mcp_authenticated(&g_mcp));
+
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"correct horse", 13U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_TRUE(mcp_authenticated(&g_mcp));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MCP_ROLE_ADMIN, g_mcp.auth_role);
+	TEST_ASSERT_EQUAL_UINT(0U, g_remote.calls);
+}
+
+/*
+ * The role floor bites a remotely-mapped session and nothing else.
+ *
+ * cmd_role_floor() puts FACTORY_RESET and the whole FW_* family behind ADMIN
+ * and REBOOT/CFG_SET behind OPERATOR. A local-credential session is ADMIN, so
+ * this can only ever restrict a session a remote authority mapped to less --
+ * which is the point: an LDAP group that means "may look" must not be able to
+ * erase the box.
+ */
+static void test_remote_role_gates_destructive_commands(void)
+{
+	uint8_t magic[4];
+
+	g_remote.wired = true;
+	wire_up(true, true, true);
+	provision_password("correct horse");
+
+	/* VIEWER: below both floors. */
+	remote_answer(0, (uint8_t)MCP_ROLE_VIEWER);
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"viewer-cred", 11U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_TRUE(mcp_authenticated(&g_mcp));
+
+	bytes_put_le32(magic, MCP_FACTORY_MAGIC);
+	(void)feed_req(MCP_CMD_FACTORY_RESET, magic, sizeof(magic));
+	expect_status(MCP_CMD_FACTORY_RESET, g_seq, (uint8_t)MCP_ERR_AUTH);
+
+	/* OPERATOR: clears the REBOOT floor, still short of ADMIN. */
+	g_remote.wired = true;
+	wire_up(true, true, true);
+	provision_password("correct horse");
+	remote_answer(0, (uint8_t)MCP_ROLE_OPERATOR);
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"oper-cred", 9U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_OK);
+
+	bytes_put_le32(magic, MCP_FACTORY_MAGIC);
+	(void)feed_req(MCP_CMD_FACTORY_RESET, magic, sizeof(magic));
+	expect_status(MCP_CMD_FACTORY_RESET, g_seq, (uint8_t)MCP_ERR_AUTH);
+
+	/* ADMIN from the authority reaches it, exactly as a local session does. */
+	g_remote.wired = true;
+	wire_up(true, true, true);
+	provision_password("correct horse");
+	remote_answer(0, (uint8_t)MCP_ROLE_ADMIN);
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"admin-cred", 10U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_OK);
+
+	bytes_put_le32(magic, MCP_FACTORY_MAGIC);
+	(void)feed_req(MCP_CMD_FACTORY_RESET, magic, sizeof(magic));
+	expect_status(MCP_CMD_FACTORY_RESET, g_seq, (uint8_t)MCP_OK);
+}
+
+/*
+ * A password carrying an embedded NUL must not reach the authority truncated.
+ *
+ * The wire payload is length-delimited; the hook takes a C string, and so does
+ * sts_aaa_check() beneath it. Passing "abc\0def" as "abc" would ask the
+ * authority about a shorter secret than the operator set, and would make the
+ * local and remote paths disagree about what the password even is -- local
+ * hashes all seven bytes. mcp.c refuses it instead.
+ *
+ * Reported as MCP_ERR_AUTH rather than MCP_ERR_ARG on purpose: a distinct code
+ * would tell an unauthenticated caller that the SHAPE of its guess was the
+ * problem, which is a hint a wrong-password answer does not give.
+ */
+static void test_remote_embedded_nul_password_is_refused(void)
+{
+	static const uint8_t pw[] = { 'a', 'b', 'c', 0x00, 'd', 'e', 'f' };
+
+	g_remote.wired = true;
+	wire_up(true, true, true);
+	provision_password("correct horse");
+
+	remote_answer(0, (uint8_t)MCP_ROLE_ADMIN);
+	(void)feed_req(MCP_CMD_AUTH, pw, (uint16_t)sizeof(pw));
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_AUTH);
+	TEST_ASSERT_FALSE(mcp_authenticated(&g_mcp));
+	TEST_ASSERT_EQUAL_UINT(0U, g_remote.calls);
 }
 
 static void test_auth_gating_matrix(void)
