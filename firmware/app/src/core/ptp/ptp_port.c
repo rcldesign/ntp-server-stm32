@@ -200,6 +200,9 @@ int ptp_cfg_validate(const ptp_cfg_t *cfg)
 	if ((unsigned int)cfg->l2_mac >= (unsigned int)PTP_L2_MAC_COUNT) {
 		return -EINVAL;
 	}
+	if ((unsigned int)cfg->never_yield >= (unsigned int)PTP_NEVER_YIELD_COUNT) {
+		return -EINVAL;
+	}
 	return profile_range_check(cfg);
 }
 
@@ -348,18 +351,19 @@ static uint8_t accuracy_from_ns(uint64_t est_ns)
  * frequency source is flywheeling (7 / 140 / 150), gives out-of-spec holdover
  * its own class (160) and free-run the default 248.
  *
- * TODO(wave-3): a clock that has never locked since boot should strictly
- * advertise 248 (default), not a degradation class. The quality view has no
- * "has ever locked" bit yet; add one with core/quality and gate FREERUN on it.
+ * The never-locked gate. A clock free-running since boot has *no* traceability,
+ * and a degradation class claims some: 52 and 187 both mean "was disciplined,
+ * has drifted". Because BMCA part 1 compares clockClass before anything else,
+ * class 52 from a unit that has never seen a satellite beats an honest peer that
+ * degraded to 187 and a default-class peer at 248 — so the box with no idea what
+ * time it is wins the election and distributes free-running OCXO time to the
+ * segment, until GNSS eventually comes up. IEEE 1588-2019 Table 4's answer for
+ * "not traceable" is 248, and that is what this returns.
  *
- * This is not cosmetic, which is why it should not be deprioritised. A unit
- * cold-booted with no antenna advertises class 52 from its first Announce.
- * Against a genuine peer that has degraded honestly to 187, or a default-class
- * 248 clock, 52 wins the BMCA outright — so the box with no idea what time it
- * is becomes grandmaster for the segment, and stays there until GNSS comes up.
- * The gate turns that first Announce into 248 and lets the better clock win.
- * Note that the telecom ladder already has the honest answer (248) for its own
- * free-run rung, so this defect is Default/Power-profile only.
+ * The latch lives in the port context (ptp_port_ctx_t::ever_locked) and reaches
+ * this pure function through ptp_quality_view_t::ever_locked. The telecom ladder
+ * already answers 248 for free-run, so the gate only changes the Default and
+ * Power profiles — but it is applied uniformly so the ladders cannot disagree.
  */
 static uint8_t clock_class_from_state(const ptp_cfg_t *cfg,
 				      const ptp_quality_view_t *q)
@@ -367,6 +371,10 @@ static uint8_t clock_class_from_state(const ptp_cfg_t *cfg,
 	const ptp_profile_desc_t *d = ptp_profile_desc((uint8_t)cfg->profile);
 	ptp_sync_state_t s = q->sync_state;
 	uint8_t cls;
+
+	if ((s == PTP_SYNC_FREERUN) && !q->ever_locked) {
+		return PTP_CLASS_DEFAULT_NOT_TRACEABLE;
+	}
 
 	cls = ptp_class_from_ladder(d->ladder, (s == PTP_SYNC_LOCKED),
 				    (s == PTP_SYNC_HOLDOVER) ||

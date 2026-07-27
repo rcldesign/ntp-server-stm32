@@ -1357,20 +1357,47 @@ static void advance_step(pwrseq_ctx_t *ctx, uint32_t ms)
 	}
 }
 
-static void handle_failure(pwrseq_ctx_t *ctx, const pwrseq_step_def_t *def,
+/* Arm the automatic stage-8 retry, if any budget is left. */
+static void arm_rb_retry(pwrseq_ctx_t *ctx, uint32_t ms)
+{
+	if (ctx->rb_auto_retries >= ctx->cfg.rb_auto_retry_max) {
+		return;
+	}
+	ctx->rb_retry_pending = true;
+	ctx->rb_retry_at_ms = ms + ctx->cfg.rb_auto_retry_delay_ms;
+}
+
+/**
+ * Apply @p def's failure policy.
+ *
+ * @retval true   Handled; the caller may continue walking the table.
+ * @retval false  The failure action needs queue room it does not have. Nothing
+ *                was recorded, so the caller must stop and retry next tick —
+ *                otherwise the stage would be abandoned while the load the
+ *                failure was supposed to drop stays enabled.
+ */
+static bool handle_failure(pwrseq_ctx_t *ctx, const pwrseq_step_def_t *def,
 			   uint32_t ms)
 {
 	if ((pwrseq_onfail_t)def->onfail == PWRSEQ_ONFAIL_RETRY) {
 		if (ctx->retries < def->retries) {
 			ctx->retries++;
 			ctx->step_armed = false; /* re-emit on the next pass */
-			return;
+			return true;
 		}
 		/* Retries exhausted: escalate exactly as ALARM would. */
 	}
 
+	if (act_free(ctx) < failact_slots(def->failact)) {
+		return false;
+	}
+
 	raise_alarm(ctx, def->alarm);
 	do_failact(ctx, def->failact);
+
+	if (def->stage == (uint8_t)PWRSEQ_STAGE_8_RB) {
+		arm_rb_retry(ctx, ms);
+	}
 
 	switch ((pwrseq_onfail_t)def->onfail) {
 	case PWRSEQ_ONFAIL_HALT:
@@ -1388,6 +1415,31 @@ static void handle_failure(pwrseq_ctx_t *ctx, const pwrseq_step_def_t *def,
 		abandon_stage(ctx, ms);
 		break;
 	}
+
+	return true;
+}
+
+/*
+ * The evidence a rubidium rail row needs has been missing for too long.
+ *
+ * Not a rubidium hard fault: RB_TELEMETRY records "the rail could not be seen",
+ * which must not latch RB_FAULT and so cost the board its rubidium for the rest
+ * of the boot. The stage is *deferred* instead — the same treatment as an
+ * inadequate PoE budget — so the sequence reaches stage 9 (and arms the
+ * watchdog) and the retry path can try the whole guarded sequence again.
+ */
+static bool handle_stall(pwrseq_ctx_t *ctx, uint32_t ms)
+{
+	if (act_free(ctx) < 2U) {
+		return false; /* the RB_OFF pair must go out whole */
+	}
+
+	raise_alarm(ctx, (uint8_t)PWRSEQ_ALARM_RB_TELEMETRY);
+	(void)rb_shutdown(ctx);
+	ctx->rb_deferred = true;
+	arm_rb_retry(ctx, ms);
+	abandon_stage(ctx, ms);
+	return true;
 }
 
 /* ------------------------------------------------------------------- init */

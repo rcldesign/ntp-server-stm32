@@ -52,6 +52,32 @@
  * credential store: AUTH answers MCP_ERR_NOTSUP and auth is treated as not
  * required. That configuration is for unit tests and minimal builds; the
  * production wiring always passes a cfg_ctx_t.
+ *
+ * Config locking
+ * --------------
+ * A cfg_ctx_t is not internally locked (cfg.h) and on target it is shared with
+ * the Zephyr shell and the local UI, so the engine must not touch it alone. The
+ * glue therefore supplies mcp_wiring_t::cfg_lock / cfg_unlock, and the engine
+ * holds that critical section across every request that reaches the config tree
+ * — the whole request, not each call, so a multi-step operation such as a
+ * CFG_IMPORT chunk cannot interleave with a shell `cfg commit`. Leaving the
+ * hooks NULL is only correct single-threaded (host tests, minimal builds).
+ *
+ * Config commits
+ * --------------
+ * Committing is more than writing the tree: on target every config group has
+ * subscribers that have to be told, and only the glue knows them. The engine
+ * therefore never calls cfg_commit() itself when mcp_wiring_t::cfg_commit_cb is
+ * supplied — CFG_COMMIT and the final CFG_IMPORT chunk both route through that
+ * one callback, which is the same path the local shell and the UI use. Without
+ * it a commit over the wire would answer "applied, no reboot needed" while
+ * nothing in the running system had been reconfigured.
+ *
+ * The commit callback runs with the cfg critical section RELEASED: it takes the
+ * config mutex itself for the commit proper and then dispatches per-group
+ * appliers with it dropped, and an applier may block (sockets, DNS, display
+ * I/O). Holding the section across it would export that latency to every other
+ * config user.
  */
 
 #ifndef STS1000_CORE_MCP_MCP_H_

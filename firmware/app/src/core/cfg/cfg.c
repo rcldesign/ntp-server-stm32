@@ -516,8 +516,8 @@ int cfg_set_validate_hook(cfg_ctx_t *c, cfg_validate_fn fn, void *user)
 
 int cfg_schema_xvalidate(const struct cfg_ctx *c, void *user)
 {
-	cfg_val_t v;
-	bool snmp_on = false;
+	cfg_val_t enable;
+	cfg_val_t community;
 
 	(void)user;
 
@@ -526,27 +526,18 @@ int cfg_schema_xvalidate(const struct cfg_ctx *c, void *user)
 	}
 
 	/*
-	 * snmp.enable requires a non-empty snmp.community. Read the *effective*
-	 * tree so enabling the agent and setting the community in one commit is
-	 * accepted, and enabling it alone against the empty default is not.
+	 * snmp.enable requires a non-empty snmp.community. Both reads go through
+	 * cfg_get_effective(), which overlays staging, so enabling the agent and
+	 * setting its community in ONE commit is accepted while enabling it
+	 * against the empty default is not.
 	 */
-	if (cfg_get_bool(c, (uint16_t)CFG_ID_SNMP_ENABLE, &snmp_on) != 0) {
+	if ((cfg_get_effective(c, (uint16_t)CFG_ID_SNMP_ENABLE, &enable) != 0) ||
+	    (cfg_get_effective(c, (uint16_t)CFG_ID_SNMP_COMMUNITY,
+			       &community) != 0)) {
 		return -EPROTO;
 	}
-	if (cfg_is_staged(c, (uint16_t)CFG_ID_SNMP_ENABLE)) {
-		if (cfg_get_effective(c, (uint16_t)CFG_ID_SNMP_ENABLE, &v) != 0) {
-			return -EPROTO;
-		}
-		snmp_on = (v.v.u != 0U);
-	}
-	if (snmp_on) {
-		if (cfg_get_effective(c, (uint16_t)CFG_ID_SNMP_COMMUNITY, &v) !=
-		    0) {
-			return -EPROTO;
-		}
-		if (v.len == 0U) {
-			return -EPROTO;
-		}
+	if ((enable.v.u != 0U) && (community.len == 0U)) {
+		return -EPROTO;
 	}
 
 	return 0;
