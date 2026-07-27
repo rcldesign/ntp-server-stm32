@@ -68,10 +68,10 @@
  *                WMM/IGRF calculator. A fixed-site grandmaster never moves, so
  *                this is both the most accurate and the most honest option.
  *                sky_declination_dipole_ddeg() is the automatic fallback and is
- *                a centred-dipole model: typically within a few degrees at mid
- *                latitudes, far worse near the poles and the agonic lines. When
- *                the fallback is used, declination_modelled is reported so the
- *                UI can mark north as approximate.
+ *                a centred-dipole model good only to 10-15 degrees — enough to
+ *                get the plot roughly the right way up, not enough to trust.
+ *                When the fallback is used, declination_modelled is reported so
+ *                the UI can mark north as approximate.
  *
  * With north_valid false the plot is drawn in GNSS-north (azimuths exactly as
  * the receiver reports, rotation 0) and a SKY_C_BADGE band is drawn along the
@@ -254,10 +254,22 @@ int sky_heading_from_ecompass(const sky_ecompass_t *e, uint32_t field_ref,
  * Magnetic declination from a geodetic position, centred-dipole model.
  *
  * The automatic fallback when no site constant has been configured. Uses the
- * IGRF-14 epoch-2025 geomagnetic north pole at 80.7 N, 72.7 W. Typical error is
- * a few degrees at mid latitudes and much worse above about 60 degrees of
- * latitude or near an agonic line, which is why the result is always flagged as
- * modelled and why a commissioned site should carry a measured constant instead.
+ * IGRF-14 epoch-2025 geomagnetic north pole at 80.7 N, 72.7 W.
+ *
+ * **Accuracy: coarse. Errors of 10-15 degrees are normal.** A centred dipole
+ * captures roughly 90 % of the field's energy but none of its regional
+ * structure, so where the real declination departs from the dipole — the eastern
+ * United States, western Europe, most of Asia — this is out by more than a
+ * skyplot's worth of rotation. Spot values from this implementation: 0.0 deg on
+ * the pole's own meridian (exact by construction), +11.9 deg at Seattle against
+ * a true +15.5, +1.2 deg at 39.0 N 77.5 W against a true -10.5.
+ *
+ * The consequence is a product decision, not a maths problem: a fixed-site
+ * grandmaster never moves, so the site declination belongs in the commissioning
+ * configuration, taken once from a WMM/IGRF calculator. This function exists so
+ * that a unit with no such constant still rotates its plot roughly correctly
+ * rather than not at all, and every use of it sets
+ * sky_orient_t::declination_modelled so the UI can mark north approximate.
  *
  * @param lat_1e7  Latitude in 1e-7 degrees (the UBX-NAV-PVT scaling).
  * @param lon_1e7  Longitude in 1e-7 degrees.

@@ -1,0 +1,1306 @@
+# STS1000 "Meridian" — Zabbix template (spec §5.3).
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# Zabbix 6.0 LTS export format. Import with
+#   Data collection -> Templates -> Import
+# and link it to a host whose SNMP interface is configured for SNMPv3 (spec §9.5
+# makes v3 the primary interface; v2c answers only when `sec.snmp.v2c` is 1).
+#
+# ---------------------------------------------------------------------------
+# THE ENTERPRISE ARC IS A PLACEHOLDER
+# ---------------------------------------------------------------------------
+#
+# Every enterprise OID below is 1.3.6.1.4.1.**99999**.1.*, matching SNMP_PEN in
+# firmware/app/src/core/snmp/snmp.h. 99999 is NOT an IANA-assigned Private
+# Enterprise Number. When a real PEN is allocated, change it in snmp.h and
+# search-and-replace `1.3.6.1.4.1.99999` here — the two must always agree, and
+# the SNMPv3 engine id derives its enterprise field from the same constant.
+#
+# ---------------------------------------------------------------------------
+# HOST MACROS TO SET ON THE HOST OR TEMPLATE
+# ---------------------------------------------------------------------------
+#
+#   {$SNMP_V3_USER}      USM user name          (cfg sec.snmpv3.u1.name)
+#   {$SNMP_V3_AUTHPASS}  auth passphrase        (cfg sec.snmpv3.u1.akey)
+#   {$SNMP_V3_PRIVPASS}  privacy passphrase     (cfg sec.snmpv3.u1.pkey)
+#
+# Zabbix's SNMP interface fields carry the protocols; set them to
+# SHA256 / AES128 to match the firmware defaults
+# (sec.snmpv3.u1.auth = 2 -> usmHMAC192SHA256AuthProtocol,
+#  sec.snmpv3.u1.priv = 1 -> usmAesCfb128Protocol).
+#
+# ---------------------------------------------------------------------------
+# WHAT IS AND IS NOT POPULATED TODAY
+# ---------------------------------------------------------------------------
+#
+# The timing, GNSS, time-service, PTP and health scalars resolve. The rail table
+# and the enclosure/die/humidity/fan/PoE/supercap scalars are exposed by the MIB
+# but currently answer noSuchInstance, because the SNMP glue cannot reach the
+# platform area's health snapshot yet (see the TODO(cross-area telemetry) note in
+# src/zephyr/net/sts_snmp.c). Their items are included anyway, and Zabbix will
+# simply report them unsupported until that accessor lands — which is more useful
+# than discovering later that half the power MIB was never templated.
+
+zabbix_export:
+  version: '6.0'
+  date: '2026-07-27T00:00:00Z'
+  groups:
+    - uuid: 7df96b18c230490a9a0a9e2307226338
+      name: Templates/Network devices
+  templates:
+    - uuid: 4f2a1c9d5e6b47c8b1a2d3e4f5a60701
+      template: 'STS1000 Meridian NTP Server by SNMP'
+      name: 'STS1000 Meridian NTP Server by SNMP'
+      description: |
+        GPS-disciplined Stratum-1 NTP/NTS/PTP grandmaster (STS1000 "Meridian").
+
+        Requires SNMPv3 (USM, HMAC-SHA-256 auth + AES-128 privacy).
+        Enterprise arc 1.3.6.1.4.1.99999 is a placeholder PEN — see the header
+        comment in this file.
+      groups:
+        - name: Templates/Network devices
+      macros:
+        - macro: '{$SNMP_V3_USER}'
+          value: meridian
+          description: 'USM user name (cfg sec.snmpv3.u1.name)'
+        - macro: '{$SNMP_V3_AUTHPASS}'
+          value: ''
+          type: SECRET_TEXT
+          description: 'USM authentication passphrase'
+        - macro: '{$SNMP_V3_PRIVPASS}'
+          value: ''
+          type: SECRET_TEXT
+          description: 'USM privacy passphrase'
+        - macro: '{$MERIDIAN.HOLDOVER.MAX}'
+          value: '3600'
+          description: 'Holdover seconds before the trigger fires'
+        - macro: '{$MERIDIAN.TIMEERR.MAX}'
+          value: '1000000'
+          description: 'Estimated time error (ns) before the trigger fires'
+        - macro: '{$MERIDIAN.PPS.SIGMA.MAX}'
+          value: '500'
+          description: 'PPS jitter sigma (ns) before the trigger fires'
+        - macro: '{$MERIDIAN.SV.MIN}'
+          value: '4'
+          description: 'Satellites in use below which the trigger fires'
+        - macro: '{$MERIDIAN.TEMP.WARN}'
+          value: '70'
+          description: 'Enclosure temperature (degC) warning threshold'
+        - macro: '{$MERIDIAN.TEMP.CRIT}'
+          value: '80'
+          description: 'Enclosure temperature (degC) high threshold'
+        - macro: '{$MERIDIAN.FAN.RPM.MIN}'
+          value: '500'
+          description: 'Fan RPM below which the fan is considered stalled'
+        - macro: '{$MERIDIAN.POE.DRAW.MAX}'
+          value: '25500'
+          description: 'PoE draw (mW) above which the trigger fires'
+
+      items:
+        # ---- system group ------------------------------------------------
+        - uuid: a1000000000000000000000000000001
+          name: 'System description'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.2.1.1.1.0
+          key: system.descr
+          delay: 1h
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          inventory_link: MODEL
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: system
+        - uuid: a1000000000000000000000000000002
+          name: 'System name'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.2.1.1.5.0
+          key: system.name
+          delay: 1h
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          inventory_link: NAME
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: system
+        - uuid: a1000000000000000000000000000003
+          name: 'Uptime'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.2.1.1.3.0
+          key: system.uptime
+          delay: 1m
+          history: 7d
+          units: uptime
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '0.01'
+          tags:
+            - tag: component
+              value: system
+        - uuid: a1000000000000000000000000000004
+          name: 'Firmware version'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.7.2.0
+          key: meridian.fw.version
+          delay: 1h
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          inventory_link: SOFTWARE
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: system
+        - uuid: a1000000000000000000000000000005
+          name: 'Serial number'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.7.9.0
+          key: meridian.serial
+          delay: 1h
+          history: 7d
+          trends: '0'
+          value_type: CHAR
+          inventory_link: SERIALNO_A
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: system
+
+        # ---- timing (enterprise .1.1) -----------------------------------
+        - uuid: a1000000000000000000000000000010
+          name: 'Timing: NTP stratum'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.1.0
+          key: meridian.stratum
+          delay: 1m
+          history: 31d
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000011
+          name: 'Timing: lock state'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.2.0
+          key: meridian.lock.state
+          delay: 30s
+          history: 31d
+          description: '0 = unlocked, 1 = acquiring, 2 = locked, 3 = holdover'
+          valuemap:
+            name: 'Lock state'
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000012
+          name: 'Timing: active reference'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.3.0
+          key: meridian.active.ref
+          delay: 1m
+          history: 31d
+          description: '0 = OCXO, 1 = external rubidium'
+          valuemap:
+            name: 'Active reference'
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000013
+          name: 'Timing: in holdover'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.4.0
+          key: meridian.holdover
+          delay: 30s
+          history: 31d
+          valuemap:
+            name: 'Boolean'
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000014
+          name: 'Timing: estimated time error'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.5.0
+          key: meridian.holdover.err
+          delay: 1m
+          history: 31d
+          units: ns
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000015
+          name: 'Timing: holdover elapsed'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.6.0
+          key: meridian.holdover.elapsed
+          delay: 1m
+          history: 31d
+          units: s
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000016
+          name: 'Timing: time to stratum demotion'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.7.0
+          key: meridian.holdover.demote
+          delay: 1m
+          history: 31d
+          units: s
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000017
+          name: 'Timing: last PPS offset'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.8.0
+          key: meridian.pps.offset
+          delay: 30s
+          history: 31d
+          units: ns
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000018
+          name: 'Timing: PPS offset mean'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.9.0
+          key: meridian.pps.mean
+          delay: 1m
+          history: 31d
+          units: ns
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000019
+          name: 'Timing: PPS offset sigma'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.10.0
+          key: meridian.pps.sigma
+          delay: 1m
+          history: 31d
+          units: ns
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000020
+          name: 'Timing: fractional frequency error'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.11.0
+          key: meridian.freq.err
+          delay: 1m
+          history: 31d
+          units: ppt
+          description: 'Parts per trillion (ppb x 1000, so sub-ppb is not quantised away)'
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000021
+          name: 'Timing: OCXO Vc commanded'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.12.0
+          key: meridian.vc.cmd
+          delay: 1m
+          history: 31d
+          units: mV
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000022
+          name: 'Timing: OCXO Vc sensed'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.13.0
+          key: meridian.vc.sense
+          delay: 1m
+          history: 31d
+          units: mV
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000023
+          name: 'Timing: ADEV tau=1s'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.14.0
+          key: meridian.adev.1s
+          delay: 5m
+          history: 31d
+          description: 'Allan deviation x 1e18'
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000024
+          name: 'Timing: ADEV tau=10s'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.15.0
+          key: meridian.adev.10s
+          delay: 5m
+          history: 31d
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000025
+          name: 'Timing: ADEV tau=100s'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.16.0
+          key: meridian.adev.100s
+          delay: 5m
+          history: 31d
+          tags:
+            - tag: component
+              value: timing
+        - uuid: a1000000000000000000000000000026
+          name: 'Timing: oscillator temperature'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.1.17.0
+          key: meridian.osc.temp
+          delay: 1m
+          history: 31d
+          value_type: FLOAT
+          units: °C
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '0.001'
+          tags:
+            - tag: component
+              value: timing
+
+        # ---- GNSS (enterprise .1.2) -------------------------------------
+        - uuid: a1000000000000000000000000000030
+          name: 'GNSS: fix type'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.2.1.0
+          key: meridian.gnss.fix
+          delay: 30s
+          history: 31d
+          valuemap:
+            name: 'GNSS fix'
+          tags:
+            - tag: component
+              value: gnss
+        - uuid: a1000000000000000000000000000031
+          name: 'GNSS: satellites used'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.2.2.0
+          key: meridian.gnss.sv.used
+          delay: 1m
+          history: 31d
+          tags:
+            - tag: component
+              value: gnss
+        - uuid: a1000000000000000000000000000032
+          name: 'GNSS: satellites visible'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.2.3.0
+          key: meridian.gnss.sv.visible
+          delay: 1m
+          history: 31d
+          tags:
+            - tag: component
+              value: gnss
+        - uuid: a1000000000000000000000000000033
+          name: 'GNSS: time accuracy estimate'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.2.4.0
+          key: meridian.gnss.tacc
+          delay: 1m
+          history: 31d
+          units: ns
+          tags:
+            - tag: component
+              value: gnss
+        - uuid: a1000000000000000000000000000034
+          name: 'GNSS: antenna state'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.2.5.0
+          key: meridian.gnss.ant.state
+          delay: 1m
+          history: 31d
+          valuemap:
+            name: 'Antenna state'
+          tags:
+            - tag: component
+              value: gnss
+        - uuid: a1000000000000000000000000000035
+          name: 'GNSS: leap second pending'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.2.6.0
+          key: meridian.gnss.leap.pending
+          delay: 5m
+          history: 31d
+          tags:
+            - tag: component
+              value: gnss
+        - uuid: a1000000000000000000000000000036
+          name: 'GNSS: current leap seconds'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.2.7.0
+          key: meridian.gnss.leap.current
+          delay: 1h
+          history: 31d
+          units: s
+          tags:
+            - tag: component
+              value: gnss
+
+        # ---- thermal / environment (enterprise .1.4) ---------------------
+        - uuid: a1000000000000000000000000000040
+          name: 'Environment: enclosure temperature'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.4.1.0
+          key: meridian.temp.enclosure
+          delay: 1m
+          history: 31d
+          value_type: FLOAT
+          units: °C
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '0.001'
+          tags:
+            - tag: component
+              value: environment
+        - uuid: a1000000000000000000000000000041
+          name: 'Environment: MCU die temperature'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.4.3.0
+          key: meridian.temp.die
+          delay: 1m
+          history: 31d
+          value_type: FLOAT
+          units: °C
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '0.001'
+          tags:
+            - tag: component
+              value: environment
+        - uuid: a1000000000000000000000000000042
+          name: 'Environment: relative humidity'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.4.4.0
+          key: meridian.humidity
+          delay: 5m
+          history: 31d
+          value_type: FLOAT
+          units: '%'
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '0.001'
+          tags:
+            - tag: component
+              value: environment
+        - uuid: a1000000000000000000000000000043
+          name: 'Environment: fan speed'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.4.5.0
+          key: meridian.fan.rpm
+          delay: 1m
+          history: 31d
+          units: rpm
+          tags:
+            - tag: component
+              value: environment
+        - uuid: a1000000000000000000000000000044
+          name: 'Environment: fan duty cycle'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.4.6.0
+          key: meridian.fan.duty
+          delay: 1m
+          history: 31d
+          units: '%'
+          tags:
+            - tag: component
+              value: environment
+
+        # ---- time services (enterprise .1.5) ----------------------------
+        - uuid: a1000000000000000000000000000050
+          name: 'NTP: requests received'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.5.1.0
+          key: meridian.ntp.rx
+          delay: 1m
+          history: 7d
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          units: '!req/s'
+          tags:
+            - tag: component
+              value: ntp
+        - uuid: a1000000000000000000000000000051
+          name: 'NTP: responses served'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.5.2.0
+          key: meridian.ntp.served
+          delay: 1m
+          history: 7d
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          units: '!rsp/s'
+          tags:
+            - tag: component
+              value: ntp
+        - uuid: a1000000000000000000000000000052
+          name: 'NTP: requests dropped'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.5.3.0
+          key: meridian.ntp.dropped
+          delay: 1m
+          history: 7d
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: ntp
+        - uuid: a1000000000000000000000000000053
+          name: 'NTP: kiss-o-death sent'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.5.4.0
+          key: meridian.ntp.kod
+          delay: 1m
+          history: 7d
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: ntp
+        - uuid: a1000000000000000000000000000054
+          name: 'NTP: authentication failures'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.5.5.0
+          key: meridian.ntp.authfail
+          delay: 1m
+          history: 7d
+          preprocessing:
+            - type: SIMPLE_CHANGE
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: ntp
+            - tag: component
+              value: security
+        - uuid: a1000000000000000000000000000055
+          name: 'NTP: rate-limited requests'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.5.6.0
+          key: meridian.ntp.ratelimited
+          delay: 1m
+          history: 7d
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: ntp
+        - uuid: a1000000000000000000000000000056
+          name: 'NTS: requests received'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.5.7.0
+          key: meridian.nts.rx
+          delay: 1m
+          history: 7d
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: nts
+        - uuid: a1000000000000000000000000000057
+          name: 'NTS: requests authenticated'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.5.8.0
+          key: meridian.nts.ok
+          delay: 1m
+          history: 7d
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: nts
+        - uuid: a1000000000000000000000000000058
+          name: 'NTS: NAKs sent'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.5.9.0
+          key: meridian.nts.nak
+          delay: 1m
+          history: 7d
+          preprocessing:
+            - type: SIMPLE_CHANGE
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: nts
+            - tag: component
+              value: security
+        - uuid: a1000000000000000000000000000059
+          name: 'NTS: cookies issued'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.5.10.0
+          key: meridian.nts.cookies
+          delay: 5m
+          history: 7d
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: nts
+        - uuid: a1000000000000000000000000000060
+          name: 'NTS-KE: successful handshakes'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.5.11.0
+          key: meridian.ntske.handshakes
+          delay: 5m
+          history: 7d
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: nts
+
+        # ---- PTP (enterprise .1.6) --------------------------------------
+        - uuid: a1000000000000000000000000000070
+          name: 'PTP: port state'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.6.1.0
+          key: meridian.ptp.state
+          delay: 1m
+          history: 31d
+          valuemap:
+            name: 'PTP port state'
+          tags:
+            - tag: component
+              value: ptp
+        - uuid: a1000000000000000000000000000071
+          name: 'PTP: clock class'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.6.2.0
+          key: meridian.ptp.class
+          delay: 1m
+          history: 31d
+          description: '6 = locked to a primary reference, 7 = holdover, 187/248 = degraded'
+          tags:
+            - tag: component
+              value: ptp
+        - uuid: a1000000000000000000000000000072
+          name: 'PTP: clock accuracy'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.6.3.0
+          key: meridian.ptp.accuracy
+          delay: 1m
+          history: 31d
+          tags:
+            - tag: component
+              value: ptp
+        - uuid: a1000000000000000000000000000073
+          name: 'PTP: domain number'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.6.4.0
+          key: meridian.ptp.domain
+          delay: 1h
+          history: 31d
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: ptp
+        - uuid: a1000000000000000000000000000074
+          name: 'PTP: messages transmitted'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.6.5.0
+          key: meridian.ptp.tx
+          delay: 1m
+          history: 7d
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: ptp
+        - uuid: a1000000000000000000000000000075
+          name: 'PTP: messages received'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.6.6.0
+          key: meridian.ptp.rx
+          delay: 1m
+          history: 7d
+          preprocessing:
+            - type: CHANGE_PER_SECOND
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: ptp
+        - uuid: a1000000000000000000000000000076
+          name: 'PTP: announce timeouts'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.6.7.0
+          key: meridian.ptp.anntimeouts
+          delay: 5m
+          history: 7d
+          preprocessing:
+            - type: SIMPLE_CHANGE
+              parameters:
+                - ''
+          tags:
+            - tag: component
+              value: ptp
+        - uuid: a1000000000000000000000000000077
+          name: 'PTP: alarm bitmask'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.6.8.0
+          key: meridian.ptp.alarms
+          delay: 1m
+          history: 31d
+          tags:
+            - tag: component
+              value: ptp
+
+        # ---- health / power (enterprise .1.7) ---------------------------
+        - uuid: a1000000000000000000000000000080
+          name: 'Health: alarm bitmask'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.7.1.0
+          key: meridian.alarms
+          delay: 30s
+          history: 31d
+          description: 'Fault-aggregator alarm bits; 0 means no active alarm'
+          tags:
+            - tag: component
+              value: health
+        - uuid: a1000000000000000000000000000081
+          name: 'Health: PoE class negotiated'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.7.5.0
+          key: meridian.poe.class
+          delay: 1h
+          history: 31d
+          preprocessing:
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
+          tags:
+            - tag: component
+              value: power
+        - uuid: a1000000000000000000000000000082
+          name: 'Health: PoE power drawn'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.7.6.0
+          key: meridian.poe.draw
+          delay: 1m
+          history: 31d
+          value_type: FLOAT
+          units: W
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '0.001'
+          tags:
+            - tag: component
+              value: power
+        - uuid: a1000000000000000000000000000083
+          name: 'Health: STM supercap voltage'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.7.7.0
+          key: meridian.supercap.stm
+          delay: 5m
+          history: 31d
+          value_type: FLOAT
+          units: V
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '0.001'
+          tags:
+            - tag: component
+              value: power
+        - uuid: a1000000000000000000000000000084
+          name: 'Health: GPS supercap voltage'
+          type: SNMP_AGENT
+          snmp_oid: 1.3.6.1.4.1.99999.1.7.8.0
+          key: meridian.supercap.gps
+          delay: 5m
+          history: 31d
+          value_type: FLOAT
+          units: V
+          preprocessing:
+            - type: MULTIPLIER
+              parameters:
+                - '0.001'
+          tags:
+            - tag: component
+              value: power
+
+      discovery_rules:
+        # ---- the nine INA228 rails (enterprise .1.3.1.1) ----------------
+        - uuid: b1000000000000000000000000000001
+          name: 'Power rail discovery'
+          type: SNMP_AGENT
+          snmp_oid: 'discovery[{#RAIL.NAME},1.3.6.1.4.1.99999.1.3.1.1.2]'
+          key: meridian.rail.discovery
+          delay: 1h
+          description: |
+            Walks the rail-name column of the nine-row INA228 table
+            (interface ref §4.2). Until the SNMP glue can reach the platform
+            area's health snapshot these columns answer noSuchInstance and the
+            rule discovers nothing — see the header comment in this file.
+          item_prototypes:
+            - uuid: c1000000000000000000000000000001
+              name: 'Rail {#RAIL.NAME}: voltage'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.4.1.99999.1.3.1.1.3.{#SNMPINDEX}'
+              key: 'meridian.rail.mv[{#SNMPINDEX}]'
+              delay: 1m
+              history: 31d
+              value_type: FLOAT
+              units: V
+              preprocessing:
+                - type: MULTIPLIER
+                  parameters:
+                    - '0.001'
+              tags:
+                - tag: component
+                  value: power
+                - tag: rail
+                  value: '{#RAIL.NAME}'
+            - uuid: c1000000000000000000000000000002
+              name: 'Rail {#RAIL.NAME}: current'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.4.1.99999.1.3.1.1.4.{#SNMPINDEX}'
+              key: 'meridian.rail.ua[{#SNMPINDEX}]'
+              delay: 1m
+              history: 31d
+              value_type: FLOAT
+              units: A
+              preprocessing:
+                - type: MULTIPLIER
+                  parameters:
+                    - '0.000001'
+              tags:
+                - tag: component
+                  value: power
+                - tag: rail
+                  value: '{#RAIL.NAME}'
+            - uuid: c1000000000000000000000000000003
+              name: 'Rail {#RAIL.NAME}: power'
+              type: SNMP_AGENT
+              snmp_oid: '1.3.6.1.4.1.99999.1.3.1.1.5.{#SNMPINDEX}'
+              key: 'meridian.rail.mw[{#SNMPINDEX}]'
+              delay: 1m
+              history: 31d
+              value_type: FLOAT
+              units: W
+              preprocessing:
+                - type: MULTIPLIER
+                  parameters:
+                    - '0.001'
+              tags:
+                - tag: component
+                  value: power
+                - tag: rail
+                  value: '{#RAIL.NAME}'
+          graph_prototypes:
+            - uuid: d1000000000000000000000000000001
+              name: 'Rail {#RAIL.NAME}: voltage and current'
+              graph_items:
+                - color: 1A7C11
+                  item:
+                    host: 'STS1000 Meridian NTP Server by SNMP'
+                    key: 'meridian.rail.mv[{#SNMPINDEX}]'
+                - sortorder: '1'
+                  color: 2774A4
+                  yaxisside: RIGHT
+                  item:
+                    host: 'STS1000 Meridian NTP Server by SNMP'
+                    key: 'meridian.rail.ua[{#SNMPINDEX}]'
+
+      triggers:
+        - uuid: e1000000000000000000000000000001
+          expression: 'last(/STS1000 Meridian NTP Server by SNMP/meridian.lock.state)<>2'
+          name: 'Meridian: timing reference not locked'
+          priority: HIGH
+          description: |
+            The discipline loop is not locked, so the served time is either
+            converging or flywheeling. Check GNSS fix and satellite count first.
+          tags:
+            - tag: scope
+              value: availability
+        - uuid: e1000000000000000000000000000002
+          expression: 'last(/STS1000 Meridian NTP Server by SNMP/meridian.holdover)=1'
+          name: 'Meridian: in holdover'
+          priority: WARNING
+          description: 'The reference is lost and the oscillator is flywheeling.'
+          dependencies:
+            - name: 'Meridian: timing reference not locked'
+              expression: 'last(/STS1000 Meridian NTP Server by SNMP/meridian.lock.state)<>2'
+          tags:
+            - tag: scope
+              value: availability
+        - uuid: e1000000000000000000000000000003
+          expression: |
+            min(/STS1000 Meridian NTP Server by SNMP/meridian.holdover.elapsed,5m)>{$MERIDIAN.HOLDOVER.MAX}
+          name: 'Meridian: holdover longer than {$MERIDIAN.HOLDOVER.MAX}s'
+          priority: HIGH
+          description: 'Prolonged holdover; the stratum will be demoted when the error estimate exceeds the configured limit.'
+          tags:
+            - tag: scope
+              value: availability
+        - uuid: e1000000000000000000000000000004
+          expression: |
+            min(/STS1000 Meridian NTP Server by SNMP/meridian.holdover.err,5m)>{$MERIDIAN.TIMEERR.MAX}
+          name: 'Meridian: estimated time error above {$MERIDIAN.TIMEERR.MAX}ns'
+          priority: HIGH
+          tags:
+            - tag: scope
+              value: performance
+        - uuid: e1000000000000000000000000000005
+          expression: 'last(/STS1000 Meridian NTP Server by SNMP/meridian.stratum)>1'
+          name: 'Meridian: no longer advertising stratum 1'
+          priority: AVERAGE
+          tags:
+            - tag: scope
+              value: availability
+        - uuid: e1000000000000000000000000000006
+          expression: |
+            min(/STS1000 Meridian NTP Server by SNMP/meridian.pps.sigma,10m)>{$MERIDIAN.PPS.SIGMA.MAX}
+          name: 'Meridian: PPS jitter above {$MERIDIAN.PPS.SIGMA.MAX}ns'
+          priority: WARNING
+          description: 'Sustained PPS jitter — check antenna placement, cable and multipath.'
+          tags:
+            - tag: scope
+              value: performance
+        - uuid: e1000000000000000000000000000007
+          expression: 'last(/STS1000 Meridian NTP Server by SNMP/meridian.gnss.ant.state)<>1'
+          name: 'Meridian: GNSS antenna fault'
+          priority: HIGH
+          description: 'The antenna supervisor reports open or short. Bias may have been dropped to protect the limiter.'
+          tags:
+            - tag: scope
+              value: availability
+        - uuid: e1000000000000000000000000000008
+          expression: |
+            max(/STS1000 Meridian NTP Server by SNMP/meridian.gnss.sv.used,10m)<{$MERIDIAN.SV.MIN}
+          name: 'Meridian: fewer than {$MERIDIAN.SV.MIN} satellites in use'
+          priority: AVERAGE
+          dependencies:
+            - name: 'Meridian: GNSS antenna fault'
+              expression: 'last(/STS1000 Meridian NTP Server by SNMP/meridian.gnss.ant.state)<>1'
+          tags:
+            - tag: scope
+              value: availability
+        - uuid: e1000000000000000000000000000009
+          expression: 'last(/STS1000 Meridian NTP Server by SNMP/meridian.gnss.leap.pending)<>0'
+          name: 'Meridian: leap second pending'
+          priority: INFO
+          description: 'A leap second is announced. Informational — the server handles it, but correlate any step here.'
+          tags:
+            - tag: scope
+              value: notice
+        - uuid: e1000000000000000000000000000010
+          expression: 'last(/STS1000 Meridian NTP Server by SNMP/meridian.alarms)<>0'
+          name: 'Meridian: one or more hardware alarms active'
+          priority: AVERAGE
+          description: 'Read the alarm bitmask, or the device log, for the specific fault.'
+          tags:
+            - tag: scope
+              value: availability
+        - uuid: e1000000000000000000000000000011
+          expression: |
+            min(/STS1000 Meridian NTP Server by SNMP/meridian.temp.enclosure,5m)>{$MERIDIAN.TEMP.CRIT}
+          name: 'Meridian: enclosure temperature above {$MERIDIAN.TEMP.CRIT}C'
+          priority: HIGH
+          description: 'The over-temperature ladder will shed the rubidium and then cold-cycle the board.'
+          tags:
+            - tag: scope
+              value: temperature
+        - uuid: e1000000000000000000000000000012
+          expression: |
+            min(/STS1000 Meridian NTP Server by SNMP/meridian.temp.enclosure,5m)>{$MERIDIAN.TEMP.WARN}
+          name: 'Meridian: enclosure temperature above {$MERIDIAN.TEMP.WARN}C'
+          priority: WARNING
+          dependencies:
+            - name: 'Meridian: enclosure temperature above {$MERIDIAN.TEMP.CRIT}C'
+              expression: |
+                min(/STS1000 Meridian NTP Server by SNMP/meridian.temp.enclosure,5m)>{$MERIDIAN.TEMP.CRIT}
+          tags:
+            - tag: scope
+              value: temperature
+        - uuid: e1000000000000000000000000000013
+          expression: |
+            max(/STS1000 Meridian NTP Server by SNMP/meridian.fan.rpm,5m)<{$MERIDIAN.FAN.RPM.MIN}
+            and last(/STS1000 Meridian NTP Server by SNMP/meridian.fan.duty)>0
+          name: 'Meridian: fan stalled'
+          priority: AVERAGE
+          description: 'A duty cycle is commanded but the tachometer reports no rotation.'
+          tags:
+            - tag: scope
+              value: temperature
+        - uuid: e1000000000000000000000000000014
+          expression: |
+            min(/STS1000 Meridian NTP Server by SNMP/meridian.poe.draw,5m)>{$MERIDIAN.POE.DRAW.MAX}
+          name: 'Meridian: PoE draw above the configured budget'
+          priority: WARNING
+          description: 'Sustained draw over the negotiated budget; the PSE may disconnect the port.'
+          tags:
+            - tag: scope
+              value: power
+        - uuid: e1000000000000000000000000000015
+          expression: |
+            change(/STS1000 Meridian NTP Server by SNMP/meridian.ntp.authfail)>0
+          name: 'Meridian: NTP authentication failures'
+          priority: WARNING
+          description: 'Symmetric-key or NTS authentication is failing — a key mismatch, or someone probing.'
+          tags:
+            - tag: scope
+              value: security
+        - uuid: e1000000000000000000000000000016
+          expression: |
+            last(/STS1000 Meridian NTP Server by SNMP/meridian.ptp.state)<>6
+            and last(/STS1000 Meridian NTP Server by SNMP/meridian.ptp.state)<>0
+          name: 'Meridian: PTP port not MASTER'
+          priority: AVERAGE
+          description: 'The grandmaster is not serving PTP. State 0 means PTP is disabled, which is not an alarm.'
+          tags:
+            - tag: scope
+              value: availability
+        - uuid: e1000000000000000000000000000017
+          expression: 'last(/STS1000 Meridian NTP Server by SNMP/meridian.ptp.class)>7'
+          name: 'Meridian: PTP clock class degraded'
+          priority: AVERAGE
+          description: 'clockClass above 7 means the grandmaster no longer claims traceability to a primary reference.'
+          tags:
+            - tag: scope
+              value: performance
+        - uuid: e1000000000000000000000000000018
+          expression: |
+            last(/STS1000 Meridian NTP Server by SNMP/system.uptime)<10m
+          name: 'Meridian: device has restarted'
+          priority: INFO
+          description: 'Correlate with a coldStart trap and with the PoE/watchdog history.'
+          manual_close: 'YES'
+          tags:
+            - tag: scope
+              value: notice
+
+      valuemaps:
+        - uuid: f1000000000000000000000000000001
+          name: 'Boolean'
+          mappings:
+            - value: '0'
+              newvalue: 'No'
+            - value: '1'
+              newvalue: 'Yes'
+        - uuid: f1000000000000000000000000000002
+          name: 'Lock state'
+          mappings:
+            - value: '0'
+              newvalue: Unlocked
+            - value: '1'
+              newvalue: Acquiring
+            - value: '2'
+              newvalue: Locked
+            - value: '3'
+              newvalue: Holdover
+        - uuid: f1000000000000000000000000000003
+          name: 'Active reference'
+          mappings:
+            - value: '0'
+              newvalue: 'OCXO (internal)'
+            - value: '1'
+              newvalue: 'Rubidium (external)'
+        - uuid: f1000000000000000000000000000004
+          name: 'GNSS fix'
+          mappings:
+            - value: '0'
+              newvalue: 'No fix'
+            - value: '1'
+              newvalue: 'Dead reckoning'
+            - value: '2'
+              newvalue: '2D fix'
+            - value: '3'
+              newvalue: '3D fix'
+            - value: '4'
+              newvalue: 'GNSS + dead reckoning'
+            - value: '5'
+              newvalue: 'Time only'
+        - uuid: f1000000000000000000000000000005
+          name: 'Antenna state'
+          mappings:
+            - value: '0'
+              newvalue: Unknown
+            - value: '1'
+              newvalue: OK
+            - value: '2'
+              newvalue: Open
+            - value: '3'
+              newvalue: Short
+        - uuid: f1000000000000000000000000000006
+          name: 'PTP port state'
+          mappings:
+            - value: '0'
+              newvalue: Disabled
+            - value: '1'
+              newvalue: Initializing
+            - value: '2'
+              newvalue: Faulty
+            - value: '3'
+              newvalue: Listening
+            - value: '4'
+              newvalue: 'Pre-master'
+            - value: '5'
+              newvalue: Passive
+            - value: '6'
+              newvalue: Master
+            - value: '7'
+              newvalue: Uncalibrated
+            - value: '8'
+              newvalue: Slave
+
+  graphs:
+    - uuid: d1000000000000000000000000000010
+      name: 'Meridian: PPS offset and jitter'
+      graph_items:
+        - color: 1A7C11
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.pps.offset
+        - sortorder: '1'
+          color: F63100
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.pps.mean
+        - sortorder: '2'
+          color: 2774A4
+          yaxisside: RIGHT
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.pps.sigma
+    - uuid: d1000000000000000000000000000011
+      name: 'Meridian: Allan deviation'
+      graph_items:
+        - color: 1A7C11
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.adev.1s
+        - sortorder: '1'
+          color: 2774A4
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.adev.10s
+        - sortorder: '2'
+          color: F63100
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.adev.100s
+    - uuid: d1000000000000000000000000000012
+      name: 'Meridian: OCXO control voltage and temperature'
+      graph_items:
+        - color: 1A7C11
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.vc.cmd
+        - sortorder: '1'
+          color: 2774A4
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.vc.sense
+        - sortorder: '2'
+          color: F63100
+          yaxisside: RIGHT
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.osc.temp
+    - uuid: d1000000000000000000000000000013
+      name: 'Meridian: GNSS satellites'
+      graph_items:
+        - color: 1A7C11
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.gnss.sv.used
+        - sortorder: '1'
+          color: 2774A4
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.gnss.sv.visible
+    - uuid: d1000000000000000000000000000014
+      name: 'Meridian: NTP and NTS request rate'
+      graph_items:
+        - color: 1A7C11
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.ntp.rx
+        - sortorder: '1'
+          color: 2774A4
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.ntp.served
+        - sortorder: '2'
+          color: F63100
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.ntp.dropped
+        - sortorder: '3'
+          color: A54F10
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.nts.ok
+    - uuid: d1000000000000000000000000000015
+      name: 'Meridian: thermal and fan'
+      graph_items:
+        - color: F63100
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.temp.enclosure
+        - sortorder: '1'
+          color: A54F10
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.temp.die
+        - sortorder: '2'
+          color: 1A7C11
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.osc.temp
+        - sortorder: '3'
+          color: 2774A4
+          yaxisside: RIGHT
+          item:
+            host: 'STS1000 Meridian NTP Server by SNMP'
+            key: meridian.fan.rpm

@@ -415,6 +415,109 @@ bool sts_gnss_cfg_ack(void);
 
 int sts_panel_led_init(void);
 
+/* ------------------------------------------------------------------------- */
+/* rb_serial.c — UART7 (PB4/PE7), the K1 RS-232/CMOS relay, RB_LOCK           */
+/* ------------------------------------------------------------------------- */
+
+/** K1 DPDT relay position. LOW / RS-232 is the reset and default state. */
+typedef enum {
+	RB_SERIAL_MODE_RS232 = 0, /**< through the SN65C3221E level shifter (U46) */
+	RB_SERIAL_MODE_CMOS,      /**< direct CMOS, for a variant that needs it */
+	RB_SERIAL_MODE__COUNT,
+} rb_serial_mode_t;
+
+/** Settling time allowed for the K1 contacts after a mode change. */
+#define RB_SERIAL_RELAY_SETTLE_MS 20
+
+/**
+ * Bring up UART7 and the two control pins.
+ *
+ * @param lock_active_low  RB_LOCK polarity for the fitted FE-5680A variant. The
+ *                         board does not fix this; the variant does
+ *                         (docs/rb_rs232_interface.md), so it is configuration.
+ *
+ * @retval 0        Ready, relay in the RS-232 position.
+ * @retval -ENODEV  UART7 is not available.
+ * @retval other    A GPIO could not be configured.
+ */
+int rb_serial_init(bool lock_active_low);
+
+/**
+ * Move the K1 relay. Blocks for RB_SERIAL_RELAY_SETTLE_MS.
+ *
+ * @retval 0        Moved.
+ * @retval -EINVAL  Bad mode.
+ * @retval -EBUSY   A raw tunnel holds the port.
+ * @retval -ENODEV  Not initialised.
+ */
+int rb_serial_set_mode(uint8_t mode);
+
+/** Current relay position; rb_serial_mode_t. */
+uint8_t rb_serial_mode(void);
+
+/**
+ * True when RB_PWR_EN is asserted, i.e. the SN65C3221E has a supply.
+ *
+ * With this false there is nothing on the far side of the relay: the level
+ * shifter is powered from the Rb domain (docs/rb_rs232_interface.md).
+ */
+bool rb_serial_rail_up(void);
+
+/** RB_LOCK (PB13), with the configured variant polarity applied. */
+bool rb_serial_locked(void);
+
+/*
+ * The core/fwupd rb_fwupd port bound to UART7 is rb_serial_ops(), declared in
+ * fwupd/rb_fwupd.h's terms. It is not declared here because platform.h is
+ * included by glue that has no reason to see core/fwupd's types; the two
+ * consumers (fwupd_glue.c and the console) include that header directly.
+ */
+
+/**
+ * Raw byte tunnel, for a maintenance tool that needs to speak to a variant this
+ * firmware does not recognise.
+ *
+ * The tunnel *channel* — its framing, its authorisation, the command that
+ * carries it — belongs to core/mp and is owned by another area. This is the
+ * whole seam that side needs.
+ *
+ * @{
+ */
+
+/** Called from the UART ISR with every octet that arrives. */
+typedef void (*rb_serial_tunnel_cb_t)(void *user, const uint8_t *data, size_t len);
+
+/**
+ * Take the port. Suspends this file's own use of it; rb_serial_ops()'s transmit
+ * path then returns -EBUSY.
+ *
+ * @retval 0        Tunnel open.
+ * @retval -EINVAL  @p cb is NULL.
+ * @retval -EBUSY   A tunnel is already open.
+ * @retval -ENODEV  Not initialised.
+ */
+int rb_serial_tunnel_open(rb_serial_tunnel_cb_t cb, void *user);
+
+/**
+ * Put octets on the wire.
+ *
+ * @retval 0        Queued.
+ * @retval -EPERM   No tunnel is open.
+ * @retval -ENODEV  Not initialised, or the Rb rail is down.
+ */
+int rb_serial_tunnel_write(const uint8_t *data, size_t len);
+
+/** Give the port back. Idempotent. */
+int rb_serial_tunnel_close(void);
+
+/** True while a tunnel holds the port. */
+bool rb_serial_tunnel_active(void);
+
+/** @} */
+
+/** Byte counters and receive-overrun count. Any pointer may be NULL. */
+void rb_serial_stats(uint32_t *tx, uint32_t *rx, uint32_t *overruns);
+
 #ifdef __cplusplus
 }
 #endif

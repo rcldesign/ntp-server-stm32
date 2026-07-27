@@ -66,6 +66,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/tls_credentials.h>
+#include <zephyr/sys/fdtable.h>
 #include <zephyr/toolchain.h>
 
 #include "cfg/cfg.h"
@@ -1551,9 +1552,14 @@ static int open_listener(uint16_t port, bool tls)
 		(void)zsock_close(fd);
 		return rc;
 	}
-	/* Non-blocking, so several workers may race on accept() and the losers
-	 * get EAGAIN instead of parking inside accept(). */
-	(void)zsock_fcntl(fd, ZSOCK_F_SETFL, ZSOCK_O_NONBLOCK);
+	/*
+	 * Non-blocking, so several workers may race on accept() and the losers
+	 * get EAGAIN instead of parking inside accept(). The flags come from
+	 * <zephyr/sys/fdtable.h> (ZVFS_*): zsock_fcntl() is the socket-facing
+	 * name for the same call, but the O_/F_ constants live with the fd table,
+	 * not in socket.h.
+	 */
+	(void)zsock_fcntl(fd, ZVFS_F_SETFL, ZVFS_O_NONBLOCK);
 	return fd;
 }
 

@@ -339,6 +339,24 @@ static int drbg_start(void)
 	return 0;
 }
 
+/*
+ * extendedKeyUsage = id-kp-serverAuth. mbedTLS only offers the generic setter
+ * over an ASN.1 OID sequence, so the one OID this certificate needs is spelled
+ * out here rather than hand-rolling DER at the call site.
+ */
+static int set_eku_server_auth(mbedtls_x509write_cert *w)
+{
+	static const char oid[] = MBEDTLS_OID_SERVER_AUTH;
+	mbedtls_asn1_sequence seq;
+
+	memset(&seq, 0, sizeof(seq));
+	seq.buf.tag = MBEDTLS_ASN1_OID;
+	seq.buf.p = (unsigned char *)(uintptr_t)oid;
+	seq.buf.len = sizeof(oid) - 1U;
+	seq.next = NULL;
+	return mbedtls_x509write_crt_set_ext_key_usage(w, &seq);
+}
+
 /* Subject DN from the configured hostname, so the CN matches what is browsed. */
 static void default_subject(char *out, size_t cap)
 {
@@ -423,20 +441,19 @@ static int generate_self_signed(void)
 	if (rc != 0) {
 		goto out;
 	}
-	rc = mbedtls_x509write_crt_set_subject_key_identifier(&w);
-	if (rc != 0) {
-		goto out;
-	}
-	rc = mbedtls_x509write_crt_set_authority_key_identifier(&w);
-	if (rc != 0) {
-		goto out;
-	}
+	/*
+	 * No subjectKeyIdentifier / authorityKeyIdentifier: mbedTLS declares both
+	 * setters only under MBEDTLS_MD_CAN_SHA1, and adding SHA-1 to the image
+	 * for two extensions that a pinned self-signed leaf does not need is the
+	 * wrong trade. An operator-supplied certificate carries whatever
+	 * extensions its CA issued.
+	 */
 	rc = mbedtls_x509write_crt_set_key_usage(
 		&w, MBEDTLS_X509_KU_DIGITAL_SIGNATURE | MBEDTLS_X509_KU_KEY_AGREEMENT);
 	if (rc != 0) {
 		goto out;
 	}
-	rc = mbedtls_x509write_crt_set_ext_key_usage_server_auth(&w);
+	rc = set_eku_server_auth(&w);
 	if (rc != 0) {
 		goto out;
 	}
@@ -490,24 +507,6 @@ out:
 		return -EIO;
 	}
 	return 0;
-}
-
-/*
- * A minimal `mbedtls_x509write_crt_set_ext_key_usage_server_auth()`: mbedTLS
- * only offers the generic extended-key-usage setter, so the id-kp-serverAuth
- * OID is spelled out here rather than hand-rolling DER at the call site.
- */
-static int set_eku_server_auth(mbedtls_x509write_cert *w)
-{
-	static const char oid[] = MBEDTLS_OID_SERVER_AUTH;
-	mbedtls_asn1_sequence seq;
-
-	memset(&seq, 0, sizeof(seq));
-	seq.buf.tag = MBEDTLS_ASN1_OID;
-	seq.buf.p = (unsigned char *)(uintptr_t)oid;
-	seq.buf.len = sizeof(oid) - 1U;
-	seq.next = NULL;
-	return mbedtls_x509write_crt_set_extended_key_usage(w, &seq);
 }
 
 #endif /* STS_CERT_HAVE_WRITE */

@@ -565,7 +565,12 @@ int sky_declination_dipole_ddeg(int32_t lat_1e7, int32_t lon_1e7, int16_t *out)
 		 * comes out directly. Fold to +-180 degrees: a declination of
 		 * 350 degrees is -10.
 		 */
-		int32_t b = sky_atan2_ddeg((int32_t)y, (int32_t)x);
+		/*
+		 * sky_atan2_ddeg() is compass-convention: the first argument is the
+		 * north component, the second the east component. Here `x` holds the
+		 * north term of the great-circle bearing and `y` the east term.
+		 */
+		int32_t b = sky_atan2_ddeg((int32_t)x, (int32_t)y);
 
 		if (b > 1800) {
 			b -= 3600;

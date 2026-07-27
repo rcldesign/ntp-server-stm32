@@ -523,15 +523,13 @@ static void mark_epoch_set(const char *src)
 	}
 }
 
-static void servo_run(struct k_work *w)
+static void servo_iterate(void)
 {
 	static int32_t integ_ppb;
 	const ref_src_t *src = NULL;
 	int64_t off_ns = 0;
 	int64_t corr;
 	int rc;
-
-	ARG_UNUSED(w);
 
 	if (dev == NULL) {
 		return;
@@ -604,6 +602,40 @@ static void servo_run(struct k_work *w)
 		integ_ppb = -RATE_CLAMP_PPB;
 	}
 	servo_apply_rate(integ_ppb);
+}
+
+/**
+ * One servo tick, then publish the traceability verdict.
+ *
+ * The publish is the other half of the F1 fix. This file gates what *this area*
+ * advertises, but core/disc derives the served stratum independently and used to
+ * do it from PPS lock alone — a locked loop on a counter that was never placed
+ * on TAI still yielded stratum 1. So the platform grew disc_env_t::
+ * timebase_traceable, fed from sts_time_is_traceable(), and this servo is the
+ * one thing on the board that knows the answer. Both transitions are published,
+ * every tick, so `disc` demotes on the way down as promptly as it promotes on
+ * the way up; publishing only the acquisition would leave a stale primary claim
+ * standing after the reference was lost.
+ */
+static void servo_run(struct k_work *w)
+{
+	static bool published;
+	static bool published_valid;
+	bool now_traceable;
+
+	ARG_UNUSED(w);
+
+	servo_iterate();
+
+	now_traceable = sts_ptpclk_traceable();
+	if (!published_valid || now_traceable != published) {
+		published = now_traceable;
+		published_valid = true;
+		sts_time_set_traceable(now_traceable);
+		sts_log(LOGR_SUB_PTP, LOGR_NOTICE,
+			"served timescale is %s",
+			now_traceable ? "traceable" : "NOT traceable");
+	}
 }
 
 static void servo_tick(struct k_timer *t)

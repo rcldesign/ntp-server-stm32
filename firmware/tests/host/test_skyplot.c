@@ -657,86 +657,161 @@ static void test_rotation_moves_markers(void)
  *  Tilt-compensated heading
  * ===================================================================== */
 
-static void test_heading_level_board(void)
+/*
+ * Fixtures for the as-built mount: the board stands vertically, so +y (up the
+ * panel) is vertical and +z (the panel normal) is horizontal. The reported
+ * heading is the bearing of +z — the direction the panel faces.
+ *
+ * Board axes are x = right, y = up the panel, z = out of the face. With the
+ * panel facing bearing B and the field at magnetic dip D, the sensor readings in
+ * board coordinates are:
+ *
+ *   acc = (0, |g|, 0)                     gravity is along +y, which points up
+ *   mag = (|B|cosD sinB, -|B|sinD, |B|cosD cosB)
+ *
+ * so the +x component carries the east-west part of the horizontal field, +z the
+ * north-south part, and +y the (vertical) dip component. The values below are
+ * that model evaluated by hand.
+ */
+static void set_vertical(sky_ecompass_t *e, int32_t mx, int32_t my, int32_t mz)
+{
+	(void)memset(e, 0, sizeof(*e));
+	e->calibrated = true;
+	e->acc[1] = 1000;   /* board vertical, +y up */
+	e->mag[0] = mx;
+	e->mag[1] = my;
+	e->mag[2] = mz;
+}
+
+static void test_heading_cardinal_bearings(void)
 {
 	sky_ecompass_t e;
 	sky_heading_t h;
 
-	/*
-	 * Board flat, +z up (gravity along -z as an accelerometer reports it as
-	 * +z when the axis points up; only the ratios matter here). Field pointing
-	 * along +y: heading 0.
-	 */
-	(void)memset(&e, 0, sizeof(e));
-	e.calibrated = true;
-	e.acc[2] = 1000;
-	e.mag[1] = 300;
-
+	/* Panel facing north: the whole horizontal field is on +z. */
+	set_vertical(&e, 0, 0, 300);
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
 	TEST_ASSERT_TRUE(h.valid);
 	TEST_ASSERT_TRUE(h.tilt_valid);
-	TEST_ASSERT_INT_WITHIN(30, 0, h.heading_ddeg);
+	TEST_ASSERT_INT_WITHIN(20, 0, h.heading_ddeg);
 	TEST_ASSERT_EQUAL_UINT32(300U, h.field_mag);
 
-	/* Field along +x: heading 90. */
-	(void)memset(e.mag, 0, sizeof(e.mag));
-	e.mag[0] = 300;
+	/* Facing east: the field appears on +x. */
+	set_vertical(&e, 300, 0, 0);
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
 	TEST_ASSERT_TRUE(h.valid);
-	TEST_ASSERT_INT_WITHIN(30, 900, h.heading_ddeg);
+	TEST_ASSERT_INT_WITHIN(20, 900, h.heading_ddeg);
 
-	/* Field along -y: heading 180. */
-	(void)memset(e.mag, 0, sizeof(e.mag));
-	e.mag[1] = -300;
+	/* Facing south. */
+	set_vertical(&e, 0, 0, -300);
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
-	TEST_ASSERT_INT_WITHIN(30, 1800, h.heading_ddeg);
+	TEST_ASSERT_INT_WITHIN(20, 1800, h.heading_ddeg);
 
-	/* Field along -x: heading 270. */
-	(void)memset(e.mag, 0, sizeof(e.mag));
-	e.mag[0] = -300;
+	/* Facing west. */
+	set_vertical(&e, -300, 0, 0);
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
-	TEST_ASSERT_INT_WITHIN(30, 2700, h.heading_ddeg);
+	TEST_ASSERT_INT_WITHIN(20, 2700, h.heading_ddeg);
+
+	/* And the four diagonals. */
+	set_vertical(&e, 212, 0, 212);
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
+	TEST_ASSERT_INT_WITHIN(30, 450, h.heading_ddeg);
+	set_vertical(&e, 212, 0, -212);
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
+	TEST_ASSERT_INT_WITHIN(30, 1350, h.heading_ddeg);
+	set_vertical(&e, -212, 0, -212);
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
+	TEST_ASSERT_INT_WITHIN(30, 2250, h.heading_ddeg);
+	set_vertical(&e, -212, 0, 212);
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
+	TEST_ASSERT_INT_WITHIN(30, 3150, h.heading_ddeg);
 }
 
 /*
- * The board is mounted vertically (§6.3), so tilt compensation is not a
- * refinement — it is what makes the heading mean anything. This is the test that
- * would fail if the de-rotation were dropped.
+ * The dip component must be removed, not folded into the bearing. At 60 degrees
+ * of magnetic dip — a realistic mid-latitude value — the vertical part of the
+ * field is larger than the horizontal part, so an implementation that skipped
+ * the projection would be wrong by tens of degrees rather than by a rounding
+ * error. This is the test that fails if the tilt compensation is dropped.
  */
-static void test_heading_compensates_tilt(void)
+static void test_heading_removes_dip(void)
 {
 	sky_ecompass_t e;
-	sky_heading_t h_level;
-	sky_heading_t h_tilted;
+	sky_heading_t h;
+	/* |B| = 300, dip 60: horizontal 150, vertical -260 on +y. */
+	const int32_t hz = 150;
+	const int32_t vt = -260;
 
-	/* Level reference: field 45 degrees between +y and +x. */
-	(void)memset(&e, 0, sizeof(e));
-	e.calibrated = true;
-	e.acc[2] = 1000;
-	e.mag[0] = 200;
-	e.mag[1] = 200;
-	e.mag[2] = 0;
-	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &h_level));
-	TEST_ASSERT_TRUE(h_level.valid);
-	TEST_ASSERT_INT_WITHIN(40, 450, h_level.heading_ddeg);
+	set_vertical(&e, 0, vt, hz);
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &h));
+	TEST_ASSERT_TRUE(h.valid);
+	TEST_ASSERT_INT_WITHIN(30, 0, h.heading_ddeg);
+
+	set_vertical(&e, hz, vt, 0);
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &h));
+	TEST_ASSERT_INT_WITHIN(30, 900, h.heading_ddeg);
+
+	set_vertical(&e, 0, vt, -hz);
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &h));
+	TEST_ASSERT_INT_WITHIN(30, 1800, h.heading_ddeg);
+
+	set_vertical(&e, -hz, vt, 0);
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &h));
+	TEST_ASSERT_INT_WITHIN(30, 2700, h.heading_ddeg);
 
 	/*
-	 * Now pitch the board 90 degrees forward — the as-built vertical mount.
-	 * Gravity moves to -y, and the field's +y component rotates into -z. A
-	 * naive atan2(mx, my) would read 90 degrees; the compensated answer stays
-	 * at 45.
+	 * The same bearing at two very different dips must give the same heading.
+	 * If the dip leaked into the answer, these would differ.
 	 */
+	{
+		sky_heading_t shallow;
+		sky_heading_t steep;
+
+		set_vertical(&e, 0, -50, 296);
+		TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U,
+								   &shallow));
+		set_vertical(&e, 0, -290, 77);
+		TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &steep));
+		TEST_ASSERT_INT_WITHIN(30, shallow.heading_ddeg,
+				       steep.heading_ddeg);
+	}
+}
+
+/*
+ * A board lying flat has no horizontal panel normal, so it has no heading under
+ * this definition. Reporting "north unverified" is the correct answer, and it is
+ * far better than a confident random bearing.
+ */
+static void test_heading_flat_board_has_no_bearing(void)
+{
+	sky_ecompass_t e;
+	sky_heading_t h;
+
 	(void)memset(&e, 0, sizeof(e));
 	e.calibrated = true;
-	e.acc[1] = -1000;
-	e.mag[0] = 200;
-	e.mag[1] = 0;
-	e.mag[2] = -200;
-	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &h_tilted));
-	TEST_ASSERT_TRUE(h_tilted.tilt_valid);
-	TEST_ASSERT_INT_WITHIN(60, 450, h_tilted.heading_ddeg);
-	/* Pitch is reported, and it is the 90 degrees we applied. */
-	TEST_ASSERT_INT_WITHIN(60, 900, h_tilted.pitch_ddeg);
+	e.acc[2] = 1000;   /* +z up: the board is lying on its back */
+	e.mag[1] = 300;
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
+	TEST_ASSERT_TRUE(h.tilt_valid);
+	TEST_ASSERT_FALSE(h.valid);
+
+	/* Face down is equally useless. */
+	(void)memset(&e, 0, sizeof(e));
+	e.calibrated = true;
+	e.acc[2] = -1000;
+	e.mag[1] = 300;
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
+	TEST_ASSERT_FALSE(h.valid);
+
+	/* Tilted 45 degrees back is still usable. */
+	(void)memset(&e, 0, sizeof(e));
+	e.calibrated = true;
+	e.acc[1] = 707;
+	e.acc[2] = 707;
+	e.mag[2] = 212;
+	e.mag[1] = -212;
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &h));
+	TEST_ASSERT_TRUE(h.valid);
 }
 
 static void test_heading_rejects_untrustworthy_input(void)
@@ -745,43 +820,48 @@ static void test_heading_rejects_untrustworthy_input(void)
 	sky_heading_t h;
 
 	/* Uncalibrated: a heading is computed but must not be believed. */
-	(void)memset(&e, 0, sizeof(e));
+	set_vertical(&e, 0, 0, 300);
 	e.calibrated = false;
-	e.acc[2] = 1000;
-	e.mag[1] = 300;
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
 	TEST_ASSERT_FALSE(h.valid);
 	TEST_ASSERT_TRUE(h.tilt_valid);
 
 	/* Calibrated but the field is implausibly strong: something is nearby. */
-	e.calibrated = true;
-	e.mag[1] = 3000;
+	set_vertical(&e, 0, 0, 3000);
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
 	TEST_ASSERT_FALSE(h.valid);
 
 	/* ...or implausibly weak. */
-	e.mag[1] = 10;
+	set_vertical(&e, 0, 0, 10);
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
 	TEST_ASSERT_FALSE(h.valid);
 
 	/* Inside the tolerance band: believed. */
-	e.mag[1] = 320;
+	set_vertical(&e, 0, 0, 320);
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
 	TEST_ASSERT_TRUE(h.valid);
 
-	/* No gravity vector at all: no tilt compensation is possible. */
+	/* With no reference magnitude the plausibility check is skipped. */
+	set_vertical(&e, 0, 0, 3000);
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &h));
+	TEST_ASSERT_TRUE(h.valid);
+
+	/* No gravity vector at all: no horizontal plane can be established. */
 	(void)memset(&e, 0, sizeof(e));
 	e.calibrated = true;
-	e.mag[1] = 300;
+	e.mag[2] = 300;
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &h));
 	TEST_ASSERT_FALSE(h.tilt_valid);
 	TEST_ASSERT_FALSE(h.valid);
 
 	/* A zero field is never a heading. */
-	(void)memset(&e, 0, sizeof(e));
-	e.calibrated = true;
-	e.acc[2] = 1000;
+	set_vertical(&e, 0, 0, 0);
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &h));
+	TEST_ASSERT_FALSE(h.valid);
+
+	/* A purely vertical field — at the magnetic pole — has no bearing either. */
+	set_vertical(&e, 0, 300, 0);
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
 	TEST_ASSERT_FALSE(h.valid);
 
 	TEST_ASSERT_EQUAL_INT(-EINVAL, sky_heading_from_ecompass(NULL, 0U, &h));
@@ -795,24 +875,22 @@ static void test_heading_applies_calibration(void)
 	sky_heading_t h;
 
 	/*
-	 * A large hard-iron offset on +x. Uncorrected the heading would be pulled
-	 * towards east; with the offset subtracted it reads north.
+	 * A large hard-iron offset on +x. Uncorrected the bearing would be pulled
+	 * a long way east; with the offset subtracted it reads north.
 	 */
-	(void)memset(&e, 0, sizeof(e));
-	e.calibrated = true;
-	e.acc[2] = 1000;
-	e.mag[0] = 1000;  /* all of it is the offset */
-	e.mag[1] = 300;
+	set_vertical(&e, 1000, 0, 300);
 	e.mag_offset[0] = 1000;
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 300U, &h));
 	TEST_ASSERT_TRUE(h.valid);
-	TEST_ASSERT_INT_WITHIN(30, 0, h.heading_ddeg);
+	TEST_ASSERT_INT_WITHIN(20, 0, h.heading_ddeg);
+
+	/* Without the correction the same reading is nowhere near north. */
+	set_vertical(&e, 1000, 0, 300);
+	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 0U, &h));
+	TEST_ASSERT_TRUE(h.heading_ddeg > 500);
 
 	/* Soft-iron scale: zero is treated as unity, so a zeroed struct works. */
-	(void)memset(&e, 0, sizeof(e));
-	e.calibrated = true;
-	e.acc[2] = 1000;
-	e.mag[1] = 300;
+	set_vertical(&e, 0, 0, 300);
 	e.mag_scale[0] = 0;
 	e.mag_scale[1] = 0;
 	e.mag_scale[2] = 0;
@@ -820,8 +898,8 @@ static void test_heading_applies_calibration(void)
 	TEST_ASSERT_TRUE(h.valid);
 	TEST_ASSERT_EQUAL_UINT32(300U, h.field_mag);
 
-	/* An explicit half-scale on y halves the measured magnitude. */
-	e.mag_scale[1] = 2048;
+	/* An explicit half-scale on z halves the measured magnitude. */
+	e.mag_scale[2] = 2048;
 	TEST_ASSERT_EQUAL_INT(0, sky_heading_from_ecompass(&e, 150U, &h));
 	TEST_ASSERT_EQUAL_UINT32(150U, h.field_mag);
 }
@@ -835,36 +913,39 @@ static void test_declination_dipole(void)
 	int16_t d = 0;
 
 	/*
-	 * The centred-dipole model, with the accuracy caveat in skyplot.h. These
-	 * assertions pin sign and rough magnitude, which is all the model
-	 * supports — a tighter bound would be asserting a precision it does not
-	 * have.
+	 * A centred dipole is good to 10-15 degrees, no better (see skyplot.h).
+	 * These assertions therefore pin the two things the model genuinely
+	 * delivers — the exact zero on the pole's own meridian, and a bounded
+	 * result everywhere — plus the invariants a convention error would break.
+	 * Asserting a tight value anywhere else would be asserting a precision the
+	 * model does not have.
 	 */
 
-	/* Williams Manor, roughly 39.0 N 77.5 W: declination is westerly. */
-	TEST_ASSERT_EQUAL_INT(0, sky_declination_dipole_ddeg(390000000L,
-							     -775000000L, &d));
-	TEST_ASSERT_TRUE(d < 0);
-	TEST_ASSERT_TRUE(d > -300);
-
-	/* Western North America, roughly 47 N 122 W: easterly. */
-	TEST_ASSERT_EQUAL_INT(0, sky_declination_dipole_ddeg(470000000L,
-							     -1220000000L, &d));
-	TEST_ASSERT_TRUE(d > 0);
-
-	/* On the pole's own meridian the declination is essentially zero. */
+	/* On the geomagnetic pole's meridian the declination is exactly zero. */
 	TEST_ASSERT_EQUAL_INT(0, sky_declination_dipole_ddeg(450000000L,
 							     -727000000L, &d));
-	TEST_ASSERT_INT_WITHIN(60, 0, d);
+	TEST_ASSERT_INT_WITHIN(5, 0, d);
 
-	/* Always folded to +-180 degrees, never 0..360. */
+	/*
+	 * West of that meridian the dipole points east of true north, and east of
+	 * it the dipole points west. That sign relationship is the part a swapped
+	 * atan2 argument would invert, so it is worth pinning explicitly.
+	 */
+	TEST_ASSERT_EQUAL_INT(0, sky_declination_dipole_ddeg(450000000L,
+							     -1200000000L, &d));
+	TEST_ASSERT_TRUE(d > 0);
+	TEST_ASSERT_EQUAL_INT(0, sky_declination_dipole_ddeg(450000000L,
+							     -200000000L, &d));
+	TEST_ASSERT_TRUE(d < 0);
+
+	/* Always folded to +-180 degrees, never 0..360, everywhere on the globe. */
 	{
 		int32_t lat;
 		int32_t lon;
 
-		for (lat = -600000000L; lat <= 600000000L; lat += 150000000L) {
+		for (lat = -800000000L; lat <= 800000000L; lat += 100000000L) {
 			for (lon = -1800000000L; lon < 1800000000L;
-			     lon += 300000000L) {
+			     lon += 150000000L) {
 				TEST_ASSERT_EQUAL_INT(0,
 					sky_declination_dipole_ddeg(lat, lon, &d));
 				TEST_ASSERT_TRUE(d >= -1800);
@@ -872,6 +953,10 @@ static void test_declination_dipole(void)
 			}
 		}
 	}
+
+	/* The poles themselves are in range and do not trap. */
+	TEST_ASSERT_EQUAL_INT(0, sky_declination_dipole_ddeg(900000000L, 0L, &d));
+	TEST_ASSERT_EQUAL_INT(0, sky_declination_dipole_ddeg(-900000000L, 0L, &d));
 
 	/* Rejections. */
 	TEST_ASSERT_EQUAL_INT(-EINVAL, sky_declination_dipole_ddeg(0L, 0L, NULL));
@@ -990,8 +1075,9 @@ int main(void)
 	RUN_TEST(test_rotation_arithmetic);
 	RUN_TEST(test_rotation_moves_markers);
 
-	RUN_TEST(test_heading_level_board);
-	RUN_TEST(test_heading_compensates_tilt);
+	RUN_TEST(test_heading_cardinal_bearings);
+	RUN_TEST(test_heading_removes_dip);
+	RUN_TEST(test_heading_flat_board_has_no_bearing);
 	RUN_TEST(test_heading_rejects_untrustworthy_input);
 	RUN_TEST(test_heading_applies_calibration);
 
