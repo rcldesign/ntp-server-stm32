@@ -569,23 +569,38 @@ static void dfu_reboot(void *ctx, int mode)
 		 * delay). There is no retention area and no boot-mode flag in
 		 * this build, so firmware cannot arm recovery for the next
 		 * boot; only the operator can, by holding the button through
-		 * reset. Say so loudly and reset normally rather than pretend.
+		 * reset. Say so loudly and reset normally rather than pretend:
+		 * a cold reset while the button is already held still enters
+		 * recovery, so this is best-effort rather than a lie.
 		 */
 		LOG_ERR("recovery reboot is not firmware-armable on this build: "
 			"hold front-panel BUTTON_1 (PF0) through reset and for "
 			"1 s afterwards to enter MCUboot serial recovery");
 		break;
 	case 2:
-		/* MCP "halt-to-test": the port contract defines modes 0 and 1
-		 * only, so there is nothing to do but leave the box running. */
-		LOG_WRN("halt-to-test requested: not implemented, application "
-			"left running");
-		return;
+		/*
+		 * halt-to-test (port_image.h): reboot into a staged TEST image
+		 * without confirming it. FW_END already called mark_pending,
+		 * i.e. boot_request_upgrade(TEST), so a plain cold reset makes
+		 * MCUboot swap in the staged image and run it unconfirmed —
+		 * which is exactly this. If nothing is staged the swap type is
+		 * "none" and it is an ordinary reboot; warn so the operator is
+		 * not surprised.
+		 */
+		if (mcuboot_swap_type() != BOOT_SWAP_TYPE_TEST) {
+			LOG_WRN("halt-to-test with no TEST image staged "
+				"(swap=%s): rebooting normally",
+				sts_dfu_swap_type_name());
+		} else {
+			LOG_WRN("halt-to-test: rebooting into the staged image "
+				"unconfirmed");
+		}
+		break;
 	default:
 		break;
 	}
 
-	LOG_WRN("rebooting on console request");
+	LOG_WRN("rebooting on console request (mode %d)", mode);
 	/* Give the deferred log backend a moment to push the lines out. */
 	k_sleep(K_MSEC(50));
 	sys_reboot(SYS_REBOOT_COLD);

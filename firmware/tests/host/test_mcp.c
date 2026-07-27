@@ -931,6 +931,131 @@ static void test_session_expires_when_idle(void)
 	TEST_ASSERT_TRUE(mcp_authenticated(&g_mcp));
 }
 
+/* HIGH-4: repeated password guesses arm a backoff that refuses AUTH — even a
+ * correct password — with ERR_BUSY, and clears once the window elapses. */
+static void test_auth_lockout_throttles_brute_force(void)
+{
+	unsigned int i;
+
+	provision_password("pw");
+	g_now = 0U;
+
+	/* The first MCP_AUTH_FREE_TRIES mismatches answer immediately. */
+	for (i = 0U; i < MCP_AUTH_FREE_TRIES; i++) {
+		(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"x", 1U);
+		expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_AUTH);
+	}
+	TEST_ASSERT_EQUAL_UINT32(0U, mcp_stats(&g_mcp)->auth_throttled);
+
+	/* The next mismatch arms the first backoff window. */
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"x", 1U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_AUTH);
+
+	/* Inside the window the correct password is refused without a check:
+	 * ERR_BUSY, not ERR_AUTH, and no session is granted. */
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"pw", 2U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_BUSY);
+	TEST_ASSERT_FALSE(mcp_authenticated(&g_mcp));
+	TEST_ASSERT_EQUAL_UINT32(1U, mcp_stats(&g_mcp)->auth_throttled);
+
+	/* One millisecond before the window closes, still refused. */
+	g_now = MCP_AUTH_THROTTLE_MS - 1U;
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"pw", 2U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_BUSY);
+
+	/* At the window edge the correct password is accepted and clears the
+	 * counter. */
+	g_now = MCP_AUTH_THROTTLE_MS;
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"pw", 2U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_TRUE(mcp_authenticated(&g_mcp));
+}
+
+/* HIGH-4: enough consecutive failures escalate to the long lockout window. */
+static void test_auth_hard_lockout_after_many_failures(void)
+{
+	uint64_t t = 0U;
+	uint64_t last = 0U;
+	unsigned int i;
+
+	provision_password("pw");
+
+	/* Step past the (growing) throttle window before each attempt so every
+	 * one actually tests a password and counts toward the lockout. */
+	for (i = 0U; i < MCP_AUTH_LOCK_TRIES; i++) {
+		g_now = t;
+		last = t;
+		(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"x", 1U);
+		expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_AUTH);
+		t += MCP_AUTH_THROTTLE_MAX_MS + 1U;
+	}
+
+	/* The last failure armed the long window. Just before it elapses even
+	 * the right password is refused; a throttle window this long is the
+	 * lockout, not the 30 s throttle cap. */
+	g_now = last + MCP_AUTH_LOCKOUT_MS - 1U;
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"pw", 2U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_BUSY);
+	TEST_ASSERT_TRUE((last + MCP_AUTH_LOCKOUT_MS - 1U) >
+			 (last + MCP_AUTH_THROTTLE_MAX_MS));
+
+	g_now = last + MCP_AUTH_LOCKOUT_MS;
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"pw", 2U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_OK);
+}
+
+/* LOW-12: a SECRET key stays gated on a real authenticated session even when
+ * the auth requirement is switched off; disabling auth must not leak secrets. */
+static void test_secrets_need_a_real_session_even_when_auth_disabled(void)
+{
+	uint8_t req[8];
+
+	provision_password("pw");
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_set_u64(&g_cfg, CFG_ID_SEC_AUTH_REQUIRED, 0U));
+	TEST_ASSERT_EQUAL_INT(0, cfg_commit(&g_cfg, NULL));
+
+	/* A plain mutating command is now allowed unauthenticated... */
+	(void)feed_req(MCP_CMD_CFG_COMMIT, NULL, 0U);
+	expect_status(MCP_CMD_CFG_COMMIT, g_seq, (uint8_t)MCP_OK);
+
+	/* ...but a SECRET read is not, and neither is a secrets export. */
+	bytes_put_le16(req, CFG_ID_SNMP_COMMUNITY);
+	(void)feed_req(MCP_CMD_CFG_GET, req, 2U);
+	expect_status(MCP_CMD_CFG_GET, g_seq, (uint8_t)MCP_ERR_AUTH);
+
+	bytes_put_le32(req, 0U);
+	req[4] = 0x01U;
+	(void)feed_req(MCP_CMD_CFG_EXPORT, req, 5U);
+	expect_status(MCP_CMD_CFG_EXPORT, g_seq, (uint8_t)MCP_ERR_AUTH);
+
+	/* With a real session both succeed. */
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"pw", 2U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_OK);
+	bytes_put_le16(req, CFG_ID_SNMP_COMMUNITY);
+	(void)feed_req(MCP_CMD_CFG_GET, req, 2U);
+	expect_status(MCP_CMD_CFG_GET, g_seq, (uint8_t)MCP_OK);
+}
+
+/* LOW-12: the admin credential is write-only over the wire — never returned by
+ * CFG_GET, even to an authenticated session, live or staged. */
+static void test_admin_password_is_never_readable(void)
+{
+	uint8_t req[8];
+
+	provision_password("pw");
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"pw", 2U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_OK);
+
+	bytes_put_le16(req, CFG_ID_SEC_ADMIN_PW);
+	(void)feed_req(MCP_CMD_CFG_GET, req, 2U);
+	expect_status(MCP_CMD_CFG_GET, g_seq, (uint8_t)MCP_ERR_AUTH);
+
+	req[2] = 0x01U; /* staged read */
+	(void)feed_req(MCP_CMD_CFG_GET, req, 3U);
+	expect_status(MCP_CMD_CFG_GET, g_seq, (uint8_t)MCP_ERR_AUTH);
+}
+
 static void test_reset_session_drops_everything_but_dfu(void)
 {
 	provision_password("pw");

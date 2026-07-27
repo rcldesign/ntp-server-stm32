@@ -69,20 +69,30 @@ target_sources(app PRIVATE
 )
 
 # Include roots:
-#   src/       "port/port_time.h", "zephyr/threads/threads.h"
-#   src/core/  core modules include each other as "util/crc.h" — the same root
-#              tests/host/CMakeLists.txt uses, which is what keeps a core module
-#              compiling identically on the host and on the target
-#   src/port/  bare "port_time.h" for glue that implements a port
+#   src/        the cross-area API as "zephyr/sts_app.h", and an area's headers
+#               with the zephyr/ prefix ("zephyr/platform/platform.h")
+#   src/core/   core modules include each other as "util/crc.h" — the same root
+#               tests/host/CMakeLists.txt uses, which is what keeps a core module
+#               compiling identically on the host and on the target
+#   src/port/   bare "port_time.h" for glue that implements a port
+#   src/zephyr/ an area's own headers, area-relative ("console/sts_console.h",
+#               "platform/platform.h"). Both this and the zephyr/-prefixed form
+#               from src/ resolve; the four glue areas are authored in parallel
+#               and settled on the area-relative style, so the glue root is
+#               carried explicitly rather than forcing every include to be
+#               rewritten. It adds src/zephyr/<area>/ as search dirs, none of
+#               which collides with a <zephyr/...> path (those live under the
+#               toolchain's zephyr/include, and there is no src/zephyr/zephyr/).
 #
-# NOTE: having src/ on the include path means <zephyr/...> resolves against
-# src/zephyr/ first. Do not create a header directly under src/zephyr/ whose
-# name matches a Zephyr header (device.h, kernel.h, ...) — glue headers belong
-# in src/zephyr/<area>/ per ARCHITECTURE.md §2.
+# NOTE: having src/ on the include path means <zephyr/...> would resolve against
+# src/zephyr/ first if such a header existed. Do not create a header directly
+# under src/zephyr/ whose name matches a Zephyr header (device.h, kernel.h, ...)
+# — glue headers belong in src/zephyr/<area>/ per ARCHITECTURE.md §2.
 target_include_directories(app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${CMAKE_CURRENT_SOURCE_DIR}/src/core
   ${CMAKE_CURRENT_SOURCE_DIR}/src/port
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr
 )
 
 # ARCHITECTURE.md §9: zero warnings from application code.

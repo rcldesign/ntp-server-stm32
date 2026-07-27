@@ -1628,6 +1628,144 @@ static void test_sensor_validity_flags_disambiguate_zero(void)
 	TEST_ASSERT_EQUAL_INT32(0, b.osc_temp_mc);
 }
 
+static void test_published_pps_offset_saturates_not_wraps(void)
+{
+	disc_ctx_t ctx;
+	quality_state_t qs;
+	quality_block_t b;
+	disc_in_t in;
+	disc_out_t out;
+
+	/*
+	 * L2: last_e_ns can be a couple of billion ns on the first accepted
+	 * capture (the median/MAD gate has no history yet), which is outside
+	 * int32 range. A bare cast to the quality block's int32 field is UB;
+	 * the value must saturate.
+	 */
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, NULL));
+	TEST_ASSERT_EQUAL_INT(0, quality_state_init(&qs));
+
+	/* wrap_diff(0, 0xC0000000) = +2^30 counts; * 3 ns = +3.22e9 ns. */
+	env_defaults(&in.env, 1000u);
+	memset(&in.pps, 0, sizeof(in.pps));
+	in.pps.primary_expected = 0u;
+	in.pps.primary_count = 0xC0000000u;
+	in.pps.primary_ns_per_count = 3.0f;
+	in.pps.primary_valid = true;
+	TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, &qs, &out));
+	TEST_ASSERT_TRUE(out.sample_accepted);
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_INT32(INT32_MAX, b.last_pps_off_ns);
+
+	/* And the negative rail: wrap_diff(0, 0x40000000) = -2^30 counts. */
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, NULL));
+	env_defaults(&in.env, 1000u);
+	in.pps.primary_count = 0x40000000u;
+	TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, &qs, &out));
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_EQUAL_INT32(INT32_MIN, b.last_pps_off_ns);
+}
+
+static void test_holdover_negative_drift_never_decreases(void)
+{
+	disc_ctx_t ctx;
+	disc_cfg_t cfg;
+	struct osc p;
+	uint64_t ms = 0u;
+	uint32_t expected = 0x9A000000u;
+	unsigned int i;
+	disc_out_t out;
+	disc_in_t in;
+
+	/*
+	 * A pathological (negative) characterised drift must not make the
+	 * estimate run backwards: the growth rate is clamped at zero, the
+	 * estimate holds at its base, and time-to-demotion reads "never".
+	 */
+	(void)disc_cfg_defaults(&cfg);
+	cfg.holdover.base_ns = 100.0f;
+	cfg.holdover.drift_ns_per_s = -5.0f;
+	cfg.holdover.aging_ns_per_s2 = 0.0f;
+	cfg.holdover.temp_ns_per_s_per_c = 0.0f;
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
+	noise_seed(71u);
+	osc_init(&p, 0.0, -30.0);
+	(void)run_to_lock(&ctx, &p, &ms, 10.0, &expected, 1500u);
+
+	/* Only meaningful once holdover has actually been entered (after
+	 * pps_loss_ticks missed seconds), so gate the assertions on it. */
+	for (i = 0u; i < 100u; i++) {
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		TEST_ASSERT_EQUAL_INT(0,
+				      disc_tick_no_pps(&ctx, &in.env, NULL, &out));
+		if (out.holdover) {
+			TEST_ASSERT_INT64_WITHIN(1, 100, out.holdover_est_err_ns);
+			TEST_ASSERT_EQUAL_UINT32(UINT32_MAX,
+						 out.holdover_t_demote_s);
+		}
+	}
+	TEST_ASSERT_TRUE(out.holdover);
+}
+
+static void test_holdover_ageing_shortens_the_demote_horizon(void)
+{
+	disc_ctx_t ctx;
+	disc_cfg_t cfg;
+	struct osc p;
+	uint64_t ms = 0u;
+	uint32_t expected = 0x9B000000u;
+	unsigned int i;
+	disc_out_t out;
+	disc_in_t in;
+	int64_t est_prev;
+
+	/*
+	 * With an ageing term the estimate grows super-linearly and the
+	 * demote horizon is the positive root of the quadratic (the conjugate
+	 * form in holdover_time_to_demote). Assert the estimate accelerates
+	 * and the horizon is finite and shrinking.
+	 */
+	(void)disc_cfg_defaults(&cfg);
+	cfg.holdover.base_ns = 100.0f;
+	cfg.holdover.drift_ns_per_s = 5.0f;
+	cfg.holdover.aging_ns_per_s2 = 0.5f;
+	cfg.demote_threshold_ns = 1.0e6f;
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
+	noise_seed(73u);
+	osc_init(&p, 0.0, -30.0);
+	(void)run_to_lock(&ctx, &p, &ms, 10.0, &expected, 1500u);
+
+	/* First 30 s: gather a growth increment for the acceleration check. */
+	for (i = 0u; i < 30u; i++) {
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		TEST_ASSERT_EQUAL_INT(0,
+				      disc_tick_no_pps(&ctx, &in.env, NULL, &out));
+	}
+	{
+		int64_t est_30 = out.holdover_est_err_ns;
+		uint32_t demote_30 = out.holdover_t_demote_s;
+
+		/* est(30) = 100 + 5*30 + 0.5*0.5*900 = 100 + 150 + 225 = 475. */
+		TEST_ASSERT_INT64_WITHIN(10, 475, est_30);
+		TEST_ASSERT_TRUE(demote_30 != UINT32_MAX);
+		TEST_ASSERT_TRUE(demote_30 > 0u);
+
+		est_prev = est_30;
+		for (i = 0u; i < 60u; i++) {
+			ms += 1000u;
+			env_defaults(&in.env, ms);
+			TEST_ASSERT_EQUAL_INT(
+				0, disc_tick_no_pps(&ctx, &in.env, NULL, &out));
+		}
+		/* Super-linear: the next 60 s add more than 60*(rate at t=30). */
+		TEST_ASSERT_TRUE(out.holdover_est_err_ns - est_prev > 60 * 20);
+		/* Horizon shrank. */
+		TEST_ASSERT_TRUE(out.holdover_t_demote_s < demote_30);
+	}
+}
+
 /* ---------------------------------------------------------------- PFI park */
 
 static void test_park_holds_the_actuator_and_unpark_recovers(void)
@@ -2298,6 +2436,9 @@ int main(void)
 
 	RUN_TEST(test_vc_sense_divergence_raises_a_dac_fault);
 	RUN_TEST(test_sensor_validity_flags_disambiguate_zero);
+	RUN_TEST(test_published_pps_offset_saturates_not_wraps);
+	RUN_TEST(test_holdover_negative_drift_never_decreases);
+	RUN_TEST(test_holdover_ageing_shortens_the_demote_horizon);
 
 	RUN_TEST(test_park_holds_the_actuator_and_unpark_recovers);
 	RUN_TEST(test_unpark_from_a_never_locked_loop_does_not_serve);

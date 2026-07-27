@@ -955,10 +955,11 @@ static void test_lock_timeout_drops_the_rubidium(void)
 	model_t m;
 
 	model_init(&m, NULL);
-	m.in.rb_lock = false;
+	m.hold_no_lock = true;
 	run_out(&m, 60000U, 40U); /* 10 min lock timeout, in minute steps */
 
-	/* It was powered and gated — the rail was fine — but never locked. */
+	/* It was powered and gated — the rail was fine, precharge and operating
+	 * both verified — but never locked. */
 	expect_present(&m, PWRSEQ_ACT_RB_PWR_EN);
 	expect_present(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 	expect_present(&m, PWRSEQ_ACT_RB_PWR_DIS);
@@ -975,7 +976,7 @@ static void test_an_out_of_band_external_reference_is_not_a_lock(void)
 	/* Interface ref §3: the dual guard is EXTREF_MON in band *and*
 	 * RB_LOCK. One without the other is not a usable reference. */
 	model_init(&m, NULL);
-	m.in.extref_in_band = false;
+	m.hold_no_extref = true;
 	run_out(&m, 60000U, 40U);
 
 	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
