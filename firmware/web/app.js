@@ -2756,12 +2756,97 @@
 		root.appendChild(el('div', { cls: 'c6' }, panel('Change password', pwB)));
 		var tlsB = el('div', { cls: 'pbody' }, empty('loading…'));
 		root.appendChild(el('div', { cls: 'c12' }, panel('TLS identity', tlsB)));
+		var backupB = el('div', { cls: 'pbody' });
+		root.appendChild(el('div', { cls: 'c12' },
+			panel('Configuration backup', backupB)));
 		var cfgHost = el('div', { cls: 'c12' });
 		root.appendChild(cfgHost);
 		var dangerB = el('div', { cls: 'pbody' });
 		root.appendChild(el('div', { cls: 'c12' }, panel('Danger zone', dangerB)));
 
 		var userNames = ['admin'];
+
+		var IMPORT_ERR = {
+			bad_magic: 'not a Meridian config blob (bad magic)',
+			bad_crc: 'the file is corrupt (CRC mismatch)',
+			schema_version: 'built for a different schema version',
+			value_out_of_range: 'a record holds an out-of-range value',
+			malformed_record: 'a record is malformed'
+		};
+
+		function renderBackup() {
+			clear(backupB);
+			if (!admin) {
+				backupB.appendChild(empty('Admin role required to export or import configuration.'));
+				return;
+			}
+			var withSecrets = el('input', { type: 'checkbox' });
+			var exp = el('button', { cls: 'btn sm', type: 'button', text: 'Export' });
+			exp.addEventListener('click', function () {
+				exp.disabled = true;
+				req('GET', 'config/export' + (withSecrets.checked ? '?secrets=1' : ''),
+					{ expect: 'blob' }).then(function (b) {
+					saveBlob(b, 'meridian-config.mcf');
+					toast('configuration exported' +
+						(withSecrets.checked ? ' including secrets' : ''), 'ok', 'backup');
+				}, function (e) { errToast(e, 'export'); })
+					.then(function () { exp.disabled = false; });
+			});
+
+			var file = el('input', { type: 'file', accept: '.mcf,.bin' });
+			var imp = el('button', { cls: 'btn sm', type: 'button', text: 'Import' });
+			imp.addEventListener('click', function () {
+				var f = file.files && file.files[0];
+				if (!f) { toast('choose an exported .mcf file first', 'err', 'import'); return; }
+				confirmDlg({
+					title: 'Import configuration',
+					text: 'Applying ' + f.name + ' (' + fbytes(f.size) + ') overwrites the ' +
+						'current configuration. Some groups may need a reboot. Continue?',
+					okText: 'Import'
+				}).then(function (ok) {
+					if (!ok) { return; }
+					imp.disabled = true;
+					return f.arrayBuffer().then(function (buf) {
+						return req('POST', 'config/import', {
+							body: buf, type: 'application/octet-stream'
+						});
+					}).then(function (r) {
+						var msg = (r && isNum(r.applied) ? r.applied : '?') + ' key(s) applied';
+						if (r && r.reboot_groups) {
+							msg += '; ' + r.reboot_groups + ' group(s) need a reboot';
+						}
+						if (r && r.persist_errors) {
+							msg += '; ' + r.persist_errors + ' failed to persist';
+						}
+						toast(msg, (r && r.persist_errors) ? 'warn' : 'ok', 'imported');
+						return Cfg.load(true).then(paintStage, paintStage);
+					}, function (e) {
+						toast(IMPORT_ERR[e.code] || (e.code + (e.detail ? ': ' + e.detail : '')),
+							'err', 'import rejected');
+					}).then(function () { imp.disabled = false; });
+				});
+			});
+
+			add(backupB, [
+				el('div', { cls: 'grid' }, [
+					el('div', { cls: 'c6' }, [
+						el('label', { cls: 'fl', text: 'Export' }),
+						el('div', { cls: 'btnrow' }, [exp,
+							el('label', { cls: 'hint' }, [withSecrets, ' include secrets'])]),
+						el('div', { cls: 'hint', style: 'margin-top:8px' },
+							'Downloads a binary blob (CRC-protected, schema-versioned). ' +
+							'Including secrets is audited on the device.')
+					]),
+					el('div', { cls: 'c6' }, [
+						el('label', { cls: 'fl', text: 'Import' }),
+						el('div', { cls: 'btnrow' }, [file, imp]),
+						el('div', { cls: 'hint', style: 'margin-top:8px' },
+							'Rejected as a whole on bad magic, CRC mismatch, schema mismatch, ' +
+							'or any out-of-range record.')
+					])
+				])
+			]);
+		}
 
 		function loadUsers() {
 			if (!admin) {
@@ -3017,6 +3102,7 @@
 			el: root,
 			init: function () {
 				renderDanger();
+				renderBackup();
 				renderPw();
 				loadUsers();
 				loadTls();

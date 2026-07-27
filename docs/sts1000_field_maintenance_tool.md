@@ -130,6 +130,25 @@ COBS-encoded frames, `0x00` delimiter (unambiguous resync on a byte stream):
 `flags` bit0 = more-fragments; reassembly is per-channel. CRC failures are dropped
 silently — the control plane has request IDs and host retry, streams tolerate loss.
 
+**Wire details this document previously left open, now fixed by the as-built device
+(a host implementation needs every one of these):**
+
+| Detail | Value |
+|---|---|
+| CRC-16-CCITT trailer byte order | **big-endian** |
+| `flags` bits 1–7 | reserved-zero, **not** rejected on RX (forward compatibility) |
+| RX payload maximum | 2048 (as specified) |
+| TX payload maximum | **1024**; longer messages are fragmented with the more-fragments flag. A host that ignores that flag will see truncation |
+| Fragmented message with no reassembly slot, or over-long | dropped **whole** and counted — never delivered partially |
+| Reserved channels 0x0B–0x1F | rejected on RX |
+| Manifest content hash | CRC-32/ISO-HDLC over the canonical per-object JSON in table order |
+| Manifest compression | served **uncompressed**; `hello.limits.gzip = false` |
+| JSON-RPC application error codes | −32000…−32009 (below the standard −32700/−32600/−32601/−32602/−32603) |
+| JSON-RPC batches | refused with −32600 |
+| CBOR record keys | small integers, per-record key tables documented in `core/mp/mp_stream.h` |
+| G3 typed phrase | `CONFIRM UNSAFE ACTION`, then a hold: arm with a nonce, re-issue after ≥3 s and within 30 s |
+| Panel mirror channel | **0x0A** |
+
 ### 3.2 Control plane (channel 0)
 
 JSON-RPC 2.0; every mutating call carries the session token (§5.3).
@@ -533,7 +552,14 @@ code exists, is unit-tested on the host, and links into the signed image.
 | Tunnels (USART3, UART7) with firmware-suspend handshake | in tree |
 | Diag runner + support bundle | in tree |
 | Multi-IC update orchestrator + inventory | in tree |
+| Capability manifest content | 91 objects (power 12, reference 7, gnss 5, panel 9, system 6, sensor 52); every object carries guard, caps, interlocks and its schematic designator |
+| Guard escalation | cumulative: G0 session → G1 `ack` → G2 typed device serial + interlocks → G3 phrase + hold |
+| Dead-man revert | keepalive TTL 5 s, checked on a 100 ms tick, so worst case ≈5.1 s; `session.close`, DTR drop, BREAK and mode-exit revert **synchronously**. 16 leases, no allocation |
+| Diag registry | 14 tests; a failing step does not abort the run (a technician wants the whole picture); verdicts rank PASS < SKIP < FAIL < ERROR |
+| Footprint | 53.1 KB flash, 23.0 KB RAM — **over the §11 aim** of 24 KB/12 KB. Structural to the scope (91 objects, 29 methods, 14 tests, 12 channels); the manifest's const string table is 13.2 KB and is the single biggest reduction lever (string pool, or the spec's optional gzip path) |
 | Host application (§10) | **not started** — specified only |
+| SMP tunnel (ch 0x06) | framing implemented; **no MCUmgr binding yet** — frames arrive but are not dispatched |
+| `sec.attest` diag | present, returns not-supported until the ATECC binding is wired |
 | Budget rule | MP threads run at console priority and **never hold a timing mutex** — they read the lock-free quality/health snapshots only, so the discipline loop is unaffected |
 
 Items marked "in tree" are verified against the repository at the commit that introduced
