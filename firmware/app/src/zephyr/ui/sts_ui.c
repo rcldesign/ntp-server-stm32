@@ -83,6 +83,17 @@ static char surf_ch[STS_UI_ROWS * STS_UI_COLS];
 static uint8_t surf_attr[STS_UI_ROWS * STS_UI_COLS];
 static ui_surface_t g_surf;
 
+/*
+ * The MP panel mirror's previous-frame store is sized for the as-built 60x20
+ * grid (MP_MIRROR_ROWS/COLS in console/mp_glue.c, which is private to that area
+ * so the constant cannot be referenced from here). A surface larger than that is
+ * rejected by sts_mp_mirror_publish() SILENTLY — every frame dropped, `mp status`
+ * still reporting the mirror wired. Fail the build instead; keep the two in step.
+ */
+BUILD_ASSERT((size_t)(STS_UI_ROWS * STS_UI_COLS) <= (size_t)(20u * 60u),
+	     "panel surface exceeds the MP mirror's 60x20 cell store "
+	     "(MP_MIRROR_CELLS in src/zephyr/console/mp_glue.c)");
+
 /* Input queue fed by the io_scan thread through sts_ui_post_input(). Deep
  * enough to absorb a burst between two render ticks; drop-on-full so the
  * non-blocking scan thread is never delayed. */
@@ -486,9 +497,8 @@ static const char *ui_alarm_name(uint16_t id)
 	return "ALARM";
 }
 
-static void fill_alarms(ui_health_t *h)
+static void fill_alarms(ui_health_t *h, uint64_t mask)
 {
-	uint64_t mask = sts_alarms_active();
 	uint8_t n = 0u;
 	unsigned int bit;
 
@@ -517,12 +527,13 @@ static void fill_alarms(ui_health_t *h)
  * back to the quality SV counts, and Home/Clocks/Alarms are fully populated
  * from the quality block and the alarm mask.
  */
-static void build_health(ui_health_t *h, const quality_block_t *q)
+static void build_health(ui_health_t *h, const quality_block_t *q,
+			 uint64_t alarms)
 {
 	memset(h, 0, sizeof(*h));
 	fill_time(h, q);
 	fill_ident(h);
-	fill_alarms(h);
+	fill_alarms(h, alarms);
 
 	/* Antenna state is not directly exposed; approximate from the GNSS
 	 * time-lock flag so the Home/Sky badge is not permanently "UNKNOWN". */
@@ -574,7 +585,7 @@ static void build_health(ui_health_t *h, const quality_block_t *q)
  *    platform's supervisor (TIM4, PD12-14). Its commanded pattern and per-channel
  *    duties are private to supervisor.c and sts_app.h exposes no getter.
  */
-static void mirror_publish(void)
+static void mirror_publish(uint64_t alarms)
 {
 	mp_mirror_in_t f;
 	uint8_t page = (uint8_t)ui_page(&g_ui);
@@ -612,8 +623,10 @@ static void mirror_publish(void)
 	f.panel_rail_on = (f.panel_duty_pct != 0u);
 	/* PF12 (U55 RT9742 nFLG) is scanned signal 12, and alarm ids 0..31 mirror
 	 * fault_sig_t one-for-one (fault.h), so the alarm mask is the cross-area
-	 * view of that pin. */
-	f.panel_fault = (sts_alarms_active() &
+	 * view of that pin. @p alarms is the tick's single sts_alarms_active()
+	 * reading, shared with build_health() — that call takes the platform's
+	 * fault mutex, and the render path takes it once per frame, not twice. */
+	f.panel_fault = (alarms &
 			 FAULT_ALARM_BIT(FAULT_SIG_PANEL_LED_FAULT)) != 0u;
 	f.bl_permille = ui_backlight_permille(&g_ui);
 
@@ -703,6 +716,7 @@ static void ui_thread_entry(void *p1, void *p2, void *p3)
 		{
 			quality_block_t q;
 			ui_health_t h;
+			uint64_t alarms;
 			int32_t detents = ui_input_encoder_delta();
 
 			if (detents != 0) {
@@ -716,14 +730,18 @@ static void ui_thread_entry(void *p1, void *p2, void *p3)
 			if (sts_quality_snapshot(&q) != 0) {
 				quality_block_init(&q);
 			}
-			build_health(&h, &q);
+			/* One reading per frame: it takes the platform's fault
+			 * mutex, and both the health snapshot and the mirror want
+			 * the same answer anyway. */
+			alarms = sts_alarms_active();
+			build_health(&h, &q, alarms);
 
 			if (ui_render(&g_ui, &q, &h, &g_surf) == 0) {
 				/* Mirror the frame the panel is about to show,
 				 * before the blit: the surface is what the host
 				 * replicates, and a display that is absent or
 				 * still powering up must not stop the mirror. */
-				mirror_publish();
+				mirror_publish(alarms);
 			}
 			(void)ui_display_blit(&g_surf);
 			ui_display_backlight_permille(

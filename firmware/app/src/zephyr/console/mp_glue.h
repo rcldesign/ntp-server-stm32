@@ -15,9 +15,10 @@
  * the shell parses nothing. `mp exit`, the in-band exit magic, a BREAK and a DTR
  * drop all clear it.
  *
- * See the TODO block in mp_glue.c for the two hooks this area cannot install by
- * itself (the raw shell tap for the autobaud entry magic, and the UI area's
- * panel-frame publisher for the mirror).
+ * The engine is started by sts_console_start() and serviced by the console
+ * supervisor; the panel mirror is published by the ui area. See the wiring block
+ * at the top of mp_glue.c for the one hook still missing (the raw shell tap for
+ * the autobaud entry magic) and for the object writes that remain unbound.
  */
 
 #ifndef STS1000_ZEPHYR_CONSOLE_MP_GLUE_H_
@@ -51,7 +52,8 @@ int sts_mp_start(void);
  *
  * Must be called at least every MP_TICK_MAX_MS (2 s) so an override can never
  * outlive its keepalive by more than the spec's revert budget. The console
- * supervisor's 100 ms loop is well inside that.
+ * supervisor calls it unconditionally on every pass of its 250 ms loop, which is
+ * 8x inside that. A no-op before sts_mp_start(), so the caller needs no gate.
  */
 void sts_mp_tick(void);
 
@@ -82,12 +84,14 @@ bool sts_mp_shell_tap(uint8_t b);
 /**
  * Publish the front-panel frame the mirror streams (project requirement).
  *
- * The UI area calls this after each render with its text-tile surface, lamp
- * state and input echo. Until it does, `mirror.get` and channel 0x0A answer
- * "not supported" rather than inventing a panel. The frame is copied, so the
- * caller may reuse its surface immediately.
+ * The ui area calls this after each render with its text-tile surface, lamp
+ * state and input echo. Before the first render `mirror.get` and channel 0x0A
+ * answer "not supported" rather than inventing a panel. The frame is copied, so
+ * the caller may reuse its surface immediately.
  *
- * Safe from the ui thread; takes a short mutex shared with the MP tick.
+ * Safe from the ui thread; takes a short mutex shared with the MP tick. Neither
+ * side waits on the other: this drops the frame if the tick holds the lock, and
+ * the tick's reader answers -EBUSY if this holds it.
  */
 void sts_mp_mirror_publish(const mp_mirror_in_t *frame);
 

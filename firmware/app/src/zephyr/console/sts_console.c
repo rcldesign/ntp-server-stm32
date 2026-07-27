@@ -20,13 +20,18 @@
  *   3. The logger. It arms the Zephyr LOG bridge, so from here on driver
  *      warnings reach MCP LOG_TAIL and the NOR spool as well as the console.
  *   4. MCP. It needs cfg (auth policy), the log ring, and the DFU port.
- *   5. Self-confirm. Reporting the unconfirmed-image warning last puts it at
+ *   5. The Maintenance Protocol. Same dependency set as MCP — cfg, the log
+ *      ring, the DFU port — plus the console UART, which it shares with the
+ *      shell through shell_set_bypass() and which it refuses to run without
+ *      (-ENODEV). Starting it after the USB gate keeps that ordering explicit
+ *      even though the CDC-ACM device is ready before usb_enable().
+ *   6. Self-confirm. Reporting the unconfirmed-image warning last puts it at
  *      the end of the boot log where an operator will see it.
  *
  * The supervisor thread runs at priority 14 alongside `mcp` and
- * `housekeeping` (ARCHITECTURE.md §6). It owns three slow duties that do not
- * deserve threads of their own: the USB VBUS gate, the §8.3 self-confirm poll,
- * and the periodic fast-save flush.
+ * `housekeeping` (ARCHITECTURE.md §6). It owns four slow duties that do not
+ * deserve threads of their own: the USB VBUS gate, the MP service tick, the
+ * §8.3 self-confirm poll, and the periodic fast-save flush.
  */
 
 #include <zephyr/kernel.h>
@@ -39,6 +44,7 @@
 #include <zephyr/logging/log.h>
 
 #include "cfg/cfg.h"
+#include "console/mp_glue.h"
 #include "console/sts_console.h"
 #include "logring/logring.h"
 #include "storage/sts_store.h"
@@ -146,6 +152,16 @@ static void console_thread_entry(void *p1, void *p2, void *p3)
 
 		sts_usb_poll();
 
+		/*
+		 * Unconditionally, every iteration — not behind one of the
+		 * accumulators below. mp_glue.h requires this at least every
+		 * MP_TICK_MAX_MS (2 s) because it is what expires an override's
+		 * dead-man: a tick that is skipped is a lease that outlives its
+		 * keepalive. CONSOLE_PERIOD_MS (250) is 8x inside that budget,
+		 * and the call is a no-op until sts_mp_start() has run.
+		 */
+		sts_mp_tick();
+
 		since_selfconfirm += CONSOLE_PERIOD_MS;
 		if (since_selfconfirm >= SELFCONFIRM_PERIOD_MS) {
 			since_selfconfirm = 0U;
@@ -236,6 +252,19 @@ int sts_console_start(void)
 	rc = sts_mcp_start();
 	if (rc != 0) {
 		LOG_ERR("MCP channel failed to start (%d)", rc);
+	}
+
+	/*
+	 * Non-fatal, like MCP above: MP shares CDC-ACM #0 with the shell, so if
+	 * its engine will not initialise the shell and MCP are still there — and
+	 * they are the recovery path. Aborting console bring-up here would take
+	 * the recovery path away to punish the loss of a maintenance surface.
+	 */
+	rc = sts_mp_start();
+	if (rc != 0) {
+		LOG_ERR("Maintenance Protocol failed to start (%d): `mp enter` "
+			"will refuse; shell and MCP unaffected",
+			rc);
 	}
 
 	(void)sts_selfconfirm_start();

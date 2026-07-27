@@ -415,6 +415,13 @@ static int pv_cal_run(void *u, uint8_t proc, uint32_t arg)
  * them are CFG_F_REBOOT_REQUIRED. So this stages the key and the operator commits
  * it — the response tells them a commit is required, and the router reports
  * `commit_required`.
+ *
+ * Staged under sts_cfg_lock(). sts_app.h: sts_cfg() is not internally locked and
+ * the MCP engine, the shell backend and the ui_local thread write the same tree,
+ * so every mutation MUST be bracketed. This runs on a web worker, the one plane
+ * that was still writing it bare. No commit here — the operator commits through
+ * /api/v1/config/commit, which reaches sts_cfg_commit() via commit_via_app() and
+ * takes the mutex itself.
  */
 static int pv_service_enable(void *u, uint8_t svc, bool enable)
 {
@@ -423,15 +430,18 @@ static int pv_service_enable(void *u, uint8_t svc, bool enable)
 		(uint16_t)CFG_ID_PTP_ENABLE,  (uint16_t)CFG_ID_SNMP_ENABLE,
 		(uint16_t)CFG_ID_LOG_SYSLOG_EN,
 	};
+	int rc;
 
 	ARG_UNUSED(u);
 	if (svc >= (uint8_t)REST_SVC_COUNT) {
 		return -EINVAL;
 	}
-	if (cfg_set_u64(sts_cfg(), keys[svc], enable ? 1U : 0U) != 0) {
-		return -EIO;
-	}
-	return 0;
+
+	sts_cfg_lock();
+	rc = cfg_set_u64(sts_cfg(), keys[svc], enable ? 1U : 0U);
+	sts_cfg_unlock();
+
+	return (rc != 0) ? -EIO : 0;
 }
 
 /*

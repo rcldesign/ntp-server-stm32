@@ -157,7 +157,7 @@ JSON-RPC 2.0; every mutating call carries the session token (§5.3).
 |---|---|---|
 | `hello` | host tool version | fw version, hw rev, serial, manifest hash, MP version, session requirements |
 | `manifest.get` | cursor | manifest fragment (§4) |
-| `session.open` / `keepalive` / `close` | credential+level / token / token | token+ttl+level / ttl / — (all overrides revert) |
+| `session.open` / `keepalive` / `close` | `user`+`secret` (both optional) + `ttl_ms` + `client` / `sid` / `sid` | `sid`+`keepalive_ms`+`expires_ms`+`role`+`auth_required`+`serial_required` / ttl / — (all overrides revert) |
 | `obj.get` | id \| glob | value(s) + source (auto/override) + timestamp |
 | `obj.set` / `obj.override` | id, value, [confirm nonce] | applied value \| guard challenge |
 | `obj.pulse` | id, value, duration_ms | momentary actions (lamp test, identify, relay exercise) |
@@ -234,11 +234,29 @@ Rules:
 
 ### 5.3 Sessions & auth
 
-`session.open` against the same credential store the web and console planes use
-(role ≥ operator for G0–G1, admin for G2–G3). Read-only monitoring needs no session.
-Token TTL 15 min, extended by keepalive; one session at a time, takeover audited.
-Repeated failures escalate through a throttle to a hard lockout (shared discipline with
-MCP/web — reconnecting does not reset it). Every mutating call is audit-logged
+`session.open` takes optional `user`/`secret` and authenticates through `sts_aaa_check()`
+— the same credential store and lockout table the web and shell planes use, so
+reconnecting does not reset the throttle. Read-only monitoring needs no session, and a
+session opened without a credential is **not refused**: it opens at role `none`, which
+satisfies G0 and nothing above it.
+
+**Role floor (enforced in `mp_ovr_guard()`):** G1 needs ≥ operator, G2 and G3 need admin.
+The role is checked before the typed confirmations, so a refusal names the real obstacle
+rather than the next one, and before the keepalive refresh, so an under-privileged caller
+cannot hold a session open by hammering actions it is not allowed to perform.
+
+**Fail-closed.** When the device build has no authenticate hook wired, every session caps
+at role `none` — observation only. The reply carries `auth_required` and the granted
+`role` so the tool prompts for a credential instead of discovering the cap by being
+refused later. A wrong password, an unknown user, an over-long field and "no authority
+could answer" are one indistinguishable refusal; only a lockout is reported distinctly,
+because telling an operator to wait is operationally necessary and reveals nothing an
+attacker who caused the lockout does not already know.
+
+Authentication runs **before** the session is opened, so a bad credential cannot evict a
+working tool and revert its overrides. TTL is bounded by `MP_KEEPALIVE_TTL_MS` and
+extended by keepalive; one session at a time, and a takeover neither inherits the previous
+session's role nor its typed-serial confirmation. Every mutating call is audit-logged
 (user, object, old→new, source).
 
 ### 5.4 Dead-man
@@ -547,9 +565,10 @@ code exists, is unit-tested on the host, and links into the signed image.
 | Frame mux (COBS + CRC16, channel dispatch, `mp enter/exit`) | in tree |
 | Manifest generator (build-time table → runtime JSON + content hash) | in tree |
 | Override engine (lease table, dead-man, revert hooks, veto reporting) | in tree |
-| Sessions + guard/interlock evaluation | in tree, sharing the credential store and lockout discipline with the console and web planes |
-| Streams (telemetry/PPS/log/event/mirror CBOR; NMEA/UBX tees) | in tree |
-| Tunnels (USART3, UART7) with firmware-suspend handshake | in tree |
+| Sessions + guard/interlock evaluation | in tree, authenticating through `sts_aaa_check()` so the credential store and lockout table are shared with the console and web planes; role floor enforced per §5.3, fail-closed at role `none` |
+| Streams (telemetry/PPS/log/event/mirror CBOR) | in tree. The **NMEA/UBX tees are not fed**: `sts_mp_tee_gnss/rb/nmea/ubx` have no producers — the calls belong in `platform/gnss.c` and `platform/rb_serial.c` and are not there yet, so a subscriber sees an open channel with no bytes |
+| Tunnels (USART3) with firmware-suspend handshake | in tree. Opening the GNSS tunnel calls `sts_gnss_uart_suspend()`, so the receiver is genuinely stood down rather than merely alarmed about |
+| Tunnels (UART7, rubidium) | **not wired.** `rb_serial_tunnel_open()` exists (`platform/rb_serial.c:356`) but is private to the platform area and takes a mandatory **ISR-context** byte-sink callback; the only useful sink (`sts_mp_tee_rb` → `mp_stream_raw` → `uart_poll_out`) is not ISR-safe. Needs a ring plus a drain on `sts_mp_tick()`. Firmware still reads UART7 while the tunnel is "open" |
 | Diag runner + support bundle | in tree |
 | Multi-IC update orchestrator + inventory | in tree |
 | Capability manifest content | 91 objects (power 12, reference 7, gnss 5, panel 9, system 6, sensor 52); every object carries guard, caps, interlocks and its schematic designator |
@@ -562,9 +581,15 @@ code exists, is unit-tested on the host, and links into the signed image.
 | `sec.attest` diag | present, returns not-supported until the ATECC binding is wired |
 | Budget rule | MP threads run at console priority and **never hold a timing mutex** — they read the lock-free quality/health snapshots only, so the discipline loop is unaffected |
 
-Items marked "in tree" are verified against the repository at the commit that introduced
-this document's §11; anything the firmware has not yet landed is called out explicitly
-rather than implied.
+**"In tree" means reachable in the linked image, not merely present in the repository.**
+That distinction is not pedantry: every row above once read "in tree" while
+`sts_mp_start()` and `sts_mp_tick()` had no callers anywhere, so `--gc-sections` discarded
+`mp_init`, the override engine and the mirror provider, and the entire MP device side was
+absent from the firmware. Source-level `grep` said the code was there; the ELF said it was
+not. Verify a row by checking the symbol survives into `zephyr.elf`
+(`nm build/app/zephyr/zephyr.elf | grep -w <symbol>`), and treat a call chain that ends at
+a function nothing calls as **not** in tree. Anything the firmware has not landed is
+called out explicitly rather than implied.
 
 ---
 

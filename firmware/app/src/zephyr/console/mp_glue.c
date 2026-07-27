@@ -8,7 +8,23 @@
  * hand-off, and the provider callbacks.
  *
  * ---------------------------------------------------------------------------
- * TODO — two hooks this area cannot install by itself
+ * As-built wiring, and what is still missing
+ *
+ * Engine. sts_console_start() calls sts_mp_start() alongside sts_mcp_start(),
+ * and the console supervisor calls sts_mp_tick() every 250 ms — inside the 2 s
+ * MP_TICK_MAX_MS dead-man budget. Without both the whole engine is not merely
+ * idle: --gc-sections drops mp_init(), obj_apply() and the override/lease code
+ * out of the image entirely.
+ *
+ * Panel mirror: WIRED. The ui area publishes a frame after each ui_render()
+ * (src/zephyr/ui/sts_ui.c) through sts_mp_mirror_publish(), declared in
+ * src/zephyr/sts_app.h because mp_glue.h is private to this area
+ * (ARCHITECTURE.md §2) — the same seam sts_ui_post_input() crosses in the other
+ * direction. `mirror.get` and channel 0x0A therefore serve a real panel; they
+ * answer MP_E_NOTSUP only before the first render, and `mp status` prints the
+ * mirror as "wired" once one has landed.
+ *
+ * Still missing, and not silent:
  *
  * 1. Autobaud entry magic. sts_mp_shell_tap() implements it, but something has
  *    to feed it every console byte while the shell owns the port. That means one
@@ -16,22 +32,14 @@
  *    cross-area accessor. Until then MP mode is entered with `mp enter`, which
  *    covers every case except a host that cannot type.
  *
- * 2. Panel mirror. sts_mp_mirror_publish() is ready; the UI area has to call it
- *    after each ui_render(). It cannot include this private header
- *    (ARCHITECTURE.md §2 forbids cross-area private includes), so the
- *    declaration belongs in src/zephyr/sts_app.h — one prototype plus a __weak
- *    no-op, matching how sts_ui_post_input() already crosses the same seam.
- *
- * Neither gap is silent: `mirror.get` answers MP_E_NOTSUP and `mp status`
- * reports the mirror as unwired.
- *
- * A third, larger gap is the object write path. Most control objects live on
- * GPIO/PWM/DAC that the *platform* area owns, and sts_app.h exposes only
- * sts_panel_led_set(). Every other write therefore answers MP_E_NOTSUP today;
- * the manifest still publishes the object, its guard and its interlocks, so the
- * tool discovers the surface and the safety model is already enforced. Wiring
- * the rest is a platform-area change: one setter that takes a manifest object
- * index, or a small table of per-object accessors in sts_app.h.
+ * 2. The object write path. Most control objects live on GPIO/PWM/DAC that the
+ *    *platform* area owns, and sts_app.h exposes only sts_panel_led_set(); the
+ *    GNSS and Rb tunnels are the other two wired writes. Every remaining write
+ *    answers MP_E_NOTSUP, but the manifest still publishes the object, its guard
+ *    and its interlocks, so the tool discovers the surface and the safety model
+ *    is already enforced. Wiring the rest is a platform-area change: one setter
+ *    that takes a manifest object index, or a small table of per-object
+ *    accessors in sts_app.h.
  * ---------------------------------------------------------------------------
  */
 
@@ -338,7 +346,23 @@ static int prov_mirror(void *user, mp_mirror_in_t *out)
 	if (!mirror_valid) {
 		return -ENOTSUP;
 	}
-	(void)k_mutex_lock(&mirror_lock, K_MSEC(20));
+	/*
+	 * A timeout means the ui thread is mid-memcpy into mirror_ch/mirror_attr,
+	 * so copying anyway would serve cells from two different renders — and
+	 * unlocking a mutex this thread does not own returns -EPERM, i.e. the
+	 * release would silently not happen either. Bail, like
+	 * sts_mp_mirror_publish() does on the other side.
+	 *
+	 * -EBUSY specifically: mp_map_errno() turns it into MP_E_BUSY ("another
+	 * operation holds the resource"), which is the retryable answer the tool
+	 * needs. -EAGAIN has no case in that map and would land on
+	 * MP_E_INTERNAL; -ENOTSUP would claim the mirror is unwired for good.
+	 * pump_mirror() treats any non-zero as "skip this frame", so a subscribed
+	 * stream simply resyncs on the next tick.
+	 */
+	if (k_mutex_lock(&mirror_lock, K_MSEC(20)) != 0) {
+		return -EBUSY;
+	}
 	*out = mirror_frame;
 	out->ch = mirror_ch;
 	out->attr = mirror_attr;
@@ -851,8 +875,11 @@ static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 			"verify-fail %u, refusals %u",
 		    mp.ovr.grants, mp.ovr.vetoes, mp.ovr.deadman_reverts,
 		    mp.ovr.verify_failures, mp.ovr.refusals);
+	/* The ui area publishes after every ui_render(), so "no frame yet" means
+	 * it has not rendered one — CONFIG_STS1000_UI=n, or a boot this early —
+	 * not that the hook is missing. */
 	shell_print(sh, "mirror       %s (%u frames, %u keyframes)",
-		    mirror_valid ? "wired" : "UNWIRED (ui area must publish)",
+		    mirror_valid ? "live" : "no frame yet (ui has not rendered)",
 		    mp.mirror.frames, mp.mirror.keyframes);
 	shell_print(sh, "events       %u queued, %u dropped",
 		    (unsigned int)mp_stream_event_count(&mp.st),

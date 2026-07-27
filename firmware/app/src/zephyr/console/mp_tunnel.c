@@ -76,9 +76,10 @@ bool sts_mp_tunnel_rb_open(void)
  * Open or close the GNSS tunnel.
  *
  * Called from core's apply callback once the G2 guard and the interlocks have
- * passed. Raising the suspect state is the *first* thing done on open and the
- * last undone on close, so there is no window in which bytes are being diverted
- * while the reference is still believed.
+ * passed. Ordering is chosen so the port never has two owners and the reference
+ * is never believed while bytes are being diverted: on OPEN the receiver is stood
+ * down first, then the tee is enabled and the alarm raised; on CLOSE the tee is
+ * shut first, then the receiver is resumed and the alarm cleared.
  *
  * Balance. `tunnel_gnss` is the single record of who owns USART3, and it is
  * advanced only after the platform has agreed:

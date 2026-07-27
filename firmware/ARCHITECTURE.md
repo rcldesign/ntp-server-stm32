@@ -137,7 +137,7 @@ Conventions:
 | `thermal` | §10.2 fan PI loop (25 kHz PWM duty out, tach RPM in, hysteresis, min duty, fail-safe max), over-temp shed ladder (fan max → shed Rb → POE_KILL) | `thermal_step_1hz()` |
 | `mcp` | §7 + user req: **Meridian Console Protocol** (framing + command router + DFU session SM + telemetry/log event encoder + auth gate) — see §7 below | `mcp_input()`, `mcp_poll_tx()` |
 | `logring` | Structured log ring (RAM), RFC 5424 render, cursor-based tail, drop counters; NOR spool + syslog senders live in glue | `logr_put/tail` |
-| `snmp` | Compact SNMPv2c **read-only** agent + traps: BER codec, OID table walk bound to quality/health metrics catalog (§10.5 subset); v3 deferred (documented) | `snmp_handle(pkt)`, `snmp_make_trap()` |
+| `snmp` | Compact **read-only** agent + traps: BER codec, OID table walk bound to quality/health metrics catalog (§10.5 subset). **SNMPv3/USM is no longer deferred** — `snmp_v3.c` adds HMAC-SHA-256 auth, AES-128-CFB privacy, engine discovery/Report PDUs and authenticated notifications; `snmp_dispatch()` routes by msgVersion and is the live receive path, with v2c behind `sec.snmp.v2c` | `snmp_dispatch(pkt)`, `snmp_v3_handle()`, `snmp_make_trap()`, `snmp_v3_make_notification()` |
 | `ui` | Screen-stack nav SM (§6.1/6.2), button/encoder event consumption, page render into an abstract "text/tile" surface (glue rasterizes to ST7796), RGB pattern selector (§2.8), backlight/wake policy | `ui_input()`, `ui_render(surface)` |
 
 ### Phase-2 modules (all landed; see the FMT spec for the maintenance surface)
@@ -160,7 +160,21 @@ keys — refused to create RAM-only ghosts); Argon2id credential stretching (plu
 `auth_kdf_t`, but switching it is a coordinated flag day with MCP because the 48-byte
 envelope cannot record which KDF produced the tag); key zeroization on factory reset;
 FE-5680A firmware update (no loader protocol is documented anywhere reachable — reported
-as `NOT_SUPPORTED` rather than attempted).
+as `NOT_SUPPORTED` rather than attempted); an **ATECC-backed TLS server key** (the HTTPS
+identity is still a software PEM on NOR — routing it to the secure element needs an
+mbedTLS `PK_OPAQUE`/PSA driver over CryptoAuthLib, which is a driver, not wiring; the part
+is already the root for the SNMP engine id, attestation, the TRNG and the anti-rollback
+counters); the **MP UART7/rubidium tunnel** and the **NMEA/UBX tee producers**
+(`docs/sts1000_field_maintenance_tool.md` §11 records both blockers).
+
+> **Reachability is a build property, not a source property.** `--gc-sections` silently
+> discards any function nothing calls, so an entry point with no caller produces code that
+> compiles, tests green and is absent from the image. This bit the project once, at the
+> largest possible scale: `sts_mp_start()`/`sts_mp_tick()` had no callers, so the whole
+> Maintenance Protocol engine — `mp_init`, the override/lease engine, the guard classes,
+> the mirror provider — was stripped from every image built before it was wired into
+> `sts_console.c`. When a module is declared done, confirm its symbols survive into
+> `zephyr.elf` (`nm`), not merely that a call chain exists in the source.
 
 ---
 

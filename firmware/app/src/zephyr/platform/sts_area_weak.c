@@ -24,6 +24,8 @@
  *     retry forever.
  */
 
+#include <errno.h>
+
 #include <zephyr/kernel.h>
 #include <zephyr/toolchain.h>
 
@@ -63,12 +65,31 @@ __weak int sts_update_self_confirm(void)
 /*
  * PFI fast-save hooks. The console area's storage backend (src/zephyr/storage/)
  * owns the strong definitions; these weak no-ops let the platform's PFI ISR,
- * the discipline loop and the gnss path call them unconditionally, so a
- * CONFIG_STS1000_CONSOLE=n image still links (nothing is persisted, which is
- * the correct behaviour with no storage backend).
+ * the discipline loop, the gnss path and the shutdown sequencer call them
+ * unconditionally, so a CONFIG_STS1000_CONSOLE=n image still links (nothing is
+ * persisted, which is the correct behaviour with no storage backend).
+ *
+ * Keep this set complete against sts_store.h: every storage entry point the
+ * always-compiled platform area calls needs a stub here, or the claim above is
+ * false for exactly one symbol and only a `=n` build finds out.
  */
 __weak void sts_store_critical_flush_from_isr(void)
 {
+}
+
+/*
+ * The blocking counterpart. pwrseq_exec.c:512 calls it on the shutdown path and
+ * that file is in the always-compiled platform area, so its absence broke the
+ * CONFIG_STS1000_CONSOLE=n link that the comment above claims works — the ISR
+ * variant was stubbed and this one was not. Returns -ENODEV rather than 0: with
+ * no storage backend nothing was persisted, and reporting success for a flush
+ * that did not happen is the kind of lie a later caller would build on. Both
+ * present call sites discard the value.
+ */
+__weak int sts_store_critical_flush(sts_critical_reason_t reason)
+{
+	ARG_UNUSED(reason);
+	return -ENODEV;
 }
 
 __weak void sts_store_note_dac_code(uint16_t code)
