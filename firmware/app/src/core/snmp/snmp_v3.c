@@ -1321,9 +1321,10 @@ int snmp_v3_handle(snmp_ctx_t *agent, snmp_v3_ctx_t *c, const uint8_t *req,
 		 * what the sender used to build it (RFC 3826 §3.1.2.1). */
 		(void)snmp_usm_priv_iv(m.boots, m.time_s, m.privparam, iv);
 
-		/* c->scratch already holds the message (the digest check put it
-		 * there and zeroed only the digest field, which is not inside
-		 * the ciphertext). */
+		/* Re-copy the message: the digest check left a zeroed digest
+		 * field in the scratch, and while that field is never inside the
+		 * ciphertext, decrypting a buffer that is not a faithful copy of
+		 * the datagram is not a property worth depending on. */
 		memcpy(c->scratch, req, req_len);
 		rc = snmp_usm_aes_cfb(&c->cfg.ports, u->priv_key, iv,
 				      &c->scratch[m.scoped_off],

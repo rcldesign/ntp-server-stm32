@@ -18,6 +18,8 @@
 #include <stdint.h>
 
 #include "mcp/mcp.h"
+#include "fwupd/fwupd.h"
+#include "fwupd/rb_fwupd.h"
 #include "port/port_image.h"
 
 #ifdef __cplusplus
@@ -179,5 +181,32 @@ void sts_shell_announce(void);
 #ifdef __cplusplus
 }
 #endif
+
+
+/* ------------------------------------------------------------------------- */
+/* fwupd_glue.c — core/fwupd bound to the board's three updatable ICs        */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Wire core/fwupd's targets and register the whole component inventory.
+ *
+ * Only FWUPD_COMP_STM32_APP is permitted by default: it is the one path with a
+ * signature check and an automatic revert behind it. The GNSS and Rb paths
+ * destroy a peripheral with no way back and must be enabled explicitly.
+ *
+ * @retval 0          Ready.
+ * @retval -EALREADY  Already initialised.
+ * @retval other      A client or the orchestrator failed to initialise.
+ */
+int sts_fwupd_init(void);
+
+/** The orchestrator context, or NULL before sts_fwupd_init(). */
+fwupd_ctx_t *sts_fwupd_ctx(void);
+
+/** The FE-5680A client context, or NULL before sts_fwupd_init(). */
+rb_ctx_t *sts_fwupd_rb_ctx(void);
+
+/** Pump an open update session. Call from the console/maintenance thread. */
+int sts_fwupd_step(void);
 
 #endif /* STS1000_ZEPHYR_CONSOLE_STS_CONSOLE_H_ */

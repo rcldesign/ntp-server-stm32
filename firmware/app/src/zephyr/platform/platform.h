@@ -21,6 +21,7 @@
 
 #include "disc/disc.h"
 #include "fault/fault.h"
+#include "fwupd/rb_fwupd.h"
 #include "gnssmgr/gnssmgr.h"
 #include "ina228/ina228.h"
 #include "quality/quality.h"
@@ -466,12 +467,8 @@ bool rb_serial_rail_up(void);
 /** RB_LOCK (PB13), with the configured variant polarity applied. */
 bool rb_serial_locked(void);
 
-/*
- * The core/fwupd rb_fwupd port bound to UART7 is rb_serial_ops(), declared in
- * fwupd/rb_fwupd.h's terms. It is not declared here because platform.h is
- * included by glue that has no reason to see core/fwupd's types; the two
- * consumers (fwupd_glue.c and the console) include that header directly.
- */
+/** The core/fwupd rb_fwupd port bound to UART7. Never NULL. */
+const rb_fwupd_ops_t *rb_serial_ops(void);
 
 /**
  * Raw byte tunnel, for a maintenance tool that needs to speak to a variant this

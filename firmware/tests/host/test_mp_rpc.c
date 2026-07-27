@@ -2519,6 +2519,472 @@ static void test_a_reply_that_cannot_fit_is_an_error_not_a_truncation(void)
 	}
 }
 
+
+/* ==================================================== diag runner (direct) */
+
+/*
+ * The runner is driven directly here rather than only through `diag.run`,
+ * because the interesting paths are the ones a request cannot reach: a step that
+ * never finishes, a callback that returns nonsense, an early completion, and the
+ * verdict-ranking that decides what a mixed run reports.
+ */
+
+static uint8_t g_dstep_verdict;
+static int g_dstep_rc;
+static bool g_dstep_done;
+static unsigned int g_dstep_calls;
+static bool g_dstep_fail_second;
+
+static int diag_ctl_cb(void *user, uint8_t test, uint8_t step,
+		       mp_diag_step_res_t *out)
+{
+	(void)user;
+	(void)test;
+	g_dstep_calls++;
+	if (g_dstep_rc != 0) {
+		return g_dstep_rc;
+	}
+	out->verdict = g_dstep_verdict;
+	if (g_dstep_fail_second && (step == 1U)) {
+		out->verdict = (uint8_t)MP_DIAG_FAIL;
+	}
+	out->done = g_dstep_done;
+	out->value = (int32_t)step;
+	return 0;
+}
+
+typedef struct {
+	uint8_t ev;
+	uint8_t test;
+	uint8_t step;
+	uint8_t verdict;
+	int32_t value;
+	char text[MP_DIAG_TEXT_MAX];
+} devt_t;
+
+static devt_t g_devt[64];
+static unsigned int g_devt_n;
+
+static void diag_ctl_evt(void *user, uint8_t ev, uint8_t test, uint8_t step,
+			 uint8_t verdict, int32_t value, const char *text)
+{
+	(void)user;
+	if (g_devt_n < (sizeof(g_devt) / sizeof(g_devt[0]))) {
+		g_devt[g_devt_n].ev = ev;
+		g_devt[g_devt_n].test = test;
+		g_devt[g_devt_n].step = step;
+		g_devt[g_devt_n].verdict = verdict;
+		g_devt[g_devt_n].value = value;
+		g_devt[g_devt_n].text[0] = '\0';
+		if (text != NULL) {
+			(void)strncpy(g_devt[g_devt_n].text, text,
+				      sizeof(g_devt[0].text) - 1U);
+			g_devt[g_devt_n].text[sizeof(g_devt[0].text) - 1U] = '\0';
+		}
+		g_devt_n++;
+	}
+}
+
+static mp_diag_ctx_t g_d;
+
+static void diag_setup(void)
+{
+	g_dstep_verdict = (uint8_t)MP_DIAG_PASS;
+	g_dstep_rc = 0;
+	g_dstep_done = false;
+	g_dstep_calls = 0U;
+	g_dstep_fail_second = false;
+	g_devt_n = 0U;
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_init(&g_d, diag_ctl_cb, NULL,
+					      diag_ctl_evt, NULL));
+}
+
+/** Drive the run to completion; returns the number of steps taken. */
+static unsigned int diag_drive(uint32_t *now)
+{
+	unsigned int steps = 0U;
+
+	while (mp_diag_busy(&g_d)) {
+		int rc = mp_diag_step(&g_d, *now);
+
+		TEST_ASSERT_TRUE(rc >= 0);
+		*now += 1U;
+		steps++;
+		TEST_ASSERT_TRUE(steps < 200U);
+	}
+	return steps;
+}
+
+static unsigned int devt_count(uint8_t ev)
+{
+	unsigned int i;
+	unsigned int n = 0U;
+
+	for (i = 0U; i < g_devt_n; i++) {
+		if (g_devt[i].ev == ev) {
+			n++;
+		}
+	}
+	return n;
+}
+
+static const devt_t *devt_last(uint8_t ev)
+{
+	unsigned int i;
+
+	for (i = g_devt_n; i > 0U; i--) {
+		if (g_devt[i - 1U].ev == ev) {
+			return &g_devt[i - 1U];
+		}
+	}
+	return NULL;
+}
+
+static void test_diag_registry_lookup(void)
+{
+	size_t i;
+
+	for (i = 0U; i < MP_DIAG_COUNT; i++) {
+		const mp_diag_test_t *t = mp_diag_test((uint8_t)i);
+
+		TEST_ASSERT_NOT_NULL(t);
+		TEST_ASSERT_NOT_NULL(t->name);
+		TEST_ASSERT_TRUE(strlen(t->name) > 3U);
+		TEST_ASSERT_NOT_NULL(t->desc);
+		TEST_ASSERT_TRUE(t->guard < (uint8_t)MP_GUARD_COUNT);
+		TEST_ASSERT_TRUE(t->steps > 0U);
+		TEST_ASSERT_TRUE(t->step_timeout_ms > 0U);
+		TEST_ASSERT_EQUAL_UINT32(0U, t->ilk & ~MP_ILK_ALL);
+		TEST_ASSERT_EQUAL_INT((int)i, mp_diag_find(t->name));
+		/* Names are unique. */
+		{
+			size_t j;
+
+			for (j = i + 1U; j < MP_DIAG_COUNT; j++) {
+				TEST_ASSERT_TRUE_MESSAGE(
+					strcmp(t->name,
+					       mp_diag_tests[j].name) != 0,
+					t->name);
+			}
+		}
+	}
+	TEST_ASSERT_NULL(mp_diag_test((uint8_t)MP_DIAG_COUNT));
+	TEST_ASSERT_EQUAL_INT(-ENOENT, mp_diag_find("nope"));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_diag_find(NULL));
+
+	/* The one deferred test is the ATECC attestation, and it says so. */
+	TEST_ASSERT_TRUE(mp_diag_tests[MP_DIAG_SEC_ATTEST].deferred);
+	/* wdt.test is G3 and disruptive — it cold-cycles the board. */
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MP_GUARD_G3,
+				mp_diag_tests[MP_DIAG_WDT_TEST].guard);
+	TEST_ASSERT_TRUE(mp_diag_tests[MP_DIAG_WDT_TEST].disruptive);
+}
+
+static void test_diag_names(void)
+{
+	uint8_t i;
+
+	for (i = 0U; i < (uint8_t)MP_DIAG_VERDICT_COUNT; i++) {
+		TEST_ASSERT_TRUE(strlen(mp_diag_verdict_name(i)) > 0U);
+		TEST_ASSERT_TRUE(strcmp(mp_diag_verdict_name(i),
+					"unknown") != 0);
+	}
+	TEST_ASSERT_EQUAL_STRING("unknown",
+				 mp_diag_verdict_name(MP_DIAG_VERDICT_COUNT));
+
+	for (i = 0U; i < (uint8_t)MP_DIAG_EV_COUNT; i++) {
+		TEST_ASSERT_TRUE(strlen(mp_diag_ev_name(i)) > 0U);
+		TEST_ASSERT_TRUE(strcmp(mp_diag_ev_name(i), "unknown") != 0);
+	}
+	TEST_ASSERT_EQUAL_STRING("unknown", mp_diag_ev_name(MP_DIAG_EV_COUNT));
+}
+
+static void test_diag_init_and_start_validation(void)
+{
+	mp_diag_ctx_t c;
+	uint32_t run = 0U;
+
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      mp_diag_init(NULL, diag_ctl_cb, NULL, NULL, NULL));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      mp_diag_init(&c, NULL, NULL, NULL, NULL));
+
+	diag_setup();
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      mp_diag_start(NULL, 0U, 0U, 0U, &run));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      mp_diag_start(&g_d, (uint8_t)MP_DIAG_COUNT, 0U, 0U,
+					    &run));
+	TEST_ASSERT_EQUAL_INT(-ENOTSUP,
+			      mp_diag_start(&g_d,
+					    (uint8_t)MP_DIAG_SEC_ATTEST, 0U, 0U,
+					    &run));
+
+	TEST_ASSERT_FALSE(mp_diag_busy(NULL));
+	TEST_ASSERT_EQUAL_UINT16(0U, mp_diag_progress(NULL));
+	TEST_ASSERT_EQUAL_UINT16(0U, mp_diag_progress(&g_d)); /* idle */
+	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_diag_step(NULL, 0U));
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_step(&g_d, 0U)); /* idle: nothing to do */
+	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_diag_abort(NULL, 0U));
+	TEST_ASSERT_EQUAL_INT(-ENOENT, mp_diag_abort(&g_d, 0U));
+}
+
+static void test_diag_all_steps_pass(void)
+{
+	uint32_t now = 1000U;
+	uint32_t run = 0U;
+	unsigned int steps;
+
+	diag_setup();
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_start(&g_d,
+					       (uint8_t)MP_DIAG_INA_SELFTEST,
+					       7U, now, &run));
+	TEST_ASSERT_NOT_EQUAL_UINT32(0U, run);
+	TEST_ASSERT_TRUE(mp_diag_busy(&g_d));
+	TEST_ASSERT_EQUAL_UINT32(7U, g_d.sid);
+	TEST_ASSERT_EQUAL_UINT16(0U, mp_diag_progress(&g_d));
+
+	/* A START event carries the step count. */
+	TEST_ASSERT_EQUAL_UINT(1U, devt_count((uint8_t)MP_DIAG_EV_START));
+	TEST_ASSERT_EQUAL_INT32(mp_diag_tests[MP_DIAG_INA_SELFTEST].steps,
+				devt_last((uint8_t)MP_DIAG_EV_START)->value);
+
+	steps = diag_drive(&now);
+	TEST_ASSERT_EQUAL_UINT(mp_diag_tests[MP_DIAG_INA_SELFTEST].steps, steps);
+	TEST_ASSERT_EQUAL_UINT(steps,
+			       devt_count((uint8_t)MP_DIAG_EV_PROGRESS));
+	TEST_ASSERT_EQUAL_UINT(1U, devt_count((uint8_t)MP_DIAG_EV_RESULT));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MP_DIAG_PASS,
+				devt_last((uint8_t)MP_DIAG_EV_RESULT)->verdict);
+	TEST_ASSERT_EQUAL_INT32(0, devt_last((uint8_t)MP_DIAG_EV_RESULT)->value);
+	TEST_ASSERT_EQUAL_UINT32(1U, g_d.completed);
+
+	/* A second run gets a different id. */
+	{
+		uint32_t run2 = 0U;
+
+		TEST_ASSERT_EQUAL_INT(0,
+				      mp_diag_start(&g_d,
+						    (uint8_t)MP_DIAG_I2C_SCAN,
+						    0U, now, &run2));
+		TEST_ASSERT_NOT_EQUAL_UINT32(run, run2);
+		TEST_ASSERT_EQUAL_INT(-EBUSY,
+				      mp_diag_start(&g_d,
+						    (uint8_t)MP_DIAG_I2C_SCAN,
+						    0U, now, NULL));
+	}
+}
+
+static void test_diag_progress_advances(void)
+{
+	uint32_t now = 1000U;
+
+	diag_setup();
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_start(&g_d,
+					       (uint8_t)MP_DIAG_INA_SELFTEST,
+					       0U, now, NULL));
+	TEST_ASSERT_EQUAL_UINT16(0U, mp_diag_progress(&g_d));
+	TEST_ASSERT_EQUAL_INT(1, mp_diag_step(&g_d, now));
+	/* 1 of 9 steps done. */
+	TEST_ASSERT_EQUAL_UINT16(111U, mp_diag_progress(&g_d));
+	TEST_ASSERT_EQUAL_INT(1, mp_diag_step(&g_d, now));
+	TEST_ASSERT_EQUAL_UINT16(222U, mp_diag_progress(&g_d));
+}
+
+/** A failing step does not abort the run; the worst verdict is reported. */
+static void test_diag_failure_does_not_stop_the_sequence(void)
+{
+	uint32_t now = 1000U;
+	unsigned int steps;
+
+	diag_setup();
+	g_dstep_fail_second = true;
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_start(&g_d,
+					       (uint8_t)MP_DIAG_PPS_SELFCHECK,
+					       0U, now, NULL));
+	steps = diag_drive(&now);
+
+	/* Every step ran, not just up to the failure. */
+	TEST_ASSERT_EQUAL_UINT(mp_diag_tests[MP_DIAG_PPS_SELFCHECK].steps,
+			       steps);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MP_DIAG_FAIL,
+				devt_last((uint8_t)MP_DIAG_EV_RESULT)->verdict);
+	/* The RESULT value is the failed-step count. */
+	TEST_ASSERT_EQUAL_INT32(1, devt_last((uint8_t)MP_DIAG_EV_RESULT)->value);
+}
+
+/** SKIP is worse than PASS but better than FAIL, and FAIL better than ERROR. */
+static void test_diag_verdict_ranking(void)
+{
+	static const struct {
+		int rc;
+		uint8_t verdict;
+		uint8_t expect;
+		/* True where the *runner* synthesises the explanation, rather
+		 * than the callback being free to leave it empty. */
+		bool runner_text;
+	} m[] = {
+		{ 0, (uint8_t)MP_DIAG_PASS, (uint8_t)MP_DIAG_PASS, false },
+		{ 0, (uint8_t)MP_DIAG_SKIP, (uint8_t)MP_DIAG_SKIP, false },
+		{ 0, (uint8_t)MP_DIAG_FAIL, (uint8_t)MP_DIAG_FAIL, false },
+		{ 0, (uint8_t)MP_DIAG_ERROR, (uint8_t)MP_DIAG_ERROR, false },
+		{ -ENOTSUP, 0U, (uint8_t)MP_DIAG_SKIP, true },
+		{ -EIO, 0U, (uint8_t)MP_DIAG_ERROR, true },
+		/* A callback that returns success with a nonsense verdict is a
+		 * glue bug; it is surfaced, not trusted. */
+		{ 0, (uint8_t)MP_DIAG_VERDICT_COUNT, (uint8_t)MP_DIAG_ERROR,
+		  true },
+		{ 0, 200U, (uint8_t)MP_DIAG_ERROR, true },
+	};
+	size_t i;
+
+	for (i = 0U; i < (sizeof(m) / sizeof(m[0])); i++) {
+		uint32_t now = 1000U;
+		char msg[32];
+
+		diag_setup();
+		g_dstep_rc = m[i].rc;
+		g_dstep_verdict = m[i].verdict;
+		TEST_ASSERT_EQUAL_INT(0,
+				      mp_diag_start(&g_d,
+						    (uint8_t)MP_DIAG_I2C_SCAN,
+						    0U, now, NULL));
+		(void)diag_drive(&now);
+
+		(void)snprintf(msg, sizeof(msg), "row %u", (unsigned int)i);
+		TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+			m[i].expect,
+			devt_last((uint8_t)MP_DIAG_EV_RESULT)->verdict, msg);
+		/* Where the runner classified the step itself, it must say why. */
+		if (m[i].runner_text) {
+			TEST_ASSERT_TRUE_MESSAGE(
+				strlen(devt_last((uint8_t)MP_DIAG_EV_PROGRESS)
+					       ->text) > 0U,
+				msg);
+		}
+	}
+}
+
+/** A step that never finishes is bounded by the registry's timeout. */
+static void test_diag_step_timeout(void)
+{
+	uint32_t now = 1000U;
+	const mp_diag_test_t *t = &mp_diag_tests[MP_DIAG_I2C_SCAN];
+
+	diag_setup();
+	g_dstep_rc = -EAGAIN;
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_start(&g_d, (uint8_t)MP_DIAG_I2C_SCAN,
+					       0U, now, NULL));
+
+	/* Inside the timeout the runner just waits. */
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_step(&g_d, now));
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_step(&g_d, now + t->step_timeout_ms));
+	TEST_ASSERT_TRUE(mp_diag_busy(&g_d));
+	TEST_ASSERT_EQUAL_UINT32(0U, g_d.timeouts);
+
+	/* Past it the step is recorded as an error and the run moves on. */
+	TEST_ASSERT_EQUAL_INT(2,
+			      mp_diag_step(&g_d,
+					   now + t->step_timeout_ms + 1U));
+	TEST_ASSERT_FALSE(mp_diag_busy(&g_d));
+	TEST_ASSERT_EQUAL_UINT32(1U, g_d.timeouts);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)MP_DIAG_ERROR,
+				devt_last((uint8_t)MP_DIAG_EV_RESULT)->verdict);
+	TEST_ASSERT_EQUAL_STRING("step timeout",
+				 devt_last((uint8_t)MP_DIAG_EV_PROGRESS)->text);
+}
+
+/** A timeout mid-sequence continues to the next step rather than ending. */
+static void test_diag_step_timeout_mid_sequence(void)
+{
+	uint32_t now = 1000U;
+	const mp_diag_test_t *t = &mp_diag_tests[MP_DIAG_INA_SELFTEST];
+
+	diag_setup();
+	g_dstep_rc = -EAGAIN;
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_start(&g_d,
+					       (uint8_t)MP_DIAG_INA_SELFTEST,
+					       0U, now, NULL));
+	TEST_ASSERT_EQUAL_INT(1,
+			      mp_diag_step(&g_d,
+					   now + t->step_timeout_ms + 1U));
+	TEST_ASSERT_TRUE(mp_diag_busy(&g_d));
+	TEST_ASSERT_EQUAL_UINT8(1U, g_d.step);
+}
+
+/** A step may end the run early by setting `done`. */
+static void test_diag_early_completion(void)
+{
+	uint32_t now = 1000U;
+
+	diag_setup();
+	g_dstep_done = true;
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_start(&g_d,
+					       (uint8_t)MP_DIAG_INA_SELFTEST,
+					       0U, now, NULL));
+	TEST_ASSERT_EQUAL_INT(2, mp_diag_step(&g_d, now));
+	TEST_ASSERT_FALSE(mp_diag_busy(&g_d));
+	TEST_ASSERT_EQUAL_UINT(1U, g_dstep_calls);
+	TEST_ASSERT_EQUAL_UINT(1U, devt_count((uint8_t)MP_DIAG_EV_RESULT));
+}
+
+static void test_diag_abort_mid_run(void)
+{
+	uint32_t now = 1000U;
+
+	diag_setup();
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_start(&g_d,
+					       (uint8_t)MP_DIAG_INA_SELFTEST,
+					       0U, now, NULL));
+	TEST_ASSERT_EQUAL_INT(1, mp_diag_step(&g_d, now));
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_abort(&g_d, now));
+	TEST_ASSERT_FALSE(mp_diag_busy(&g_d));
+	TEST_ASSERT_EQUAL_UINT32(1U, g_d.aborts);
+	TEST_ASSERT_EQUAL_UINT(1U, devt_count((uint8_t)MP_DIAG_EV_ABORT));
+	TEST_ASSERT_EQUAL_STRING("aborted",
+				 devt_last((uint8_t)MP_DIAG_EV_ABORT)->text);
+	/* No RESULT: an aborted run has no verdict. */
+	TEST_ASSERT_EQUAL_UINT(0U, devt_count((uint8_t)MP_DIAG_EV_RESULT));
+	TEST_ASSERT_EQUAL_INT(-ENOENT, mp_diag_abort(&g_d, now));
+}
+
+static void test_diag_runs_without_an_event_sink(void)
+{
+	mp_diag_ctx_t c;
+	uint32_t now = 1000U;
+
+	g_dstep_verdict = (uint8_t)MP_DIAG_PASS;
+	g_dstep_rc = 0;
+	g_dstep_done = false;
+	g_dstep_fail_second = false;
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_init(&c, diag_ctl_cb, NULL, NULL,
+					      NULL));
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_start(&c, (uint8_t)MP_DIAG_I2C_SCAN, 0U,
+					       now, NULL));
+	while (mp_diag_busy(&c)) {
+		TEST_ASSERT_TRUE(mp_diag_step(&c, now++) >= 0);
+	}
+	TEST_ASSERT_EQUAL_UINT32(1U, c.completed);
+}
+
+/** The run-id counter must never hand out 0, including across a wrap. */
+static void test_diag_run_id_never_zero(void)
+{
+	uint32_t now = 1000U;
+	uint32_t run = 0U;
+
+	diag_setup();
+	g_d.next_run_id = 0xFFFFFFFFU;
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_start(&g_d, (uint8_t)MP_DIAG_I2C_SCAN,
+					       0U, now, &run));
+	TEST_ASSERT_EQUAL_UINT32(0xFFFFFFFFU, run);
+	TEST_ASSERT_EQUAL_UINT32(1U, g_d.next_run_id);
+	(void)diag_drive(&now);
+	TEST_ASSERT_EQUAL_INT(0, mp_diag_start(&g_d, (uint8_t)MP_DIAG_I2C_SCAN,
+					       0U, now, &run));
+	TEST_ASSERT_EQUAL_UINT32(1U, run);
+}
+
 /* ------------------------------------------------------------------- runner */
 
 int main(void)
@@ -2585,6 +3051,20 @@ int main(void)
 	RUN_TEST(test_end_to_end_over_frames);
 	RUN_TEST(test_fragmented_request_is_reassembled);
 	RUN_TEST(test_a_reply_that_cannot_fit_is_an_error_not_a_truncation);
+
+	RUN_TEST(test_diag_registry_lookup);
+	RUN_TEST(test_diag_names);
+	RUN_TEST(test_diag_init_and_start_validation);
+	RUN_TEST(test_diag_all_steps_pass);
+	RUN_TEST(test_diag_progress_advances);
+	RUN_TEST(test_diag_failure_does_not_stop_the_sequence);
+	RUN_TEST(test_diag_verdict_ranking);
+	RUN_TEST(test_diag_step_timeout);
+	RUN_TEST(test_diag_step_timeout_mid_sequence);
+	RUN_TEST(test_diag_early_completion);
+	RUN_TEST(test_diag_abort_mid_run);
+	RUN_TEST(test_diag_runs_without_an_event_sink);
+	RUN_TEST(test_diag_run_id_never_zero);
 
 	return UNITY_END();
 }

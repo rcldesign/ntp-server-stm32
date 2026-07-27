@@ -1065,7 +1065,6 @@ static size_t build_request(const req_spec_t *s, const uint8_t *auth_key,
 	w_t body;
 	w_t msg;
 	size_t scoped_len;
-	size_t ap_off;
 
 	memset(zero, 0, sizeof(zero));
 	scoped_len = build_scoped(s, scoped);
@@ -1081,8 +1080,6 @@ static size_t build_request(const req_spec_t *s, const uint8_t *auth_key,
 	w_int(&usm, (int32_t)s->boots);
 	w_int(&usm, (int32_t)s->time_s);
 	w_tlv(&usm, SNMP_TAG_OCTET_STRING, s->user, strlen(s->user));
-	/* Remember where the digest lands inside the USM blob. */
-	ap_off = usm.len + 2U;
 	w_tlv(&usm, SNMP_TAG_OCTET_STRING, zero, s->authparam_len);
 	if (s->salt != NULL) {
 		w_tlv(&usm, SNMP_TAG_OCTET_STRING, s->salt, SNMP_V3_SALT_LEN);
@@ -1098,13 +1095,7 @@ static size_t build_request(const req_spec_t *s, const uint8_t *auth_key,
 
 		w_reset(&params);
 		w_tlv(&params, SNMP_TAG_SEQUENCE, usm.buf, usm.len);
-		/* The digest offset shifts by the outer SEQUENCE header. */
-		ap_off += params.len - usm.len;
 		w_tlv(&body, SNMP_TAG_OCTET_STRING, params.buf, params.len);
-		/* ...and again by the OCTET STRING header. */
-		ap_off += body.len - params.len -
-			  (2U + (size_t)((usm.len >= 0x80U) ? 1 : 0)) -
-			  gd.len + gd.len;
 	}
 
 	if (s->salt != NULL && priv_key != NULL) {

@@ -139,6 +139,19 @@ int wss_encode(uint8_t op, bool fin, const uint8_t *payload, size_t len,
 	       uint8_t *out, size_t cap);
 
 /**
+ * Write just the frame header for a payload of @p len bytes.
+ *
+ * For payloads too large to copy into a staging buffer: emit the header, then
+ * write the payload straight from wherever it already is.
+ *
+ * @retval >=0      Header bytes written (2, 4 or 10).
+ * @retval -EINVAL  Bad argument or an illegal opcode/length combination.
+ * @retval -ENOSPC  @p cap too small.
+ */
+int wss_encode_header(uint8_t op, bool fin, size_t len, uint8_t *out,
+		      size_t cap);
+
+/**
  * Encode a Close frame. @p code of 0 emits an empty close (no status).
  *
  * @retval >=0      Bytes written.
@@ -201,24 +214,36 @@ int wss_rx_feed(wss_rx_t *r, uint8_t *in, size_t n, size_t *consumed,
 
 /* ------------------------------------------------------------- send queue */
 
-/** Queued frames. Four is enough for one telemetry record plus a pong. */
+/** Queued frames. Four covers a pong, a close and two in flight. */
 #ifndef WSS_TXQ_SLOTS
 #define WSS_TXQ_SLOTS 4U
 #endif
 
-/** Bytes per queue slot (a framed telemetry record). */
+/**
+ * Bytes per queue slot.
+ *
+ * The queue carries CONTROL frames only, so a slot needs the 2-byte header plus
+ * WSS_CONTROL_MAX. Telemetry records are far larger than any sane queue slot (a
+ * nine-rail power snapshot alone runs to a couple of kilobytes), so they are
+ * framed with wss_encode_header() and written straight to the socket instead of
+ * being buffered — see the wss_txq_t comment.
+ */
 #ifndef WSS_TXQ_SLOT_BYTES
-#define WSS_TXQ_SLOT_BYTES 1536U
+#define WSS_TXQ_SLOT_BYTES (WSS_CONTROL_MAX + 4U)
 #endif
 
 /**
- * Bounded, lossy-by-design send queue.
+ * Bounded, lossy-by-design send queue for CONTROL frames.
  *
- * Telemetry is a snapshot that will be re-sampled, so a slow reader must never
- * back-pressure the server thread: a push into a full queue drops the OLDEST
- * telemetry record and counts it, exactly the discipline core/mcp applies to its
- * EVT frames. Control frames (pong/close) are pushed with @p urgent so they
- * cannot be starved by telemetry.
+ * A push into a full queue drops the OLDEST entry and counts it, so a slow reader
+ * can never back-pressure the server thread — the discipline core/mcp applies to
+ * its EVT frames. @p urgent pushes to the front so a pong or a close cannot be
+ * starved.
+ *
+ * Application messages deliberately do NOT go through here: queueing a
+ * multi-kilobyte telemetry record per connection would cost more SRAM than the
+ * whole web plane is allowed, and a record that cannot be written now is better
+ * dropped than buffered, because the next one supersedes it.
  */
 typedef struct {
 	uint8_t  slot[WSS_TXQ_SLOTS][WSS_TXQ_SLOT_BYTES];

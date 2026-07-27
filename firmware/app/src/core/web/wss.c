@@ -387,16 +387,12 @@ void wss_unmask(uint8_t *p, size_t n, const uint8_t mask[4], uint64_t offset)
 	}
 }
 
-int wss_encode(uint8_t op, bool fin, const uint8_t *payload, size_t len,
-	       uint8_t *out, size_t cap)
+int wss_encode_header(uint8_t op, bool fin, size_t len, uint8_t *out, size_t cap)
 {
 	size_t hdr;
 	size_t o = 0U;
 
 	if (out == NULL) {
-		return -EINVAL;
-	}
-	if (payload == NULL && len != 0U) {
 		return -EINVAL;
 	}
 	if (!op_known(op)) {
@@ -413,7 +409,7 @@ int wss_encode(uint8_t op, bool fin, const uint8_t *payload, size_t len,
 	} else {
 		hdr = 10U;
 	}
-	if ((hdr + len) > cap) {
+	if (hdr > cap) {
 		return -ENOSPC;
 	}
 
@@ -433,11 +429,28 @@ int wss_encode(uint8_t op, bool fin, const uint8_t *payload, size_t len,
 					      (56U - (8U * i))) & 0xFFU);
 		}
 	}
-	if (len != 0U) {
-		memcpy(&out[o], payload, len);
-		o += len;
-	}
 	return (int)o;
+}
+
+int wss_encode(uint8_t op, bool fin, const uint8_t *payload, size_t len,
+	       uint8_t *out, size_t cap)
+{
+	int hdr;
+
+	if (payload == NULL && len != 0U) {
+		return -EINVAL;
+	}
+	hdr = wss_encode_header(op, fin, len, out, cap);
+	if (hdr < 0) {
+		return hdr;
+	}
+	if (((size_t)hdr + len) > cap) {
+		return -ENOSPC;
+	}
+	if (len != 0U) {
+		memcpy(&out[hdr], payload, len);
+	}
+	return hdr + (int)len;
 }
 
 /* True when @p code may appear in a Close frame on the wire. */

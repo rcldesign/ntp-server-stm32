@@ -121,7 +121,7 @@ struct worker {
 	uint8_t rx[STS_WEB_RX_SIZE];
 	char    resp[STS_WEB_RESP_SIZE];
 	uint8_t ws_msg[STS_WEB_WS_MSG_SIZE];
-	uint8_t frame[WSS_TXQ_SLOT_BYTES];
+	uint8_t frame[WSS_HDR_MAX + WSS_CONTROL_MAX];
 	wss_txq_t txq;
 };
 
@@ -721,6 +721,8 @@ static int pv_fw_begin(void *u, uint32_t size, const uint8_t sha[32],
 static int pv_fw_data(void *u, uint32_t off, const uint8_t *data, size_t len,
 		      uint32_t *out_next)
 {
+	/* Static, not stack: 1 KB+ of locals would blow the worker stack. Safe
+	 * because every provider call is made under api_lock. */
 	static uint8_t payload[4U + MCP_FW_CHUNK_MAX];
 	int status;
 
@@ -893,7 +895,7 @@ static ssize_t send_all(int fd, const void *buf, size_t len)
 
 static int send_response(int fd, const web_resp_t *r, bool head_only)
 {
-	char hdr[768];
+	char hdr[1024];
 	size_t o = 0U;
 
 	o += (size_t)snprintf(&hdr[o], sizeof(hdr) - o,
@@ -934,7 +936,7 @@ static int send_response(int fd, const web_resp_t *r, bool head_only)
 static int send_simple(int fd, uint16_t status, const char *ctype,
 		       const char *body, const char *extra)
 {
-	char hdr[512];
+	char hdr[768];
 	size_t blen = (body == NULL) ? 0U : strlen(body);
 	size_t o = 0U;
 
@@ -966,7 +968,7 @@ static int send_simple(int fd, uint16_t status, const char *ctype,
 static int serve_static(struct worker *wk, int fd, const http_req_t *req)
 {
 	sts_webfs_asset_t a;
-	char hdr[512];
+	char hdr[768];
 	size_t o = 0U;
 	size_t off = 0U;
 	int rc;
@@ -980,7 +982,7 @@ static int serve_static(struct worker *wk, int fd, const http_req_t *req)
 	/* Conditional GET: the SPA is cache-busted by its ETag. */
 	if (a.etag[0] != '\0' && req->if_none_match.n != 0U &&
 	    web_span_eq(req->if_none_match.p, req->if_none_match.n, a.etag)) {
-		char nm[256];
+		char nm[512];
 
 		(void)snprintf(nm, sizeof(nm),
 			       "HTTP/1.1 304 Not Modified\r\nETag: %s\r\n"
@@ -1046,6 +1048,7 @@ static int ws_flush(struct worker *wk, int fd)
 	return 0;
 }
 
+/* Control frames only; see the wss_txq_t contract. */
 static int ws_queue(struct worker *wk, uint8_t op, const uint8_t *payload,
 		    size_t len, bool urgent)
 {
@@ -1057,6 +1060,34 @@ static int ws_queue(struct worker *wk, uint8_t op, const uint8_t *payload,
 	if (wss_txq_push(&wk->txq, wk->frame, (size_t)n, urgent) == 1) {
 		stat_add(&st.ws_dropped, 1U);
 	}
+	return 0;
+}
+
+/*
+ * Send an application text message straight from wk->resp: the header goes out
+ * first, then the payload. Nothing is staged, so a 6 KB telemetry record costs
+ * no extra SRAM — which is why these do not go through the queue.
+ */
+static int ws_send_text(struct worker *wk, int fd, const char *body, size_t len)
+{
+	uint8_t hdr[WSS_HDR_MAX];
+	int hn;
+
+	if (ws_flush(wk, fd) != 0) {
+		return -EIO;
+	}
+	hn = wss_encode_header((uint8_t)WSS_OP_TEXT, true, len, hdr,
+			       sizeof(hdr));
+	if (hn < 0) {
+		return hn;
+	}
+	if (send_all(fd, hdr, (size_t)hn) < 0) {
+		return -EIO;
+	}
+	if (send_all(fd, body, len) < 0) {
+		return -EIO;
+	}
+	stat_add(&st.ws_frames_tx, 1U);
 	return 0;
 }
 
@@ -1194,10 +1225,9 @@ static void ws_run(struct worker *wk, int fd, const rest_authctx_t *actx)
 						  ++sub.seq, wk->resp,
 						  sizeof(wk->resp));
 			k_mutex_unlock(&api_lock);
-			if (n > 0) {
-				(void)ws_queue(wk, (uint8_t)WSS_OP_TEXT,
-					       (const uint8_t *)wk->resp,
-					       (size_t)n, false);
+			if (n > 0 &&
+			    ws_send_text(wk, fd, wk->resp, (size_t)n) != 0) {
+				break;
 			}
 		}
 		if ((sub.groups & WSS_GRP_LOGS) != 0U) {
@@ -1209,10 +1239,9 @@ static void ws_run(struct worker *wk, int fd, const rest_authctx_t *actx)
 					     (uint8_t)LOGR_DEBUG, wk->resp,
 					     sizeof(wk->resp));
 			k_mutex_unlock(&api_lock);
-			if (n > 0) {
-				(void)ws_queue(wk, (uint8_t)WSS_OP_TEXT,
-					       (const uint8_t *)wk->resp,
-					       (size_t)n, false);
+			if (n > 0 &&
+			    ws_send_text(wk, fd, wk->resp, (size_t)n) != 0) {
+				break;
 			}
 		}
 	}
@@ -1224,7 +1253,7 @@ done:
 static int ws_handshake(int fd, const http_req_t *req)
 {
 	char accept[WSS_ACCEPT_LEN + 2U];
-	char hdr[320];
+	char hdr[352];
 	size_t o = 0U;
 
 	if (wss_accept_key(req->ws_key.p, req->ws_key.n, accept,
@@ -1263,7 +1292,17 @@ static bool serve_request(struct worker *wk, int fd, size_t *have, bool tls)
 	http_chunked_t chunk;
 	const char *body = NULL;
 	size_t body_len = 0U;
-	static uint8_t body_buf[HTTP_BODY_MAX];
+	/*
+	 * A chunked body is decoded into the RESPONSE buffer. The two lifetimes
+	 * do not overlap — the body is fully decoded before rest_dispatch() is
+	 * called, and the response is only built after that — so this costs no
+	 * SRAM. It must be per-worker, not static: two workers decoding chunked
+	 * bodies at once would otherwise corrupt each other's request.
+	 */
+	uint8_t *body_buf = (uint8_t *)wk->resp;
+	const size_t body_cap = (sizeof(wk->resp) < HTTP_BODY_MAX)
+					? sizeof(wk->resp)
+					: HTTP_BODY_MAX;
 	int rc;
 
 	rc = http_parse_request((const char *)wk->rx, *have, &req);
@@ -1288,7 +1327,7 @@ static bool serve_request(struct worker *wk, int fd, size_t *have, bool tls)
 		size_t off = req.head_len;
 		size_t out_len = 0U;
 
-		http_chunked_init(&chunk, HTTP_BODY_MAX);
+		http_chunked_init(&chunk, (uint32_t)body_cap);
 		for (;;) {
 			size_t consumed = 0U;
 			int frc = http_chunked_feed(&chunk,
@@ -1329,7 +1368,7 @@ static bool serve_request(struct worker *wk, int fd, size_t *have, bool tls)
 		body_len = out_len;
 		*have = 0U; /* the pipeline cannot be resynchronised cheaply */
 	} else if (req.content_length != 0U) {
-		if (req.content_length > HTTP_BODY_MAX) {
+		if (req.content_length > body_cap) {
 			(void)send_simple(fd, 413, "text/plain",
 					  "body too large\n", NULL);
 			return false;

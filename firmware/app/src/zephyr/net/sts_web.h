@@ -68,9 +68,17 @@ extern "C" {
 #define STS_WEB_WORKERS 2
 #endif
 
-/** Worker thread stack, bytes. TLS handshake + REST encoding, no recursion. */
+/**
+ * Worker thread stack, bytes.
+ *
+ * Nothing here recurses, but the deepest call chain is real: the connection loop
+ * -> request parse -> rest_dispatch -> a firmware handler -> the MCP bridge,
+ * whose frame and COBS buffers are ~2.1 KB of locals on their own. 8 KB keeps a
+ * comfortable margin over the ~4 KB that chain needs; a stack overflow on the
+ * management path would be a crash on a security-relevant route.
+ */
 #ifndef STS_WEB_STACK_SIZE
-#define STS_WEB_STACK_SIZE 6144
+#define STS_WEB_STACK_SIZE 8192
 #endif
 
 /** Thread priority. ARCHITECTURE.md §6: web/tls share band 12 with SNMP. */

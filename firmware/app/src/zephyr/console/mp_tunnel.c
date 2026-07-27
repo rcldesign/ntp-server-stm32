@@ -30,6 +30,7 @@
 #include <zephyr/logging/log.h>
 
 #include "console/mp_glue.h"
+#include "fault/fault.h"
 #include "zephyr/sts_app.h"
 
 LOG_MODULE_DECLARE(sts_mp, CONFIG_STS1000_LOG_LEVEL);
