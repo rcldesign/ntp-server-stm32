@@ -501,8 +501,10 @@ static void lockwin_stats(const disc_ctx_t *ctx, float *mean, float *var)
 	float sum = 0.0f;
 	float acc = 0.0f;
 
-	if (n == 0u) {
-		*mean = 0.0f;
+	if (n < 2u) {
+		/* A single sample has a mean and no variance; an empty window
+		 * has neither. Both are only seen on the first tick. */
+		*mean = (n == 1u) ? ctx->lock_buf[0] : 0.0f;
 		*var = 0.0f;
 		return;
 	}
@@ -512,10 +514,6 @@ static void lockwin_stats(const disc_ctx_t *ctx, float *mean, float *var)
 	}
 	*mean = sum / (float)n;
 
-	if (n < 2u) {
-		*var = 0.0f;
-		return;
-	}
 	for (i = 0u; i < n; i++) {
 		float d = ctx->lock_buf[i] - *mean;
 
@@ -718,11 +716,20 @@ static void fill_out(const disc_ctx_t *ctx, disc_out_t *o, uint32_t flags,
 	o->flags = flags;
 }
 
+/*
+ * RFC 5905 root dispersion, in nanoseconds before the NTP-short conversion.
+ *
+ * cfg.base_disp_ns is the floor a disciplined server always carries (the PHI
+ * term, see disc_cfg_defaults). Everything else is added on top of it, never
+ * substituted for it — in particular, entering holdover must only ever make
+ * the served dispersion grow. The §3.6 estimate is the *additional* error
+ * accumulated since the reference was lost.
+ */
 static float served_dispersion_ns(const disc_ctx_t *ctx)
 {
 	switch (ctx->state) {
 	case DISC_STATE_HOLDOVER:
-		return ctx->holdover_est_ns;
+		return ctx->cfg.base_disp_ns + ctx->holdover_est_ns;
 	case DISC_STATE_LOCKED:
 		return ctx->cfg.base_disp_ns + ctx->pps_sigma_ns;
 	default:
@@ -1129,11 +1136,12 @@ int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
 	 */
 	if (freq_ok) {
 		float f_obs = -(e - ctx->e_prev) / dt;
+		/* Telemetry only: a one-pole filter of the measured residual
+		 * frequency error, with the loop's own time constant. dt is
+		 * clamped to DT_MAX_S and tau is validated at 10 s or more, so
+		 * alpha cannot reach 1 and the filter cannot overshoot. */
 		float alpha = dt / ctx->cfg.tau_s;
 
-		if (alpha > 1.0f) {
-			alpha = 1.0f;
-		}
 		ctx->freq_err_ppb += alpha * (f_obs - ctx->freq_err_ppb);
 
 		if (ctx->state == DISC_STATE_ACQUIRING ||
@@ -1189,6 +1197,10 @@ int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
 	}
 
 	code = (uint16_t)(code_des_f + 0.5f);
+	/* Belt and braces on a value that goes straight into a DAC register:
+	 * the two clamps above already bound code_des_f to [0, dac_max_code]
+	 * and rounding cannot carry past the top, but an out-of-range write to
+	 * PA4 is not a failure mode worth leaving to an argument. */
 	if (code > ctx->cfg.dac_max_code) {
 		code = ctx->cfg.dac_max_code;
 	}

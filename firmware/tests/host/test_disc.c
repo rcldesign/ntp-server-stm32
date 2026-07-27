@@ -648,6 +648,18 @@ static void test_no_usable_capture_is_a_missed_second(void)
 	TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, NULL, &out));
 	TEST_ASSERT_FALSE(out.sample_accepted);
 	TEST_ASSERT_TRUE((out.flags & QUALITY_FLAG_NO_PPS) != 0u);
+
+	/* A finite but absurd scale that overflows the product is caught after
+	 * the corrections rather than propagating an infinity into the loop. */
+	in.env.mono_ms = 3000u;
+	in.pps.primary_ns_per_count = 1.0e30f;
+	in.pps.primary_expected = 0u;
+	in.pps.primary_count = 0x40000000u;
+	in.pps.secondary_valid = false;
+	TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, NULL, &out));
+	TEST_ASSERT_FALSE(out.sample_accepted);
+	TEST_ASSERT_TRUE((out.flags & QUALITY_FLAG_NO_PPS) != 0u);
+	TEST_ASSERT_EQUAL_UINT16(2048u, out.dac_code);
 }
 
 /* --------------------------------------------------------- §3.2 MAD gate */
@@ -880,7 +892,11 @@ static void test_steady_state_noise_rejection_bounds_the_actuator(void)
 			max_step = step;
 		}
 		prev = out.dac_code;
-		if (d_abs(p.e_ns) > worst_e) {
+		/* Measured over the second half only: LOCKED is declared as
+		 * soon as the criteria hold, so the first few hundred seconds
+		 * still carry the tail of the acquisition transient and say
+		 * nothing about noise rejection. */
+		if (i >= 300u && d_abs(p.e_ns) > worst_e) {
 			worst_e = d_abs(p.e_ns);
 		}
 	}
@@ -888,7 +904,8 @@ static void test_steady_state_noise_rejection_bounds_the_actuator(void)
 	/* 30 ns rms of PPS noise must not become a frequency step: the §3.3
 	 * slew limit is 5 LSB/s and the loop must respect it. */
 	TEST_ASSERT_TRUE(max_step <= 5);
-	/* And the loop stays locked and quiet. */
+	/* And the loop stays locked, with a true phase error far below the
+	 * per-sample measurement noise — that is what the loop filter is for. */
 	TEST_ASSERT_EQUAL_INT(DISC_STATE_LOCKED, out.state);
 	TEST_ASSERT_TRUE(worst_e < 200.0);
 	/* The published statistics track the injected noise. */
@@ -957,11 +974,18 @@ static void test_pi_integral_does_not_wind_up_against_the_rail(void)
 	unsigned int i;
 	disc_out_t out;
 
+	float y_int_when_railed;
+
 	/*
 	 * Keep the loop in the PI state throughout (re-entry to ACQUIRING
 	 * disabled) so this exercises the Ki integrator specifically rather
-	 * than the FLL. Without conditional integration, 600 s of a railed
-	 * actuator would leave the integral in the thousands of ppb.
+	 * than the FLL, which only runs in ACQUIRING and RECOVERING.
+	 *
+	 * The oscillator is walked out of range rather than stepped: an abrupt
+	 * 875 ppb step trips the median/MAD gate for several seconds running,
+	 * which is a holdover trigger (§3.6 "PPS outliers") and would put the
+	 * loop into the FLL-driven recovery path instead. A ramp is also the
+	 * physically realistic failure — an oscillator does not teleport.
 	 */
 	(void)disc_cfg_defaults(&cfg);
 	cfg.tau_s = 30.0f;
@@ -972,18 +996,37 @@ static void test_pi_integral_does_not_wind_up_against_the_rail(void)
 	osc_init(&p, 0.0, -25.0);
 	(void)run_to_lock(&ctx, &p, &ms, 2.0, &expected, 900u);
 
-	p.intrinsic_ppb = -900.0; /* step outside the pull range */
-	for (i = 0u; i < 600u; i++) {
+	/* Walk to 900 ppb — more than twice the pull range — over 175 s, then
+	 * hold there. Without conditional integration the integral would keep
+	 * accumulating Ki*e*dt against a phase error growing at ~875 ns/s for
+	 * the next ten minutes. */
+	for (i = 0u; i < 200u; i++) {
+		if (p.intrinsic_ppb > -900.0) {
+			p.intrinsic_ppb -= 5.0;
+		}
 		out = loop_second(&ctx, &p, &ms, 2.0, &expected);
 	}
 	TEST_ASSERT_EQUAL_UINT16(4095u, out.dac_code);
 	TEST_ASSERT_TRUE((out.flags & QUALITY_FLAG_DAC_SAT) != 0u);
 	TEST_ASSERT_NOT_EQUAL_INT(DISC_STATE_ACQUIRING, out.state);
+	TEST_ASSERT_NOT_EQUAL_INT(DISC_STATE_RECOVERING, out.state);
+	y_int_when_railed = ctx.y_int;
+
+	for (i = 0u; i < 600u; i++) {
+		out = loop_second(&ctx, &p, &ms, 2.0, &expected);
+	}
+	/* Ten more minutes on the rail with a phase error in the hundreds of
+	 * microseconds: the integral must not have moved at all. */
+	TEST_ASSERT_EQUAL_UINT16(4095u, out.dac_code);
+	TEST_ASSERT_TRUE(d_abs((double)p.e_ns) > 100000.0);
+	TEST_ASSERT_FLOAT_WITHIN(0.01f, y_int_when_railed, ctx.y_int);
 	/* Bounded by the achievable command, not by how long we sat there. */
 	TEST_ASSERT_TRUE(ctx.y_int < 500.0f);
 
+	/* Oscillator repaired: the loop must come back without a wound-up
+	 * integral to unwind first. */
 	p.intrinsic_ppb = -25.0;
-	for (i = 0u; i < 900u; i++) {
+	for (i = 0u; i < 2500u; i++) {
 		out = loop_second(&ctx, &p, &ms, 2.0, &expected);
 	}
 	TEST_ASSERT_TRUE(d_abs(p.e_ns) < 1000.0);
@@ -1331,8 +1374,22 @@ static void test_vc_sense_divergence_raises_a_dac_fault(void)
 	in.env.vc_sense_valid = true;
 	in.env.vc_sense_mv = ctx.vc_cmd_mv;
 	pps_from_error(&in.pps, 0.0, 1.0, expected);
+	expected += 1000000u;
 	TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, NULL, &out));
 	TEST_ASSERT_TRUE((out.flags & QUALITY_FLAG_DAC_FAULT) == 0u);
+
+	/* The comparison is symmetric: a sense stuck high is as much of a
+	 * fault as one stuck low. */
+	for (i = 0u; i < 3u; i++) {
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		in.env.vc_sense_valid = true;
+		in.env.vc_sense_mv = ctx.vc_cmd_mv + 900;
+		pps_from_error(&in.pps, 0.0, 1.0, expected);
+		expected += 1000000u;
+		TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, NULL, &out));
+	}
+	TEST_ASSERT_TRUE((out.flags & QUALITY_FLAG_DAC_FAULT) != 0u);
 }
 
 /* ---------------------------------------------------------------- PFI park */
@@ -1846,6 +1903,78 @@ static void test_slew_limiter_is_reported(void)
 		}
 	}
 	TEST_ASSERT_TRUE(saw_slew);
+}
+
+static void test_lock_is_lost_before_holdover_when_pulses_are_merely_late(void)
+{
+	disc_ctx_t ctx;
+	disc_cfg_t cfg;
+	struct osc p;
+	uint64_t ms = 0u;
+	uint32_t expected = 0xE3000000u;
+	unsigned int i;
+	disc_out_t out;
+	disc_in_t in;
+
+	/*
+	 * With a holdover threshold deliberately longer than the unlock dwell,
+	 * a run of missing pulses must first cost the lock and only later
+	 * become holdover. Serving stratum-1 off a lock that has not been
+	 * confirmed for a dozen seconds would be a lie.
+	 */
+	(void)disc_cfg_defaults(&cfg);
+	cfg.pps_loss_ticks = 40u;
+	cfg.unlock_dwell_s = 5u;
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
+	noise_seed(131u);
+	osc_init(&p, 0.0, -30.0);
+	(void)run_to_lock(&ctx, &p, &ms, 3.0, &expected, 1500u);
+
+	for (i = 0u; i < 10u; i++) {
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		TEST_ASSERT_EQUAL_INT(0,
+				      disc_tick_no_pps(&ctx, &in.env, NULL, &out));
+	}
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_LOCKING, out.state);
+	TEST_ASSERT_FALSE(out.holdover);
+	TEST_ASSERT_EQUAL_UINT8(QUALITY_STRATUM_UNSYNC, out.stratum);
+
+	for (i = 0u; i < 40u; i++) {
+		ms += 1000u;
+		env_defaults(&in.env, ms);
+		TEST_ASSERT_EQUAL_INT(0,
+				      disc_tick_no_pps(&ctx, &in.env, NULL, &out));
+	}
+	TEST_ASSERT_EQUAL_INT(DISC_STATE_HOLDOVER, out.state);
+}
+
+static void test_negative_rail_saturates_and_is_reported(void)
+{
+	disc_ctx_t ctx;
+	disc_cfg_t cfg;
+	struct osc p;
+	uint64_t ms = 0u;
+	uint32_t expected = 0xE4000000u;
+	unsigned int i;
+	disc_out_t out;
+
+	/* The mirror image of the positive-rail case: an oscillator running
+	 * 900 ppb fast drives the actuator to code 0, and the slew band has to
+	 * clamp at the bottom of the range as well as the top. */
+	(void)disc_cfg_defaults(&cfg);
+	cfg.tau_s = 30.0f;
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
+	noise_seed(137u);
+	osc_init(&p, 0.0, 900.0);
+
+	for (i = 0u; i < 300u; i++) {
+		out = loop_second(&ctx, &p, &ms, 2.0, &expected);
+	}
+	TEST_ASSERT_EQUAL_UINT16(0u, out.dac_code);
+	TEST_ASSERT_TRUE((out.flags & QUALITY_FLAG_DAC_SAT) != 0u);
+	TEST_ASSERT_EQUAL_INT32(0, out.vc_cmd_mv);
+	TEST_ASSERT_FLOAT_WITHIN(1.0f, -400.0f, out.applied_ppb);
 }
 
 static void test_lock_is_lost_after_sustained_bad_seconds(void)

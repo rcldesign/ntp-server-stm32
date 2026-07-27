@@ -328,7 +328,15 @@ int nts_init(nts_ctx_t *ctx, nts_keyring_t *ring, uint8_t max_cookies);
  * followed by an authenticator that does not verify is a forgery, and answering
  * it at all would confirm to the forger that the cookie is live, so it is
  * dropped. (RFC 8915 §5.7 permits a NAK for both; this is the narrower reading
- * chrony also takes.)
+ * chrony also takes.) A failure of the crypto port itself is also a drop: it is
+ * the server's fault, and sending a NAK would send a healthy client off to
+ * re-key while hiding the real fault behind a protocol message.
+ *
+ * Encrypted extension fields in the *request* are decrypted — they have to be,
+ * to authenticate the packet — but their contents are then discarded. RFC 8915
+ * defines no field a client must send encrypted, and inventing an
+ * interpretation for one would be inventing attack surface. Anything longer
+ * than NTS_REQ_PLAINTEXT_MAX is refused outright.
  *
  * @param out  Populated for NTS_ACT_OK and, as far as the echo, for NTS_ACT_NAK.
  *
@@ -352,6 +360,10 @@ int nts_process_request(nts_ctx_t *ctx, const uint8_t *pkt, size_t len,
  * @param pkt   Response buffer with the NTP header already written.
  * @param len   In/out: current response length, advanced by what is appended.
  * @param cap   Total capacity available for the response.
+ *
+ * On any failure @p len is left as it was but the octets past it are
+ * unspecified — the builder writes cookies into the packet before sealing them.
+ * The caller must discard the response, which is what it would do anyway.
  *
  * @retval 0        Appended.
  * @retval -EINVAL  NULL argument, uninitialised context, or a request that was
@@ -382,6 +394,13 @@ int nts_append_nak(nts_ctx_t *ctx, const nts_req_t *req, uint8_t *pkt,
  * field, setting @p kod_refid to 'NTSN' in the latter case. A request with no
  * NTS fields appends nothing and succeeds, so a server with the hook installed
  * still answers plain NTP.
+ *
+ * Interaction with rate limiting: core/ntp decides to send a Kiss-o'-Death for
+ * an over-limit client *before* it calls the hook, so such a reply carries no
+ * Unique Identifier. An NTS client is required to ignore a Kiss-o'-Death it
+ * cannot match to a request (RFC 8915 §5.7), so a rate-limited NTS client sees
+ * a silent drop. That is the right outcome — the alternative is a reply an
+ * off-path attacker could have solicited on the client's behalf.
  *
  * @param ctx  An nts_ctx_t.
  *

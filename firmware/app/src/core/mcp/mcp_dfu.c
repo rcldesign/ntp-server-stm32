@@ -285,11 +285,18 @@ static int h_fw_begin(mcp_ctx_t *c, const mcp_frame_t *f)
 	c->dfu.state = (uint8_t)MCP_DFU_ACTIVE;
 	c->dfu.last_ms = c->now_ms;
 
-	if (!resumed && (ensure_erased(c, 0U) != 0)) {
-		mcp_dfu__reset(c);
-		mcp__log(c, (uint8_t)LOGR_ERR, "dfu: staging erase failed");
-		return mcp__reply_status(c, f->cmd, f->seq,
-					 (uint8_t)MCP_ERR_INTERNAL);
+	if (!resumed) {
+		/* Clear the first window now so the first FW_DATA does not
+		 * stall behind an erase. */
+		int rc = ensure_erased(c, 0U);
+
+		if (rc != 0) {
+			mcp_dfu__reset(c);
+			mcp__log(c, (uint8_t)LOGR_ERR,
+				 "dfu: staging erase failed");
+			return mcp__reply_status(c, f->cmd, f->seq,
+						 mcp__port_err(rc));
+		}
 	}
 
 	mcp__log(c, (uint8_t)LOGR_NOTICE,

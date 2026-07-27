@@ -1271,6 +1271,9 @@ static void test_ke_record_codec(void)
 	len = 0U;
 	TEST_ASSERT_EQUAL_INT(-ENOSPC, ntske_rec_put(buf, 8U, &len, false, 0U, body,
 						     sizeof(body)));
+	len = 0U;
+	TEST_ASSERT_EQUAL_INT(-ENOSPC, ntske_rec_put_u16(buf, 5U, &len, false, 0U,
+							 1U));
 
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ntske_rec_parse(NULL, 4U, 0U, &rec, &next));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ntske_rec_parse(buf, 4U, 0U, NULL, &next));
@@ -1741,6 +1744,106 @@ static void test_ke_bad_arguments(void)
 	}
 }
 
+static void test_keyring_id_space_wraps_past_zero(void)
+{
+	nts_keyring_t r;
+	nts_cookie_keys_t keys;
+	uint8_t key[NTS_MASTER_KEY_LEN];
+	uint8_t cookie[NTS_COOKIE_LEN];
+
+	make_keys(&keys);
+	memset(key, 0x11U, sizeof(key));
+	TEST_ASSERT_EQUAL_INT(0, nts_keyring_init(&r, &g_port, 0, 0));
+
+	/* Restore a key near the top of the id space, as a long-lived unit
+	 * would after many rotations. */
+	TEST_ASSERT_EQUAL_INT(0, nts_keyring_install(&r, 0xFFFEU, key, 0, false));
+	TEST_ASSERT_EQUAL_INT(0, nts_keyring_rotate(&r, 1));
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_seal(&r, &keys, cookie));
+	TEST_ASSERT_EQUAL_UINT16(0xFFFFU, bytes_get_be16(cookie));
+
+	/* The next id must skip 0: a cookie naming key 0 would match every
+	 * empty slot in the ring. */
+	TEST_ASSERT_EQUAL_INT(0, nts_keyring_rotate(&r, 2));
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_seal(&r, &keys, cookie));
+	TEST_ASSERT_EQUAL_UINT16(1U, bytes_get_be16(cookie));
+
+	/* Installing the very last id must not roll the counter to 0 either. */
+	TEST_ASSERT_EQUAL_INT(0, nts_keyring_install(&r, 0xFFFFU, key, 0, false));
+	TEST_ASSERT_EQUAL_INT(0, nts_keyring_rotate(&r, 3));
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_seal(&r, &keys, cookie));
+	TEST_ASSERT_NOT_EQUAL(0U, bytes_get_be16(cookie));
+}
+
+static void test_remaining_rejection_and_clamp_paths(void)
+{
+	nts_cookie_keys_t keys;
+	nts_req_t req;
+	pkt_t p;
+	uint8_t rsp[PKT_CAP];
+	uint8_t uniq[NTS_UNIQ_MIN];
+	uint8_t cookie[NTS_COOKIE_LEN];
+	const size_t empty_rsp = NTS_NTP_HDR_LEN + 4U + NTS_UNIQ_MIN + 40U;
+	size_t auth_off;
+	size_t len;
+
+	make_keys(&keys);
+	make_uniq(uniq, sizeof(uniq));
+
+	/* The crypto port failing mid-unseal is the server's problem, not the
+	 * client's: a NAK would send a healthy client off to re-key for nothing
+	 * and would hide the fault behind a protocol message. */
+	build_request(&p, &keys, 0U);
+	g_hc.fail_aes_in = 1U;
+	TEST_ASSERT_EQUAL_INT(NTS_ACT_DROP,
+			      nts_process_request(&g_nts, p.buf, p.len, &req));
+
+	/* An authenticator with no body at all — too short even for the two
+	 * length fields it must begin with. */
+	build_request(&p, &keys, 0U);
+	auth_off = p.len - 40U;
+	bytes_put_be16(&p.buf[auth_off + 2U], 4U);
+	p.len = auth_off + 4U;
+	TEST_ASSERT_EQUAL_INT(NTS_ACT_DROP,
+			      nts_process_request(&g_nts, p.buf, p.len, &req));
+
+	/* Two stray octets where the next field header should begin. An NTS
+	 * packet's extension fields tile the datagram exactly, so a tail too
+	 * short to be a field is malformed rather than padding. */
+	TEST_ASSERT_EQUAL_INT(0, nts_cookie_seal(&g_ring, &keys, cookie));
+	pkt_hdr(&p);
+	pkt_ef(&p, (uint16_t)NTS_EF_UNIQUE_ID, uniq, sizeof(uniq));
+	pkt_ef(&p, (uint16_t)NTS_EF_COOKIE, cookie, sizeof(cookie));
+	p.buf[p.len] = 0U;
+	p.buf[p.len + 1U] = 0U;
+	p.len += 2U;
+	TEST_ASSERT_EQUAL_INT(NTS_ACT_DROP,
+			      nts_process_request(&g_nts, p.buf, p.len, &req));
+
+	/* A server configured to issue fewer cookies than the client asks for,
+	 * with room to spare: the server's limit is what binds. */
+	TEST_ASSERT_EQUAL_INT(0, nts_init(&g_nts, &g_ring, 2U));
+	build_request(&p, &keys, 5U);
+	TEST_ASSERT_EQUAL_INT(NTS_ACT_OK,
+			      nts_process_request(&g_nts, p.buf, p.len, &req));
+	len = NTS_NTP_HDR_LEN;
+	memset(rsp, 0, sizeof(rsp));
+	TEST_ASSERT_EQUAL_INT(0, nts_append_response(&g_nts, &req, rsp, &len,
+						     sizeof(rsp)));
+	TEST_ASSERT_EQUAL_UINT(2U, check_response(rsp, len, &keys, uniq,
+						  sizeof(uniq)));
+
+	/* The AEAD failing while sealing the response itself. */
+	TEST_ASSERT_EQUAL_INT(0, nts_init(&g_nts, &g_ring, 0U));
+	build_request(&p, &keys, 0U);
+	TEST_ASSERT_EQUAL_INT(NTS_ACT_OK,
+			      nts_process_request(&g_nts, p.buf, p.len, &req));
+	len = NTS_NTP_HDR_LEN;
+	g_hc.fail_aes_in = 1U;
+	TEST_ASSERT_EQUAL_INT(-EIO, nts_append_response(&g_nts, &req, rsp, &len,
+							empty_rsp));
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -1749,6 +1852,7 @@ int main(void)
 	RUN_TEST(test_keyring_rotation_window);
 	RUN_TEST(test_keyring_tick_and_failures);
 	RUN_TEST(test_keyring_install_restores_across_reboot);
+	RUN_TEST(test_keyring_id_space_wraps_past_zero);
 	RUN_TEST(test_cookie_layout_and_roundtrip);
 	RUN_TEST(test_cookie_rejects_mutation);
 	RUN_TEST(test_cookie_bad_arguments_and_port_failures);
@@ -1764,6 +1868,7 @@ int main(void)
 	RUN_TEST(test_response_never_exceeds_request);
 	RUN_TEST(test_response_trims_to_capacity);
 	RUN_TEST(test_response_bad_arguments_and_port_failures);
+	RUN_TEST(test_remaining_rejection_and_clamp_paths);
 	RUN_TEST(test_ext_hook);
 	RUN_TEST(test_ke_record_codec);
 	RUN_TEST(test_ke_exporter_context);

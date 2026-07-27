@@ -612,8 +612,10 @@ int nts_append_response(nts_ctx_t *ctx, const nts_req_t *req, uint8_t *pkt,
 		return -EINVAL;
 	}
 
-	/* Echo first: it is authenticated but not encrypted, and it is part of
-	 * the associated data the authenticator covers. */
+	/* The echo goes first: RFC 8915 §5.7 has it authenticated but not
+	 * encrypted, so it belongs in the associated data the authenticator
+	 * covers. It is the same field a NAK carries alone, so the NAK builder
+	 * is the one place that lays it out. */
 	rc = nts_append_nak(ctx, req, pkt, len, cap);
 	if (rc != 0) {
 		return rc;

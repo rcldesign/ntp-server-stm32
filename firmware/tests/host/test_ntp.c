@@ -1426,6 +1426,94 @@ static void test_random_input_never_crashes(void)
 	TEST_ASSERT_EQUAL_UINT64(0U, st.rx);
 }
 
+static void test_token_bucket_bounds(void)
+{
+	uint8_t req[NTP_HDR_LEN];
+	uint8_t out[NTP_PKT_MAX];
+	ntp_cfg_t cfg;
+	ntp_quality_view_t q;
+	ntp_rx_t rx;
+	ntp_result_t res;
+	size_t len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+	unsigned served;
+
+	good_quality(&q);
+
+	/* A configured burst of zero would wedge the bucket shut. It is clamped
+	 * to one request instead of refused: a nonsensical setting should
+	 * degrade the service, not take it down. */
+	ntp_cfg_default(&cfg);
+	cfg.client_rate = 1U;
+	cfg.client_burst = 0U;
+	cfg.global_rate = 0U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	fill_rx(&rx, req, len, 1U, 0);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+	fill_rx(&rx, req, len, 1U, 0);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_NOT_EQUAL(NTP_ACT_RESPOND, res.action);
+
+	/* And an absurd one is clamped down, which is what keeps the
+	 * milli-token accounting inside 32 bits. */
+	ntp_cfg_default(&cfg);
+	cfg.client_rate = 1U;
+	cfg.client_burst = NTP_BURST_MAX + 1U;
+	cfg.global_rate = 0U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	for (unsigned i = 0U; i < 64U; i++) {
+		fill_rx(&rx, req, len, 2U, 0);
+		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+							    sizeof(out), &res));
+		TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+	}
+
+	/*
+	 * A slot idle for thirty years: the refill multiplies elapsed
+	 * milliseconds by the rate, so the elapsed time has to be clamped
+	 * before the multiply or the product leaves 64 bits. The bucket must
+	 * come back exactly full — four requests, then limited again.
+	 */
+	ntp_cfg_default(&cfg);
+	cfg.client_rate = 1U;
+	cfg.client_burst = 4U;
+	cfg.global_rate = 0U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	for (unsigned i = 0U; i < 8U; i++) {
+		fill_rx(&rx, req, len, 3U, 0);
+		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+							    sizeof(out), &res));
+	}
+	served = 0U;
+	for (unsigned i = 0U; i < 8U; i++) {
+		fill_rx(&rx, req, len, 3U, INT64_C(1000000000000));
+		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+							    sizeof(out), &res));
+		if (res.action == NTP_ACT_RESPOND) {
+			served++;
+		}
+	}
+	TEST_ASSERT_EQUAL_UINT(4U, served);
+
+	/* A clock that steps backwards must not drain the bucket. */
+	fill_rx(&rx, req, len, 4U, INT64_C(1000000000000));
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+	served = 0U;
+	for (unsigned i = 0U; i < 8U; i++) {
+		fill_rx(&rx, req, len, 4U, 0);
+		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+							    sizeof(out), &res));
+		if (res.action == NTP_ACT_RESPOND) {
+			served++;
+		}
+	}
+	TEST_ASSERT_EQUAL_UINT(3U, served);
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -1443,6 +1531,7 @@ int main(void)
 	RUN_TEST(test_unserved_modes_and_versions);
 	RUN_TEST(test_malformed_and_argument_errors);
 	RUN_TEST(test_rate_limit_burst_throttle_recover);
+	RUN_TEST(test_token_bucket_bounds);
 	RUN_TEST(test_kod_rate_bytes);
 	RUN_TEST(test_kod_can_be_disabled_and_global_bucket_bites);
 	RUN_TEST(test_kod_is_damped);
