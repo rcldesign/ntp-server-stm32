@@ -29,14 +29,14 @@
  */
 static const uint16_t sin_tbl[91] = {
 	   0,   71,  143,  214,  286,  357,  428,  499,  570,  641,
-	 711,  781,  851,  921,  990, 1059, 1128, 1196, 1264, 1331,
-	1398, 1465, 1531, 1596, 1661, 1725, 1789, 1852, 1915, 1977,
-	2038, 2098, 2158, 2217, 2276, 2333, 2390, 2446, 2501, 2556,
-	2609, 2662, 2714, 2765, 2815, 2865, 2913, 2960, 3007, 3053,
-	3097, 3141, 3183, 3225, 3266, 3305, 3344, 3381, 3417, 3453,
-	3487, 3520, 3552, 3583, 3612, 3641, 3668, 3695, 3720, 3744,
-	3767, 3788, 3809, 3828, 3846, 3863, 3879, 3893, 3907, 3919,
-	3930, 3939, 3948, 3955, 3961, 3966, 3970, 3972, 3974, 3974,
+	 711,  782,  852,  921,  991, 1060, 1129, 1198, 1266, 1334,
+	1401, 1468, 1534, 1600, 1666, 1731, 1796, 1860, 1923, 1986,
+	2048, 2110, 2171, 2231, 2290, 2349, 2408, 2465, 2522, 2578,
+	2633, 2687, 2741, 2793, 2845, 2896, 2946, 2996, 3044, 3091,
+	3138, 3183, 3228, 3271, 3314, 3355, 3396, 3435, 3474, 3511,
+	3547, 3582, 3617, 3650, 3681, 3712, 3742, 3770, 3798, 3824,
+	3849, 3873, 3896, 3917, 3937, 3956, 3974, 3991, 4006, 4021,
+	4034, 4046, 4056, 4065, 4074, 4080, 4086, 4090, 4094, 4095,
 	4096,
 };
 
@@ -110,19 +110,26 @@ uint32_t sky_isqrt(uint64_t v)
 /*
  * atan(z) for 0 <= z <= 1, z in Q12, result in tenths of a degree.
  *
- * The classic single-rational approximation: atan(z) ~ z * (c1 - c2*z^2), with
- * the constants scaled so the output lands directly in tenths of a degree. Peak
- * error is about 0.2 degrees, which is a fifth of a pixel at the rim of a
- * 320-pixel plot.
+ * The standard rational approximation
+ *
+ *   atan(z) = (pi/4)*z - z*(z - 1)*(0.2447 + 0.0663*z)      radians
+ *
+ * scaled into tenths of a degree by 1800/pi = 572.958:
+ *
+ *   atan(z) = 450*z - z*(z - 1)*(140.2 + 38.0*z)            tenths of a degree
+ *
+ * Exact at z = 0 and z = 1; peak error about 0.1 degrees in between, which is a
+ * tenth of a pixel at the rim of a 320-pixel plot.
  */
 static int32_t atan_unit_q12(int32_t z)
 {
-	int32_t z2 = (int32_t)(((int64_t)z * (int64_t)z) >> 12);
-	int64_t t;
+	int32_t t1 = (int32_t)(((int64_t)450 * (int64_t)z) >> 12);
+	/* zf*(zf - 1) in Q12; negative over the whole open interval. */
+	int64_t a = ((int64_t)z * (int64_t)(z - SKY_TRIG_ONE)) >> 12;
+	/* 140.2 + 38.0*zf in Q12. */
+	int64_t k = ((int64_t)140 << 12) + ((int64_t)38 * (int64_t)z);
 
-	/* 450 tenths of a degree at z = 1, with the cubic term shaping the curve. */
-	t = (int64_t)z * (int64_t)(5730 - (((int64_t)1266 * z2) >> 12));
-	return (int32_t)(t >> 12);
+	return t1 - (int32_t)((a * k) >> 24);
 }
 
 int32_t sky_atan2_ddeg(int32_t y, int32_t x)
@@ -314,22 +321,20 @@ static int32_t scale_or_unity(int32_t s)
 int sky_heading_from_ecompass(const sky_ecompass_t *e, uint32_t field_ref,
 			      sky_heading_t *out)
 {
-	int32_t mx;
-	int32_t my;
-	int32_t mz;
-	int32_t ax;
-	int32_t ay;
-	int32_t az;
-	int32_t pitch;
-	int32_t roll;
-	int32_t sp;
-	int32_t cp;
-	int32_t sr;
-	int32_t cr;
-	int64_t xh;
-	int64_t yh;
+	int32_t m[3];
+	int32_t g[3];
+	int64_t mh[3];
+	int64_t fh[3];
+	int64_t mdotg;
+	int64_t fdotg;
+	int64_t dot;
+	int64_t cross[3];
+	int64_t sinterm;
 	uint32_t mag;
 	uint32_t acc_mag;
+	uint32_t mh_len;
+	uint32_t fh_len;
+	unsigned int i;
 
 	if ((e == NULL) || (out == NULL)) {
 		return -EINVAL;
@@ -337,65 +342,146 @@ int sky_heading_from_ecompass(const sky_ecompass_t *e, uint32_t field_ref,
 	(void)memset(out, 0, sizeof(*out));
 
 	/* Hard-iron offset, then soft-iron scale (§10.4 calibration). */
-	mx = ((e->mag[0] - e->mag_offset[0]) * scale_or_unity(e->mag_scale[0])) / 4096;
-	my = ((e->mag[1] - e->mag_offset[1]) * scale_or_unity(e->mag_scale[1])) / 4096;
-	mz = ((e->mag[2] - e->mag_offset[2]) * scale_or_unity(e->mag_scale[2])) / 4096;
+	for (i = 0U; i < 3U; i++) {
+		m[i] = ((e->mag[i] - e->mag_offset[i]) *
+			scale_or_unity(e->mag_scale[i])) / SKY_TRIG_ONE;
+		g[i] = e->acc[i];
+	}
 
-	ax = e->acc[0];
-	ay = e->acc[1];
-	az = e->acc[2];
-
-	mag = sky_isqrt(((uint64_t)((int64_t)mx * mx)) +
-			((uint64_t)((int64_t)my * my)) +
-			((uint64_t)((int64_t)mz * mz)));
+	mag = sky_isqrt(((uint64_t)((int64_t)m[0] * m[0])) +
+			((uint64_t)((int64_t)m[1] * m[1])) +
+			((uint64_t)((int64_t)m[2] * m[2])));
 	out->field_mag = mag;
 
-	acc_mag = sky_isqrt(((uint64_t)((int64_t)ax * ax)) +
-			    ((uint64_t)((int64_t)ay * ay)) +
-			    ((uint64_t)((int64_t)az * az)));
-
+	acc_mag = sky_isqrt(((uint64_t)((int64_t)g[0] * g[0])) +
+			    ((uint64_t)((int64_t)g[1] * g[1])) +
+			    ((uint64_t)((int64_t)g[2] * g[2])));
 	if (acc_mag == 0U) {
-		/* No gravity vector: nothing to tilt-compensate against. */
+		/* No gravity vector: nothing defines the horizontal plane. */
 		return 0;
 	}
 	out->tilt_valid = true;
 
 	/*
-	 * Pitch and roll from gravity. The board stands vertically (§6.3), so
-	 * these are large in normal service — which is exactly why skipping the
-	 * compensation would produce a heading that is wrong by tens of degrees
-	 * rather than by a rounding error.
+	 * Pitch and roll, for telemetry. Reported in the usual aerospace sense
+	 * about the board's own axes; the heading below does not use them.
+	 *
+	 * sky_atan2_ddeg() is compass-convention (0 at +y, clockwise), so a
+	 * mathematical atan2(a, b) is written sky_atan2_ddeg(b, a).
 	 */
-	roll = sky_atan2_ddeg(ax, az);
-	pitch = sky_atan2_ddeg(-ay, (int32_t)sky_isqrt(
-			((uint64_t)((int64_t)ax * ax)) +
-			((uint64_t)((int64_t)az * az))));
+	{
+		int32_t roll = sky_atan2_ddeg(g[2], g[0]);
+		int32_t pitch = sky_atan2_ddeg((int32_t)sky_isqrt(
+					((uint64_t)((int64_t)g[0] * g[0])) +
+					((uint64_t)((int64_t)g[2] * g[2]))),
+					-g[1]);
 
-	out->roll_ddeg = (int16_t)((roll > 1800) ? (roll - 3600) : roll);
-	out->pitch_ddeg = (int16_t)((pitch > 1800) ? (pitch - 3600) : pitch);
-
-	sp = sky_sin_ddeg(pitch);
-	cp = sky_cos_ddeg(pitch);
-	sr = sky_sin_ddeg(roll);
-	cr = sky_cos_ddeg(roll);
+		out->roll_ddeg = (int16_t)((roll > 1800) ? (roll - 3600) : roll);
+		out->pitch_ddeg = (int16_t)((pitch > 1800) ? (pitch - 3600) : pitch);
+	}
 
 	/*
-	 * De-rotate the magnetic vector into the horizontal plane. Standard
-	 * tilt-compensated compass, in Q12 throughout:
+	 * The heading, derived geometrically rather than from an axis convention.
 	 *
-	 *   xh = mx*cr + mz*sr
-	 *   yh = mx*sr*sp + my*cp - mz*cr*sp
+	 * Reported heading is the compass bearing of the board's **+z axis** — the
+	 * front-panel normal, i.e. the direction the panel faces. That is the only
+	 * choice that means anything for this product: the board is mounted
+	 * vertically (§6.3), so +y is nearly vertical and has no useful horizontal
+	 * projection, while +z is horizontal and is what an operator standing in
+	 * front of the unit is looking along.
+	 *
+	 * Construction, using only dot and cross products so that no axis-order or
+	 * sign convention has to be argued about:
+	 *
+	 *   g       gravity, from the accelerometer (points up, by convention)
+	 *   mh      the magnetic vector with its vertical component removed
+	 *           -> horizontal magnetic north
+	 *   fh      the +z axis with its vertical component removed
+	 *           -> where the panel faces, in the horizontal plane
+	 *   heading = signed angle from mh to fh, measured clockwise about g
+	 *
+	 * Both projections are scaled by |g|^2 rather than normalised, which keeps
+	 * everything in integers; the common factor cancels in the angle.
 	 */
-	xh = (((int64_t)mx * cr) + ((int64_t)mz * sr)) / SKY_TRIG_ONE;
-	yh = ((((int64_t)mx * sr) / SKY_TRIG_ONE) * sp) / SKY_TRIG_ONE;
-	yh += ((int64_t)my * cp) / SKY_TRIG_ONE;
-	yh -= ((((int64_t)mz * cr) / SKY_TRIG_ONE) * sp) / SKY_TRIG_ONE;
+	mdotg = ((int64_t)m[0] * g[0]) + ((int64_t)m[1] * g[1]) +
+		((int64_t)m[2] * g[2]);
+	/* fh = z - (z.g)g, and z = (0, 0, 1), so z.g is simply g[2]. */
+	fdotg = (int64_t)g[2];
 
-	if ((xh == 0) && (yh == 0)) {
+	for (i = 0U; i < 3U; i++) {
+		int64_t gg = (int64_t)g[i];
+
+		mh[i] = ((int64_t)m[i] * (int64_t)acc_mag * (int64_t)acc_mag) -
+			(mdotg * gg);
+		fh[i] = -(fdotg * gg);
+	}
+	fh[2] += (int64_t)acc_mag * (int64_t)acc_mag;
+
+	/*
+	 * Scale both projections down into a range where the cross product cannot
+	 * overflow int64. |g|^2 can be ~1e6 and m ~1e3, so mh can reach ~1e9;
+	 * squaring that in the cross product would be ~1e18, which is within
+	 * int64 but leaves no headroom for the subsequent multiply by g.
+	 */
+	for (i = 0U; i < 3U; i++) {
+		mh[i] /= (int64_t)acc_mag;
+		fh[i] /= (int64_t)acc_mag;
+	}
+
+	mh_len = sky_isqrt((uint64_t)((mh[0] * mh[0]) + (mh[1] * mh[1]) +
+				      (mh[2] * mh[2])));
+	fh_len = sky_isqrt((uint64_t)((fh[0] * fh[0]) + (fh[1] * fh[1]) +
+				      (fh[2] * fh[2])));
+
+	if ((mh_len == 0U) || (fh_len == 0U)) {
+		/*
+		 * Either the field is exactly vertical (at the magnetic pole) or the
+		 * panel normal is exactly vertical (the board is lying flat). In both
+		 * cases there is no horizontal reference and §6.3's GNSS-north
+		 * fallback is the honest answer.
+		 */
 		return 0;
 	}
 
-	out->heading_ddeg = (int16_t)sky_atan2_ddeg((int32_t)yh, (int32_t)xh);
+	/*
+	 * The panel normal must have a real horizontal projection, not a residue
+	 * of rounding: below a quarter of its length the bearing is dominated by
+	 * noise. This is what makes a near-flat board report "north unverified"
+	 * instead of a confident random number.
+	 */
+	if ((uint64_t)fh_len * 4U < (uint64_t)acc_mag) {
+		return 0;
+	}
+
+	dot = (mh[0] * fh[0]) + (mh[1] * fh[1]) + (mh[2] * fh[2]);
+
+	cross[0] = (mh[1] * fh[2]) - (mh[2] * fh[1]);
+	cross[1] = (mh[2] * fh[0]) - (mh[0] * fh[2]);
+	cross[2] = (mh[0] * fh[1]) - (mh[1] * fh[0]);
+	sinterm = ((cross[0] * g[0]) + (cross[1] * g[1]) + (cross[2] * g[2])) /
+		  (int64_t)acc_mag;
+
+	/*
+	 * Scale both terms into int32 before the bearing. Only their ratio
+	 * matters, so a common right shift is free of consequence.
+	 */
+	{
+		int64_t a = (dot < 0) ? -dot : dot;
+		int64_t b = (sinterm < 0) ? -sinterm : sinterm;
+		int64_t big = (a > b) ? a : b;
+		int shift = 0;
+
+		while ((big >> shift) > 0x3FFFFFFF) {
+			shift++;
+		}
+		/*
+		 * Negated: the cross product gives the angle from magnetic north to
+		 * the panel normal measured one way about gravity, and a compass
+		 * bearing runs the other way.
+		 */
+		out->heading_ddeg = (int16_t)sky_atan2_ddeg(
+			(int32_t)(dot >> shift), (int32_t)(-sinterm >> shift));
+	}
 
 	/*
 	 * Only now decide whether to believe it. Two independent reasons not to:
@@ -407,6 +493,9 @@ int sky_heading_from_ecompass(const sky_ecompass_t *e, uint32_t field_ref,
 	if (!e->calibrated) {
 		return 0;
 	}
+	if (mag == 0U) {
+		return 0;
+	}
 	if (field_ref != 0U) {
 		uint32_t tol = (field_ref * (uint32_t)SKY_FIELD_TOLERANCE_PCT) / 100U;
 
@@ -416,9 +505,6 @@ int sky_heading_from_ecompass(const sky_ecompass_t *e, uint32_t field_ref,
 		if (mag > (field_ref + tol)) {
 			return 0;
 		}
-	}
-	if (mag == 0U) {
-		return 0;
 	}
 
 	out->valid = true;
@@ -655,20 +741,29 @@ int sky_render(sky_canvas_t *c, const ui_sv_t *sv, uint8_t n,
 	geometry(c, &cx, &cy, &r);
 	rotation = sky_rotation_ddeg(o);
 
-	/* Horizon (elevation 0) and the 30/60-degree elevation rings. */
-	ring(c, cx, cy, r, (uint8_t)SKY_C_GRID_MAJOR);
+	/* The 30/60-degree elevation rings. */
 	ring(c, cx, cy, (r * 2) / 3, (uint8_t)SKY_C_GRID);
 	ring(c, cx, cy, r / 3, (uint8_t)SKY_C_GRID);
 
 	/*
 	 * Cardinal ticks. They rotate with the plot, so when north is verified the
 	 * north tick genuinely points at true north, and when it is not the ticks
-	 * are GNSS-north and the badge says so.
+	 * are GNSS-north and the badge says so. North gets a longer, brighter tick
+	 * than the other three — on a rotated plot the operator needs to find north
+	 * at a glance, and "the long one" is faster to read than a letter.
 	 */
 	tick(c, cx, cy, r, rotation, r / 8, (uint8_t)SKY_C_GRID_MAJOR);
 	tick(c, cx, cy, r, rotation + 900, r / 12, (uint8_t)SKY_C_GRID);
 	tick(c, cx, cy, r, rotation + 1800, r / 12, (uint8_t)SKY_C_GRID);
 	tick(c, cx, cy, r, rotation + 2700, r / 12, (uint8_t)SKY_C_GRID);
+
+	/*
+	 * The horizon (elevation 0) goes on LAST of the grid elements so the ticks
+	 * cannot punch holes in it. A broken horizon ring reads as a rendering
+	 * fault to anyone looking at the panel, and the ring is the one line that
+	 * tells them where the sky ends.
+	 */
+	ring(c, cx, cy, r, (uint8_t)SKY_C_GRID_MAJOR);
 
 	count = (n > (uint8_t)UI_MAX_SV) ? (uint8_t)UI_MAX_SV : n;
 	for (i = 0U; i < count; i++) {

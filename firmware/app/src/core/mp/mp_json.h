@@ -226,6 +226,17 @@ int mp_jw_f32(mp_jw_t *w, float v, uint8_t decimals);
 /** Write pre-formatted JSON verbatim (used for cached manifest fragments). */
 int mp_jw_raw(mp_jw_t *w, const char *json, size_t n);
 
+/**
+ * Write a string value whose body is *already* correctly escaped.
+ *
+ * Emits `"` + @p escaped + `"` as one value, so it may be used where a value is
+ * expected. This exists for echoing a parsed string span back verbatim (a
+ * JSON-RPC `id`): unescaping it and re-escaping could change it, and emitting
+ * the quotes with separate mp_jw_raw() calls would trip the writer's
+ * bare-value-in-an-object check.
+ */
+int mp_jw_str_escaped(mp_jw_t *w, const char *escaped, size_t n);
+
 /* Convenience: key + value in one call. */
 int mp_jw_kv_str(mp_jw_t *w, const char *key, const char *v);
 int mp_jw_kv_i64(mp_jw_t *w, const char *key, int64_t v);

@@ -1381,10 +1381,10 @@ int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
 	 * concerned.
 	 */
 	if (ctx->state == DISC_STATE_HOLDOVER) {
+		/* holdover_retained_ns is already at the running estimate —
+		 * update_holdover() keeps it there on every tick — so leaving
+		 * holdover only has to bank the elapsed time. */
 		ctx->state = DISC_STATE_RECOVERING;
-		if (ctx->holdover_est_ns > ctx->holdover_retained_ns) {
-			ctx->holdover_retained_ns = ctx->holdover_est_ns;
-		}
 		ctx->holdover_elapsed_base_s = ctx->holdover_elapsed_s;
 		ctx->t_demote_s = UINT32_MAX;
 	}
@@ -1668,15 +1668,13 @@ int disc_park(disc_ctx_t *ctx, uint16_t *out_code)
 	 * parks and unparks unconditionally) laundered a demoted holdover into a
 	 * RECOVERING state with no retained error and an immediate stratum 1.
 	 */
-	if (ctx->state == DISC_STATE_HOLDOVER &&
-	    ctx->holdover_est_ns > ctx->holdover_retained_ns) {
-		ctx->holdover_retained_ns = ctx->holdover_est_ns;
-	}
 	if (ctx->last_e_valid &&
 	    (f_abs(ctx->last_e_ns) > ctx->holdover_retained_ns)) {
 		ctx->holdover_retained_ns = f_abs(ctx->last_e_ns);
 	}
 	if (ctx->state == DISC_STATE_HOLDOVER) {
+		/* The estimate is already banked (update_holdover keeps the floor
+		 * current); only the elapsed time needs carrying. */
 		ctx->holdover_elapsed_base_s = ctx->holdover_elapsed_s;
 	}
 

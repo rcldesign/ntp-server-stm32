@@ -352,6 +352,15 @@ static void emit_val(mp_jw_t *w, const mp_obj_t *o, const mp_val_t *v)
 typedef int (*handler_fn)(mp_ctx_t *c, const mp_json_t *p, int params,
 			  mp_jw_t *w);
 
+/**
+ * Largest raw cfg-transfer chunk one `cfg.import` request may carry.
+ *
+ * Published in `hello.limits.cfg_chunk` so a host does not have to guess. It
+ * bounds two stack buffers in m_cfg_import(), which is why it is a fixed
+ * constant rather than the size of the whole import stream.
+ */
+#define MP_CFG_CHUNK_MAX 384U
+
 /* ------------------------------------------------------------------- hello */
 
 static int m_hello(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
@@ -406,6 +415,7 @@ static int m_hello(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	(void)mp_jw_kv_u64(w, "revert_ms", MP_DEADMAN_REVERT_MS);
 	(void)mp_jw_kv_u64(w, "lease_ttl_max_ms", MP_LEASE_TTL_MAX_MS);
 	(void)mp_jw_kv_u64(w, "g3_hold_ms", MP_G3_HOLD_MS);
+	(void)mp_jw_kv_u64(w, "cfg_chunk", MP_CFG_CHUNK_MAX);
 	(void)mp_jw_kv_bool(w, "batch", false);
 	(void)mp_jw_obj_close(w);
 
@@ -724,6 +734,17 @@ static int m_obj_set(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	} else if (p_i32(p, params, "value", 0, &value) != 0) {
 		mp_fail(c, MP_E_BAD_PARAMS, "value");
 		return MP_E_BAD_PARAMS;
+	}
+
+	/*
+	 * The manifest's envelope binds `set` exactly as it binds `override`. A
+	 * cfg-backed object would otherwise be limited only by its schema row,
+	 * which may be wider than what the manifest promised the tool.
+	 */
+	rc = mp_obj_check_value((size_t)idx, value);
+	if (rc != 0) {
+		mp_fail(c, mp_map_errno(rc), "value");
+		return mp_map_errno(rc);
 	}
 
 	g = guard_or_fail(c, o->guard, p, params, (uint16_t)(idx + 1), 0U, w);
@@ -1580,8 +1601,8 @@ static int m_cfg_export(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 
 static int m_cfg_import(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 {
-	uint8_t raw[CFG_EXPORT_MIN_CHUNK * 2U];
-	char b64[(MP_B64_LEN(CFG_EXPORT_MIN_CHUNK * 2U)) + 4U];
+	uint8_t raw[MP_CFG_CHUNK_MAX];
+	char b64[MP_B64_LEN(MP_CFG_CHUNK_MAX) + 4U];
 	cfg_commit_res_t res;
 	size_t consumed = 0U;
 	bool restart = false;
@@ -2029,10 +2050,8 @@ static void emit_id(mp_jw_t *w, const mp_json_t *p, int id_tok)
 	if (t->type == (uint8_t)MP_J_STR) {
 		/* Re-quote the raw span: it is already escaped correctly and
 		 * re-escaping an unescaped copy could change it. */
-		(void)mp_jw_raw(w, "\"", 1U);
-		(void)mp_jw_raw(w, &p->src[t->start],
-				(size_t)(t->end - t->start));
-		(void)mp_jw_raw(w, "\"", 1U);
+		(void)mp_jw_str_escaped(w, &p->src[t->start],
+					(size_t)(t->end - t->start));
 		return;
 	}
 	(void)mp_jw_raw(w, &p->src[t->start], (size_t)(t->end - t->start));

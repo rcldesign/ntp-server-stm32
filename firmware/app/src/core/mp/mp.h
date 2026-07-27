@@ -213,9 +213,16 @@ typedef struct {
 #define MP_RPC_TOKENS 96U
 #endif
 
-/** Reply assembly buffer. One JSON-RPC response must fit. */
+/**
+ * Reply assembly buffer. One complete JSON-RPC response must fit.
+ *
+ * Larger than MP_TX_PAYLOAD_MAX on purpose: `hello`, `diag.list` and a manifest
+ * page all exceed one frame, and mp_frame_send() fragments them. A reply that
+ * still does not fit is answered as an internal error rather than truncated —
+ * see mp_rpc_handle().
+ */
 #ifndef MP_REPLY_MAX
-#define MP_REPLY_MAX MP_TX_PAYLOAD_MAX
+#define MP_REPLY_MAX 3072U
 #endif
 
 /** Longest `data` detail an error reply carries. */

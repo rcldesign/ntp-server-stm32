@@ -1680,6 +1680,111 @@ static void test_bad_community_is_dropped_and_counted(void)
 					  &g_out_len));
 }
 
+/*
+ * The community pointer is replaced by a *different* thread from the one that
+ * serves requests: the cfg-commit applier calls snmp_set_community() while the
+ * agent thread may be between parsing a request and writing its reply. A
+ * single-threaded host test cannot produce that interleaving, so what is
+ * asserted here is the documented API contract either side of it — every entry
+ * point refuses to act on a NULL or empty community, and none of them
+ * dereferences it. The guard inside the response and trap writers
+ * (community_of()) is what closes the window itself.
+ */
+static void test_no_community_is_refused_everywhere(void)
+{
+	uint8_t trap[SNMP_PKT_MAX];
+	size_t trap_len = 0U;
+	snmp_bind_t b;
+
+	b.obj = (uint16_t)SNMP_OBJ_STRATUM;
+	b.inst = 0U;
+
+	/* Baseline: with a community configured, both paths work. */
+	TEST_ASSERT_EQUAL_INT(0, snmp_set_community(&g_ctx, "public"));
+	TEST_ASSERT_EQUAL_INT(0,
+			      snmp_handle(&g_ctx, v_get_req, sizeof(v_get_req),
+					  0U, g_out, sizeof(g_out),
+					  &g_out_len));
+	TEST_ASSERT_EQUAL_INT(0, snmp_make_trap(&g_ctx, SNMP_TRAP_COLD_START, 0U,
+						&b, 1U, trap, sizeof(trap),
+						&trap_len));
+	TEST_ASSERT_TRUE(trap_len > 0U);
+
+	/* An empty community refuses requests and refuses to build traps. */
+	TEST_ASSERT_EQUAL_INT(0, snmp_set_community(&g_ctx, ""));
+	TEST_ASSERT_EQUAL_INT(-EACCES,
+			      snmp_handle(&g_ctx, v_get_req, sizeof(v_get_req),
+					  0U, g_out, sizeof(g_out),
+					  &g_out_len));
+	TEST_ASSERT_EQUAL_INT(-EACCES,
+			      snmp_make_trap(&g_ctx, SNMP_TRAP_COLD_START, 0U,
+					     &b, 1U, trap, sizeof(trap),
+					     &trap_len));
+
+	/* And so does no community at all. */
+	TEST_ASSERT_EQUAL_INT(0, snmp_set_community(&g_ctx, NULL));
+	TEST_ASSERT_EQUAL_INT(-EACCES,
+			      snmp_handle(&g_ctx, v_get_req, sizeof(v_get_req),
+					  0U, g_out, sizeof(g_out),
+					  &g_out_len));
+	TEST_ASSERT_EQUAL_INT(-EACCES,
+			      snmp_make_trap(&g_ctx, SNMP_TRAP_COLD_START, 0U,
+					     &b, 1U, trap, sizeof(trap),
+					     &trap_len));
+
+	/* Restoring it restores both — the guard is not a one-way latch. */
+	TEST_ASSERT_EQUAL_INT(0, snmp_set_community(&g_ctx, "public"));
+	TEST_ASSERT_EQUAL_INT(0,
+			      snmp_handle(&g_ctx, v_get_req, sizeof(v_get_req),
+					  0U, g_out, sizeof(g_out),
+					  &g_out_len));
+	TEST_ASSERT_EQUAL_INT(0, snmp_make_trap(&g_ctx, SNMP_TRAP_COLD_START, 0U,
+						NULL, 0U, trap, sizeof(trap),
+						&trap_len));
+
+	/* snmp_set_community() itself needs a live context. */
+	{
+		snmp_ctx_t fresh;
+
+		memset(&fresh, 0, sizeof(fresh));
+		TEST_ASSERT_EQUAL_INT(-EINVAL,
+				      snmp_set_community(&fresh, "x"));
+		TEST_ASSERT_EQUAL_INT(-EINVAL, snmp_set_community(NULL, "x"));
+	}
+}
+
+/* Spec §9.5: SNMPv2c answers only when explicitly enabled. */
+static void test_v2c_can_be_switched_off(void)
+{
+	snmp_stats_t st;
+
+	TEST_ASSERT_EQUAL_INT(0, snmp_set_community(&g_ctx, "public"));
+	TEST_ASSERT_EQUAL_INT(0, snmp_stats_reset(&g_ctx));
+
+	/* A zero-initialised configuration keeps the historical behaviour. */
+	TEST_ASSERT_EQUAL_INT(0,
+			      snmp_handle(&g_ctx, v_get_req, sizeof(v_get_req),
+					  0U, g_out, sizeof(g_out),
+					  &g_out_len));
+
+	TEST_ASSERT_EQUAL_INT(0, snmp_set_v2c_enabled(&g_ctx, false));
+	TEST_ASSERT_EQUAL_INT(-EPERM,
+			      snmp_handle(&g_ctx, v_get_req, sizeof(v_get_req),
+					  0U, g_out, sizeof(g_out),
+					  &g_out_len));
+	TEST_ASSERT_EQUAL_INT(0, snmp_stats_get(&g_ctx, &st));
+	TEST_ASSERT_EQUAL_UINT64(1U, st.v2c_refused);
+	/* The refusal happens before the community is compared, so a disabled
+	 * v2c does not tell a prober anything about the community. */
+	TEST_ASSERT_EQUAL_UINT64(0U, st.bad_community);
+
+	TEST_ASSERT_EQUAL_INT(0, snmp_set_v2c_enabled(&g_ctx, true));
+	TEST_ASSERT_EQUAL_INT(0,
+			      snmp_handle(&g_ctx, v_get_req, sizeof(v_get_req),
+					  0U, g_out, sizeof(g_out),
+					  &g_out_len));
+}
+
 static void test_wrong_version_is_dropped(void)
 {
 	bld_t body;
@@ -2195,6 +2300,8 @@ int main(void)
 
 	RUN_TEST(test_set_is_refused_and_echoes_the_varbinds);
 	RUN_TEST(test_bad_community_is_dropped_and_counted);
+	RUN_TEST(test_no_community_is_refused_everywhere);
+	RUN_TEST(test_v2c_can_be_switched_off);
 	RUN_TEST(test_wrong_version_is_dropped);
 	RUN_TEST(test_unserved_pdu_types_are_dropped);
 	RUN_TEST(test_malformed_messages_are_dropped);

@@ -1233,25 +1233,49 @@ static void oracle_cmac128(const uint8_t key[16], const uint8_t *msg, size_t n,
 	memcpy(out, x, 16U);
 }
 
+/*
+ * All four RFC 4493 §4 examples, not just the first two.
+ *
+ * Examples 1 and 2 alone left the oracle's multi-block loop and its K1 (whole
+ * final block) path completely unpinned — yet the oracle is then used to
+ * validate 48- and 76-octet server MACs, so a bug shared between the oracle and
+ * ntp.c would have agreed with itself and passed (F15). Example 3 (40 octets)
+ * exercises two full blocks plus a padded remainder (K2); example 4 (64 octets)
+ * exercises four full blocks with an exactly-aligned final block (K1).
+ */
 static void test_cmac_oracle(void)
 {
-	/* RFC 4493 §4: the empty message and the 16-octet message. */
-	static const uint8_t want_empty[16] = { 0xbb, 0x1d, 0x69, 0x29, 0xe9,
-						0x59, 0x37, 0x28, 0x7f, 0xa3,
-						0x7d, 0x12, 0x9b, 0x75, 0x67,
-						0x46 };
-	static const uint8_t msg16[16] = { 0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40,
-					   0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11,
-					   0x73, 0x93, 0x17, 0x2a };
-	static const uint8_t want_16[16] = { 0x07, 0x0a, 0x16, 0xb4, 0x6b, 0x4d,
-					     0x41, 0x44, 0xf7, 0x9b, 0xdd, 0x9d,
-					     0xd0, 0x4a, 0x28, 0x7c };
+	/* RFC 4493 §4 message, of which each example takes a prefix. */
+	static const uint8_t msg[64] = {
+		0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96,
+		0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
+		0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c,
+		0x9e, 0xb7, 0x6f, 0xac, 0x45, 0xaf, 0x8e, 0x51,
+		0x30, 0xc8, 0x1c, 0x46, 0xa3, 0x5c, 0xe4, 0x11,
+		0xe5, 0xfb, 0xc1, 0x19, 0x1a, 0x0a, 0x52, 0xef,
+		0xf6, 0x9f, 0x24, 0x45, 0xdf, 0x4f, 0x9b, 0x17,
+		0xad, 0x2b, 0x41, 0x7b, 0xe6, 0x6c, 0x37, 0x10,
+	};
+	/* Example 1: len 0.  Example 2: len 16.  Example 3: len 40 (K2 path).
+	 * Example 4: len 64 (K1 path, four blocks). */
+	static const size_t lens[4] = { 0U, 16U, 40U, 64U };
+	static const uint8_t want[4][16] = {
+		{ 0xbb, 0x1d, 0x69, 0x29, 0xe9, 0x59, 0x37, 0x28, 0x7f, 0xa3,
+		  0x7d, 0x12, 0x9b, 0x75, 0x67, 0x46 },
+		{ 0x07, 0x0a, 0x16, 0xb4, 0x6b, 0x4d, 0x41, 0x44, 0xf7, 0x9b,
+		  0xdd, 0x9d, 0xd0, 0x4a, 0x28, 0x7c },
+		{ 0xdf, 0xa6, 0x67, 0x47, 0xde, 0x9a, 0xe6, 0x30, 0x30, 0xca,
+		  0x32, 0x61, 0x14, 0x97, 0xc8, 0x27 },
+		{ 0x51, 0xf0, 0xbe, 0xbf, 0x7e, 0x3b, 0x9d, 0x92, 0xfc, 0x49,
+		  0x74, 0x17, 0x79, 0x36, 0x3c, 0xfe },
+	};
 	uint8_t out[16];
 
-	oracle_cmac128(cmac_key, NULL, 0U, out);
-	TEST_ASSERT_EQUAL_HEX8_ARRAY(want_empty, out, 16);
-	oracle_cmac128(cmac_key, msg16, sizeof(msg16), out);
-	TEST_ASSERT_EQUAL_HEX8_ARRAY(want_16, out, 16);
+	for (size_t i = 0U; i < ARRAY_LEN(lens); i++) {
+		oracle_cmac128(cmac_key, (lens[i] != 0U) ? msg : NULL, lens[i],
+			       out);
+		TEST_ASSERT_EQUAL_HEX8_ARRAY(want[i], out, 16);
+	}
 }
 
 /** Append a keyid + MAC field for @p alg, as a client would. */
@@ -1846,6 +1870,395 @@ static void test_response_never_exceeds_request(void)
 	}
 }
 
+/* ------------------------------------------- MAC-shaped tails vs ext fields */
+
+/**
+ * F6/M4: a MAC field whose key id aliases a plausible extension-field length
+ * must not be swallowed as an extension field and the request answered
+ * unauthenticated.
+ *
+ * The whole attack is that a candidate field's Length is read from the same two
+ * octets that carry the low half of the key id. `keyid = 36` therefore presents
+ * `flen = 36`: 4-aligned, exactly the remainder, and consumed as one field. The
+ * old walk tried the extension-field parse first and only fell back to the MAC
+ * reading when that parse *failed*, so the fallback never ran.
+ */
+static void test_mac_shaped_tail_is_not_an_extension_field(void)
+{
+	static const size_t mac_lens[] = { 36U, 52U, 68U };
+	uint8_t req[NTP_PKT_MAX];
+	uint8_t out[NTP_PKT_MAX];
+	ntp_quality_view_t q;
+	ntp_rx_t rx;
+	ntp_result_t res;
+	ntp_pkt_t p;
+	ntp_cfg_t cfg;
+	size_t len;
+
+	ntp_cfg_default(&cfg);
+	cfg.client_rate = 0U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	good_quality(&q);
+
+	for (size_t i = 0U; i < ARRAY_LEN(mac_lens); i++) {
+		size_t mlen = mac_lens[i];
+
+		/* (a) bare MAC tail whose key id's low half == the tail length. */
+		memset(req, 0, sizeof(req));
+		len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+		bytes_put_be32(&req[len], (uint32_t)mlen);
+		memset(&req[len + 4U], 0xA5U, mlen - 4U);
+
+		TEST_ASSERT_EQUAL_INT(0, ntp_parse(req, len + mlen, &p));
+		TEST_ASSERT_EQUAL_size_t(mlen, p.mac_len);
+		TEST_ASSERT_EQUAL_size_t(0U, p.ext_len);
+		TEST_ASSERT_TRUE(p.mac_unsupported);
+
+		fill_rx(&rx, req, len + mlen, 1U, 0);
+		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+							    sizeof(out), &res));
+		TEST_ASSERT_EQUAL_INT(NTP_ACT_IGNORE, res.action);
+		TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
+
+		/* (b) the same MAC hidden behind a real 28-octet extension field,
+		 * so the MAC-shaped remainder appears mid-walk rather than first. */
+		memset(req, 0, sizeof(req));
+		len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+		bytes_put_be16(&req[len], 0x0104U);
+		bytes_put_be16(&req[len + 2U], 28U);
+		bytes_put_be32(&req[len + 28U], (uint32_t)mlen);
+		memset(&req[len + 32U], 0xA5U, mlen - 4U);
+
+		TEST_ASSERT_EQUAL_INT(0,
+				      ntp_parse(req, len + 28U + mlen, &p));
+		TEST_ASSERT_EQUAL_size_t(mlen, p.mac_len);
+		TEST_ASSERT_EQUAL_size_t(28U, p.ext_len);
+		TEST_ASSERT_TRUE(p.mac_unsupported);
+
+		fill_rx(&rx, req, len + 28U + mlen, 2U, 0);
+		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+							    sizeof(out), &res));
+		TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
+	}
+
+	/* RFC 7822 §7.5.1 floor: a 4-aligned tail below 16 octets is not an
+	 * extension field, and every value the walk used to accept was another
+	 * key id the aliasing above could use. */
+	for (size_t tail = 8U; tail <= 12U; tail += 4U) {
+		memset(req, 0, sizeof(req));
+		len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+		bytes_put_be16(&req[len], 0x0104U);
+		bytes_put_be16(&req[len + 2U], (uint16_t)tail);
+
+		TEST_ASSERT_EQUAL_INT(0, ntp_parse(req, len + tail, &p));
+		TEST_ASSERT_EQUAL_size_t(0U, p.ext_len);
+		TEST_ASSERT_EQUAL_size_t(0U, p.mac_len);
+	}
+
+	/* Regressions the rule must NOT cause. A 28-octet field followed by a
+	 * verifiable 24-octet MAC totals 52 — a MAC-shaped number — and must
+	 * still parse as field-then-MAC. */
+	memset(req, 0, sizeof(req));
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+	bytes_put_be16(&req[len], 0x0104U);
+	bytes_put_be16(&req[len + 2U], 28U);
+	bytes_put_be32(&req[len + 28U], KID_HMAC160);
+	TEST_ASSERT_EQUAL_INT(0, ntp_parse(req, len + 28U + 24U, &p));
+	TEST_ASSERT_EQUAL_size_t(24U, p.mac_len);
+	TEST_ASSERT_EQUAL_size_t(28U, p.ext_len);
+	TEST_ASSERT_FALSE(p.mac_unsupported);
+	TEST_ASSERT_EQUAL_HEX32(KID_HMAC160, p.keyid);
+
+	/* And an NTS-shaped request — Unique Identifier (36) + cookie (104) +
+	 * authenticator (40) — is all extension fields, no MAC. None of its
+	 * remainders (180, 144, 40) is MAC-shaped, which is the argument that the
+	 * rule costs NTS nothing. */
+	memset(req, 0, sizeof(req));
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+	bytes_put_be16(&req[len], 0x0104U);
+	bytes_put_be16(&req[len + 2U], 36U);
+	bytes_put_be16(&req[len + 36U], 0x0204U);
+	bytes_put_be16(&req[len + 38U], 104U);
+	bytes_put_be16(&req[len + 140U], 0x0404U);
+	bytes_put_be16(&req[len + 142U], 40U);
+	TEST_ASSERT_EQUAL_INT(0, ntp_parse(req, len + 180U, &p));
+	TEST_ASSERT_EQUAL_size_t(0U, p.mac_len);
+	TEST_ASSERT_EQUAL_size_t(180U, p.ext_len);
+}
+
+/* ------------------------------------------- transmit-field distinctness (F5) */
+
+/**
+ * Every response must carry a transmit field distinct from the previous one.
+ *
+ * The platform demultiplexes hardware egress timestamps by that field, so two
+ * responses sharing it are indistinguishable and one client's measured transmit
+ * instant can be reported to another as its own t3. Before the fix, three
+ * clients answered inside one clock tick all received
+ * `xmt = <rec> + 1` — the `xmt == rec` backstop mapped every degenerate case to
+ * the same value, so the backstop *created* the collision it was meant to avoid.
+ */
+static void test_transmit_field_is_distinct_per_response(void)
+{
+	uint8_t req[NTP_HDR_LEN];
+	uint8_t out[NTP_PKT_MAX];
+	ntp_quality_view_t q;
+	ntp_rx_t rx;
+	ntp_result_t res;
+	ntp_cfg_t cfg;
+	uint64_t seen[8];
+	size_t len;
+
+	ntp_cfg_default(&cfg);
+	cfg.client_rate = 0U;
+	cfg.interleave = true;
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	good_quality(&q);
+
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+
+	for (size_t i = 0U; i < ARRAY_LEN(seen); i++) {
+		/* The pathological case the fix targets: a clock so coarse that
+		 * every client's receive and transmit timestamps are identical,
+		 * which is exactly the state the 1 ms software fallback leaves the
+		 * board in. Distinct client ids, one single instant. */
+		memset(&rx, 0, sizeof(rx));
+		rx.pkt = req;
+		rx.len = len;
+		rx.client_id = (uint32_t)(0x1000U + i);
+		rx.rx_tai_ns = (UNIX_2024 + TAI_OFFSET) * NS;
+		rx.tx_tai_ns = rx.rx_tai_ns;
+		rx.now_ms = 0;
+
+		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+							    sizeof(out), &res));
+		TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+		seen[i] = res.xmt;
+
+		/* What went on the wire is what the demux will key on. */
+		TEST_ASSERT_EQUAL_HEX64(res.xmt, bytes_get_be64(&out[OFF_XMT_TS]));
+		/* Rule 1 still holds. */
+		TEST_ASSERT_NOT_EQUAL_UINT64(bytes_get_be64(&out[OFF_REC_TS]),
+					     res.xmt);
+	}
+
+	for (size_t i = 0U; i < ARRAY_LEN(seen); i++) {
+		for (size_t j = i + 1U; j < ARRAY_LEN(seen); j++) {
+			TEST_ASSERT_NOT_EQUAL_UINT64(seen[i], seen[j]);
+		}
+	}
+
+	/* The nudge is one LSB per response — ~233 ps each — so eight responses
+	 * inside one tick move the reported instant by less than 2 ns. */
+	TEST_ASSERT_TRUE((seen[ARRAY_LEN(seen) - 1U] - seen[0]) <
+			 ARRAY_LEN(seen));
+}
+
+/* --------------------------------------------- keyed client identity (F8) */
+
+/**
+ * ntp_client_id() must be a keyed function of the address.
+ *
+ * The pinned values come from an independent SipHash-2-4 implementation, and the
+ * collision pair is *solved*, not searched: CRC-32 is affine over GF(2), so for
+ * a 16-octet IPv6 address a second address with the same CRC is a linear-algebra
+ * exercise. The pair below was produced that way and both halves sit in the same
+ * /64 — i.e. within one attacker's own prefix. Under the old unkeyed CRC-32 the
+ * two shared a token bucket and an interleave cache, so anyone with a routable
+ * /64 could drain a chosen customer's rate budget.
+ */
+static void test_client_id_is_keyed(void)
+{
+	/* The SipHash reference key, 00 01 02 ... 0f. */
+	static const uint8_t key[16] = { 0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+					 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+					 0x0c, 0x0d, 0x0e, 0x0f };
+	/* Two IPv6 addresses in one /64 with an identical CRC-32/ISO-HDLC. */
+	static const uint8_t v6_a[16] = {
+		0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+	};
+	static const uint8_t v6_b[16] = {
+		0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x00,
+		0x95, 0xcb, 0x67, 0x65, 0x80, 0x00, 0x00, 0x01,
+	};
+	static const uint8_t v4[4] = { 0xc0, 0xa8, 0x01, 0x01 };
+	static const uint8_t one[1] = { 0x00 };
+	static const uint8_t fifteen[15] = { 0x00, 0x01, 0x02, 0x03, 0x04,
+					     0x05, 0x06, 0x07, 0x08, 0x09,
+					     0x0a, 0x0b, 0x0c, 0x0d, 0x0e };
+	uint32_t id_a;
+	uint32_t id_b;
+
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, NULL, &g_port, 0));
+	memcpy(g_ctx.id_key, key, sizeof(key));
+
+	/* Pinned against the independent implementation: SipHash-2-4 folded to
+	 * 32 bits. A deviation anywhere in the construction shows up here. */
+	TEST_ASSERT_EQUAL_HEX32(0xE7245E38U,
+				ntp_client_id(&g_ctx, one, sizeof(one)));
+	TEST_ASSERT_EQUAL_HEX32(0xE8978F84U,
+				ntp_client_id(&g_ctx, fifteen, sizeof(fifteen)));
+	TEST_ASSERT_EQUAL_HEX32(0x0A183C4AU,
+				ntp_client_id(&g_ctx, v4, sizeof(v4)));
+	TEST_ASSERT_EQUAL_HEX32(0xB19D1A4BU,
+				ntp_client_id(&g_ctx, v6_a, sizeof(v6_a)));
+
+	/* The solved CRC-32 collision no longer collides. */
+	id_a = ntp_client_id(&g_ctx, v6_a, sizeof(v6_a));
+	id_b = ntp_client_id(&g_ctx, v6_b, sizeof(v6_b));
+	TEST_ASSERT_NOT_EQUAL_UINT32(id_a, id_b);
+	TEST_ASSERT_EQUAL_HEX32(0xF26A7FD1U, id_b);
+
+	/* Key-dependent: a different per-boot key gives a different identity for
+	 * the same address, which is what makes the collision unsolvable without
+	 * the key. */
+	g_ctx.id_key[0] ^= 0xFFU;
+	TEST_ASSERT_NOT_EQUAL_UINT32(id_a,
+				     ntp_client_id(&g_ctx, v6_a, sizeof(v6_a)));
+
+	/* Defensive arguments. */
+	TEST_ASSERT_EQUAL_UINT32(0U, ntp_client_id(NULL, v4, sizeof(v4)));
+	TEST_ASSERT_EQUAL_UINT32(0U, ntp_client_id(&g_ctx, NULL, 4U));
+	TEST_ASSERT_EQUAL_UINT32(0U, ntp_client_id(&g_ctx, v4, 0U));
+}
+
+/* --------------------------------------- quality-block projection + F1 gate */
+
+/**
+ * ntp_quality_view_from_block(), and above all its traceability gate.
+ *
+ * A locked discipline loop is not the same claim as a placed clock: on this
+ * hardware the MAC counter every timestamp is read from powers up at zero and is
+ * put on TAI by a separate mechanism. With that mechanism never having run, the
+ * appliance advertised LI=0 / stratum 1 / refid 'GPS' over timestamps ~56 years
+ * wrong (F1). The gate is a hard one, and this test is what holds it there.
+ */
+static void test_quality_view_from_block_gates_traceability(void)
+{
+	const uint64_t now_tai_ns = (uint64_t)(UNIX_2024 + TAI_OFFSET) * (uint64_t)NS;
+	uint8_t req[NTP_HDR_LEN];
+	uint8_t out[NTP_PKT_MAX];
+	quality_block_t b;
+	ntp_quality_view_t v;
+	ntp_rx_t rx;
+	ntp_result_t res;
+	size_t len;
+
+	/* A block that claims everything: locked, stratum 1, GPS. */
+	quality_block_init(&b);
+	b.stratum = (uint8_t)QUALITY_STRATUM_PRIMARY;
+	b.lock_state = (uint8_t)QUALITY_LOCK_LOCKED;
+	b.refid = 0x47505300U; /* 'GPS\0' */
+	b.leap_current_s = TAI_OFFSET;
+	b.utc_valid = true;
+	b.updated_mono_ms = 1000U;
+	b.root_delay_q16 = 0x100U;
+	b.root_disp_q16 = 0x1000U;
+
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_quality_view_from_block(
+					       NULL, now_tai_ns, 1000U, true,
+					       -20, &v));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_quality_view_from_block(
+					       &b, now_tai_ns, 1000U, true, -20,
+					       NULL));
+
+	/* --- untraceable: the honest advertisement --- */
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
+							    1000U, false, -20,
+							    &v));
+	TEST_ASSERT_FALSE(v.synchronized);
+	TEST_ASSERT_EQUAL_INT8(-20, v.precision);
+	TEST_ASSERT_EQUAL_INT32(TAI_OFFSET, v.tai_minus_utc);
+
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+	fill_rx(&rx, req, len, 0x501U, 0);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &v, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+	/* LI=3, stratum 16, refid 'INIT' — whatever the block believes. */
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_UNSYNC,
+				(uint8_t)((out[0] >> 6) & 0x03U));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_STRATUM_UNSYNC, out[1]);
+	TEST_ASSERT_EQUAL_HEX32(NTP_REFID_INIT, bytes_get_be32(&out[12]));
+
+	/* --- traceable: primary, as before --- */
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
+							    1000U, true, -20,
+							    &v));
+	TEST_ASSERT_TRUE(v.synchronized);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_STRATUM_PRIM, v.stratum);
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_NONE, v.leap);
+
+	fill_rx(&rx, req, len, 0x502U, 0);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &v, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_NONE,
+				(uint8_t)((out[0] >> 6) & 0x03U));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_STRATUM_PRIM, out[1]);
+	TEST_ASSERT_EQUAL_HEX32(0x47505300U, bytes_get_be32(&out[12]));
+
+	/* A stratum the discipline loop has demoted stays demoted even when the
+	 * clock IS placed: both claims are required, neither is sufficient. */
+	b.stratum = (uint8_t)QUALITY_STRATUM_UNSYNC;
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
+							    1000U, true, -20,
+							    &v));
+	TEST_ASSERT_FALSE(v.synchronized);
+	b.stratum = (uint8_t)QUALITY_STRATUM_PRIMARY;
+
+	/* Reference timestamp = now less the block's age. */
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
+							    3000U, true, -20,
+							    &v));
+	TEST_ASSERT_EQUAL_INT64((int64_t)now_tai_ns - 2 * NS, v.ref_tai_ns);
+	/* A monotonic clock behind the block's stamp cannot age it. */
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
+							    500U, true, -20,
+							    &v));
+	TEST_ASSERT_EQUAL_INT64(0, v.ref_tai_ns);
+	/* No time at all: no reference timestamp invented. */
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, 0U, 3000U, true,
+							    -20, &v));
+	TEST_ASSERT_EQUAL_INT64(0, v.ref_tai_ns);
+
+	/* Leap announcement: only inside the window, and only with a time. */
+	b.leap_pending = 1;
+	b.leap_at_tai_s = (now_tai_ns / (uint64_t)NS) + 3600U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
+							    1000U, true, -20,
+							    &v));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_ADD, v.leap);
+	b.leap_pending = -1;
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
+							    1000U, true, -20,
+							    &v));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_DEL, v.leap);
+	/* Beyond the 24 h window, and already past, both announce nothing. */
+	b.leap_at_tai_s = (now_tai_ns / (uint64_t)NS) + NTP_LEAP_ANNOUNCE_WINDOW_S
+			  + 10U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
+							    1000U, true, -20,
+							    &v));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_NONE, v.leap);
+	b.leap_at_tai_s = (now_tai_ns / (uint64_t)NS) - 1U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
+							    1000U, true, -20,
+							    &v));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_NONE, v.leap);
+	b.leap_at_tai_s = (now_tai_ns / (uint64_t)NS) + 3600U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, 0U, 1000U, true,
+							    -20, &v));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)NTP_LI_NONE, v.leap);
+
+	/* Holdover is carried through untouched, informationally. */
+	b.holdover = true;
+	TEST_ASSERT_EQUAL_INT(0, ntp_quality_view_from_block(&b, now_tai_ns,
+							    1000U, true, -20,
+							    &v));
+	TEST_ASSERT_TRUE(v.holdover);
+}
+
 /* -------------------------------------------------------------------- fuzz */
 
 static void test_random_input_never_crashes(void)
@@ -2035,6 +2448,10 @@ int main(void)
 	RUN_TEST(test_mac_without_a_crypto_port);
 	RUN_TEST(test_extension_hook);
 	RUN_TEST(test_response_never_exceeds_request);
+	RUN_TEST(test_mac_shaped_tail_is_not_an_extension_field);
+	RUN_TEST(test_transmit_field_is_distinct_per_response);
+	RUN_TEST(test_client_id_is_keyed);
+	RUN_TEST(test_quality_view_from_block_gates_traceability);
 	RUN_TEST(test_random_input_never_crashes);
 	return UNITY_END();
 }

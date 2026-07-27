@@ -481,9 +481,29 @@ const mp_obj_t mp_objs[] = {
 	{ .id = "sensor.pwrseq.stage", .kind = MP_KIND_SCALAR,
 	  .group = MP_GRP_SENSOR, .flags = F_RO, .min = 0, .max = 15,
 	  .desc = "bring-up stage machine position (interface ref §2)" },
-	{ .id = "sensor.alarms", .kind = MP_KIND_SCALAR,
+	/*
+	 * The active-alarm mask. Bits 0..31 are the scanned signals (fault_sig_t)
+	 * and 32..48 the software-raised alarms (fault_alarm_id_t); the names are
+	 * published here rather than left to the tool because an unlabelled 49-bit
+	 * mask is useless at a bench. This is the only place the full list
+	 * appears — the bitmap objects above are per-port groupings of the same
+	 * signals.
+	 */
+	{ .id = "sensor.alarms", .kind = MP_KIND_BITS,
 	  .group = MP_GRP_SENSOR, .flags = F_RO,
-	  .desc = "active fault_alarm_id_t mask, 64 bits" },
+	  .enums = "button_1,button_2,button_3,button_4,button_5,button_6,"
+		   "button_7,touch_int,v_ant_en_fault,v_disp_en_fault,"
+		   "prox_wake,enc_button,panel_led_fault,ina_alert_panel,"
+		   "bkp_stm_pg,bkp_gps_pg,pg_3v3_gps_ldo,pg_ocxo_ldo,"
+		   "pg_3v0_rf_ldo,pg_5v_psu,pg_3v3_psu,pg_ocxo_psu,pg_rb_psu,"
+		   "pg_poe,ina_alert_v_poe,ina_alert_3v3_stm,"
+		   "ina_alert_5v_disp,ina_alert_3v3,ina_alert_3v3_gps,"
+		   "ina_alert_v_ant,ina_alert_ocxo,ina_alert_vcc_rb,"
+		   "reference_lost,gnss_lost,antenna_open,antenna_short,"
+		   "ocxo_unhealthy,dac_fault,rb_fault,rb_ov,thermal_warn,"
+		   "thermal_critical,fan_fault,poe_budget,i2c_wedge,nor_fault,"
+		   "display_fault,pfi,tamper",
+	  .desc = "active alarm mask: fault_sig_t 0..31, fault_alarm_id_t 32..48" },
 	{ .id = "sensor.uptime_s", .kind = MP_KIND_SCALAR,
 	  .group = MP_GRP_SENSOR, .flags = F_RO, .min = 0, .max = 2147483647,
 	  .unit = U_S, .desc = "seconds since boot" },
@@ -536,6 +556,29 @@ size_t mp_obj_count_in(uint8_t group)
 		}
 	}
 	return n;
+}
+
+int mp_obj_check_value(size_t idx, int32_t v)
+{
+	const mp_obj_t *o = mp_obj_at(idx);
+
+	if (o == NULL) {
+		return -EINVAL;
+	}
+	switch (o->kind) {
+	case MP_KIND_BOOL:
+		return ((v == 0) || (v == 1)) ? 0 : -ERANGE;
+	case MP_KIND_ENUM:
+	case MP_KIND_PCT:
+	case MP_KIND_MV:
+	case MP_KIND_CODE:
+	case MP_KIND_PULSE:
+	case MP_KIND_SCALAR:
+		return ((v >= o->min) && (v <= o->max)) ? 0 : -ERANGE;
+	default:
+		/* REAL/RAIL/BITS/TEXT are observations, not settings. */
+		return -ENOTSUP;
+	}
 }
 
 /* --------------------------------------------------------------- emitting */

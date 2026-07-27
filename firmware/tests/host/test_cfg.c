@@ -186,7 +186,7 @@ static void test_schema_group_census(void)
 		{ CFG_G_NET, 9 },   { CFG_G_NTP, 7 },  { CFG_G_NTS, 4 },
 		{ CFG_G_PTP, 10 },  { CFG_G_GNSS, 7 }, { CFG_G_TIMING, 8 },
 		{ CFG_G_POWER, 5 }, { CFG_G_UI, 3 },   { CFG_G_LOG, 5 },
-		{ CFG_G_SEC, 4 },   { CFG_G_SNMP, 4 }, { CFG_G_CAL, 13 },
+		{ CFG_G_SEC, 61 },  { CFG_G_SNMP, 4 }, { CFG_G_CAL, 13 },
 	};
 	size_t i;
 	uint16_t total = 0U;
@@ -204,8 +204,8 @@ static void test_schema_group_census(void)
 		total = (uint16_t)(total + n);
 	}
 
-	TEST_ASSERT_EQUAL_size_t(79U, cfg_key_count());
-	TEST_ASSERT_EQUAL_UINT16(79U, total); /* no key outside a known group */
+	TEST_ASSERT_EQUAL_size_t(136U, cfg_key_count());
+	TEST_ASSERT_EQUAL_UINT16(136U, total); /* no key outside a known group */
 }
 
 static void test_schema_is_sorted_and_well_formed(void)
@@ -941,6 +941,27 @@ static void test_factory_reset_reports_an_erase_failure(void)
 
 #define EXPORT_BUF 8192U
 
+/*
+ * Records a plain (non-secrets) export leaves out: every key flagged SECRET or
+ * NOEXPORT. Computed rather than hard-coded, because the count changes whenever
+ * a secret key is added and the arithmetic below is not the tripwire —
+ * test_schema_group_census() is.
+ */
+static uint16_t export_excluded_count(void)
+{
+	uint16_t n = 0U;
+	size_t i;
+
+	for (i = 0U; i < cfg_key_count(); i++) {
+		uint8_t f = cfg_key_at(i)->flags;
+
+		if ((f & (CFG_F_SECRET | CFG_F_NOEXPORT)) != 0U) {
+			n++;
+		}
+	}
+	return n;
+}
+
 static uint8_t g_blob[EXPORT_BUF];
 
 /* Locate a record for @p id inside a TLV stream. Returns its offset or -1. */
@@ -976,7 +997,9 @@ static void test_export_header_and_trailer_are_as_documented(void)
 					    ((uint16_t)g_blob[5] << 8)));
 
 	count = (uint16_t)(g_blob[6] | ((uint16_t)g_blob[7] << 8));
-	TEST_ASSERT_EQUAL_UINT16((uint16_t)cfg_key_count() - 2U, count);
+	TEST_ASSERT_EQUAL_UINT16((uint16_t)cfg_key_count() -
+					 export_excluded_count(),
+				 count);
 
 	/* The trailer is a CRC-32/ISO-HDLC over every preceding byte. */
 	TEST_ASSERT_EQUAL_HEX32(sts_crc32_ieee(g_blob, n - 4U),
@@ -1119,7 +1142,9 @@ static void test_import_round_trip_restores_every_key(void)
 	TEST_ASSERT_EQUAL_INT(0,
 		cfg_import_all(&g_cfg, g_blob, n, true, &res));
 
-	TEST_ASSERT_EQUAL_UINT16((uint16_t)cfg_key_count() - 2U, res.staged);
+	TEST_ASSERT_EQUAL_UINT16((uint16_t)cfg_key_count() -
+					 export_excluded_count(),
+				 res.staged);
 	TEST_ASSERT_EQUAL_UINT16(4U, res.applied);
 	TEST_ASSERT_EQUAL_HEX32(CFG_GROUP_BIT(CFG_G_NTS), res.reboot_groups);
 

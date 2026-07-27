@@ -209,6 +209,21 @@ int mp_obj_find(const char *id);
 /** Objects in @p group. 0 for an out-of-range group. */
 size_t mp_obj_count_in(uint8_t group);
 
+/**
+ * Check @p v against object @p idx's published envelope.
+ *
+ * Every write path must go through this, not just the leased one: a manifest
+ * range the device does not actually enforce is documentation, and a cfg-backed
+ * object would otherwise be bounded only by its schema row, which may be wider
+ * than what the manifest promises.
+ *
+ * @retval 0         Inside the envelope.
+ * @retval -EINVAL   @p idx out of range.
+ * @retval -ERANGE   Outside min..max, or not 0/1 for a boolean.
+ * @retval -ENOTSUP  The kind is not settable (REAL/RAIL/BITS/TEXT).
+ */
+int mp_obj_check_value(size_t idx, int32_t v);
+
 /* -------------------------------------------------------------- serialising */
 
 /**

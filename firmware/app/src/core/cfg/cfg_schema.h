@@ -276,6 +276,149 @@ typedef enum {
 	  600, 30, 3600)                                                                       \
 	U(SEC_CONSOLE_RO,    0x0A04, "sec.console.ro",  BOOL, CFG_F_RUNTIME_APPLY,             \
 	  1, 0, 1)                                                                             \
+	/* SNMPv3 / USM (spec §9.5). The USM users live here rather than in the 0x0B snmp    */ \
+	/* group because they are key material, and spec §9.3 puts all key material in the   */ \
+	/* security config. `sec.snmp.v2c` defaults OFF: spec §9.5 wants v2c only when       */ \
+	/* explicitly enabled, and core/snmp's gate is spelled negatively so a zeroed        */ \
+	/* config keeps the historical behaviour.                                            */ \
+	U(SEC_SNMPV3_EN,     0x0A05, "sec.snmpv3.en",   BOOL, CFG_F_REBOOT_REQUIRED,           \
+	  1, 0, 1)                                                                             \
+	U(SEC_SNMP_V2C_EN,   0x0A06, "sec.snmp.v2c",    BOOL, CFG_F_RUNTIME_APPLY,             \
+	  0, 0, 1)                                                                             \
+	/* snmpEngineBoots. RFC 3414 §2.2.2 requires it to increase on every restart, so the */ \
+	/* glue increments and commits it once during start-up. 2147483647 is terminal.      */ \
+	U(SEC_SNMPV3_BOOTS,  0x0A07, "sec.snmpv3.boots", U32, CFG_F_RUNTIME_APPLY,             \
+	  0, 0, 2147483647U)                                                                   \
+	/* 0 = the key blobs below hold passphrases (localised at start-up); 1 = they hold   */ \
+	/* already-localised keys, which keeps the passphrase off the device entirely.       */ \
+	U(SEC_SNMPV3_LOCALIZED, 0x0A08, "sec.snmpv3.local", BOOL, CFG_F_REBOOT_REQUIRED,       \
+	  0, 0, 1)                                                                             \
+	/* Per user: name, auth protocol (0 none / 1 HMAC-SHA-1-96 / 2 HMAC-SHA-256-192),    */ \
+	/* auth secret, privacy protocol (0 none / 1 AES-128-CFB), privacy secret.           */ \
+	S(SEC_SNMPV3_U1_NAME, 0x0A09, "sec.snmpv3.u1.name",     CFG_F_REBOOT_REQUIRED,         \
+	  31, "")                                                                              \
+	U(SEC_SNMPV3_U1_AUTH, 0x0A0A, "sec.snmpv3.u1.auth", U8, CFG_F_REBOOT_REQUIRED,         \
+	  2, 0, 2)                                                                             \
+	B(SEC_SNMPV3_U1_AKEY, 0x0A0B, "sec.snmpv3.u1.akey",                                    \
+	  CFG_F_REBOOT_REQUIRED|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                               \
+	U(SEC_SNMPV3_U1_PRIV, 0x0A0C, "sec.snmpv3.u1.priv", U8, CFG_F_REBOOT_REQUIRED,         \
+	  1, 0, 1)                                                                             \
+	B(SEC_SNMPV3_U1_PKEY, 0x0A0D, "sec.snmpv3.u1.pkey",                                    \
+	  CFG_F_REBOOT_REQUIRED|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                               \
+	S(SEC_SNMPV3_U2_NAME, 0x0A0E, "sec.snmpv3.u2.name",     CFG_F_REBOOT_REQUIRED,         \
+	  31, "")                                                                              \
+	U(SEC_SNMPV3_U2_AUTH, 0x0A0F, "sec.snmpv3.u2.auth", U8, CFG_F_REBOOT_REQUIRED,         \
+	  2, 0, 2)                                                                             \
+	B(SEC_SNMPV3_U2_AKEY, 0x0A10, "sec.snmpv3.u2.akey",                                    \
+	  CFG_F_REBOOT_REQUIRED|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                               \
+	U(SEC_SNMPV3_U2_PRIV, 0x0A11, "sec.snmpv3.u2.priv", U8, CFG_F_REBOOT_REQUIRED,         \
+	  1, 0, 1)                                                                             \
+	B(SEC_SNMPV3_U2_PKEY, 0x0A12, "sec.snmpv3.u2.pkey",                                    \
+	  CFG_F_REBOOT_REQUIRED|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                               \
+	/* USM user and security level (0 noAuthNoPriv / 1 authNoPriv / 2 authPriv) that     */ \
+	/* v3 notifications are sent as; empty falls back to v2c traps.                      */ \
+	S(SEC_SNMPV3_TRAP_USER, 0x0A13, "sec.snmpv3.trap.user", CFG_F_RUNTIME_APPLY,           \
+	  31, "")                                                                              \
+	U(SEC_SNMPV3_TRAP_LVL, 0x0A14, "sec.snmpv3.trap.lvl", U8, CFG_F_RUNTIME_APPLY,         \
+	  1, 0, 2)                                                                             \
+	/* Minimum interval between two notifications of the same type. Without it one       */ \
+	/* unauthenticated peer turns one trap per datagram into an attack on the receiver.  */ \
+	U(SEC_SNMP_NOTIFY_MS, 0x0A15, "sec.snmp.notify.ms", U32, CFG_F_RUNTIME_APPLY,          \
+	  5000, 0, 600000)                                                                     \
+	/* -- management AAA (spec §9.4) ------------------------------------------------- */ \
+	/* Backend chain, first to last. A reject from any backend is final; only an        */ \
+	/* unavailable backend falls through to the next.                                   */ \
+	S(SEC_AAA_ORDER,     0x0A16, "sec.aaa.order",         CFG_F_RUNTIME_APPLY,             \
+	  31, "local")                                                                         \
+	U(SEC_AAA_CACHE_S,   0x0A17, "sec.aaa.cache.s", U16,  CFG_F_RUNTIME_APPLY,             \
+	  300, 0, 3600)                                                                        \
+	U(SEC_AAA_LOCK_N,    0x0A18, "sec.aaa.lock.n",  U8,   CFG_F_RUNTIME_APPLY,             \
+	  5, 0, 255)                                                                           \
+	U(SEC_AAA_LOCK_S,    0x0A19, "sec.aaa.lock.s",  U16,  CFG_F_RUNTIME_APPLY,             \
+	  300, 0, 3600)                                                                        \
+	/* NAS-Identifier / TACACS+ port name this box presents; empty uses net.hostname.   */ \
+	S(SEC_AAA_NAS_ID,    0x0A1A, "sec.aaa.nas.id",        CFG_F_RUNTIME_APPLY,             \
+	  63, "")                                                                              \
+	S(SEC_RADIUS_HOST,   0x0A1B, "sec.radius.host",       CFG_F_RUNTIME_APPLY,             \
+	  63, "")                                                                              \
+	U(SEC_RADIUS_PORT,   0x0A1C, "sec.radius.port", U16,  CFG_F_RUNTIME_APPLY,             \
+	  1812, 1, 65535)                                                                      \
+	B(SEC_RADIUS_SECRET, 0x0A1D, "sec.radius.secret",                                      \
+	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                                 \
+	U(SEC_RADIUS_TMO_MS, 0x0A1E, "sec.radius.tmo.ms", U16, CFG_F_RUNTIME_APPLY,            \
+	  3000, 200, 30000)                                                                    \
+	U(SEC_RADIUS_RETRIES, 0x0A1F, "sec.radius.retries", U8, CFG_F_RUNTIME_APPLY,           \
+	  2, 0, 5)                                                                             \
+	S(SEC_TACACS_HOST,   0x0A20, "sec.tacacs.host",       CFG_F_RUNTIME_APPLY,             \
+	  63, "")                                                                              \
+	U(SEC_TACACS_PORT,   0x0A21, "sec.tacacs.port", U16,  CFG_F_RUNTIME_APPLY,             \
+	  49, 1, 65535)                                                                        \
+	B(SEC_TACACS_SECRET, 0x0A22, "sec.tacacs.secret",                                      \
+	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                                 \
+	U(SEC_TACACS_TMO_MS, 0x0A23, "sec.tacacs.tmo.ms", U16, CFG_F_RUNTIME_APPLY,            \
+	  5000, 200, 30000)                                                                    \
+	S(SEC_LDAP_HOST,     0x0A24, "sec.ldap.host",         CFG_F_RUNTIME_APPLY,             \
+	  63, "")                                                                              \
+	U(SEC_LDAP_PORT,     0x0A25, "sec.ldap.port",   U16,  CFG_F_RUNTIME_APPLY,             \
+	  389, 1, 65535)                                                                       \
+	/* 0 = plain, 1 = StartTLS, 2 = LDAPS. 1 and 2 need a TLS-capable socket layer.     */ \
+	U(SEC_LDAP_MODE,     0x0A26, "sec.ldap.mode",   U8,   CFG_F_RUNTIME_APPLY,             \
+	  0, 0, 2)                                                                             \
+	U(SEC_LDAP_TMO_MS,   0x0A27, "sec.ldap.tmo.ms", U16,  CFG_F_RUNTIME_APPLY,             \
+	  5000, 200, 30000)                                                                    \
+	S(SEC_LDAP_BASE_DN,  0x0A28, "sec.ldap.base",         CFG_F_RUNTIME_APPLY,             \
+	  63, "")                                                                              \
+	/* User-DN template with one %s for the username, e.g. "uid=%s,ou=people,dc=x".     */ \
+	S(SEC_LDAP_USER_DN,  0x0A29, "sec.ldap.userdn",       CFG_F_RUNTIME_APPLY,             \
+	  63, "")                                                                              \
+	S(SEC_LDAP_BIND_DN,  0x0A2A, "sec.ldap.binddn",       CFG_F_RUNTIME_APPLY,             \
+	  63, "")                                                                              \
+	B(SEC_LDAP_BIND_PW,  0x0A2B, "sec.ldap.bindpw",                                        \
+	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                                 \
+	/* Membership attribute: "member", "uniqueMember" and "memberUid" all occur.        */ \
+	S(SEC_LDAP_MEMBER_ATTR, 0x0A2C, "sec.ldap.memberattr", CFG_F_RUNTIME_APPLY,            \
+	  31, "member")                                                                        \
+	S(SEC_LDAP_GRP_ADMIN, 0x0A2D, "sec.ldap.grp.admin",   CFG_F_RUNTIME_APPLY,             \
+	  63, "")                                                                              \
+	S(SEC_LDAP_GRP_OPER, 0x0A2E, "sec.ldap.grp.oper",     CFG_F_RUNTIME_APPLY,             \
+	  63, "")                                                                              \
+	S(SEC_LDAP_GRP_VIEW, 0x0A2F, "sec.ldap.grp.view",     CFG_F_RUNTIME_APPLY,             \
+	  63, "")                                                                              \
+	/* -- ATECC608B secure element (spec §9.1) --------------------------------------- */ \
+	/* Disabled or absent means the software key path (port_crypto over PSA) is used.   */ \
+	U(SEC_ATECC_EN,      0x0A30, "sec.atecc.en",    BOOL, CFG_F_REBOOT_REQUIRED,           \
+	  1, 0, 1)                                                                             \
+	U(SEC_ATECC_SLOT,    0x0A31, "sec.atecc.slot",  U8,   CFG_F_REBOOT_REQUIRED,           \
+	  0, 0, 15)                                                                            \
+	/* -- symmetric-key NTP (spec §4.3, §9.3) ---------------------------------------- */ \
+	/* Four operator-provisioned key slots. `alg` is the per-key MAC selector core/ntp  */ \
+	/* takes through ntp_key_set(): 0 = AES-CMAC-128 (RFC 8573, needs a 16-octet key),  */ \
+	/* 1 = HMAC-SHA-256 truncated to 128 bits, 2 = HMAC-SHA-256 truncated to 160 bits.  */ \
+	/* A key id of 0 means the slot is unused; RFC 5905 reserves it.                    */ \
+	U(SEC_NTPKEY0_ID,    0x0A32, "sec.ntpkey0.id",  U16,  CFG_F_RUNTIME_APPLY,             \
+	  0, 0, 65535)                                                                         \
+	U(SEC_NTPKEY0_ALG,   0x0A33, "sec.ntpkey0.alg", U8,   CFG_F_RUNTIME_APPLY,             \
+	  1, 0, 2)                                                                             \
+	B(SEC_NTPKEY0_KEY,   0x0A34, "sec.ntpkey0.key",                                        \
+	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                                 \
+	U(SEC_NTPKEY1_ID,    0x0A35, "sec.ntpkey1.id",  U16,  CFG_F_RUNTIME_APPLY,             \
+	  0, 0, 65535)                                                                         \
+	U(SEC_NTPKEY1_ALG,   0x0A36, "sec.ntpkey1.alg", U8,   CFG_F_RUNTIME_APPLY,             \
+	  1, 0, 2)                                                                             \
+	B(SEC_NTPKEY1_KEY,   0x0A37, "sec.ntpkey1.key",                                        \
+	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                                 \
+	U(SEC_NTPKEY2_ID,    0x0A38, "sec.ntpkey2.id",  U16,  CFG_F_RUNTIME_APPLY,             \
+	  0, 0, 65535)                                                                         \
+	U(SEC_NTPKEY2_ALG,   0x0A39, "sec.ntpkey2.alg", U8,   CFG_F_RUNTIME_APPLY,             \
+	  1, 0, 2)                                                                             \
+	B(SEC_NTPKEY2_KEY,   0x0A3A, "sec.ntpkey2.key",                                        \
+	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                                 \
+	U(SEC_NTPKEY3_ID,    0x0A3B, "sec.ntpkey3.id",  U16,  CFG_F_RUNTIME_APPLY,             \
+	  0, 0, 65535)                                                                         \
+	U(SEC_NTPKEY3_ALG,   0x0A3C, "sec.ntpkey3.alg", U8,   CFG_F_RUNTIME_APPLY,             \
+	  1, 0, 2)                                                                             \
+	B(SEC_NTPKEY3_KEY,   0x0A3D, "sec.ntpkey3.key",                                        \
+	  CFG_F_RUNTIME_APPLY|CFG_F_SECRET|CFG_F_NOEXPORT, 64)                                 \
 	                                                                                       \
 	/* -- 0x0B snmp ----------------------------------------------------------------- */  \
 	U(SNMP_ENABLE,       0x0B01, "snmp.enable",     BOOL, CFG_F_REBOOT_REQUIRED,           \

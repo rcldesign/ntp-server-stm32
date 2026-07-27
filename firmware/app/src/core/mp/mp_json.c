@@ -1346,6 +1346,22 @@ int mp_jw_raw(mp_jw_t *w, const char *json, size_t n)
 	return w->err;
 }
 
+int mp_jw_str_escaped(mp_jw_t *w, const char *escaped, size_t n)
+{
+	if (w == NULL) {
+		return -EINVAL;
+	}
+	if ((escaped == NULL) && (n != 0U)) {
+		return -EINVAL;
+	}
+	sep_before_value(w);
+	putc_(w, '"');
+	put(w, escaped, n);
+	putc_(w, '"');
+	after_value(w);
+	return w->err;
+}
+
 int mp_jw_kv_str(mp_jw_t *w, const char *key, const char *v)
 {
 	(void)mp_jw_key(w, key);

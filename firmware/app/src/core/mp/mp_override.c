@@ -598,25 +598,6 @@ void mp_ovr_disarm(mp_ovr_ctx_t *c)
 
 /* ------------------------------------------------------------------ leases */
 
-/** Value-envelope check against the manifest. */
-static int check_envelope(const mp_obj_t *o, int32_t v)
-{
-	switch (o->kind) {
-	case MP_KIND_BOOL:
-		return ((v == 0) || (v == 1)) ? 0 : -ERANGE;
-	case MP_KIND_ENUM:
-	case MP_KIND_PCT:
-	case MP_KIND_MV:
-	case MP_KIND_CODE:
-	case MP_KIND_PULSE:
-	case MP_KIND_SCALAR:
-		return ((v >= o->min) && (v <= o->max)) ? 0 : -ERANGE;
-	default:
-		/* REAL/RAIL/BITS/TEXT are not settable through this path. */
-		return -ENOTSUP;
-	}
-}
-
 int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
 		 uint32_t sid, const mp_ilk_state_t *st, uint32_t now_ms,
 		 mp_ilk_res_t *res)
@@ -639,7 +620,7 @@ int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
 		return -ENOLINK;
 	}
 
-	rc = check_envelope(o, value);
+	rc = mp_obj_check_value(obj, value);
 	if (rc != 0) {
 		(void)memset(res, 0, sizeof(*res));
 		res->value = value;
@@ -653,7 +634,7 @@ int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
 	}
 
 	/* A clamp must still land inside the published envelope. */
-	rc = check_envelope(o, res->value);
+	rc = mp_obj_check_value(obj, res->value);
 	if (rc != 0) {
 		return rc;
 	}
