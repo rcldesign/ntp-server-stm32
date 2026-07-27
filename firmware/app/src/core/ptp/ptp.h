@@ -222,6 +222,17 @@ typedef enum {
  */
 #define PTP_LEAP_ANNOUNCE_WINDOW_S 43200U
 
+/**
+ * currentUtcOffset advertised before the receiver has reported a real one.
+ *
+ * TAI - UTC has stood at 37 s since the 2017-01-01 leap second. A block that
+ * has not yet heard from the GNSS receiver carries 0, which on the wire claims
+ * TAI == UTC: wrong by 37 s and plausible enough to be believed. Announcing the
+ * standing value with currentUtcOffsetValid clear is the honest fallback. Update
+ * this constant if IERS ever announces another leap second.
+ */
+#define PTP_DEFAULT_UTC_OFFSET 37
+
 /** The §3.8 quality block projected onto what PTP needs. */
 typedef struct {
 	ptp_sync_state_t sync_state;
@@ -679,13 +690,18 @@ int ptp_port_step(ptp_port_ctx_t *c, uint64_t now_ms);
 /**
  * Feed one received PDU.
  *
- * @param rx_tai_ns  Hardware ingress timestamp, TAI nanoseconds. Only read for
- *                   event messages; pass 0 for general ones.
+ * @param rx_tai_ns  Hardware ingress timestamp, TAI nanoseconds. Mandatory and
+ *                   non-zero for the event message types (messageType 0x0..0x3,
+ *                   see ptp_msg_is_event()); an event message without one is
+ *                   rejected rather than answered with a zero receiveTimestamp.
+ *                   Pass 0 for general messages, where it is not read.
  *
  * @retval 0        Consumed, including deliberately ignored messages.
  * @retval -EINVAL  @p c or @p buf is NULL.
  * @retval -EBADMSG Malformed or truncated.
  * @retval -EPROTO  Wrong versionPTP, domainNumber or majorSdoId.
+ * @retval -ENODATA An event message arrived without a hardware ingress
+ *                  timestamp; counted in rx_no_timestamp.
  * @retval -EPERM   The port is not receiving (INITIALIZING or FAULTY).
  */
 int ptp_port_rx(ptp_port_ctx_t *c, const uint8_t *buf, size_t len,
@@ -717,7 +733,15 @@ int ptp_port_fault_reset(ptp_port_ctx_t *c, uint64_t now_ms);
 /** Current port state; PTP_PS_INITIALIZING for a NULL context. */
 ptp_port_state_t ptp_port_state(const ptp_port_ctx_t *c);
 
-/** Latched alarm bits, PTP_ALARM_*; 0 for a NULL context. */
+/**
+ * Current alarm bits, PTP_ALARM_*; 0 for a NULL context.
+ *
+ * These are live, not latched: NOT_BEST_MASTER follows the BMCA outcome on every
+ * run, FAULTY clears on ptp_port_fault_reset(), and TX_ERROR clears on the next
+ * successful transmit. Only PTP_ALARM_PROFILE_UNSUPPORTED is sticky — it is set
+ * once at ptp_port_init() and lasts the life of the context. A consumer that
+ * needs edge semantics (a trap, a log line) must remember the previous value.
+ */
 uint32_t ptp_port_alarms(const ptp_port_ctx_t *c);
 
 /** Counter block, or NULL for a NULL context. */

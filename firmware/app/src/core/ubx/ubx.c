@@ -376,16 +376,22 @@ int ubx_nav_sat_begin(const ubx_msg_t *m, ubx_nav_sat_iter_t *it)
 	}
 	p = m->payload;
 
+	/*
+	 * Validate before arming. An iterator left half-populated by a failed
+	 * begin() is a loaded gun: ubx_nav_sat_next() only checks rec != NULL,
+	 * so a caller that ignores the return code would walk records that the
+	 * length field says are not there.
+	 */
+	if (m->len != (uint16_t)(UBX_NAV_SAT_HDR_LEN +
+				 ((uint32_t)p[5] * UBX_NAV_SAT_SV_LEN))) {
+		return -EBADMSG;
+	}
+
 	it->itow_ms = bytes_get_le32(&p[0]);
 	it->version = p[4];
 	it->num_svs = p[5];
 	it->idx = 0U;
 	it->rec = &p[UBX_NAV_SAT_HDR_LEN];
-
-	if (m->len != (uint16_t)(UBX_NAV_SAT_HDR_LEN +
-				 ((uint32_t)it->num_svs * UBX_NAV_SAT_SV_LEN))) {
-		return -EBADMSG;
-	}
 	return 0;
 }
 
@@ -519,15 +525,16 @@ int ubx_mon_rf_begin(const ubx_msg_t *m, ubx_mon_rf_iter_t *it)
 	}
 	p = m->payload;
 
+	/* Validate before arming — see ubx_nav_sat_begin(). */
+	if (m->len != (uint16_t)(UBX_MON_RF_HDR_LEN +
+				 ((uint32_t)p[1] * UBX_MON_RF_BLK_LEN))) {
+		return -EBADMSG;
+	}
+
 	it->version = p[0];
 	it->n_blocks = p[1];
 	it->idx = 0U;
 	it->rec = &p[UBX_MON_RF_HDR_LEN];
-
-	if (m->len != (uint16_t)(UBX_MON_RF_HDR_LEN +
-				 ((uint32_t)it->n_blocks * UBX_MON_RF_BLK_LEN))) {
-		return -EBADMSG;
-	}
 	return 0;
 }
 

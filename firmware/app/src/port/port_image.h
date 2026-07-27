@@ -21,7 +21,10 @@ typedef struct {
 } port_image_info_t;
 
 typedef struct {
-	/* Staging-slot geometry. */
+	/* Maximum IMAGE size the staging slot accepts, in bytes — the slot
+	 * capacity MINUS the MCUboot trailer/magic region. A signed image whose
+	 * total length exceeds this must be rejected at FW_BEGIN (there must
+	 * always be room for the swap trailer that mark_pending writes). */
 	uint32_t (*staging_size)(void *ctx);
 	/* Erase [off, off+len) in the staging slot (sector-aligned by impl). */
 	int (*staging_erase)(void *ctx, uint32_t off, uint32_t len);
@@ -39,7 +42,9 @@ typedef struct {
 	int (*confirm_active)(void *ctx);
 	/* Request revert (erase trailer pending/confirm of staged). */
 	int (*request_revert)(void *ctx);
-	/* System reset. mode: 0 normal, 1 stay-in-bootloader-recovery. */
+	/* System reset. mode: 0 normal, 1 stay-in-bootloader-recovery,
+	 * 2 halt-to-test (reboot into the just-staged test image without
+	 * confirming). Matches mcp_wire.h REBOOT modes. */
 	void (*reboot)(void *ctx, int mode);
 	void *ctx;
 } port_image_t;

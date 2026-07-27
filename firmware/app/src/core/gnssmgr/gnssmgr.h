@@ -65,12 +65,37 @@ typedef enum {
 	GNSSMGR_ST_CONFIG_FAILED, /**< retries exhausted; needs an explicit restart */
 } gnssmgr_state_t;
 
+/**
+ * Steps of the configuration walk, in the order they are sent.
+ *
+ * Public because gnssmgr_failed_step() names one: an operator staring at a
+ * CONFIG_FAILED alarm needs to know *which* group the receiver refused, and
+ * "step 5" is not an answer. gnssmgr_step_name() renders it for a log line.
+ */
+typedef enum {
+	GNSSMGR_STEP_PORT = 0,    /**< UART1 protocol filters: UBX in/out, NMEA off */
+	GNSSMGR_STEP_MSGOUT,      /**< per-message output rates */
+	GNSSMGR_STEP_RATE,        /**< measurement/navigation rate, dynamic model, mask */
+	GNSSMGR_STEP_SIGNAL,      /**< constellation enables */
+	GNSSMGR_STEP_TP1,         /**< TIMEPULSE 1 (PA0/TIM2) */
+	GNSSMGR_STEP_TP2,         /**< TIMEPULSE 2 (PC6/TIM3) */
+	GNSSMGR_STEP_TXREADY,     /**< pin-19 TX_READY remap — advisory, see below */
+	GNSSMGR_STEP_TMODE,       /**< survey-in or fixed position */
+	GNSSMGR_STEP_COUNT,
+} gnssmgr_step_id_t;
+
+/** Human-readable name of @p step, "?" if out of range. Never NULL. */
+const char *gnssmgr_step_name(gnssmgr_step_id_t step);
+
 /** Alarms raised through gnssmgr_cb_t::alarm. */
 typedef enum {
-	GNSSMGR_ALARM_CONFIG_FAILED = 0, /**< receiver would not accept its config */
+	GNSSMGR_ALARM_CONFIG_FAILED = 0, /**< an essential config step was refused */
+	GNSSMGR_ALARM_CONFIG_DEGRADED,   /**< an advisory step was refused; the clock
+					   *  runs, but without that feature */
 	GNSSMGR_ALARM_ANT_OPEN,          /**< antenna current below the present threshold */
 	GNSSMGR_ALARM_ANT_SHORT,         /**< persistent short; bias has been cut */
 	GNSSMGR_ALARM_TIME_UNLOCKED,     /**< time lock lost after having been held */
+	GNSSMGR_ALARM_SURVEY_REJECTED,   /**< a completed survey missed its own limits */
 	GNSSMGR_ALARM_COUNT,
 } gnssmgr_alarm_t;
 
@@ -273,21 +298,43 @@ typedef struct {
 /**
  * The latest UBX-TIM-TP, tagged with the pulse it describes.
  *
- * Convention implemented here: the receiver emits TIM-TP in the second *before*
- * the pulse it refers to, so the message's towMS is already the time-of-week of
- * that upcoming pulse. @p target_tow_ms is therefore the message's towMS
- * verbatim, and the discipline glue pairs a captured PA0 edge with the record
- * whose @p target_tow_ms matches the edge's own ToW — never with "the last one
- * received", which would be one second early.
+ * Two conventions matter here, and both exist to make one thing work: the
+ * discipline glue pairing a captured PA0 edge with the qErr that belongs to
+ * *that* edge.
+ *
+ * 1. Which pulse. The receiver emits TIM-TP in the second *before* the pulse it
+ *    refers to, so the message's towMS already names the upcoming pulse. Pair
+ *    on @p target_tow_ms; never on "the last record received", which is one
+ *    second early.
+ *
+ * 2. Which timescale. TIM-TP reports its towMS on the timebase the time pulse
+ *    is aligned to — UTC when CFG-TP-TIMEGRID_TPx is UTC, which is this board's
+ *    default. UBX-NAV-PVT iTOW is always GPS. Left alone the two differ by the
+ *    leap-second offset (18 s today), so a glue layer pairing by ToW would
+ *    never match and the sawtooth correction would be silently lost — the loop
+ *    would run on uncorrected PPS and nobody would see an error.
+ *
+ *    So @p target_tow_ms is ALWAYS normalised to the **GPS** time of week,
+ *    converting from UTC with the tracked leap offset when needed, and wrapping
+ *    the week (with @p week incremented) if the conversion crosses the
+ *    boundary. @p raw_tow_ms keeps the value exactly as the receiver sent it.
+ *
+ *    When the pulse is UTC-aligned but the leap offset is not yet known, the
+ *    conversion cannot be done: @p qerr_valid is cleared so the glue does not
+ *    apply a correction it cannot place in time. @p valid stays true — the
+ *    record is still worth showing in telemetry.
  */
 typedef struct {
 	bool     valid;          /**< a TIM-TP has been decoded */
-	bool     qerr_valid;     /**< false when the receiver flagged qErrInvalid */
+	bool     qerr_valid;     /**< false when the receiver flagged qErrInvalid,
+				   *  or the UTC->GPS conversion was impossible */
 	int32_t  qerr_ps;        /**< sawtooth quantisation error to subtract */
-	uint32_t target_tow_ms;  /**< ToW of the pulse this qErr belongs to */
+	uint32_t target_tow_ms;  /**< GPS ToW of the pulse this qErr belongs to */
 	uint32_t target_tow_sub_ms;
-	uint16_t week;
-	bool     time_base_utc;
+	uint32_t raw_tow_ms;     /**< towMS as received, on @p time_base_utc's scale */
+	uint16_t week;           /**< GPS week of the target pulse, after normalisation */
+	bool     time_base_utc;  /**< the receiver's raw timeBase flag */
+	bool     tow_from_utc;   /**< target_tow_ms was converted from UTC */
 	bool     utc_available;
 	uint8_t  raim;
 	uint32_t rx_mono_ms;     /**< caller clock when the message was decoded */
@@ -303,6 +350,15 @@ typedef struct {
 	uint32_t obs;
 	gnssmgr_ecef_t pos;
 } gnssmgr_svin_t;
+
+/** RF-front-end view fused from UBX-MON-RF, for telemetry and the supervisor. */
+typedef struct {
+	bool    valid;         /**< a MON-RF with at least one block has arrived */
+	bool    ant_short;     /**< some block reported antStatus SHORT */
+	bool    ant_open;      /**< some block reported antStatus OPEN */
+	uint8_t ant_power;     /**< UBX_ANT_POWER_*, from the first block */
+	uint8_t jamming_state; /**< worst UBX_JAMMING_* across the blocks */
+} gnssmgr_rf_t;
 
 /** Counted NAV-SAT summary. Per-SV detail stays in the frame. */
 typedef struct {
@@ -320,13 +376,17 @@ typedef struct {
 	gnssmgr_cb_t  cb;
 
 	uint8_t  state;        /**< gnssmgr_state_t */
-	uint8_t  step;         /**< index into the config sequence */
+	uint8_t  step;         /**< gnssmgr_step_id_t currently being configured */
 	uint8_t  attempt;      /**< attempts spent on the current step */
-	bool     awaiting_ack;
+	uint8_t  inflight;     /**< copies of the current step sent but unanswered */
+	uint8_t  failed_step;  /**< step named by CONFIG_FAILED / CONFIG_DEGRADED */
+	bool     awaiting_ack; /**< the ACK deadline is armed */
 	bool     txready_acked; /**< CFG-TXREADY step accepted; PD5 may be trusted */
 	uint32_t deadline_ms;
 
 	bool           have_position;
+	bool           svin_started; /**< a NAV-SVIN with active=1 seen since the
+				       *  current survey was requested */
 	gnssmgr_ecef_t position;
 
 	gnssmgr_status_t status;
@@ -345,10 +405,7 @@ typedef struct {
 	uint8_t  ant_candidate;  /**< gnssmgr_ant_state_t under test */
 	uint8_t  ant_count;      /**< consecutive samples supporting the candidate */
 	bool     ant_short_latched;
-	bool     mon_rf_valid;
-	uint8_t  mon_rf_ant_status;
-	uint8_t  mon_rf_ant_power;
-	uint8_t  mon_rf_jamming;
+	gnssmgr_rf_t rf;
 
 	uint32_t alarms;         /**< bitmask, bit n = gnssmgr_alarm_t n active */
 

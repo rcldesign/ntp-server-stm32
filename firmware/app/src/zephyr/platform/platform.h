@@ -65,6 +65,7 @@ const char *sts_liveness_name(uint32_t id);
 fault_ctx_t *sts_fault(void);
 void sts_fault_lock(void);
 void sts_fault_unlock(void);
+int sts_fault_init(void);
 
 /* ------------------------------------------------------------------------- */
 /* pps.c — TIM2_CH1 / TIM3_CH1 input capture                                 */

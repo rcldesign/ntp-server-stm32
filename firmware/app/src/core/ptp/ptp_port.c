@@ -83,6 +83,15 @@ int ptp_cfg_validate(const ptp_cfg_t *cfg)
 	if (cfg->port_number == 0U) {
 		return -EINVAL;
 	}
+	/*
+	 * majorSdoId is the high nibble of octet 0 (§13.3.2.2). A wider value
+	 * would be silently truncated by the encoder, putting this clock in a
+	 * different SDO from the one that was configured — and it would then
+	 * discard the peers it was meant to hear.
+	 */
+	if (cfg->major_sdo_id > 0x0FU) {
+		return -EINVAL;
+	}
 	if (((int)cfg->transport < 0) ||
 	    ((int)cfg->transport >= (int)PTP_TRANSPORT_COUNT)) {
 		return -EINVAL;
@@ -235,6 +244,13 @@ static uint8_t accuracy_from_ns(uint64_t est_ns)
  * TODO(wave-3): a clock that has never locked since boot should strictly
  * advertise 248 (default), not a degradation class. The quality view has no
  * "has ever locked" bit yet; add one with core/quality and gate FREERUN on it.
+ *
+ * This is not cosmetic, which is why it should not be deprioritised. A unit
+ * cold-booted with no antenna advertises class 52 from its first Announce.
+ * Against a genuine peer that has degraded honestly to 187, or a default-class
+ * 248 clock, 52 wins the BMCA outright — so the box with no idea what time it
+ * is becomes grandmaster for the segment, and stays there until GNSS comes up.
+ * The gate turns that first Announce into 248 and lets the better clock win.
  */
 static uint8_t clock_class_from_state(const ptp_cfg_t *cfg, ptp_sync_state_t s)
 {
@@ -337,7 +353,11 @@ static uint64_t est_accuracy_from_block(const quality_block_t *b,
 		int64_t e = b->holdover_est_err_ns;
 
 		if (e < 0) {
-			e = -e;
+			/*
+			 * Negating INT64_MIN overflows, so take the magnitude in
+			 * the unsigned domain: -(e + 1) is always representable.
+			 */
+			return (uint64_t)(-(e + 1)) + 1U;
 		}
 		return (uint64_t)e;
 	}
@@ -390,6 +410,17 @@ int ptp_quality_view_from_block(const quality_block_t *b, uint64_t now_tai_s,
 	out->sync_state = s;
 	out->utc_offset = b->leap_current_s;
 	out->utc_offset_valid = b->utc_valid;
+	if (!b->utc_valid && (b->leap_current_s == 0)) {
+		/*
+		 * Before the receiver has delivered a leap offset the block
+		 * carries 0, which as a currentUtcOffset claims TAI == UTC — 37
+		 * seconds wrong and superficially plausible. Advertise the
+		 * standing offset instead, with currentUtcOffsetValid clear so a
+		 * client knows not to trust it. Once the receiver reports, the
+		 * real value takes over.
+		 */
+		out->utc_offset = PTP_DEFAULT_UTC_OFFSET;
+	}
 	leap_from_block(b, now_tai_s, out);
 	out->time_traceable = traceable;
 	out->freq_traceable = traceable ||
@@ -508,15 +539,21 @@ static void hdr_init(const ptp_port_ctx_t *c, ptp_hdr_t *h, uint8_t type,
 	h->log_msg_interval = log_interval;
 }
 
-static int emit(ptp_port_ctx_t *c, size_t len, uint8_t type, uint16_t seq,
-		ptp_port_kind_t kind, ptp_addr_hint_t addr,
+/*
+ * @p buf is the scratch the message was encoded into. It is a parameter rather
+ * than always c->txbuf because a Follow_Up can be released from inside the Sync
+ * transmit callback, while the glue still holds a pointer into the Sync's
+ * buffer; the two must not be the same storage.
+ */
+static int emit(ptp_port_ctx_t *c, const uint8_t *buf, size_t len, uint8_t type,
+		uint16_t seq, ptp_port_kind_t kind, ptp_addr_hint_t addr,
 		const ptp_port_id_t *peer)
 {
 	ptp_tx_desc_t d;
 	int rc;
 
 	memset(&d, 0, sizeof(d));
-	d.buf = c->txbuf;
+	d.buf = buf;
 	d.len = len;
 	d.msg_type = type;
 	d.seq = seq;
@@ -579,7 +616,7 @@ static void tx_announce(ptp_port_ctx_t *c)
 		return;
 	}
 
-	(void)emit(c, len, (uint8_t)PTP_MSG_ANNOUNCE, c->announce_seq,
+	(void)emit(c, c->txbuf, len, (uint8_t)PTP_MSG_ANNOUNCE, c->announce_seq,
 		   PTP_PORT_GENERAL, PTP_ADDR_PRIMARY, NULL);
 	c->announce_seq++;
 }
@@ -618,19 +655,27 @@ static void tx_sync(ptp_port_ctx_t *c)
 	c->sync_pending_seq = seq;
 	c->sync_seq++;
 
-	if (emit(c, len, (uint8_t)PTP_MSG_SYNC, seq, PTP_PORT_EVENT,
+	if (emit(c, c->txbuf, len, (uint8_t)PTP_MSG_SYNC, seq, PTP_PORT_EVENT,
 		 PTP_ADDR_PRIMARY, NULL) != 0) {
-		/*
-		 * Nothing left the interface, so there is no egress timestamp
-		 * coming and no Follow_Up to publish. Disarming here also keeps
-		 * the next Sync from charging this one to followup_missed, which
-		 * would double-count a failure tx_errors already records.
-		 *
-		 * Safe against the synchronous-timestamp glue: that path runs
-		 * inside emit() and only on success, where this branch is not
-		 * taken.
-		 */
-		c->sync_pending = false;
+		if (c->sync_pending) {
+			/*
+			 * Nothing left the interface, so no egress timestamp is
+			 * coming and there is no Follow_Up to publish. Disarming
+			 * here also keeps the next Sync from charging this one
+			 * to followup_missed, which would double-count a failure
+			 * tx_errors already records.
+			 */
+			c->sync_pending = false;
+		} else {
+			/*
+			 * The glue released the Follow_Up synchronously from
+			 * inside the callback and only then reported the Sync as
+			 * failed. The Follow_Up is already on the wire with
+			 * nothing to follow; a receiver discards it, but the
+			 * operator should see that the glue did this.
+			 */
+			c->counters.followup_orphaned++;
+		}
 	}
 }
 
@@ -654,14 +699,15 @@ int ptp_on_sync_txts(ptp_port_ctx_t *c, uint16_t seq, uint64_t tai_ns)
 	hdr_init(c, &h, (uint8_t)PTP_MSG_FOLLOW_UP, seq, c->cfg.log_sync_interval,
 		 0U, 0);
 
-	rc = ptp_tsmsg_encode(c->txbuf, sizeof(c->txbuf), &h, &ts, &len);
+	/* Its own scratch: c->txbuf may still hold the Sync being transmitted. */
+	rc = ptp_tsmsg_encode(c->fubuf, sizeof(c->fubuf), &h, &ts, &len);
 	if (rc != 0) {
 		c->counters.tx_errors++;
 		return rc;
 	}
 
-	return emit(c, len, (uint8_t)PTP_MSG_FOLLOW_UP, seq, PTP_PORT_GENERAL,
-		    PTP_ADDR_PRIMARY, NULL);
+	return emit(c, c->fubuf, len, (uint8_t)PTP_MSG_FOLLOW_UP, seq,
+		    PTP_PORT_GENERAL, PTP_ADDR_PRIMARY, NULL);
 }
 
 /* -------------------------------------------------------------- schedule -- */
@@ -890,7 +936,7 @@ static void rx_delay_req(ptp_port_ctx_t *c, const ptp_hdr_t *hdr,
 		return;
 	}
 
-	(void)emit(c, len, (uint8_t)PTP_MSG_DELAY_RESP, hdr->seq_id,
+	(void)emit(c, c->txbuf, len, (uint8_t)PTP_MSG_DELAY_RESP, hdr->seq_id,
 		   PTP_PORT_GENERAL, addr, &hdr->source_port);
 }
 
@@ -931,6 +977,18 @@ int ptp_port_rx(ptp_port_ctx_t *c, const uint8_t *buf, size_t len,
 	}
 
 	c->counters.rx[hdr.msg_type & 0x0FU]++;
+
+	/*
+	 * An event message is only worth anything with its hardware ingress
+	 * timestamp, and 0 is the documented "no timestamp" value the glue
+	 * passes for general messages. Answering a Delay_Req with
+	 * receiveTimestamp 0 would tell the requester its path delay is some
+	 * decades negative, which is far worse than not answering at all.
+	 */
+	if (ptp_msg_is_event(hdr.msg_type) && (rx_tai_ns == 0U)) {
+		c->counters.rx_no_timestamp++;
+		return -ENODATA;
+	}
 
 	switch (hdr.msg_type) {
 	case PTP_MSG_ANNOUNCE:

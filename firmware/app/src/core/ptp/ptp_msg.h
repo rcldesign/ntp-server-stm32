@@ -199,7 +199,17 @@ int ptp_clock_id_cmp(const ptp_clock_id_t *a, const ptp_clock_id_t *b);
 /** Compare PortIdentities: ClockIdentity first, then portNumber. <0, 0 or >0. */
 int ptp_port_id_cmp(const ptp_port_id_t *a, const ptp_port_id_t *b);
 
-/** Minimum wire length of @p msg_type, in octets. Unknown types give the header. */
+/**
+ * Minimum wire length of @p msg_type, in octets. Unknown types give the header.
+ *
+ * These are the fixed-field minima only. Management (§13.11) and Signaling
+ * (§13.12) additionally carry at least one mandatory TLV, so a conforming
+ * message of either type is always longer than the figure returned here. That
+ * is deliberate and safe for this engine, which parses neither: both are
+ * accepted, counted and dropped, so the number is used purely as a lower bound
+ * for memory safety. A future Management responder must check the TLV extent
+ * for itself.
+ */
 size_t ptp_msg_min_len(uint8_t msg_type);
 
 /** Legacy controlField value for @p msg_type (§13.3.2.10, Table 39). */
