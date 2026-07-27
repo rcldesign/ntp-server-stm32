@@ -1572,6 +1572,49 @@ static void test_vc_sense_divergence_raises_a_dac_fault(void)
 	TEST_ASSERT_TRUE((out.flags & QUALITY_FLAG_DAC_FAULT) != 0u);
 }
 
+static void test_sensor_validity_flags_disambiguate_zero(void)
+{
+	disc_ctx_t ctx;
+	quality_state_t qs;
+	quality_block_t b;
+	disc_in_t in;
+	disc_out_t out;
+
+	/*
+	 * L9: vc_sense_mv and osc_temp_mc are published as 0 when their source
+	 * is invalid, but 0 mV / 0 m°C are legal readings, so a consumer needs
+	 * the companion validity flags to tell "no data" from "genuinely zero".
+	 */
+	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, NULL));
+	TEST_ASSERT_EQUAL_INT(0, quality_state_init(&qs));
+
+	/* Both sensors present. */
+	env_defaults(&in.env, 1000u);
+	in.env.vc_sense_valid = true;
+	in.env.vc_sense_mv = 1650;
+	in.env.osc_temp_valid = true;
+	in.env.osc_temp_mc = 42000;
+	pps_from_error(&in.pps, 0.0, 1.0, 1000u);
+	TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, &qs, &out));
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_TRUE((b.flags & QUALITY_FLAG_VC_SENSE_VALID) != 0u);
+	TEST_ASSERT_TRUE((b.flags & QUALITY_FLAG_OSC_TEMP_VALID) != 0u);
+	TEST_ASSERT_EQUAL_INT32(1650, b.vc_sense_mv);
+	TEST_ASSERT_EQUAL_INT32(42000, b.osc_temp_mc);
+
+	/* Both sensors gone: the fields read 0 and the flags say so. */
+	env_defaults(&in.env, 2000u);
+	in.env.vc_sense_valid = false;
+	in.env.osc_temp_valid = false;
+	pps_from_error(&in.pps, 0.0, 1.0, 2000u);
+	TEST_ASSERT_EQUAL_INT(0, disc_tick_pps(&ctx, &in, &qs, &out));
+	TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+	TEST_ASSERT_TRUE((b.flags & QUALITY_FLAG_VC_SENSE_VALID) == 0u);
+	TEST_ASSERT_TRUE((b.flags & QUALITY_FLAG_OSC_TEMP_VALID) == 0u);
+	TEST_ASSERT_EQUAL_INT32(0, b.vc_sense_mv);
+	TEST_ASSERT_EQUAL_INT32(0, b.osc_temp_mc);
+}
+
 /* ---------------------------------------------------------------- PFI park */
 
 static void test_park_holds_the_actuator_and_unpark_recovers(void)
@@ -2241,6 +2284,7 @@ int main(void)
 	RUN_TEST(test_large_post_holdover_excursion_stays_rate_limited);
 
 	RUN_TEST(test_vc_sense_divergence_raises_a_dac_fault);
+	RUN_TEST(test_sensor_validity_flags_disambiguate_zero);
 
 	RUN_TEST(test_park_holds_the_actuator_and_unpark_recovers);
 	RUN_TEST(test_unpark_from_a_never_locked_loop_does_not_serve);

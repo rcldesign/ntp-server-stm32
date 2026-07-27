@@ -313,8 +313,14 @@ typedef enum {
 	UI_IN_NONE = 0,
 	UI_IN_UP,
 	UI_IN_DOWN,
-	UI_IN_LEFT,  /**< back: pops the screen stack everywhere */
-	UI_IN_RIGHT, /**< descend / move to the affirmative choice */
+	UI_IN_LEFT, /**< back: pops the screen stack everywhere */
+	/**
+	 * Descend. Identical to ENTER except on a confirm dialog, where it only
+	 * moves the highlight to "Yes" — the one place the asymmetry matters,
+	 * because a right-arrow must never be able to reboot the unit on its
+	 * own. On an edit page it commits, like ENTER.
+	 */
+	UI_IN_RIGHT,
 	UI_IN_ENTER,
 	UI_IN_FN,         /**< MENU key: to the menu, or back to Home from it */
 	UI_IN_ENCODER,    /**< ui_input_t::delta detents, signed */

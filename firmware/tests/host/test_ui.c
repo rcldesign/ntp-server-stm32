@@ -927,10 +927,16 @@ static void test_timeout_edit_walks_the_choice_list(void)
 	TEST_ASSERT_EQUAL_INT32(0, ctx.edit_val);
 	render(&hp); /* the "never" rendering path */
 
-	key((uint8_t)UI_IN_RIGHT); /* RIGHT steps the value on an edit page */
+	key((uint8_t)UI_IN_UP); /* wraps backwards to the longest choice */
+	TEST_ASSERT_EQUAL_INT32(600, ctx.edit_val);
+	key((uint8_t)UI_IN_DOWN);
+	key((uint8_t)UI_IN_DOWN);
 	TEST_ASSERT_EQUAL_INT32(15, ctx.edit_val);
 
-	key((uint8_t)UI_IN_ENTER);
+	/* RIGHT commits, exactly like ENTER (only a confirm dialog treats the
+	 * two differently). */
+	key((uint8_t)UI_IN_RIGHT);
+	TEST_ASSERT_EQUAL_INT(UI_PAGE_MENU, ui_page(&ctx));
 	TEST_ASSERT_EQUAL_UINT16(15u, ctx.cfg.timeout_s);
 	a = next_action();
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)UI_ACTION_SET_TIMEOUT, a.kind);
@@ -985,6 +991,7 @@ static void test_identify_latches_when_the_timeout_is_zero(void)
 	unsigned int i;
 
 	ctx.cfg.identify_timeout_s = 0u;
+	ctx.cfg.timeout_s = 0u; /* keep the panel awake so ENTER is not eaten */
 	key((uint8_t)UI_IN_FN);
 	key((uint8_t)UI_IN_DOWN);
 	key((uint8_t)UI_IN_DOWN);
@@ -1149,7 +1156,7 @@ static void test_idle_timeout_blanks_the_backlight_only(void)
 	/* Sleep is a duty change only: the rendered page is untouched. */
 	TEST_ASSERT_EQUAL_INT(UI_PAGE_SKYPLOT, ui_page(&ctx));
 	render(&hp);
-	TEST_ASSERT_EQUAL_STRING("SKY VIEW", strtok(rowbuf, " "));
+	TEST_ASSERT_EQUAL_STRING(row_lr("SKY VIEW", "12:34:56 UTC"), row(0u));
 }
 
 static void test_a_key_wakes_in_place_and_is_consumed(void)
@@ -1486,6 +1493,7 @@ static void test_home_without_a_time_or_a_fix(void)
 	qb.active_ref = (uint8_t)QUALITY_REF_NONE;
 	qb.gnss_sv_used = 0u;
 	qb.gnss_sv_visible = 0u;
+	qb.last_pps_off_ns = 0;
 
 	render(&he);
 	TEST_ASSERT_EQUAL_STRING(row_lr("HOME", "--:--:-- ---"), row(0u));
@@ -2023,7 +2031,7 @@ static void test_unknown_page_renders_a_placeholder(void)
 	ctx.stack[1].page = (uint8_t)UI_PAGE__COUNT;
 
 	render(&hp);
-	TEST_ASSERT_EQUAL_STRING("?", strtok(rowbuf, " "));
+	TEST_ASSERT_EQUAL_STRING(row_lr("?", "12:34:56 UTC"), row(0u));
 	TEST_ASSERT_EQUAL_STRING(" (no such page)", row(2u));
 }
 

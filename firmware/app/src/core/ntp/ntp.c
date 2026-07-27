@@ -805,6 +805,7 @@ int ntp_handle_request(ntp_ctx_t *ctx, const ntp_rx_t *rx,
 	uint64_t ref_ntp;
 	uint64_t xmt;
 	uint64_t rec;
+	uint64_t org_out;
 	uint32_t refid;
 	uint32_t kod_refid = 0U;
 	uint8_t li;
@@ -901,38 +902,78 @@ int ntp_handle_request(ntp_ctx_t *ctx, const ntp_rx_t *rx,
 		bucket_take(&ctx->g_tokens_milli, ctx->cfg.global_rate);
 	}
 
-	/* --- 4. authenticate ---------------------------------------------- */
-	if (p.mac_len != 0U) {
-		if (!mac_verify(ctx, rx->pkt, &p)) {
+	/*
+	 * --- 4. authenticate ---------------------------------------------
+	 *
+	 * Behind the rate limiter (L15): when the request is already destined
+	 * for a Kiss-o'-Death, skip the MAC entirely, so an over-limit flood of
+	 * MAC-bearing packets cannot buy CMAC/HMAC CPU. A KoD is not
+	 * authenticated in any case.
+	 */
+	if (kod_refid == 0U && p.mac_len != 0U) {
+		if (p.mac_unsupported || !mac_verify(ctx, rx->pkt, &p)) {
+			/* A MAC-shaped tail we cannot verify — unknown key, wrong
+			 * key type, a crypto-NAK, or an unimplemented digest length
+			 * — is an authentication failure. It is never ignored and
+			 * answered unauthenticated: a client that attached a MAC
+			 * gets authentication or silence. */
 			ctx->stats.auth_fail++;
 			finish_drop(ctx, res, NTP_DROP_AUTH);
 			return 0;
 		}
 		authed = true;
-		mac_reserve = NTP_MAC_FIELD_LEN;
+		mac_reserve = p.mac_len; /* response uses the same key and length */
 	}
 
 	/* --- 5. build ------------------------------------------------------ */
-	rx_ntp = ntp_ts_from_tai(rx->rx_tai_ns, q->tai_minus_utc);
+	rx_ntp = ntp_ts_from_tai(rx->rx_tai_ns, q->tai_minus_utc); /* t6 */
 	ref_ntp = (q->ref_tai_ns != 0)
 			  ? ntp_ts_from_tai(q->ref_tai_ns, q->tai_minus_utc)
 			  : rx_ntp;
 	rec = rx_ntp;
 	xmt = ntp_ts_from_tai(rx->tx_tai_ns, q->tai_minus_utc);
+	org_out = p.xmt_ts; /* basic mode (RFC 5905): echo the client transmit */
 
 	/*
-	 * Interleaved client/server mode. The client marks a request interleaved
-	 * by echoing, as its origin timestamp, the transmit field of the previous
-	 * response. When that matches, the reply reports the *previous* exchange's
-	 * receive timestamp and the hardware transmit timestamp of the previous
-	 * response — the one the server could not know at the time it built it.
-	 * A KoD is never interleaved: it carries no useful timestamps.
+	 * Interleaved client/server mode (RFC 9769 §2). The client requests it by
+	 * echoing, as its origin timestamp, the *receive* timestamp the server
+	 * put in the previous response — NOT the transmit timestamp, which is
+	 * what an ordinary RFC 5905 client echoes. Getting that distinction
+	 * backwards misreads every basic client as interleaved and answers it
+	 * garbage, so the match is against xl_rx_sent and never xl_tx_actual.
+	 *
+	 * The interleaved reply then reports the current receive timestamp (t6)
+	 * and the *measured* transmit instant of the previous response — the value
+	 * the server could not know when it built that response. The origin echoes
+	 * the request's own receive field.
+	 *
+	 * Guards: a zero origin (a first-contact client) never matches; the
+	 * request's own receive and transmit fields must differ (RFC 9769 forbids
+	 * treating an ambiguous request as interleaved); and the committed pair is
+	 * consumed after one use so a replayed origin cannot mint a second reply.
+	 * A KoD is never interleaved.
 	 */
 	if (kod_refid == 0U && ctx->cfg.interleave && cl->xl_valid &&
-	    cl->xl_tx_field != 0U && p.org_ts == cl->xl_tx_field) {
-		rec = cl->xl_rx;
+	    p.org_ts != 0U && p.org_ts == cl->xl_rx_sent &&
+	    p.rec_ts != p.xmt_ts) {
+		org_out = p.rec_ts;
+		rec = rx_ntp;
 		xmt = cl->xl_tx_actual;
 		xleave = true;
+		cl->xl_valid = false; /* one-shot */
+	}
+
+	/*
+	 * The server MUST NOT emit a response whose transmit field equals its
+	 * receive field: interleaved detection tells the two modes apart solely by
+	 * which of those the client later echoes, so they have to be distinct for
+	 * the next exchange to be unambiguous. They differ naturally (transmit is
+	 * later than receive, or is a wholly different exchange's measured
+	 * instant); this is the backstop for the degenerate case where a caller
+	 * supplies identical timestamps. One LSB is ~233 ps.
+	 */
+	if (xmt == rec) {
+		xmt = rec + 1U;
 	}
 
 	if (!q->synchronized) {
@@ -951,7 +992,7 @@ int ntp_handle_request(ntp_ctx_t *ctx, const ntp_rx_t *rx,
 	put_header(out, li, p.vn, stratum, p.poll, q->precision,
 		   ntp_short_from_q16(q->root_delay_q16),
 		   ntp_short_from_q16(q->root_disp_q16), refid, ref_ntp,
-		   p.xmt_ts, rec, xmt);
+		   org_out, rec, xmt);
 	len = NTP_HDR_LEN;
 
 	/*
@@ -996,22 +1037,25 @@ int ntp_handle_request(ntp_ctx_t *ctx, const ntp_rx_t *rx,
 		}
 	}
 
-	/* Arm interleaved mode for the next request from this client. Only a real
-	 * response carries timestamps worth remembering. */
-	if (kod_refid == 0U) {
-		cl->xl_pend_rx = rx_ntp;
-		cl->xl_pend_tx_field = xmt;
-		cl->xl_pending = true;
-	} else {
-		/*
-		 * A Kiss-o'-Death is still a datagram, so the caller will report
-		 * its transmit timestamp. Disarming here makes that report a
-		 * no-op instead of letting it pair an *older* response's
-		 * transmit field with the KoD's measured instant — which would
-		 * hand the client's next interleaved request a timestamp from a
-		 * packet it never saw.
-		 */
-		cl->xl_pending = false;
+	/*
+	 * Arm the interleave pair for this client's next request: remember the
+	 * receive field we just sent, and issue a generation token the caller
+	 * returns with the measured transmit timestamp (ntp_tx_complete). Only a
+	 * real response with interleave enabled arms anything — a KoD carries no
+	 * timestamps worth committing, and disarming any prior pending response on
+	 * a KoD stops a stale transmit timestamp from being paired with it.
+	 */
+	if (ctx->cfg.interleave && kod_refid == 0U) {
+		cl->xl_gen++;
+		if (cl->xl_gen == 0U) {
+			cl->xl_gen = 1U; /* token 0 means "no pending" */
+		}
+		cl->xl_pend_rx_sent = rec;
+		cl->xl_pend_token = cl->xl_gen;
+		cl->xl_pend_active = true;
+		res->xl_token = cl->xl_gen;
+	} else if (kod_refid != 0U) {
+		cl->xl_pend_active = false;
 	}
 
 	res->action = (kod_refid != 0U) ? NTP_ACT_KOD : NTP_ACT_RESPOND;
@@ -1031,22 +1075,25 @@ int ntp_handle_request(ntp_ctx_t *ctx, const ntp_rx_t *rx,
 	return 0;
 }
 
-int ntp_tx_complete(ntp_ctx_t *ctx, uint32_t client_id, uint64_t xmt_ntp)
+int ntp_tx_complete(ntp_ctx_t *ctx, uint32_t client_id, uint32_t token,
+		    uint64_t xmt_ntp)
 {
 	ntp_client_t *cl;
 
-	if (ctx == NULL) {
+	if (ctx == NULL || token == 0U) {
 		return -EINVAL;
 	}
 	cl = client_find(ctx, client_id);
-	if (cl == NULL || !cl->xl_pending) {
+	if (cl == NULL || !cl->xl_pend_active || cl->xl_pend_token != token) {
+		/* No pending response, or this timestamp is for one a later
+		 * request already superseded (M5): drop it rather than pair it
+		 * with the wrong exchange. */
 		return -ENOENT;
 	}
 
-	cl->xl_rx = cl->xl_pend_rx;
-	cl->xl_tx_field = cl->xl_pend_tx_field;
+	cl->xl_rx_sent = cl->xl_pend_rx_sent;
 	cl->xl_tx_actual = xmt_ntp;
 	cl->xl_valid = true;
-	cl->xl_pending = false;
+	cl->xl_pend_active = false;
 	return 0;
 }
