@@ -15,18 +15,26 @@ has to run on a laptop in a rack room.
     meridian_ctl.py watch --rate 4 --groups timing,gnss
     meridian_ctl.py cfg-list
     meridian_ctl.py cfg-get tim.tau.s
-    meridian_ctl.py auth && meridian_ctl.py cfg-set tim.tau.s 300 && \
-        meridian_ctl.py cfg-commit
+    meridian_ctl.py --password s3cret cfg-set tim.tau.s 300
     meridian_ctl.py cfg-export backup.mcf
     meridian_ctl.py cfg-import backup.mcf
     meridian_ctl.py log-tail --follow
-    meridian_ctl.py fw-upload zephyr.signed.bin
+    meridian_ctl.py --password s3cret fw-upload zephyr.signed.bin
     meridian_ctl.py fw-confirm
+
+Sessions are per-invocation. The tool opens one on connect (from
+``--password`` / ``$MERIDIAN_PASSWORD``, or a prompt for a mutating command on a
+terminal) and the firmware drops it when the port closes. So a mutating flow
+must run in ONE invocation: ``cfg-set`` then a separate ``cfg-commit`` process
+would commit nothing, because closing the port after ``cfg-set`` reverts the
+staged change. Chain such work in a single process (e.g. an interactive
+session, or ``cfg-import`` which stages and commits atomically), not with
+``auth && cfg-set && cfg-commit`` across three processes.
 
 Everything above the ``Link`` class is pure: the codec, the payload builders
 and the payload decoders take and return bytes, so they can be exercised
-without a serial port (``python3 -m doctest meridian_ctl.py -v`` covers the
-codec, and the firmware's own test_mcp.c pins the same vectors).
+without a serial port (``python3 -m doctest meridian_ctl.py`` covers the codec,
+and the firmware's own test_mcp.c pins the same vectors).
 """
 
 from __future__ import annotations
@@ -337,12 +345,14 @@ def decode_fw_info(p: bytes) -> Dict[str, Any]:
             "version": ".".join(str(v) for v in ver),
         })
         off += 22
-    state, total, written, chunk_max = struct.unpack_from("<BIII", p, off)
+    state, total, written, chunk_max, write_block = struct.unpack_from(
+        "<BIIII", p, off)
     return {
         "slots": slots,
         "dfu": {
             "state": DFU_STATE.get(state, state), "total": total,
             "written": written, "chunk_max": chunk_max,
+            "write_block": write_block,
         },
     }
 
@@ -638,10 +648,13 @@ class Client:
 
     def cfg_commit(self) -> Dict[str, Any]:
         p = self.link.request(CMD["CFG_COMMIT"])
-        applied, reboot_keys, groups = struct.unpack_from("<HHI", p, 1)
+        applied, reboot_keys, groups, persist_errors = struct.unpack_from(
+            "<HHIH", p, 1)
         return {"applied": applied, "reboot_required_keys": reboot_keys,
                 "reboot_groups_mask": groups,
-                "reboot_required": reboot_keys > 0}
+                "reboot_required": reboot_keys > 0,
+                "persist_errors": persist_errors,
+                "persisted": persist_errors == 0}
 
     def cfg_revert(self) -> Dict[str, Any]:
         p = self.link.request(CMD["CFG_REVERT"])
@@ -671,9 +684,12 @@ class Client:
             flags = (0x01 if strict else 0x00) | (0x02 if last else 0x00)
             req = struct.pack("<IB", off, flags) + piece
             p = self.link.request(CMD["CFG_IMPORT"], req)
-            nxt, complete, applied, groups = struct.unpack_from("<IBHI", p, 1)
+            nxt, complete, applied, groups, persist_errors = struct.unpack_from(
+                "<IBHIH", p, 1)
             result = {"applied": applied, "complete": bool(complete),
-                      "reboot_groups_mask": groups}
+                      "reboot_groups_mask": groups,
+                      "persist_errors": persist_errors,
+                      "persisted": persist_errors == 0}
             if last:
                 break
             if nxt <= off:
@@ -705,9 +721,9 @@ class Client:
     def fw_begin(self, size: int, digest: bytes) -> Dict[str, Any]:
         p = self.link.request(CMD["FW_BEGIN"], struct.pack("<I", size) + digest,
                               timeout=15.0)
-        nxt, chunk_max, resumed = struct.unpack_from("<IIB", p, 1)
+        nxt, chunk_max, write_block, resumed = struct.unpack_from("<IIIB", p, 1)
         return {"next": nxt, "chunk_max": min(chunk_max, FW_CHUNK_MAX),
-                "resumed": bool(resumed)}
+                "write_block": max(1, write_block), "resumed": bool(resumed)}
 
     def fw_data(self, off: int, data: bytes) -> Tuple[int, int]:
         p = self.link.request_raw(CMD["FW_DATA"],
@@ -873,6 +889,15 @@ def cmd_cfg_set(cli: Client, out: Out, args: argparse.Namespace) -> int:
     return 0
 
 
+def _warn_persist(out: Out, res: Dict[str, Any]) -> int:
+    """Print a persistence warning and return the process exit code."""
+    if res.get("persist_errors", 0) and not out.json:
+        print("WARNING: %d key(s) applied to RAM but NOT saved to flash; the "
+              "change is live now but will not survive a reboot"
+              % res["persist_errors"])
+    return 4 if res.get("persist_errors", 0) else 0
+
+
 def cmd_cfg_commit(cli: Client, out: Out, args: argparse.Namespace) -> int:
     del args
     res = cli.cfg_commit()
@@ -880,7 +905,7 @@ def cmd_cfg_commit(cli: Client, out: Out, args: argparse.Namespace) -> int:
     if res["reboot_required"] and not out.json:
         print("a reboot is required for %d of the applied keys"
               % res["reboot_required_keys"])
-    return 0
+    return _warn_persist(out, res)
 
 
 def cmd_cfg_revert(cli: Client, out: Out, args: argparse.Namespace) -> int:
@@ -907,18 +932,24 @@ def cmd_cfg_import(cli: Client, out: Out, args: argparse.Namespace) -> int:
     res = cli.cfg_import(blob, strict=not args.lenient)
     res["file"] = args.file
     out.obj(res)
-    return 0
+    return _warn_persist(out, res)
 
 
 def cmd_factory_reset(cli: Client, out: Out, args: argparse.Namespace) -> int:
     if not args.yes:
-        answer = input("Erase all configuration and return to defaults? "
-                       "type FACTORY to confirm: ")
+        out.line("Factory reset erases all configuration AND the admin "
+                 "credential.")
+        out.line("The credential cannot be set over this channel by design; "
+                 "afterwards you must set a new admin password from the local "
+                 "front-panel UI or the ACM0 console shell before any "
+                 "authenticated MCP operation will work again.")
+        answer = input("Type FACTORY to confirm: ")
         if answer.strip() != "FACTORY":
             out.line("aborted")
             return 1
     cli.factory_reset()
-    out.obj({"factory_reset": True})
+    out.obj({"factory_reset": True,
+             "note": "set a new admin password via the local UI or ACM0 shell"})
     return 0
 
 
@@ -994,7 +1025,13 @@ def cmd_fw_upload(cli: Client, out: Out, args: argparse.Namespace) -> int:
                 digest.hex()[:16]))
 
     session = cli.fw_begin(len(image), digest)
+    block = session["write_block"]
+    # Every non-final chunk must be a multiple of the flash write block (the
+    # device buffers only the final short one), so round the chunk size down to
+    # a whole number of blocks. The trailing remainder rides in the final chunk,
+    # which may be any length.
     chunk = min(args.chunk, session["chunk_max"])
+    chunk = max(block, (chunk // block) * block)
     off = session["next"]
     if session["resumed"]:
         out.line("resuming at offset %d (%.1f%% already staged)"
@@ -1063,9 +1100,7 @@ def cmd_reboot(cli: Client, out: Out, args: argparse.Namespace) -> int:
 
 
 def cmd_auth(cli: Client, out: Out, args: argparse.Namespace) -> int:
-    password = args.password
-    if password is None:
-        password = os.environ.get("MERIDIAN_PASSWORD")
+    password = _resolve_password(args)
     if password is None:
         password = getpass.getpass("Meridian password: ")
     out.obj(cli.auth(password))
@@ -1097,6 +1132,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="request retries before giving up (default: %(default)s)")
     ap.add_argument("--json", action="store_true",
                     help="machine-readable output")
+    ap.add_argument("--password", default=None,
+                    help="admin password used to open a session before a "
+                         "mutating command; falls back to $MERIDIAN_PASSWORD, "
+                         "and to a prompt for mutating commands on a terminal")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="trace requests and responses on stderr")
 
@@ -1175,14 +1214,58 @@ def build_parser() -> argparse.ArgumentParser:
                    help="stay in the bootloader for serial recovery")
     p.add_argument("--halt", action="store_true", help="halt for test")
 
-    p = add("auth", cmd_auth, "open an authenticated session")
-    p.add_argument("--password", help="read from $MERIDIAN_PASSWORD or a prompt "
-                                      "if omitted")
+    add("auth", cmd_auth, "open an authenticated session (uses the global "
+                          "--password / $MERIDIAN_PASSWORD, else prompts)")
 
     p = add("diag", cmd_diag, "run a diagnostic sub-function")
     p.add_argument("sub", type=int, choices=[0, 1, 2, 3, 4])
 
     return ap
+
+
+# Subcommands that mutate state and therefore need a session when the device
+# has sec.auth.req set. The engine reset_session()s on disconnect (dropping any
+# staged config), so a mutating flow MUST run inside a single invocation — a
+# separate `auth` process does not carry a session into the next one.
+MUTATING = frozenset({
+    "reboot", "cfg-set", "cfg-commit", "cfg-revert", "cfg-import",
+    "factory-reset", "log-level", "fw-upload", "fw-confirm", "fw-revert",
+})
+
+
+def _resolve_password(args: argparse.Namespace) -> Optional[str]:
+    if getattr(args, "password", None) is not None:
+        return args.password
+    return os.environ.get("MERIDIAN_PASSWORD")
+
+
+def _authenticate_if_needed(cli: Client, args: argparse.Namespace,
+                            out: Out) -> None:
+    """Open a session on connect when a mutating command may require one.
+
+    Authenticates when a password is available (``--password`` or
+    ``$MERIDIAN_PASSWORD``); for a mutating command on a terminal with none set,
+    it prompts. A device with auth disabled may reject the AUTH (no credential),
+    which is not fatal here — the command itself is still attempted.
+    """
+    if args.command == "auth":
+        return  # the subcommand authenticates itself
+    if "auth" not in cli.hello().get("capabilities", []):
+        return  # this build cannot evaluate AUTH at all
+
+    password = _resolve_password(args)
+    if password is None:
+        if args.command in MUTATING and sys.stdin.isatty():
+            password = getpass.getpass("Meridian password: ")
+        else:
+            return  # read-only, or no way to obtain a password non-interactively
+    try:
+        cli.auth(password)
+    except McpError as exc:
+        # Auth may simply be disabled (no credential provisioned); let the
+        # command proceed and fail on its own if it really needed a session.
+        sys.stderr.write("meridian_ctl: authentication failed (%s); "
+                         "continuing unauthenticated\n" % exc)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -1193,6 +1276,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               args.verbose) as link:
         cli = Client(link)
         try:
+            _authenticate_if_needed(cli, args, out)
             return args.func(cli, out, args)
         except McpError as exc:
             sys.stderr.write("meridian_ctl: %s\n" % exc)

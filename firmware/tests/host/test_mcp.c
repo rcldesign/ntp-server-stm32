@@ -1534,6 +1534,157 @@ static void test_cfg_import_rejects_bad_streams(void)
 	TEST_ASSERT_EQUAL_UINT16(0U, cfg_staged_count(&g_cfg));
 }
 
+/* MEDIUM-5: a commit that reaches RAM but fails to persist answers OK with a
+ * non-zero persist_errors count, not a bare error the operator would read as
+ * "nothing changed" (and then reboot, silently reverting). */
+static void test_cfg_commit_reports_persist_errors(void)
+{
+	uint8_t req[8];
+	const uint8_t *p;
+	uint64_t u = 0U;
+
+	policy_no_auth();
+	g_store_fail_save_id = (int)CFG_ID_TIM_TAU_S;
+
+	bytes_put_le16(req, CFG_ID_TIM_TAU_S);
+	req[2] = CFG_T_U16;
+	bytes_put_le16(&req[3], 2U);
+	bytes_put_le16(&req[5], 321U);
+	(void)feed_req(MCP_CMD_CFG_SET, req, 7U);
+	expect_status(MCP_CMD_CFG_SET, g_seq, (uint8_t)MCP_OK);
+
+	(void)feed_req(MCP_CMD_CFG_COMMIT, NULL, 0U);
+	expect_status(MCP_CMD_CFG_COMMIT, g_seq, (uint8_t)MCP_OK);
+	p = tx_pay(last_tx());
+	TEST_ASSERT_EQUAL_UINT16(11U, tx_plen(last_tx()));
+	TEST_ASSERT_EQUAL_UINT16(1U, bytes_get_le16(&p[1]));  /* applied */
+	TEST_ASSERT_EQUAL_UINT16(1U, bytes_get_le16(&p[9]));  /* persist_errors */
+
+	/* The value is live regardless of the storage failure. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_TIM_TAU_S, &u));
+	TEST_ASSERT_EQUAL_UINT64(321U, u);
+}
+
+/* MEDIUM-7: CFG_EXPORT re-emits the previous chunk byte-for-byte when its
+ * offset is requested again (a lost response), and still rejects a bogus one. */
+static void test_cfg_export_re_emits_a_repeated_chunk(void)
+{
+	uint8_t req[8];
+	uint8_t saved[MCP_MAX_PAYLOAD];
+	const uint8_t *p;
+	uint16_t saved_len;
+	uint32_t o1;
+
+	policy_no_auth();
+
+	/* First chunk. The export is capped well under the frame size, so a
+	 * full config spans several chunks and there really is a "previous"
+	 * offset to repeat. */
+	bytes_put_le32(req, 0U);
+	req[4] = 0U;
+	(void)feed_req(MCP_CMD_CFG_EXPORT, req, 5U);
+	expect_status(MCP_CMD_CFG_EXPORT, g_seq, (uint8_t)MCP_OK);
+	p = tx_pay(last_tx());
+	TEST_ASSERT_EQUAL_UINT8(1U, p[5]); /* more follows: multi-chunk */
+	o1 = bytes_get_le32(&p[1]) + (uint32_t)(tx_plen(last_tx()) - 6U);
+
+	/* Second chunk, captured. */
+	bytes_put_le32(req, o1);
+	req[4] = 0U;
+	(void)feed_req(MCP_CMD_CFG_EXPORT, req, 5U);
+	expect_status(MCP_CMD_CFG_EXPORT, g_seq, (uint8_t)MCP_OK);
+	p = tx_pay(last_tx());
+	TEST_ASSERT_EQUAL_UINT32(o1, bytes_get_le32(&p[1]));
+	saved_len = tx_plen(last_tx());
+	memcpy(saved, p, saved_len);
+
+	/* Repeat the same offset: identical chunk re-emitted. */
+	bytes_put_le32(req, o1);
+	req[4] = 0U;
+	(void)feed_req(MCP_CMD_CFG_EXPORT, req, 5U);
+	expect_status(MCP_CMD_CFG_EXPORT, g_seq, (uint8_t)MCP_OK);
+	p = tx_pay(last_tx());
+	TEST_ASSERT_EQUAL_UINT16(saved_len, tx_plen(last_tx()));
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(saved, p, saved_len);
+
+	/* A neither-current-nor-previous offset is still refused. */
+	bytes_put_le32(req, 7U);
+	req[4] = 0U;
+	(void)feed_req(MCP_CMD_CFG_EXPORT, req, 5U);
+	expect_status(MCP_CMD_CFG_EXPORT, g_seq, (uint8_t)MCP_ERR_OFFSET);
+}
+
+/* MEDIUM-7: CFG_IMPORT absorbs a repeat of the previous chunk's offset (it was
+ * already consumed) by re-acking the frontier, and re-emits the cached result
+ * for a repeat of the committed final chunk — a lost response never forces a
+ * restart or double-applies. */
+static void test_cfg_import_absorbs_a_repeated_chunk(void)
+{
+	static uint8_t blob[8192];
+	static uint8_t req[MCP_MAX_PAYLOAD];
+	const uint8_t *p;
+	size_t total = 0U;
+	size_t half;
+	uint64_t u = 0U;
+
+	memset(req, 0, sizeof(req));
+	policy_no_auth();
+	TEST_ASSERT_EQUAL_INT(0, cfg_set_u64(&g_cfg, CFG_ID_TIM_TAU_S, 815U));
+	TEST_ASSERT_EQUAL_INT(0, cfg_commit(&g_cfg, NULL));
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_export_all(&g_cfg, blob, sizeof(blob), false, &total));
+	TEST_ASSERT_TRUE(total > 128U);
+	TEST_ASSERT_EQUAL_INT(0, cfg_init(&g_cfg, &g_store_port));
+	policy_no_auth();
+
+	half = 100U;
+
+	/* First chunk at offset 0. */
+	bytes_put_le32(req, 0U);
+	req[4] = 0U;
+	memcpy(&req[5], blob, half);
+	(void)feed_req(MCP_CMD_CFG_IMPORT, req, (uint16_t)(5U + half));
+	expect_status(MCP_CMD_CFG_IMPORT, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_UINT32((uint32_t)half,
+				 bytes_get_le32(&tx_pay(last_tx())[1]));
+
+	/* A repeat of offset 0 is absorbed: the frontier is re-reported (still
+	 * at `half`) and the stream is not rewound. */
+	bytes_put_le32(req, 0U);
+	req[4] = 0U;
+	memcpy(&req[5], blob, half);
+	(void)feed_req(MCP_CMD_CFG_IMPORT, req, (uint16_t)(5U + half));
+	expect_status(MCP_CMD_CFG_IMPORT, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_UINT32((uint32_t)half,
+				 bytes_get_le32(&tx_pay(last_tx())[1]));
+	TEST_ASSERT_EQUAL_UINT8(0U, tx_pay(last_tx())[5]); /* not complete */
+
+	/* Deliver the remainder as the final chunk. */
+	bytes_put_le32(req, (uint32_t)half);
+	req[4] = 0x02U; /* final */
+	memcpy(&req[5], &blob[half], total - half);
+	(void)feed_req(MCP_CMD_CFG_IMPORT, req,
+		       (uint16_t)(5U + (total - half)));
+	expect_status(MCP_CMD_CFG_IMPORT, g_seq, (uint8_t)MCP_OK);
+	p = tx_pay(last_tx());
+	TEST_ASSERT_EQUAL_UINT8(1U, p[5]); /* complete */
+	TEST_ASSERT_EQUAL_UINT16(1U, bytes_get_le16(&p[6])); /* applied */
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_TIM_TAU_S, &u));
+	TEST_ASSERT_EQUAL_UINT64(815U, u);
+
+	/* A repeat of the committed final chunk re-emits the cached result
+	 * without re-committing. */
+	bytes_put_le32(req, (uint32_t)half);
+	req[4] = 0x02U;
+	memcpy(&req[5], &blob[half], total - half);
+	(void)feed_req(MCP_CMD_CFG_IMPORT, req,
+		       (uint16_t)(5U + (total - half)));
+	expect_status(MCP_CMD_CFG_IMPORT, g_seq, (uint8_t)MCP_OK);
+	p = tx_pay(last_tx());
+	TEST_ASSERT_EQUAL_UINT8(1U, p[5]);                    /* complete */
+	TEST_ASSERT_EQUAL_UINT16(1U, bytes_get_le16(&p[6]));  /* same applied */
+}
+
 static void test_factory_reset_needs_the_magic(void)
 {
 	uint8_t req[4];
@@ -1946,6 +2097,10 @@ int main(void)
 	RUN_TEST(test_auth_without_a_provisioned_credential_locks_the_box);
 	RUN_TEST(test_auth_needs_a_credential_store_and_crypto);
 	RUN_TEST(test_auth_gating_matrix);
+	RUN_TEST(test_auth_lockout_throttles_brute_force);
+	RUN_TEST(test_auth_hard_lockout_after_many_failures);
+	RUN_TEST(test_secrets_need_a_real_session_even_when_auth_disabled);
+	RUN_TEST(test_admin_password_is_never_readable);
 	RUN_TEST(test_session_expires_when_idle);
 	RUN_TEST(test_reset_session_drops_everything_but_dfu);
 	RUN_TEST(test_auth_blob_helper);
@@ -1962,6 +2117,9 @@ int main(void)
 	RUN_TEST(test_cfg_export_secrets_need_a_session);
 	RUN_TEST(test_cfg_import_streams_in_chunks);
 	RUN_TEST(test_cfg_import_rejects_bad_streams);
+	RUN_TEST(test_cfg_commit_reports_persist_errors);
+	RUN_TEST(test_cfg_export_re_emits_a_repeated_chunk);
+	RUN_TEST(test_cfg_import_absorbs_a_repeated_chunk);
 	RUN_TEST(test_factory_reset_needs_the_magic);
 
 	RUN_TEST(test_status_get_is_versioned_and_group_tagged);

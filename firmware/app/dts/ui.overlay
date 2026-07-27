@@ -1,0 +1,102 @@
+/*
+ * STS1000 "Meridian" — local-UI devicetree overlay.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Merged after the board .dts by app/CMakeLists.txt. Adds only the display
+ * subsystem; every other pin the UI area touches (DISP_EN/PC11, DISP_RST/PA10,
+ * DISP_DC/PB0, PROX_WAKE, the touch INT) is already declared in the board's
+ * /zephyr,user node, and the encoder and backlight ride nodes the board
+ * already defines (`panel_qdec` on TIM1, `panel_pwm` on TIM15).
+ *
+ * ---------------------------------------------------------------------------
+ * Why the in-tree ST7796S driver, and how it shares SPI4
+ * ---------------------------------------------------------------------------
+ * The panel is a Sitronix ST7796S over SPI4, write-only (J17 carries
+ * SPI_SCK_DISP and SPI_MOSI_DISP but no MISO — interface ref §9). Zephyr 4.2
+ * ships `sitronix,st7796s` on top of the MIPI-DBI mode-C shim
+ * (`zephyr,mipi-dbi-spi`), which is exactly this wiring: a SPI controller plus
+ * a data/command GPIO plus a reset GPIO.
+ *
+ * The shared-bus question resolves in the shim's favour rather than against it.
+ * MIPI_DBI_SPI_CONFIG_DT() takes the chip select from the *parent's* `spi-dev`
+ * phandle at index `reg`, so `reg = <2>` below selects &spi4's cs-gpios[2] =
+ * PE9 = DISP_CS, leaving cs-gpios[0] (NOR) and cs-gpios[1] (digipot)
+ * untouched. Zephyr's SPI driver serialises transfers per controller and
+ * re-applies each device's spi_config, so the NOR at 40 MHz mode 0, the
+ * MCP41U83 at mode 0,0 and the panel at 30 MHz coexist without an application
+ * mutex. A hand-rolled ST7796 driver was therefore not needed and is not used.
+ *
+ * ---------------------------------------------------------------------------
+ * Deferred init
+ * ---------------------------------------------------------------------------
+ * Both nodes are `zephyr,deferred-init`. Spec §6.5 requires DISP_EN (PC11) to
+ * come up first so the RT9742 soft-starts 5V_DISP and the PCA9306 enables,
+ * and only then DISP_RST to be released. That ordering is owned by
+ * src/zephyr/ui/ui_display.c, which asserts the rail, waits, and calls
+ * device_init() on the shim and then the panel. Left to POST_KERNEL the panel
+ * driver would push its whole init sequence into an unpowered module.
+ *
+ * `reset-gpios` on the shim (not on /zephyr,user) is deliberate: st7796s_init()
+ * calls mipi_dbi_reset() unconditionally and fails with -ENOTSUP if the shim
+ * has no reset pin, and the same DISP_RST line also resets the FT6336U, whose
+ * initialisation the UI area runs immediately after the panel's — one owner,
+ * one pulse, both devices.
+ */
+
+/ {
+	disp_dbi: mipi-dbi {
+		compatible = "zephyr,mipi-dbi-spi";
+		spi-dev = <&spi4>;
+		/* PB0 DISP_DC: high = data, low = command. */
+		dc-gpios = <&gpiob 0 GPIO_ACTIVE_HIGH>;
+		/* PA10 DISP_RST: active low, held asserted at boot by R209. */
+		reset-gpios = <&gpioa 10 GPIO_ACTIVE_LOW>;
+		write-only;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		zephyr,deferred-init;
+		status = "okay";
+
+		display: st7796s@2 {
+			compatible = "sitronix,st7796s";
+			/* Index into &spi4 cs-gpios: [2] = PE9 DISP_CS. */
+			reg = <2>;
+			mipi-max-frequency = <DT_FREQ_M(30)>;
+			mipi-mode = "MIPI_DBI_MODE_SPI_4WIRE";
+
+			/*
+			 * Landscape. The panel is 320RGB x 480 native; MADCTL
+			 * MV|MX exchanges the axes and mirrors the column
+			 * order, giving 480 x 320 with the origin top-left for
+			 * a rack-front orientation. BGR is set because the
+			 * common ST7796S modules wire the panel that way.
+			 *
+			 * BENCH: confirm orientation and colour order against
+			 * the fitted module; a mirrored image is MX (0x40) and
+			 * swapped red/blue is BGR (0x08).
+			 */
+			width = <480>;
+			height = <320>;
+			madctl = <0x68>;
+			invert-mode = "1-dot";
+
+			/*
+			 * Gamma: 14 bytes each into E0h/E1h. The binding
+			 * requires both and offers no default because the
+			 * curve is panel specific. These are the ST7796S
+			 * application-note values — a neutral starting point,
+			 * not a characterisation of the fitted glass.
+			 *
+			 * BENCH: adjust against the module's own init table
+			 * once one is fitted; a wrong gamma is a washed-out or
+			 * crushed image, never a functional failure.
+			 */
+			pgc = [F0 09 0B 06 04 15 2F 54 42 3C 17 14 18 1B];
+			ngc = [E0 09 0B 06 04 03 2B 43 42 3B 16 14 17 1B];
+
+			zephyr,deferred-init;
+			status = "okay";
+		};
+	};
+};

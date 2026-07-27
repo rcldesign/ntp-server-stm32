@@ -93,20 +93,32 @@ static uint16_t ring_next_id(nts_keyring_t *r)
 	return id;
 }
 
-/** Empty slot if there is one, otherwise the least recently created. */
+/**
+ * Empty slot if there is one, otherwise the least recently created — but never
+ * the current key (L7). Evicting the current key to make room for an installed
+ * one would leave newly minted cookies sealed under a key no longer in the
+ * ring the instant the next install lands. With ≥ 2 slots (asserted below) and
+ * every slot valid, skipping the current one still leaves a candidate.
+ */
 static size_t ring_victim(const nts_keyring_t *r)
 {
-	size_t victim = 0U;
+	size_t victim = NTS_MASTER_KEY_SLOTS; /* sentinel: none chosen yet */
 
 	for (size_t i = 0U; i < NTS_MASTER_KEY_SLOTS; i++) {
 		if (!r->keys[i].valid) {
 			return i;
 		}
-		if (r->keys[i].created_ms < r->keys[victim].created_ms) {
+	}
+	for (size_t i = 0U; i < NTS_MASTER_KEY_SLOTS; i++) {
+		if (i == r->current) {
+			continue;
+		}
+		if (victim == NTS_MASTER_KEY_SLOTS ||
+		    r->keys[i].created_ms < r->keys[victim].created_ms) {
 			victim = i;
 		}
 	}
-	return victim;
+	return (victim == NTS_MASTER_KEY_SLOTS) ? r->current : victim;
 }
 
 static int ring_mint(nts_keyring_t *r, int64_t now_ms)
@@ -232,7 +244,8 @@ int nts_keyring_export(const nts_keyring_t *r, size_t slot, uint16_t *id,
 int nts_cookie_seal(nts_keyring_t *r, const nts_cookie_keys_t *k,
 		    uint8_t out[NTS_COOKIE_LEN])
 {
-	const nts_master_key_t *mk;
+	uint16_t mk_id;
+	uint8_t mk_key[NTS_MASTER_KEY_LEN];
 	aes_siv_ctx_t siv;
 	aes_siv_ad_t ad[2];
 	uint8_t pt[COOKIE_PT_LEN];
@@ -245,20 +258,38 @@ int nts_cookie_seal(nts_keyring_t *r, const nts_cookie_keys_t *k,
 	if (k->aead_id != NTS_AEAD_AES_SIV_CMAC_256) {
 		return -EINVAL;
 	}
-	mk = &r->keys[r->current];
 
-	bytes_put_be16(&out[COOKIE_OFF_KEYID], mk->id);
+	/*
+	 * Snapshot the current master key's id and material together, up front
+	 * (M3). Rotation runs on the housekeeping thread and the datapath here on
+	 * the ntp_server thread; the threading contract (nts.h) is that the glue
+	 * serialises them, but taking a local copy of {id, key} makes a torn
+	 * rotation impossible even if that contract is ever violated — the worst
+	 * case degrades from "seal with id A but key B, an unsealable cookie" to
+	 * at most sealing under the key that was current at this instant.
+	 */
+	{
+		uint8_t cur = r->current;
+
+		mk_id = r->keys[cur].id;
+		memcpy(mk_key, r->keys[cur].key, sizeof(mk_key));
+	}
+
+	bytes_put_be16(&out[COOKIE_OFF_KEYID], mk_id);
 	bytes_put_be16(&out[COOKIE_OFF_AEAD], k->aead_id);
 	if (r->crypto.rand(r->crypto.ctx, &out[COOKIE_OFF_NONCE],
 			   NTS_NONCE_LEN) != 0) {
+		memset(mk_key, 0, sizeof(mk_key));
 		return -EIO;
 	}
 
 	memcpy(pt, k->c2s, NTS_KEY_LEN);
 	memcpy(&pt[NTS_KEY_LEN], k->s2c, NTS_KEY_LEN);
 
-	rc = aes_siv_init(&siv, &r->crypto, mk->key, NTS_MASTER_KEY_LEN);
+	rc = aes_siv_init(&siv, &r->crypto, mk_key, NTS_MASTER_KEY_LEN);
+	memset(mk_key, 0, sizeof(mk_key));
 	if (rc != 0) {
+		memset(pt, 0, sizeof(pt));
 		return rc;
 	}
 	ad[0].p = &out[COOKIE_OFF_KEYID];

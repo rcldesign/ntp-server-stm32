@@ -293,9 +293,19 @@ static void track_link(void)
 		LOG_INF("MCP host attached");
 	} else {
 		link_stats.link_drops++;
+		/*
+		 * Quiesce the ISR before touching its rings: a DTR drop (the
+		 * host merely closing the port) leaves USB enumerated and the
+		 * RX interrupt live, so resetting the rings underneath it would
+		 * race. TX is re-enabled lazily by the next mcp_tx(); RX is
+		 * restored here so the next host can talk.
+		 */
+		uart_irq_rx_disable(mcp_uart);
+		uart_irq_tx_disable(mcp_uart);
 		mcp_reset_session(&mcp);
 		ring_buf_reset(&tx_rb);
 		ring_buf_reset(&rx_rb);
+		uart_irq_rx_enable(mcp_uart);
 		LOG_INF("MCP host detached; session reset");
 	}
 }

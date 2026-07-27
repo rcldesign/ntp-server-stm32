@@ -66,19 +66,8 @@ static struct k_thread hk_tcb;
 
 static const struct device *const i2c1 = DEVICE_DT_GET(DT_NODELABEL(i2c1));
 
-/* ---- INA228 registers (core/ina228 owns the decode, not the addresses) --- */
-
-#define INA228_REG_CONFIG     0x00U
-#define INA228_REG_ADC_CONFIG 0x01U
-#define INA228_REG_SHUNT_CAL  0x02U
-#define INA228_REG_VBUS       0x05U
-#define INA228_REG_CURRENT    0x07U
-#define INA228_REG_POWER      0x08U
-#define INA228_REG_DIAG_ALRT  0x0BU
-#define INA228_REG_SOVL       0x0CU
-#define INA228_REG_SUVL       0x0DU
-#define INA228_REG_MANUF_ID   0x3EU
-#define INA228_REG_DEVICE_ID  0x3FU
+/* INA228 register numbers come from core/ina228 (INA228_REG_*); this file owns
+ * only the transfers. */
 
 /* ---- other I2C devices --------------------------------------------------- */
 
@@ -234,7 +223,7 @@ int sts_hk_ina_configure_all(void)
 
 		hk.shunt_cal[i] = hk_shunt_cal_for((ina228_rail_t)i);
 
-		rc = ina_read16(info->addr, INA228_REG_MANUF_ID, &manuf);
+		rc = ina_read16(info->addr, INA228_REG_MANUFACTURER_ID, &manuf);
 		if (rc == 0) {
 			rc = ina_read16(info->addr, INA228_REG_DEVICE_ID, &devid);
 		}

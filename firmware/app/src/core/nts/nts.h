@@ -28,6 +28,21 @@
  * Cookie format is entirely a server-side choice — RFC 8915 §6 only suggests
  * one, and clients treat cookies as opaque. This server uses a fixed 100-octet
  * layout, documented at NTS_COOKIE_LEN below.
+ *
+ * Threading contract: all nts_* functions operating on one nts_keyring_t /
+ * nts_ctx_t are single-threaded with respect to that object. In the target,
+ * rotation (nts_keyring_tick/rotate) runs on the housekeeping thread and the
+ * datapath (nts_process_request and the cookie seal/unseal it drives) on the
+ * ntp_server thread, so the glue MUST serialise them — a mutex around rotation,
+ * or driving rotation from the datapath thread. As defence in depth,
+ * nts_cookie_seal snapshots the current key up front so even a contract
+ * violation cannot tear a cookie into an unsealable {id, key} pair (M3); it
+ * costs one cookie at worst, never a crash or a key disclosure.
+ *
+ * Time base: every *_ms argument (now_ms, created_ms, rotate_ms) is on one
+ * monotonic millisecond clock chosen by the glue. created_ms values passed to
+ * nts_keyring_install must come from that same clock, since rotation compares
+ * them; they are used only for age ordering, never as wall-clock time.
  */
 
 #ifndef STS1000_CORE_NTS_NTS_H_
@@ -60,8 +75,14 @@ extern "C" {
 
 /** Shortest Unique Identifier the RFC allows (§5.3: at least 32 octets). */
 #define NTS_UNIQ_MIN 32U
-/** Longest Unique Identifier accepted; anything longer is a malformed request. */
-#define NTS_UNIQ_MAX 64U
+/**
+ * Longest Unique Identifier accepted. RFC 8915 §5.3 sets only a 32-octet lower
+ * bound (and RECOMMENDs exactly 32); there is no upper bound, so this is a sane
+ * cap well above any real client rather than a protocol limit. A longer one is
+ * refused so the echo buffer stays bounded — never at 64, which rejected
+ * conforming clients that pad the identifier.
+ */
+#define NTS_UNIQ_MAX 128U
 
 /**
  * NTS NAK kiss code 'NTSN' (RFC 8915 §5.7) as a host-order reference

@@ -932,8 +932,6 @@ static void print_slot(const struct shell *sh, uint8_t slot)
 
 static int cmd_fw_info(const struct shell *sh, size_t argc, char **argv)
 {
-	const mcp_dfu_t *d;
-
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
@@ -943,11 +941,6 @@ static int cmd_fw_info(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "staging usable: %u B, %u B erase pages",
 		    (unsigned int)sts_dfu_port()->staging_size(NULL),
 		    (unsigned int)sts_dfu_erase_granularity());
-
-	if (sts_mcp_stats() != NULL) {
-		d = NULL; /* the DFU snapshot lives with the engine context */
-	}
-	ARG_UNUSED(d);
 
 	if (sts_update_pending_confirm()) {
 		sts_selfconfirm_status_t st;

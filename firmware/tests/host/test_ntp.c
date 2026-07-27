@@ -53,6 +53,11 @@
 
 #define NS INT64_C(1000000000)
 
+/* Header field offsets (RFC 5905 §7.3), for hand-building request packets. */
+#define OFF_ORG_TS 24U
+#define OFF_REC_TS 32U
+#define OFF_XMT_TS 40U
+
 static host_crypto_t g_hc;
 static port_crypto_t g_port;
 static ntp_ctx_t g_ctx; /* ~20 kB of client table: static, not on the stack */
@@ -199,7 +204,8 @@ static void test_defaults(void)
 	TEST_ASSERT_EQUAL_UINT32(8U, cfg.client_rate);
 	TEST_ASSERT_EQUAL_UINT32(16U, cfg.client_burst);
 	TEST_ASSERT_TRUE(cfg.kod_on_limit);
-	TEST_ASSERT_TRUE(cfg.interleave);
+	/* Interleave is opt-in (RFC 9769); the default must be off. */
+	TEST_ASSERT_FALSE(cfg.interleave);
 
 	/* NULL is a no-op rather than a crash: these are called from bring-up
 	 * paths that have no way to report a failure. */
@@ -588,7 +594,8 @@ static void test_malformed_and_argument_errors(void)
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_stats_get(NULL, NULL));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_stats_reset(NULL));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_set_ext_hook(NULL, NULL));
-	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_tx_complete(NULL, 0U, 0U));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_tx_complete(NULL, 0U, 1U, 0U));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_tx_complete(&g_ctx, 0U, 0U, 0U));
 }
 
 /* ------------------------------------------------------------ rate limiting */
@@ -704,8 +711,8 @@ static void test_kod_rate_bytes(void)
 				bytes_get_be64(&out[24]));
 
 	/* A Kiss-o'-Death never arms interleaved mode: it carries no timestamps
-	 * worth remembering. */
-	TEST_ASSERT_EQUAL_INT(-ENOENT, ntp_tx_complete(&g_ctx, 5U, 1U));
+	 * worth remembering, so there is no pending pair to complete. */
+	TEST_ASSERT_EQUAL_INT(-ENOENT, ntp_tx_complete(&g_ctx, 5U, 1U, 1U));
 }
 
 static void test_kod_can_be_disabled_and_global_bucket_bites(void)
@@ -814,18 +821,21 @@ static void test_client_table_evicts_the_stalest(void)
 	ntp_result_t res;
 	size_t len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
 	uint32_t victim = 0x11110000U;
+	uint32_t tok;
 
 	ntp_cfg_default(&cfg);
 	cfg.client_rate = 1U;
 	cfg.client_burst = 1U;
+	cfg.interleave = true; /* so eviction has interleave state to forget */
 	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
 	good_quality(&q);
 
-	/* Spend the victim's single token. */
+	/* Spend the victim's single token, capturing the interleave token. */
 	fill_rx(&rx, req, len, victim, 0);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
 	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+	tok = res.xl_token;
 	fill_rx(&rx, req, len, victim, 0);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
@@ -844,25 +854,48 @@ static void test_client_table_evicts_the_stalest(void)
 							    sizeof(out), &res));
 	}
 
+	/* The victim's pending pair was evicted with its entry, so a late
+	 * transmit timestamp for it is now rejected — no stale timestamp is
+	 * committed against a reused slot. */
+	TEST_ASSERT_EQUAL_INT(-ENOENT, ntp_tx_complete(&g_ctx, victim, tok, 0x1234U));
+
 	fill_rx(&rx, req, len, victim, 1);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
 	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
-
-	/* Eviction also forgets the interleave state, so an evicted client
-	 * falls back to basic mode rather than being told a stale timestamp. */
-	TEST_ASSERT_EQUAL_INT(0, ntp_tx_complete(&g_ctx, victim, 0x1234U));
-	for (uint32_t i = 0U; i < NTP_CLIENT_SLOTS * 8U; i++) {
-		fill_rx(&rx, req, len, 0xA0000000U + i, 2);
-		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
-							    sizeof(out), &res));
-	}
-	TEST_ASSERT_EQUAL_INT(-ENOENT, ntp_tx_complete(&g_ctx, victim, 0x1234U));
 }
 
 /* --------------------------------------------------------- interleaved mode */
 
-static void test_interleaved_handshake(void)
+/* Fresh context with interleaved mode on and the rate limiter out of the way. */
+static void init_interleave(void)
+{
+	ntp_cfg_t cfg;
+
+	ntp_cfg_default(&cfg);
+	cfg.interleave = true;
+	cfg.client_rate = 0U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+}
+
+/*
+ * RFC 9769 Figure 1, driven packet by packet.
+ *
+ * The exchange the figure describes: a first basic request/response gives the
+ * client the server's receive timestamp (t2) and a provisional transmit field;
+ * the server then learns the real transmit instant (t3) out of band. The
+ * client's *next* request echoes t2 — the receive timestamp — as its origin,
+ * and that, and only that, is what marks the request interleaved. The reply
+ * carries the current receive timestamp and the measured t3 of the previous
+ * response.
+ *
+ * The load-bearing assertions are the field identities: interleaved origin is
+ * the request's own receive field, interleaved transmit is the previously
+ * measured t3, and the receive field advances to the new t6. Timestamps are
+ * read back from the wire rather than recomputed, so the test pins the layout,
+ * not this code's arithmetic.
+ */
+static void test_interleaved_rfc9769_figure1(void)
 {
 	uint8_t req[NTP_HDR_LEN];
 	uint8_t out[NTP_PKT_MAX];
@@ -871,14 +904,16 @@ static void test_interleaved_handshake(void)
 	ntp_result_t res;
 	ntp_stats_t st;
 	const uint32_t id = 0x2A2A2A2AU;
-	uint64_t rx1;
+	const uint64_t t3_actual = UINT64_C(0xE93C7F0000000000) + 0x3333U;
+	uint64_t t2_field;
 	uint64_t xmt_field1;
-	const uint64_t hw_tx1 = UINT64_C(0xE93C7F0000000000) + 0x3333U;
+	uint32_t token1;
 	size_t len;
 
+	init_interleave();
 	good_quality(&q);
 
-	/* Packet 1 — an ordinary basic-mode exchange. */
+	/* Packet 1 — basic. The server has no measured transmit timestamp yet. */
 	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U,
 			   UINT64_C(0xE1000000AAAA0001), 0U);
 	fill_rx(&rx, req, len, id, 1000);
@@ -886,64 +921,202 @@ static void test_interleaved_handshake(void)
 						    sizeof(out), &res));
 	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
 	TEST_ASSERT_FALSE(res.interleaved);
-	rx1 = bytes_get_be64(&out[32]);
-	xmt_field1 = bytes_get_be64(&out[40]);
-	TEST_ASSERT_EQUAL_HEX64(res.xmt, xmt_field1);
+	TEST_ASSERT_NOT_EQUAL(0U, res.xl_token);
+	t2_field = bytes_get_be64(&out[32]);   /* the receive timestamp t2 */
+	xmt_field1 = bytes_get_be64(&out[40]); /* the provisional transmit field */
+	token1 = res.xl_token;
+	/* The server must never emit a response whose transmit equals its
+	 * receive; the whole interleave detection rests on the two being told
+	 * apart by which the client echoes. */
+	TEST_ASSERT_NOT_EQUAL(t2_field, xmt_field1);
 
-	/* Until the driver reports the hardware transmit timestamp, the server
-	 * has nothing precise to offer and must stay in basic mode. */
-	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U,
-			   UINT64_C(0xE1000000AAAA0002), xmt_field1);
-	fill_rx(&rx, req, len, id, 1001);
+	/* The measured hardware transmit timestamp of packet 1 arrives. */
+	TEST_ASSERT_EQUAL_INT(0, ntp_tx_complete(&g_ctx, id, token1, t3_actual));
+	/* A second delivery of the same token is stale. */
+	TEST_ASSERT_EQUAL_INT(-ENOENT, ntp_tx_complete(&g_ctx, id, token1, t3_actual));
+	TEST_ASSERT_EQUAL_INT(-ENOENT, ntp_tx_complete(&g_ctx, 0xDEADU, 1U, t3_actual));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_tx_complete(&g_ctx, id, 0U, t3_actual));
+
+	/*
+	 * Packet 2 — interleaved. The client echoes t2 (the receive field) as
+	 * its origin, and carries distinct receive and transmit fields. The
+	 * reply's origin is the request's receive field, its transmit is the
+	 * measured t3, and its receive field is the new t6.
+	 */
+	memset(req, 0, sizeof(req));
+	req[0] = 0x23U; /* LI 0, VN 4, mode 3 */
+	req[2] = 6U;
+	bytes_put_be64(&req[OFF_ORG_TS], t2_field);           /* origin = t2 */
+	bytes_put_be64(&req[OFF_REC_TS], UINT64_C(0xC0DE0001)); /* rec != xmt */
+	bytes_put_be64(&req[OFF_XMT_TS], UINT64_C(0xE1000000AAAA0002));
+	fill_rx(&rx, req, NTP_HDR_LEN, id, 1002);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_TRUE(res.interleaved);
+	TEST_ASSERT_EQUAL_HEX64(UINT64_C(0xC0DE0001), bytes_get_be64(&out[24]));
+	TEST_ASSERT_EQUAL_HEX64(t3_actual, bytes_get_be64(&out[40]));
+	TEST_ASSERT_EQUAL_HEX64(res.xmt, t3_actual);
+	/* The receive field is this exchange's t6, not the previous t2. */
+	TEST_ASSERT_NOT_EQUAL(t2_field, bytes_get_be64(&out[32]));
+
+	TEST_ASSERT_EQUAL_INT(0, ntp_stats_get(&g_ctx, &st));
+	TEST_ASSERT_EQUAL_UINT64(1U, st.interleaved);
+	TEST_ASSERT_EQUAL_UINT64(2U, st.served);
+
+	/* The pair is one-shot: replaying the same interleaved origin without a
+	 * fresh committed pair falls back to basic. */
+	fill_rx(&rx, req, NTP_HDR_LEN, id, 1003);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
 	TEST_ASSERT_FALSE(res.interleaved);
 
-	/* Now report it. */
-	TEST_ASSERT_EQUAL_INT(0, ntp_tx_complete(&g_ctx, id, hw_tx1));
-	TEST_ASSERT_EQUAL_INT(-ENOENT, ntp_tx_complete(&g_ctx, id, hw_tx1));
-	TEST_ASSERT_EQUAL_INT(-ENOENT, ntp_tx_complete(&g_ctx, 0xDEADU, hw_tx1));
-
-	/*
-	 * Packet 3 — the client echoes the transmit field it was given as its
-	 * origin, which is how it asks for interleaved mode. The reply carries
-	 * the *previous* exchange's receive timestamp and the *measured*
-	 * transmit timestamp of the previous response — the value the server
-	 * could not know when it built it. The origin is still the client's own
-	 * transmit timestamp, verbatim.
-	 */
-	{
-		/* xmt_field1 was superseded by the packet-2 exchange; use what
-		 * the server last committed. */
-		uint64_t handle = bytes_get_be64(&out[40]);
-
-		len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U,
-				   UINT64_C(0xE1000000AAAA0003), handle);
-		fill_rx(&rx, req, len, id, 1002);
-		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
-							    sizeof(out), &res));
-		TEST_ASSERT_TRUE(res.interleaved);
-		TEST_ASSERT_EQUAL_HEX64(UINT64_C(0xE1000000AAAA0003),
-					bytes_get_be64(&out[24]));
-		TEST_ASSERT_EQUAL_HEX64(hw_tx1, bytes_get_be64(&out[40]));
-		/* The receive field is the earlier request's, not this one's. */
-		TEST_ASSERT_NOT_EQUAL(rx1, bytes_get_be64(&out[32]));
-	}
-
-	TEST_ASSERT_EQUAL_INT(0, ntp_stats_get(&g_ctx, &st));
-	TEST_ASSERT_EQUAL_UINT64(1U, st.interleaved);
-	TEST_ASSERT_EQUAL_UINT64(3U, st.served);
-
 	/* A stale or invented origin gets a basic response, not a guess. */
 	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U,
-			   UINT64_C(0xE1000000AAAA0004), UINT64_C(0x1111111111111111));
-	fill_rx(&rx, req, len, id, 1003);
+			   UINT64_C(0xE1000000AAAA0009), UINT64_C(0x1111111111111111));
+	fill_rx(&rx, req, len, id, 1004);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
 	TEST_ASSERT_FALSE(res.interleaved);
 }
 
-static void test_interleave_can_be_disabled(void)
+/*
+ * The negative case that the inverted implementation got wrong: an ordinary
+ * RFC 5905 client echoes the previous response's TRANSMIT field as its origin
+ * (peer_xmit sets x.org = the server's last transmit timestamp). That MUST NOT
+ * be read as an interleave request, or the client is served t2/t3 from the
+ * wrong exchange and computes a wildly wrong offset. This is the regression
+ * guard for BLOCKER-1.
+ */
+static void test_basic_client_is_not_interleaved(void)
+{
+	uint8_t req[NTP_HDR_LEN];
+	uint8_t out[NTP_PKT_MAX];
+	ntp_quality_view_t q;
+	ntp_rx_t rx;
+	ntp_result_t res;
+	ntp_stats_t st;
+	const uint32_t id = 0x0A0B0C0DU;
+	const uint64_t t3_actual = UINT64_C(0x1234567800000000);
+	uint64_t xmt_field1;
+	uint64_t origin_echo;
+	uint32_t token1;
+	size_t len;
+
+	init_interleave();
+	good_quality(&q);
+
+	/* Basic exchange 1, then the transmit timestamp is committed. */
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U,
+			   UINT64_C(0xB0000001), 0U);
+	fill_rx(&rx, req, len, id, 500);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	xmt_field1 = bytes_get_be64(&out[40]);
+	token1 = res.xl_token;
+	TEST_ASSERT_EQUAL_INT(0, ntp_tx_complete(&g_ctx, id, token1, t3_actual));
+
+	/*
+	 * Exchange 2 as a *basic* RFC 5905 client sends it: origin = the
+	 * previous response's transmit field. A correct server keeps this in
+	 * basic mode.
+	 */
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U,
+			   UINT64_C(0xB0000002), xmt_field1);
+	fill_rx(&rx, req, len, id, 501);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_FALSE(res.interleaved);
+	/* Basic mode echoes the client's transmit timestamp as the origin, and
+	 * never leaks the previous exchange's measured transmit. */
+	origin_echo = bytes_get_be64(&out[24]);
+	TEST_ASSERT_EQUAL_HEX64(UINT64_C(0xB0000002), origin_echo);
+	TEST_ASSERT_NOT_EQUAL(t3_actual, bytes_get_be64(&out[40]));
+
+	TEST_ASSERT_EQUAL_INT(0, ntp_stats_get(&g_ctx, &st));
+	TEST_ASSERT_EQUAL_UINT64(0U, st.interleaved);
+
+	/* Belt and braces: an interleaved request whose own rec == xmt is
+	 * ambiguous and RFC 9769 forbids treating it as interleaved. */
+	memset(req, 0, sizeof(req));
+	req[0] = 0x23U;
+	req[2] = 6U;
+	{
+		uint64_t t2 = bytes_get_be64(&out[32]);
+
+		/* Commit a pair so an interleave *could* trigger. */
+		TEST_ASSERT_EQUAL_INT(0, ntp_tx_complete(&g_ctx, id, res.xl_token,
+							 t3_actual));
+		bytes_put_be64(&req[OFF_ORG_TS], t2);
+		bytes_put_be64(&req[OFF_REC_TS], UINT64_C(0x55555555));
+		bytes_put_be64(&req[OFF_XMT_TS], UINT64_C(0x55555555)); /* == rec */
+		fill_rx(&rx, req, NTP_HDR_LEN, id, 502);
+		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+							    sizeof(out), &res));
+		TEST_ASSERT_FALSE(res.interleaved);
+	}
+}
+
+/*
+ * M5: the transmit timestamp for a response is delivered asynchronously (the
+ * socket error queue), so a second request from the same client can be handled
+ * before the first response's timestamp arrives. The token must make the late
+ * timestamp for the superseded response reject rather than pair with the newer
+ * exchange.
+ */
+static void test_interleave_tx_complete_token(void)
+{
+	uint8_t req[NTP_HDR_LEN];
+	uint8_t out[NTP_PKT_MAX];
+	ntp_quality_view_t q;
+	ntp_rx_t rx;
+	ntp_result_t res;
+	const uint32_t id = 0x77U;
+	const uint64_t tx_a = UINT64_C(0xAAAAAAAA00000000);
+	const uint64_t tx_b = UINT64_C(0xBBBBBBBB00000000);
+	uint32_t token_a;
+	uint32_t token_b;
+	uint64_t rec_b;
+	size_t len;
+
+	init_interleave();
+	good_quality(&q);
+
+	/* Two responses back to back; only the second's timestamp arrives. */
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 0xE1000001, 0U);
+	fill_rx(&rx, req, len, id, 10);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	token_a = res.xl_token;
+
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 0xE1000002, 0U);
+	fill_rx(&rx, req, len, id, 11);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	token_b = res.xl_token;
+	rec_b = bytes_get_be64(&out[32]);
+	TEST_ASSERT_NOT_EQUAL(token_a, token_b);
+
+	/* The first response's timestamp is now stale and must be rejected. */
+	TEST_ASSERT_EQUAL_INT(-ENOENT, ntp_tx_complete(&g_ctx, id, token_a, tx_a));
+	/* The second's commits. */
+	TEST_ASSERT_EQUAL_INT(0, ntp_tx_complete(&g_ctx, id, token_b, tx_b));
+
+	/* An interleaved request echoing response 2's receive field is answered
+	 * with response 2's measured transmit, never response 1's. */
+	memset(req, 0, sizeof(req));
+	req[0] = 0x23U;
+	req[2] = 6U;
+	bytes_put_be64(&req[OFF_ORG_TS], rec_b);
+	bytes_put_be64(&req[OFF_REC_TS], UINT64_C(0x0BADF00D));
+	bytes_put_be64(&req[OFF_XMT_TS], UINT64_C(0xE1000003));
+	fill_rx(&rx, req, NTP_HDR_LEN, id, 12);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_TRUE(res.interleaved);
+	TEST_ASSERT_EQUAL_HEX64(tx_b, bytes_get_be64(&out[40]));
+}
+
+static void test_interleave_off_by_default(void)
 {
 	uint8_t req[NTP_HDR_LEN];
 	uint8_t out[NTP_PKT_MAX];
@@ -952,11 +1125,14 @@ static void test_interleave_can_be_disabled(void)
 	ntp_rx_t rx;
 	ntp_result_t res;
 	const uint32_t id = 3U;
-	uint64_t handle;
+	uint64_t t2_field;
 	size_t len;
 
+	/* The default must be off (the reviewer's gate until the vector test
+	 * above proves detection correct). */
 	ntp_cfg_default(&cfg);
-	cfg.interleave = false;
+	TEST_ASSERT_FALSE(cfg.interleave);
+
 	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
 	good_quality(&q);
 
@@ -964,37 +1140,143 @@ static void test_interleave_can_be_disabled(void)
 	fill_rx(&rx, req, len, id, 0);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
-	handle = bytes_get_be64(&out[40]);
-	TEST_ASSERT_EQUAL_INT(0, ntp_tx_complete(&g_ctx, id, 0x999U));
+	/* With interleave off nothing is armed, so there is no token to return. */
+	TEST_ASSERT_EQUAL_UINT32(0U, res.xl_token);
+	t2_field = bytes_get_be64(&out[32]);
+	TEST_ASSERT_EQUAL_INT(-ENOENT, ntp_tx_complete(&g_ctx, id, 1U, 0x999U));
 
-	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 2U, handle);
-	fill_rx(&rx, req, len, id, 1);
+	/* Even a client that echoes the receive field gets a basic response. */
+	memset(req, 0, sizeof(req));
+	req[0] = 0x23U;
+	req[2] = 6U;
+	bytes_put_be64(&req[OFF_ORG_TS], t2_field);
+	bytes_put_be64(&req[OFF_REC_TS], UINT64_C(0xC0DE0001));
+	bytes_put_be64(&req[OFF_XMT_TS], UINT64_C(0xE1000002));
+	fill_rx(&rx, req, NTP_HDR_LEN, id, 1);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
 	TEST_ASSERT_FALSE(res.interleaved);
-	TEST_ASSERT_NOT_EQUAL(0x999U, bytes_get_be64(&out[40]));
 }
 
 /* ------------------------------------------------------- symmetric-key auth */
 
-#define TEST_KEYID 42U
-static const uint8_t test_key[20] = { 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+#define KID_CMAC 42U
+#define KID_HMAC160 43U
+#define KID_HMAC128 44U
+
+/* RFC 4493 example key, which doubles as the AES-CMAC-128 test key. */
+static const uint8_t cmac_key[16] = { 0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae,
+				      0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88,
+				      0x09, 0xcf, 0x4f, 0x3c };
+static const uint8_t hmac_key[20] = { 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
 				      0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
 				      0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b };
 
-/** Append a keyid + truncated HMAC-SHA-256 MAC field, as a client would. */
-static size_t append_mac(uint8_t *buf, size_t len, uint32_t keyid,
-			 const uint8_t *key, size_t key_len)
+/*
+ * An AES-CMAC-128 implementation independent of the one in ntp.c, built on the
+ * test fixture's AES-ECB. It is pinned to the RFC 4493 §4 vectors in
+ * test_cmac_oracle() below, then used as the oracle the server's MAC is checked
+ * against — an independent vector, per ARCHITECTURE.md §9.
+ */
+static void oracle_dbl(uint8_t b[16])
 {
-	uint8_t digest[32];
+	uint8_t carry = (uint8_t)(b[0] >> 7);
 
-	bytes_put_be32(&buf[len], keyid);
-	host_hmac_sha256(key, key_len, buf, len, digest);
-	memcpy(&buf[len + 4U], digest, NTP_MAC_DIGEST_LEN);
-	return len + NTP_MAC_FIELD_LEN;
+	for (size_t i = 0U; i < 15U; i++) {
+		b[i] = (uint8_t)((uint8_t)(b[i] << 1) | (uint8_t)(b[i + 1U] >> 7));
+	}
+	b[15] = (uint8_t)((uint8_t)(b[15] << 1) ^ (uint8_t)(0x87U * carry));
 }
 
-static void test_symmetric_mac(void)
+static void oracle_cmac128(const uint8_t key[16], const uint8_t *msg, size_t n,
+			   uint8_t out[16])
+{
+	uint8_t k1[16] = { 0 };
+	uint8_t k2[16];
+	uint8_t x[16] = { 0 };
+	uint8_t blk[16];
+	size_t off = 0U;
+	size_t rem;
+
+	TEST_ASSERT_EQUAL_INT(0, host_aes_ecb_encrypt(key, 16U, k1, k1, 16U));
+	oracle_dbl(k1);
+	memcpy(k2, k1, sizeof(k2));
+	oracle_dbl(k2);
+
+	while ((n - off) > 16U) {
+		for (size_t i = 0U; i < 16U; i++) {
+			x[i] ^= msg[off + i];
+		}
+		TEST_ASSERT_EQUAL_INT(0, host_aes_ecb_encrypt(key, 16U, x, x, 16U));
+		off += 16U;
+	}
+	rem = n - off;
+	memset(blk, 0, sizeof(blk));
+	if (rem == 16U && n != 0U) {
+		memcpy(blk, &msg[off], 16U);
+		for (size_t i = 0U; i < 16U; i++) {
+			blk[i] ^= k1[i];
+		}
+	} else {
+		if (rem != 0U) {
+			memcpy(blk, &msg[off], rem);
+		}
+		blk[rem] = 0x80U;
+		for (size_t i = 0U; i < 16U; i++) {
+			blk[i] ^= k2[i];
+		}
+	}
+	for (size_t i = 0U; i < 16U; i++) {
+		x[i] ^= blk[i];
+	}
+	TEST_ASSERT_EQUAL_INT(0, host_aes_ecb_encrypt(key, 16U, x, x, 16U));
+	memcpy(out, x, 16U);
+}
+
+static void test_cmac_oracle(void)
+{
+	/* RFC 4493 §4: the empty message and the 16-octet message. */
+	static const uint8_t want_empty[16] = { 0xbb, 0x1d, 0x69, 0x29, 0xe9,
+						0x59, 0x37, 0x28, 0x7f, 0xa3,
+						0x7d, 0x12, 0x9b, 0x75, 0x67,
+						0x46 };
+	static const uint8_t msg16[16] = { 0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40,
+					   0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11,
+					   0x73, 0x93, 0x17, 0x2a };
+	static const uint8_t want_16[16] = { 0x07, 0x0a, 0x16, 0xb4, 0x6b, 0x4d,
+					     0x41, 0x44, 0xf7, 0x9b, 0xdd, 0x9d,
+					     0xd0, 0x4a, 0x28, 0x7c };
+	uint8_t out[16];
+
+	oracle_cmac128(cmac_key, NULL, 0U, out);
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(want_empty, out, 16);
+	oracle_cmac128(cmac_key, msg16, sizeof(msg16), out);
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(want_16, out, 16);
+}
+
+/** Append a keyid + MAC field for @p alg, as a client would. */
+static size_t append_mac(uint8_t *buf, size_t len, uint32_t keyid,
+			 ntp_mac_alg_t alg, const uint8_t *key, size_t key_len)
+{
+	uint8_t digest[32];
+	size_t dlen;
+
+	bytes_put_be32(&buf[len], keyid);
+	if (alg == NTP_MAC_AES_CMAC_128) {
+		oracle_cmac128(key, buf, len, digest);
+		dlen = 16U;
+	} else {
+		host_hmac_sha256(key, key_len, buf, len, digest);
+		dlen = (alg == NTP_MAC_HMAC_SHA256_160) ? 20U : 16U;
+	}
+	memcpy(&buf[len + 4U], digest, dlen);
+	return len + 4U + dlen;
+}
+
+/* Exercise one keytype end to end: accept a good MAC, produce a verifiable
+ * response MAC, and reject a one-bit change anywhere in the request. */
+static void run_mac_keytype(uint32_t keyid, ntp_mac_alg_t alg, const uint8_t *key,
+			    size_t key_len, size_t field_len)
 {
 	uint8_t req[NTP_HDR_LEN + 64U];
 	uint8_t out[NTP_PKT_MAX];
@@ -1002,97 +1284,134 @@ static void test_symmetric_mac(void)
 	ntp_quality_view_t q;
 	ntp_rx_t rx;
 	ntp_result_t res;
-	ntp_stats_t st;
 	ntp_cfg_t cfg;
-	uint64_t expect_fail = 0U;
+	size_t dlen = field_len - 4U;
 	size_t len;
 
-	/* This test sends hundreds of requests from one source; the rate
-	 * limiter has its own test and would otherwise mask the auth results. */
 	ntp_cfg_default(&cfg);
-	cfg.client_rate = 0U;
+	cfg.client_rate = 0U; /* the rate limiter has its own test */
 	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
-
 	good_quality(&q);
-	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, TEST_KEYID, test_key,
-					     sizeof(test_key)));
+	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, keyid, alg, key, key_len));
 
 	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
-	len = append_mac(req, len, TEST_KEYID, test_key, sizeof(test_key));
-	TEST_ASSERT_EQUAL_size_t(NTP_HDR_LEN + 24U, len);
+	len = append_mac(req, len, keyid, alg, key, key_len);
+	TEST_ASSERT_EQUAL_size_t(NTP_HDR_LEN + field_len, len);
 
 	fill_rx(&rx, req, len, 1U, 0);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
 	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
 	TEST_ASSERT_TRUE(res.authenticated);
-	TEST_ASSERT_EQUAL_size_t(NTP_HDR_LEN + NTP_MAC_FIELD_LEN, res.len);
+	TEST_ASSERT_EQUAL_size_t(NTP_HDR_LEN + field_len, res.len);
 
-	/* The response MAC is the same construction over the response. */
-	TEST_ASSERT_EQUAL_HEX32(TEST_KEYID, bytes_get_be32(&out[NTP_HDR_LEN]));
-	host_hmac_sha256(test_key, sizeof(test_key), out, NTP_HDR_LEN, expect);
-	TEST_ASSERT_EQUAL_HEX8_ARRAY(expect, &out[NTP_HDR_LEN + 4U],
-				     NTP_MAC_DIGEST_LEN);
+	/* The response MAC is the same construction over the response header. */
+	TEST_ASSERT_EQUAL_HEX32(keyid, bytes_get_be32(&out[NTP_HDR_LEN]));
+	if (alg == NTP_MAC_AES_CMAC_128) {
+		oracle_cmac128(key, out, NTP_HDR_LEN, expect);
+	} else {
+		host_hmac_sha256(key, key_len, out, NTP_HDR_LEN, expect);
+	}
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(expect, &out[NTP_HDR_LEN + 4U], dlen);
 
-	/*
-	 * Every octet of the request is inside the authenticated region — the
-	 * whole header, the key id, and the digest itself — so flipping any bit
-	 * anywhere must fail. Fields the response merely echoes, like the poll
-	 * and the origin timestamp, are covered too.
-	 */
-	for (size_t i = 0U; i < len; i++) {
+	/* Any single-bit change in the authenticated region fails (octet 0's low
+	 * bit is a mode bit, rejected earlier as a non-client mode). */
+	for (size_t i = 1U; i < len; i++) {
 		uint8_t saved = req[i];
 
 		req[i] ^= 0x01U;
 		fill_rx(&rx, req, len, 1U, 0);
 		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 							    sizeof(out), &res));
-		if (i == 0U) {
-			/* Bit 0 of octet 0 is a mode bit: mode 3 becomes 2, so
-			 * this one is rejected before authentication. */
-			TEST_ASSERT_EQUAL_INT(NTP_DROP_MODE, res.drop);
-		} else {
-			TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
-			expect_fail++;
-		}
+		TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
 		req[i] = saved;
 	}
+}
 
-	/* An unknown key id. */
+static void test_mac_aes_cmac128(void)
+{
+	/* RFC 8573 AES-CMAC-128: 16-octet digest, 20-octet field. */
+	run_mac_keytype(KID_CMAC, NTP_MAC_AES_CMAC_128, cmac_key, sizeof(cmac_key),
+			20U);
+}
+
+static void test_mac_hmac_sha256(void)
+{
+	run_mac_keytype(KID_HMAC160, NTP_MAC_HMAC_SHA256_160, hmac_key,
+			sizeof(hmac_key), 24U);
+	run_mac_keytype(KID_HMAC128, NTP_MAC_HMAC_SHA256_128, hmac_key,
+			sizeof(hmac_key), 20U);
+}
+
+/*
+ * M4(a): a MAC this server cannot verify must be rejected, never served
+ * unauthenticated. Covers the crypto-NAK, an oversize (SHA-256/384/512) digest
+ * — the exact case that used to parse as garbage and be answered unauth — and a
+ * key-type mismatch, while confirming a legitimate 36-octet extension field is
+ * still not mistaken for a MAC.
+ */
+static void test_mac_rejects_unsupported(void)
+{
+	uint8_t req[NTP_HDR_LEN + 128U];
+	uint8_t out[NTP_PKT_MAX];
+	ntp_quality_view_t q;
+	ntp_rx_t rx;
+	ntp_result_t res;
+	ntp_cfg_t cfg;
+	size_t len;
+	static const size_t oversize[] = { 36U, 52U, 68U }; /* SHA-256/384/512 */
+
+	ntp_cfg_default(&cfg);
+	cfg.client_rate = 0U;
+	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, &cfg, &g_port, 0));
+	good_quality(&q);
+	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, KID_CMAC,
+					     NTP_MAC_AES_CMAC_128, cmac_key,
+					     sizeof(cmac_key)));
+
+	/* Oversize digests: MAC-shaped, unverifiable. Must be dropped, never
+	 * answered unauthenticated. */
+	for (size_t i = 0U; i < ARRAY_LEN(oversize); i++) {
+		len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+		bytes_put_be32(&req[len], KID_CMAC);
+		memset(&req[len + 4U], 0x5AU, oversize[i] - 4U);
+		fill_rx(&rx, req, len + oversize[i], 1U, 0);
+		TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+							    sizeof(out), &res));
+		TEST_ASSERT_EQUAL_INT(NTP_ACT_IGNORE, res.action);
+		TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
+	}
+
+	/* Crypto-NAK (bare key id). */
 	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
-	len = append_mac(req, len, TEST_KEYID + 1U, test_key, sizeof(test_key));
+	bytes_put_be32(&req[len], KID_CMAC);
+	fill_rx(&rx, req, len + 4U, 1U, 0);
+	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
+						    sizeof(out), &res));
+	TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
+
+	/* Key-type mismatch: a 24-octet (160-bit) tail under a CMAC (128-bit)
+	 * key. The digest length disagrees with the key's algorithm. */
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+	len = append_mac(req, len, KID_CMAC, NTP_MAC_HMAC_SHA256_160, hmac_key,
+			 sizeof(hmac_key));
 	fill_rx(&rx, req, len, 1U, 0);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
 	TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
-	expect_fail++;
 
-	/* A 16-octet digest is an MD5 MAC. Recognised only so it is counted as
-	 * an authentication failure instead of mis-parsed as an extension
-	 * field; MD5 is not implemented and will not be. */
+	/* A genuine 36-octet extension field (an NTS Unique Identifier is
+	 * exactly this size) must NOT be mistaken for a MAC — it parses as an
+	 * EF, so with no MAC present the request is served. */
 	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
-	bytes_put_be32(&req[len], TEST_KEYID);
-	memset(&req[len + 4U], 0x55U, 16U);
-	fill_rx(&rx, req, len + 20U, 1U, 0);
+	bytes_put_be16(&req[len], 0x0104U);
+	bytes_put_be16(&req[len + 2U], 36U);
+	memset(&req[len + 4U], 0x22U, 32U);
+	fill_rx(&rx, req, len + 36U, 1U, 0);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
-	TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
-	expect_fail++;
-
-	/* A bare key id is a client-sent crypto-NAK: nothing to verify. */
-	fill_rx(&rx, req, NTP_HDR_LEN + 4U, 1U, 0);
-	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
-						    sizeof(out), &res));
-	TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
-	expect_fail++;
-
-	TEST_ASSERT_EQUAL_INT(0, ntp_stats_get(&g_ctx, &st));
-	TEST_ASSERT_EQUAL_UINT64(expect_fail, st.auth_fail);
-	/* Authentication failures are drops; the one mode-bit flip is counted
-	 * as ignored instead, because it never reached authentication. */
-	TEST_ASSERT_EQUAL_UINT64(expect_fail, st.dropped);
-	TEST_ASSERT_EQUAL_UINT64(1U, st.ignored);
-	TEST_ASSERT_EQUAL_UINT64(1U, st.served);
+	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
+	TEST_ASSERT_FALSE(res.authenticated);
 }
 
 static void test_mac_key_table(void)
@@ -1101,25 +1420,47 @@ static void test_mac_key_table(void)
 
 	memset(key, 0x77U, sizeof(key));
 
-	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_key_set(NULL, 1U, key, 8U));
-	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_key_set(&g_ctx, 1U, NULL, 8U));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      ntp_key_set(NULL, 1U, NTP_MAC_HMAC_SHA256_160, key, 8U));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      ntp_key_set(&g_ctx, 1U, NTP_MAC_HMAC_SHA256_160, NULL,
+					  8U));
 	/* RFC 5905 §7.5 reserves key id 0 for the crypto-NAK. */
-	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_key_set(&g_ctx, 0U, key, 8U));
-	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_key_set(&g_ctx, 1U, key, 0U));
-	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_key_set(&g_ctx, 1U, key, sizeof(key)));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      ntp_key_set(&g_ctx, 0U, NTP_MAC_HMAC_SHA256_160, key,
+					  8U));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      ntp_key_set(&g_ctx, 1U, NTP_MAC_HMAC_SHA256_160, key,
+					  0U));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      ntp_key_set(&g_ctx, 1U, NTP_MAC_HMAC_SHA256_160, key,
+					  sizeof(key)));
+	/* Unknown algorithm. */
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      ntp_key_set(&g_ctx, 1U, (ntp_mac_alg_t)99, key, 16U));
+	/* AES-CMAC-128 demands exactly a 16-octet key. */
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      ntp_key_set(&g_ctx, 1U, NTP_MAC_AES_CMAC_128, key, 20U));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      ntp_key_set(&g_ctx, 1U, NTP_MAC_AES_CMAC_128, key, 15U));
+	TEST_ASSERT_EQUAL_INT(0,
+			      ntp_key_set(&g_ctx, 1U, NTP_MAC_AES_CMAC_128, key, 16U));
 
 	for (uint32_t i = 1U; i <= NTP_MAC_KEYS; i++) {
-		TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, i, key, 16U));
+		TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, i,
+						     NTP_MAC_HMAC_SHA256_128, key,
+						     16U));
 	}
-	TEST_ASSERT_EQUAL_INT(-ENOSPC, ntp_key_set(&g_ctx, NTP_MAC_KEYS + 1U, key,
-						   16U));
-	/* Replacing an existing id reuses its slot. */
-	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, 1U, key, 32U));
+	TEST_ASSERT_EQUAL_INT(-ENOSPC,
+			      ntp_key_set(&g_ctx, NTP_MAC_KEYS + 1U,
+					  NTP_MAC_HMAC_SHA256_128, key, 16U));
+	/* Replacing an existing id reuses its slot (and may change algorithm). */
+	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, 1U, NTP_MAC_HMAC_SHA256_160,
+					     key, 32U));
 
 	TEST_ASSERT_EQUAL_INT(0, ntp_key_clear(&g_ctx, 1U));
 	TEST_ASSERT_EQUAL_INT(-ENOENT, ntp_key_clear(&g_ctx, 1U));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, ntp_key_clear(NULL, 1U));
-	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, 1U, key, 16U));
 }
 
 static void test_mac_without_a_crypto_port(void)
@@ -1130,6 +1471,7 @@ static void test_mac_without_a_crypto_port(void)
 	ntp_rx_t rx;
 	ntp_result_t res;
 	size_t len;
+	size_t cmac_len;
 
 	/* A server built without crypto still serves unauthenticated clients,
 	 * and refuses authenticated ones rather than answering them unsigned. */
@@ -1142,26 +1484,34 @@ static void test_mac_without_a_crypto_port(void)
 						    sizeof(out), &res));
 	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
 
-	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, TEST_KEYID, test_key,
-					     sizeof(test_key)));
-	len = append_mac(req, len, TEST_KEYID, test_key, sizeof(test_key));
-	fill_rx(&rx, req, len, 1U, 0);
+	/* A CMAC key needs AES-ECB; without a crypto port, verification fails
+	 * (rather than dereferencing a NULL primitive). */
+	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, KID_CMAC,
+					     NTP_MAC_AES_CMAC_128, cmac_key,
+					     sizeof(cmac_key)));
+	cmac_len = append_mac(req, len, KID_CMAC, NTP_MAC_AES_CMAC_128, cmac_key,
+			      sizeof(cmac_key));
+	fill_rx(&rx, req, cmac_len, 1U, 0);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
 	TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
 
-	/* A crypto port that fails while signing the response must not emit an
-	 * unauthenticated reply to an authenticated request. */
+	/* With a crypto port and an HMAC key, injected port failures exercise
+	 * both the verify path (auth failure) and the append path (internal). */
 	TEST_ASSERT_EQUAL_INT(0, ntp_init(&g_ctx, NULL, &g_port, 0));
-	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, TEST_KEYID, test_key,
-					     sizeof(test_key)));
+	TEST_ASSERT_EQUAL_INT(0, ntp_key_set(&g_ctx, KID_HMAC160,
+					     NTP_MAC_HMAC_SHA256_160, hmac_key,
+					     sizeof(hmac_key)));
+	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
+	len = append_mac(req, len, KID_HMAC160, NTP_MAC_HMAC_SHA256_160, hmac_key,
+			 sizeof(hmac_key));
+
 	g_hc.fail_hmac_in = 2U; /* verify succeeds, append fails */
 	fill_rx(&rx, req, len, 1U, 0);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
 	TEST_ASSERT_EQUAL_INT(NTP_DROP_INTERNAL, res.drop);
 
-	/* And one that fails while verifying is an authentication failure. */
 	g_hc.fail_hmac_in = 1U;
 	fill_rx(&rx, req, len, 1U, 0);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
@@ -1536,9 +1886,14 @@ int main(void)
 	RUN_TEST(test_kod_can_be_disabled_and_global_bucket_bites);
 	RUN_TEST(test_kod_is_damped);
 	RUN_TEST(test_client_table_evicts_the_stalest);
-	RUN_TEST(test_interleaved_handshake);
-	RUN_TEST(test_interleave_can_be_disabled);
-	RUN_TEST(test_symmetric_mac);
+	RUN_TEST(test_interleaved_rfc9769_figure1);
+	RUN_TEST(test_basic_client_is_not_interleaved);
+	RUN_TEST(test_interleave_tx_complete_token);
+	RUN_TEST(test_interleave_off_by_default);
+	RUN_TEST(test_cmac_oracle);
+	RUN_TEST(test_mac_aes_cmac128);
+	RUN_TEST(test_mac_hmac_sha256);
+	RUN_TEST(test_mac_rejects_unsupported);
 	RUN_TEST(test_mac_key_table);
 	RUN_TEST(test_mac_without_a_crypto_port);
 	RUN_TEST(test_extension_hook);

@@ -51,16 +51,61 @@ project(sts1000_meridian LANGUAGES C)
 #   src/core/    platform-neutral C11, host-testable, no Zephyr headers
 #   src/zephyr/  Zephyr glue (threads, ISRs, driver + port implementations)
 #
-# Both are recursive globs. During the wave-2 build-out core/ was listed per
+# core/ is one recursive glob. During the wave-2 build-out it was listed per
 # module so a half-written module could not break an unrelated build; every
 # ARCHITECTURE.md §5 module now compiles for the target, so that exception is
-# gone and adding a module (or an area's glue file) is a no-edit operation.
+# gone and adding a module is a no-edit operation.
 # ---------------------------------------------------------------------------
 file(GLOB_RECURSE sts1000_core_sources CONFIGURE_DEPENDS
      ${CMAKE_CURRENT_SOURCE_DIR}/src/core/*.c)
 
-file(GLOB_RECURSE sts1000_glue_sources CONFIGURE_DEPENDS
+# --- Zephyr glue, gated per ownership area ---------------------------------
+#
+# The glue is four ownership areas developed in parallel (ARCHITECTURE.md §2):
+# platform, net, console, ui. Each area's sources are globbed from its own
+# subdirectory, so adding a file to an area is still a no-edit operation — the
+# STEP-0 goal. The three non-platform areas are compiled only when their
+# CONFIG_STS1000_<AREA> switch is on (all default y).
+#
+# Gating the compile — not just the entry-point call in main.c — is what makes
+# the switches actually compose the image: CONFIG_STS1000_NET=n produces a
+# timing-only bring-up image with no network code linked (the motivation in
+# app/Kconfig), and it lets one area be excluded while it is mid-refactor
+# without editing another area's files. main.c's __weak fallbacks
+# (src/zephyr/platform/sts_area_weak.c) stand in for a disabled area's entry
+# point, so the image always links.
+#
+#   platform  src/zephyr/*.c (sts_app.c) + src/zephyr/platform/  — always built
+#   net       src/zephyr/net/                                    — CONFIG_STS1000_NET
+#   console   src/zephyr/console/ + src/zephyr/storage/          — CONFIG_STS1000_CONSOLE
+#   ui        src/zephyr/ui/                                     — CONFIG_STS1000_UI
+#
+# The four area directories are fixed by ARCHITECTURE.md §2; a fifth would be a
+# structural change that warrants editing this file.
+file(GLOB sts1000_glue_platform_top CONFIGURE_DEPENDS
      ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/*.c)
+file(GLOB_RECURSE sts1000_glue_platform CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/platform/*.c)
+set(sts1000_glue_sources ${sts1000_glue_platform_top} ${sts1000_glue_platform})
+
+if(CONFIG_STS1000_NET)
+  file(GLOB_RECURSE sts1000_glue_net CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/net/*.c)
+  list(APPEND sts1000_glue_sources ${sts1000_glue_net})
+endif()
+
+if(CONFIG_STS1000_CONSOLE)
+  file(GLOB_RECURSE sts1000_glue_console CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/console/*.c
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/storage/*.c)
+  list(APPEND sts1000_glue_sources ${sts1000_glue_console})
+endif()
+
+if(CONFIG_STS1000_UI)
+  file(GLOB_RECURSE sts1000_glue_ui CONFIGURE_DEPENDS
+       ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/ui/*.c)
+  list(APPEND sts1000_glue_sources ${sts1000_glue_ui})
+endif()
 
 target_sources(app PRIVATE
   src/main.c

@@ -1712,6 +1712,8 @@ static void test_holdover_ageing_shortens_the_demote_horizon(void)
 {
 	disc_ctx_t ctx;
 	disc_cfg_t cfg;
+	quality_state_t qs;
+	quality_block_t b;
 	struct osc p;
 	uint64_t ms = 0u;
 	uint32_t expected = 0x9B000000u;
@@ -1732,37 +1734,59 @@ static void test_holdover_ageing_shortens_the_demote_horizon(void)
 	cfg.holdover.aging_ns_per_s2 = 0.5f;
 	cfg.demote_threshold_ns = 1.0e6f;
 	TEST_ASSERT_EQUAL_INT(0, disc_init(&ctx, &cfg));
+	TEST_ASSERT_EQUAL_INT(0, quality_state_init(&qs));
 	noise_seed(73u);
 	osc_init(&p, 0.0, -30.0);
 	(void)run_to_lock(&ctx, &p, &ms, 10.0, &expected, 1500u);
 
-	/* First 30 s: gather a growth increment for the acceleration check. */
-	for (i = 0u; i < 30u; i++) {
-		ms += 1000u;
-		env_defaults(&in.env, ms);
-		TEST_ASSERT_EQUAL_INT(0,
-				      disc_tick_no_pps(&ctx, &in.env, NULL, &out));
-	}
+	/* Advance to a checkpoint well inside holdover. Assertions are tied to
+	 * the published holdover_elapsed_s rather than the loop count so the
+	 * exact holdover-entry tick does not matter, and record the growth over
+	 * the first measured interval. */
 	{
-		int64_t est_30 = out.holdover_est_err_ns;
-		uint32_t demote_30 = out.holdover_t_demote_s;
+		int64_t est_a = 0;
+		int64_t est_b;
+		uint32_t elapsed_a = 0u;
+		uint32_t demote_a = UINT32_MAX;
 
-		/* est(30) = 100 + 5*30 + 0.5*0.5*900 = 100 + 150 + 225 = 475. */
-		TEST_ASSERT_INT64_WITHIN(10, 475, est_30);
-		TEST_ASSERT_TRUE(demote_30 != UINT32_MAX);
-		TEST_ASSERT_TRUE(demote_30 > 0u);
+		for (i = 0u; i < 40u; i++) {
+			ms += 1000u;
+			env_defaults(&in.env, ms);
+			TEST_ASSERT_EQUAL_INT(
+				0, disc_tick_no_pps(&ctx, &in.env, &qs, &out));
+			TEST_ASSERT_EQUAL_INT(0, quality_snapshot(&qs, &b));
+			if (out.holdover && b.holdover_elapsed_s == 30u) {
+				est_a = out.holdover_est_err_ns;
+				elapsed_a = b.holdover_elapsed_s;
+				demote_a = out.holdover_t_demote_s;
+			}
+		}
+		TEST_ASSERT_EQUAL_UINT32(30u, elapsed_a);
+		/* est(30) = 100 + 5*30 + 0.5*0.5*30^2 = 100+150+225 = 475
+		 * in closed form; the incremental sum is within a rate step. */
+		TEST_ASSERT_INT64_WITHIN(20, 475, est_a);
+		/* Ageing makes the horizon finite (a pure-drift model of the
+		 * same drift would give (1e6-475)/5 ~= 2e5 s; ageing must make
+		 * it materially shorter). */
+		TEST_ASSERT_TRUE(demote_a != UINT32_MAX);
+		TEST_ASSERT_TRUE(demote_a > 0u);
+		TEST_ASSERT_TRUE(demote_a < 100000u);
 
-		est_prev = est_30;
+		est_prev = out.holdover_est_err_ns;
 		for (i = 0u; i < 60u; i++) {
 			ms += 1000u;
 			env_defaults(&in.env, ms);
 			TEST_ASSERT_EQUAL_INT(
-				0, disc_tick_no_pps(&ctx, &in.env, NULL, &out));
+				0, disc_tick_no_pps(&ctx, &in.env, &qs, &out));
 		}
-		/* Super-linear: the next 60 s add more than 60*(rate at t=30). */
-		TEST_ASSERT_TRUE(out.holdover_est_err_ns - est_prev > 60 * 20);
-		/* Horizon shrank. */
-		TEST_ASSERT_TRUE(out.holdover_t_demote_s < demote_30);
+		est_b = out.holdover_est_err_ns;
+
+		/* Super-linear: at t~70-130 the instantaneous rate (5 + aging*t)
+		 * is well above the early rate, so 60 s adds far more than
+		 * 60*5 = 300 ns. */
+		TEST_ASSERT_TRUE(est_b - est_prev > 60 * 20);
+		/* And the demote horizon keeps shrinking. */
+		TEST_ASSERT_TRUE(out.holdover_t_demote_s < demote_a);
 	}
 }
 

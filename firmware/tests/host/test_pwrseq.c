@@ -240,6 +240,19 @@ static int idx_of_from(const model_t *m, pwrseq_action_t a, size_t start)
 	return -1;
 }
 
+/* Advance 1 ms per step until @p a has been emitted; fail if it does not appear
+ * within @p budget_ms. Robust to the glue's per-step response roundtrips. */
+static void advance_until(model_t *m, pwrseq_action_t a, uint32_t budget_ms)
+{
+	uint32_t start = m->in.mono_ms;
+
+	while (idx_of(m, a) < 0) {
+		TEST_ASSERT_TRUE_MESSAGE(m->in.mono_ms - start <= budget_ms,
+					 pwrseq_action_name(a));
+		advance(m, 1U);
+	}
+}
+
 static int idx_of(const model_t *m, pwrseq_action_t a)
 {
 	return idx_of_from(m, a, 0U);
@@ -1471,17 +1484,18 @@ static void test_a_rail_excursion_between_gating_and_lock_aborts_stage_8(void)
 	model_t m;
 
 	/*
-	 * The window is not a one-shot gate at step 8.13. Holding at step 8.15
-	 * waiting for lock, a rail that wanders must still drop the FE — the
-	 * supervisor runs every call, whatever stage the machine is in.
+	 * The window is not a one-shot gate at the operating step. Holding at
+	 * step 8.15 waiting for lock, a rail that wanders must still drop the
+	 * FE — the supervisor runs every call, whatever stage the machine is in.
 	 */
 	model_init(&m, NULL);
-	m.in.rb_lock = false;
+	m.hold_no_lock = true;
 	run_out(&m, 100U, 40U);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_TRUE(m.ctx.rb_gated);
 
-	m.in.ina_vbus_mv[INA228_RAIL_VCC_RB] = 20000;
+	/* The buck wanders to 20 V while gated to the FE. */
+	m.force_op_rail_mv = 20000;
 	advance(&m, 100U);
 
 	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
@@ -1503,7 +1517,7 @@ static void test_an_over_voltage_during_the_lock_wait_aborts_stage_8(void)
 	model_t m;
 
 	model_init(&m, NULL);
-	m.in.rb_lock = false;
+	m.hold_no_lock = true;
 	run_out(&m, 100U, 40U);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
 
@@ -1555,13 +1569,26 @@ static void test_settle_delays_are_observed(void)
 	advance(&m, 1U);
 	expect_present(&m, PWRSEQ_ACT_ANT_BIAS_EN);
 
-	/* Rubidium soft-start: the rail is not sampled until the buck has had
-	 * its 500 ms, or the window check would judge a ramp. */
+	/*
+	 * That same step burst runs the stage-8 preconditions and the safe-code
+	 * write/verify, so RB_PWR_EN is now asserted and blocked on its 500 ms
+	 * soft-start. The *operating* code must not be commanded until the buck
+	 * has settled at safe-low, so DIGIPOT_WRITE_OP is gated by the soft-start.
+	 */
 	expect_present(&m, PWRSEQ_ACT_RB_PWR_EN);
+	expect_absent(&m, PWRSEQ_ACT_DIGIPOT_WRITE_OP);
+	advance(&m, 480U); /* still inside the 500 ms soft-start */
+	expect_absent(&m, PWRSEQ_ACT_DIGIPOT_WRITE_OP);
+	advance_until(&m, PWRSEQ_ACT_DIGIPOT_WRITE_OP, 200U);
+
+	/*
+	 * And the FE connect is gated by the ramp: after the operating code is
+	 * written and read back, the rail is given rb_ramp_ms (100 ms) to settle
+	 * before the operating-window + vmax gate is judged and RB_VCC_GATE
+	 * asserted.
+	 */
 	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
-	advance(&m, 499U);
-	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
-	advance(&m, 1U);
+	advance_until(&m, PWRSEQ_ACT_RB_VCC_GATE_EN, 400U);
 	expect_present(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 }
 
@@ -1611,7 +1638,6 @@ static void test_restoring_the_rubidium_re_runs_the_guarded_sequence(void)
 {
 	model_t m;
 	size_t base;
-	int i;
 
 	model_init(&m, NULL);
 	run_out(&m, 100U, 100U);
@@ -1635,19 +1661,21 @@ static void test_restoring_the_rubidium_re_runs_the_guarded_sequence(void)
 	m.in.mono_ms = 2000U;
 	run_out(&m, 100U, 100U);
 
-	/* The whole interlock ran again, in order. */
-	for (i = (int)base; i < (int)m.log_len; i++) {
-		/* nothing before the digipot write may touch the rail */
-		if (m.log[i].action == PWRSEQ_ACT_RB_PWR_EN) {
-			break;
-		}
-	}
+	/*
+	 * The whole two-code interlock ran again, in order: safe write + verify,
+	 * power, operating write + verify, then the FE connect. RB_VCC_GATE is
+	 * strictly last, and no RB_PWR_EN appears before the first digipot write.
+	 */
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_ACT_DIGIPOT_WRITE, (int)m.log[base].action);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_ACT_DIGIPOT_VERIFY,
 			      (int)m.log[base + 1U].action);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_ACT_RB_PWR_EN, (int)m.log[base + 2U].action);
-	TEST_ASSERT_EQUAL_INT(PWRSEQ_ACT_RB_VCC_GATE_EN,
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_ACT_DIGIPOT_WRITE_OP,
 			      (int)m.log[base + 3U].action);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_ACT_DIGIPOT_VERIFY,
+			      (int)m.log[base + 4U].action);
+	TEST_ASSERT_EQUAL_INT(PWRSEQ_ACT_RB_VCC_GATE_EN,
+			      (int)m.log[base + 5U].action);
 	TEST_ASSERT_TRUE(m.ctx.rb_gated);
 
 	/* And back up the ladder for the UI loads. */
@@ -1791,19 +1819,31 @@ static void test_pfi_emits_the_park_list_in_priority_order(void)
 	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_pfi(NULL, 0U));
 }
 
-static void test_pfi_without_a_running_rubidium_omits_the_shutdown(void)
+static void test_pfi_shuts_down_the_rubidium_unconditionally(void)
 {
 	static const uint8_t want[] = {
 		PWRSEQ_ACT_PARK_DAC,
 		PWRSEQ_ACT_PERSIST_STATE,
+		PWRSEQ_ACT_RB_VCC_GATE_DIS,
+		PWRSEQ_ACT_RB_PWR_DIS,
 		PWRSEQ_ACT_SET_SHUTDOWN_FLAG,
 	};
 	model_t m;
 	size_t i;
 
+	/*
+	 * MEDIUM-3: the park list drops the rubidium unconditionally, not gated
+	 * on the sequencer's belief that it is running. Even with the rubidium
+	 * never wanted — so RB_PWR_EN was never asserted — the RB_VCC_GATE_DIS /
+	 * RB_PWR_DIS pin writes are still emitted, because the supervisor may
+	 * have queued (and the purge may have deleted) an earlier shutdown, and
+	 * the writes are idempotent at the pin. Better a redundant safe-off than
+	 * a live FE through a brown-out.
+	 */
 	model_init(&m, NULL);
 	m.in.rb_wanted = false;
 	run_out(&m, 100U, 100U);
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
 
 	TEST_ASSERT_EQUAL_INT(0, pwrseq_pfi(&m.ctx, 9000U));
 	TEST_ASSERT_EQUAL_size_t(ARRAY_LEN(want), pwrseq_action_count(&m.ctx));
@@ -1811,8 +1851,50 @@ static void test_pfi_without_a_running_rubidium_omits_the_shutdown(void)
 		pwrseq_act_t a;
 
 		TEST_ASSERT_EQUAL_INT(0, pwrseq_action_get(&m.ctx, &a));
-		TEST_ASSERT_EQUAL_INT((int)want[i], (int)a.action);
+		TEST_ASSERT_EQUAL_INT_MESSAGE(
+			(int)want[i], (int)a.action,
+			pwrseq_action_name((pwrseq_action_t)want[i]));
 	}
+}
+
+static void test_pfi_shutdown_survives_an_undrained_supervisor_shutdown(void)
+{
+	model_t m;
+	pwrseq_act_t a;
+	int gate_dis = 0;
+	int pwr_dis = 0;
+
+	/*
+	 * The exact MEDIUM-3 race: the supervisor drops the rubidium (queuing
+	 * RB_VCC_GATE_DIS / RB_PWR_DIS and clearing rb_enabled), the glue has
+	 * NOT drained them, and then PFI fires and purges the queue. A guard on
+	 * rb_enabled would now emit nothing. Verify both pin writes still reach
+	 * the queue after the purge.
+	 */
+	model_init(&m, NULL);
+	run_out(&m, 100U, 100U);
+	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
+
+	/* Provoke a supervisor shutdown but do NOT drain it. */
+	m.rb_glue = false;      /* stop the harness draining/responding */
+	m.in.rb_ov_det = true;  /* OV latch → supervisor rb_shutdown */
+	m.in.mono_ms += 100U;
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_step(&m.ctx, &m.in));
+	TEST_ASSERT_FALSE(m.ctx.rb_enabled); /* cleared at emit time */
+	TEST_ASSERT_TRUE(pwrseq_action_count(&m.ctx) >= 2U);
+
+	/* PFI now — the purge deletes the un-drained shutdown. */
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_pfi(&m.ctx, m.in.mono_ms + 1U));
+
+	while (pwrseq_action_get(&m.ctx, &a) == 0) {
+		if (a.action == PWRSEQ_ACT_RB_VCC_GATE_DIS) {
+			gate_dis++;
+		} else if (a.action == PWRSEQ_ACT_RB_PWR_DIS) {
+			pwr_dis++;
+		}
+	}
+	TEST_ASSERT_EQUAL_INT(1, gate_dis);
+	TEST_ASSERT_EQUAL_INT(1, pwr_dis);
 }
 
 static void test_a_commanded_kill_makes_the_following_pfi_expected(void)
@@ -1924,9 +2006,12 @@ static void test_the_step_machine_never_drops_an_action(void)
 	model_init(&m, NULL);
 
 	/*
-	 * A whole bring-up is 23 actions against a 32-slot queue, so a glue
-	 * layer that only drains once at the end still loses nothing. That
-	 * headroom is the reason the queue is sized as it is.
+	 * Run the whole sequence without ever draining and without the glue
+	 * responding, so the input never advances the two-code readback and the
+	 * operating verify fails into RB_OFF — a deliberately messy run with
+	 * retries and a shutdown. The property under test is not a tidy action
+	 * count but that the step machine reserves queue room before every step:
+	 * it never drops an action, and it fits inside the queue.
 	 */
 	for (i = 0U; i < 100U; i++) {
 		m.in.mono_ms += 100U;
@@ -1935,8 +2020,7 @@ static void test_the_step_machine_never_drops_an_action(void)
 
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_EQUAL_UINT32(0U, pwrseq_actions_dropped(&m.ctx));
-	TEST_ASSERT_EQUAL_size_t(23U, pwrseq_action_count(&m.ctx));
-	TEST_ASSERT_TRUE(pwrseq_action_count(&m.ctx) <
+	TEST_ASSERT_TRUE(pwrseq_action_count(&m.ctx) <=
 			 (size_t)PWRSEQ_ACT_QUEUE_LEN);
 
 	while (pwrseq_action_get(&m.ctx, &a) == 0) {
