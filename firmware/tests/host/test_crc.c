@@ -106,7 +106,7 @@ static size_t vec_render(const crc_vec_t *v, uint8_t *buf)
 
 static void test_crc32_catalogue_check_value(void)
 {
-	TEST_ASSERT_EQUAL_HEX32(0xCBF43926U, crc32_ieee("123456789", 9U));
+	TEST_ASSERT_EQUAL_HEX32(0xCBF43926U, sts_crc32_ieee("123456789", 9U));
 }
 
 static void test_crc32_known_answers(void)
@@ -118,7 +118,7 @@ static void test_crc32_known_answers(void)
 		size_t n = vec_render(&vectors[i], buf);
 
 		TEST_ASSERT_EQUAL_HEX32_MESSAGE(vectors[i].crc32,
-						crc32_ieee(buf, n),
+						sts_crc32_ieee(buf, n),
 						vectors[i].name);
 	}
 }
@@ -127,19 +127,19 @@ static void test_crc32_seed_is_the_identity(void)
 {
 	/* The zlib convention: seeding with the constant reproduces one-shot. */
 	TEST_ASSERT_EQUAL_HEX32(0xCBF43926U,
-				crc32_ieee_update(CRC32_IEEE_SEED, "123456789", 9U));
+				sts_crc32_ieee_update(CRC32_IEEE_SEED, "123456789", 9U));
 	TEST_ASSERT_EQUAL_HEX32(CRC32_IEEE_SEED,
-				crc32_ieee_update(CRC32_IEEE_SEED, "", 0U));
+				sts_crc32_ieee_update(CRC32_IEEE_SEED, "", 0U));
 }
 
 static void test_crc32_null_is_no_data(void)
 {
 	/* Core must not trap: a NULL buffer is treated as contributing nothing,
 	 * whatever length is claimed. */
-	TEST_ASSERT_EQUAL_HEX32(0x00000000U, crc32_ieee(NULL, 0U));
-	TEST_ASSERT_EQUAL_HEX32(0x00000000U, crc32_ieee(NULL, 16U));
+	TEST_ASSERT_EQUAL_HEX32(0x00000000U, sts_crc32_ieee(NULL, 0U));
+	TEST_ASSERT_EQUAL_HEX32(0x00000000U, sts_crc32_ieee(NULL, 16U));
 	TEST_ASSERT_EQUAL_HEX32(0xCBF43926U,
-				crc32_ieee_update(0xCBF43926U, NULL, 16U));
+				sts_crc32_ieee_update(0xCBF43926U, NULL, 16U));
 }
 
 static void test_crc32_chaining_matches_one_shot(void)
@@ -154,9 +154,9 @@ static void test_crc32_chaining_matches_one_shot(void)
 		size_t split;
 
 		for (split = 0U; split <= n; split++) {
-			uint32_t c = crc32_ieee_update(CRC32_IEEE_SEED, buf, split);
+			uint32_t c = sts_crc32_ieee_update(CRC32_IEEE_SEED, buf, split);
 
-			c = crc32_ieee_update(c, &buf[split], n - split);
+			c = sts_crc32_ieee_update(c, &buf[split], n - split);
 			TEST_ASSERT_EQUAL_HEX32_MESSAGE(vectors[i].crc32, c,
 							vectors[i].name);
 		}
@@ -170,7 +170,7 @@ static void test_crc32_byte_at_a_time_matches_one_shot(void)
 	size_t i;
 
 	for (i = 0U; i < 9U; i++) {
-		c = crc32_ieee_update(c, &msg[i], 1U);
+		c = sts_crc32_ieee_update(c, &msg[i], 1U);
 	}
 	TEST_ASSERT_EQUAL_HEX32(0xCBF43926U, c);
 }
@@ -182,7 +182,7 @@ static void test_crc32_residue_is_the_magic_constant(void)
 
 	for (i = 0U; i < ARRAY_LEN(vectors); i++) {
 		size_t n = vec_render(&vectors[i], buf);
-		uint32_t c = crc32_ieee(buf, n);
+		uint32_t c = sts_crc32_ieee(buf, n);
 
 		/* Append the CRC little-endian, as MCP frames carry it. */
 		buf[n + 0U] = (uint8_t)(c & 0xFFU);
@@ -191,7 +191,7 @@ static void test_crc32_residue_is_the_magic_constant(void)
 		buf[n + 3U] = (uint8_t)((c >> 24) & 0xFFU);
 
 		TEST_ASSERT_EQUAL_HEX32_MESSAGE(0x2144DF1CU,
-						crc32_ieee(buf, n + 4U),
+						sts_crc32_ieee(buf, n + 4U),
 						vectors[i].name);
 	}
 }
@@ -205,13 +205,13 @@ static void test_crc32_detects_every_single_bit_flip(void)
 
 	test_rng_init(&rng, 0xC0FFEEU);
 	test_rng_fill(&rng, buf, sizeof(buf));
-	base = crc32_ieee(buf, sizeof(buf));
+	base = sts_crc32_ieee(buf, sizeof(buf));
 
 	for (bit = 0U; bit < sizeof(buf) * 8U; bit++) {
 		uint32_t flipped;
 
 		buf[bit / 8U] ^= (uint8_t)(1U << (bit % 8U));
-		flipped = crc32_ieee(buf, sizeof(buf));
+		flipped = sts_crc32_ieee(buf, sizeof(buf));
 		buf[bit / 8U] ^= (uint8_t)(1U << (bit % 8U));
 
 		TEST_ASSERT_NOT_EQUAL_HEX32(base, flipped);
@@ -222,7 +222,7 @@ static void test_crc32_detects_every_single_bit_flip(void)
 
 static void test_crc16_catalogue_check_value(void)
 {
-	TEST_ASSERT_EQUAL_HEX16(0x29B1U, crc16_ccitt("123456789", 9U));
+	TEST_ASSERT_EQUAL_HEX16(0x29B1U, sts_crc16_ccitt("123456789", 9U));
 }
 
 static void test_crc16_known_answers(void)
@@ -234,7 +234,7 @@ static void test_crc16_known_answers(void)
 		size_t n = vec_render(&vectors[i], buf);
 
 		TEST_ASSERT_EQUAL_HEX16_MESSAGE(vectors[i].crc16,
-						crc16_ccitt(buf, n),
+						sts_crc16_ccitt(buf, n),
 						vectors[i].name);
 	}
 }
@@ -244,16 +244,16 @@ static void test_crc16_seed_is_the_init_value(void)
 	/* CCITT-FALSE init is 0xFFFF and xorout is 0, so the empty message
 	 * hashes to the init value itself. */
 	TEST_ASSERT_EQUAL_HEX16(0xFFFFU, CRC16_CCITT_SEED);
-	TEST_ASSERT_EQUAL_HEX16(0xFFFFU, crc16_ccitt("", 0U));
+	TEST_ASSERT_EQUAL_HEX16(0xFFFFU, sts_crc16_ccitt("", 0U));
 	TEST_ASSERT_EQUAL_HEX16(0x29B1U,
-				crc16_ccitt_update(CRC16_CCITT_SEED, "123456789", 9U));
+				sts_crc16_ccitt_update(CRC16_CCITT_SEED, "123456789", 9U));
 }
 
 static void test_crc16_null_is_no_data(void)
 {
-	TEST_ASSERT_EQUAL_HEX16(0xFFFFU, crc16_ccitt(NULL, 0U));
-	TEST_ASSERT_EQUAL_HEX16(0xFFFFU, crc16_ccitt(NULL, 16U));
-	TEST_ASSERT_EQUAL_HEX16(0x29B1U, crc16_ccitt_update(0x29B1U, NULL, 16U));
+	TEST_ASSERT_EQUAL_HEX16(0xFFFFU, sts_crc16_ccitt(NULL, 0U));
+	TEST_ASSERT_EQUAL_HEX16(0xFFFFU, sts_crc16_ccitt(NULL, 16U));
+	TEST_ASSERT_EQUAL_HEX16(0x29B1U, sts_crc16_ccitt_update(0x29B1U, NULL, 16U));
 }
 
 static void test_crc16_chaining_matches_one_shot(void)
@@ -266,9 +266,9 @@ static void test_crc16_chaining_matches_one_shot(void)
 		size_t split;
 
 		for (split = 0U; split <= n; split++) {
-			uint16_t c = crc16_ccitt_update(CRC16_CCITT_SEED, buf, split);
+			uint16_t c = sts_crc16_ccitt_update(CRC16_CCITT_SEED, buf, split);
 
-			c = crc16_ccitt_update(c, &buf[split], n - split);
+			c = sts_crc16_ccitt_update(c, &buf[split], n - split);
 			TEST_ASSERT_EQUAL_HEX16_MESSAGE(vectors[i].crc16, c,
 							vectors[i].name);
 		}
@@ -282,7 +282,7 @@ static void test_crc16_byte_at_a_time_matches_one_shot(void)
 	size_t i;
 
 	for (i = 0U; i < 9U; i++) {
-		c = crc16_ccitt_update(c, &msg[i], 1U);
+		c = sts_crc16_ccitt_update(c, &msg[i], 1U);
 	}
 	TEST_ASSERT_EQUAL_HEX16(0x29B1U, c);
 }
@@ -299,13 +299,13 @@ static void test_crc16_detects_every_single_bit_flip(void)
 
 	test_rng_init(&rng, 0x5EEDU);
 	test_rng_fill(&rng, buf, sizeof(buf));
-	base = crc16_ccitt(buf, sizeof(buf));
+	base = sts_crc16_ccitt(buf, sizeof(buf));
 
 	for (bit = 0U; bit < sizeof(buf) * 8U; bit++) {
 		uint16_t flipped;
 
 		buf[bit / 8U] ^= (uint8_t)(1U << (bit % 8U));
-		flipped = crc16_ccitt(buf, sizeof(buf));
+		flipped = sts_crc16_ccitt(buf, sizeof(buf));
 		buf[bit / 8U] ^= (uint8_t)(1U << (bit % 8U));
 
 		TEST_ASSERT_NOT_EQUAL_HEX16(base, flipped);
@@ -316,8 +316,8 @@ static void test_crc16_differs_from_crc32_low_half(void)
 {
 	/* Guards against a copy-paste that wires both entry points to the same
 	 * table: the two algorithms must not agree on a non-trivial message. */
-	uint16_t c16 = crc16_ccitt("123456789", 9U);
-	uint32_t c32 = crc32_ieee("123456789", 9U);
+	uint16_t c16 = sts_crc16_ccitt("123456789", 9U);
+	uint32_t c32 = sts_crc32_ieee("123456789", 9U);
 
 	TEST_ASSERT_NOT_EQUAL_HEX16(c16, (uint16_t)(c32 & 0xFFFFU));
 }

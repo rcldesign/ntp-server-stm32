@@ -83,7 +83,7 @@ is or is not being linked:
 
 static void test_crc32_known_answer(void)
 {
-	TEST_ASSERT_EQUAL_HEX32(0xCBF43926U, crc32_ieee("123456789", 9));
+	TEST_ASSERT_EQUAL_HEX32(0xCBF43926U, sts_crc32_ieee("123456789", 9));
 }
 
 int main(void)

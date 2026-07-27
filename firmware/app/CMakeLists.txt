@@ -40,26 +40,6 @@ list(APPEND sts1000_core_sources ${sts1000_core_util_sources})
 #                    fault pwrseq thermal mcp logring snmp ui
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# TEMPORARY EXCLUSION — src/core/util/crc.c
-#
-# That file exports crc32_ieee(), crc32_ieee_update(), crc16_ccitt() and
-# crc16_ccitt_update(): the exact global symbol names of Zephyr's own
-# lib/crc (<zephyr/sys/crc.h>). CONFIG_CRC is hard-`select`ed by the SHT4X
-# driver, which the I2C device map (interface ref §4, U72 at 0x44) requires, so
-# both objects are always pulled into the link:
-#
-#   ld.bfd: zephyr/libzephyr.a(crc32_sw.c.obj): in function 'crc32_ieee':
-#   multiple definition of 'crc32_ieee'; app/libapp.a(crc.c.obj): first defined
-#
-# core/util owns those symbols and must prefix them (sts_crc32_ieee, ...); that
-# file and its host test are outside this change's boundary. Until the rename
-# lands, the module is excluded from the TARGET image only — tests/host builds
-# core/ directly, so unit coverage is unaffected.
-# ---------------------------------------------------------------------------
-list(REMOVE_ITEM sts1000_core_sources
-     ${CMAKE_CURRENT_SOURCE_DIR}/src/core/util/crc.c)
-
 # --- Zephyr glue: recursive glob is safe here, this tree is owned by the
 #     platform waves and every file in it is expected to compile. -------------
 file(GLOB_RECURSE sts1000_glue_sources CONFIGURE_DEPENDS

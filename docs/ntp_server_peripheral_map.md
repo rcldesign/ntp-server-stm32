@@ -297,7 +297,7 @@ Shared bus, 3.3 V, Fast-mode. Pull-ups R202/R203 (4.7 kΩ → 3V3_STM); rise-tim
 |PE6               |DISP_BL           |out, TIM15 PWM — backlight dimming/blanking                                                |
 |PA10              |DISP_RST          |out, GPIO — ST7796 + touch reset (R209 pull-down = held-in-reset default)                  |
 
-**Panel-LED indicator array:** 5 V → RT9742 **U55** (EN = PANEL_LED_EN/PC0) → R199 **150 mΩ** shunt (INA228 **U54** @ 0x4C; all-on 132 mA = 19.8 mV = 48 % FS) → FB12 → V_PANEL_LED → **Q22 PNP high-side** → PANEL_LEDS_P common anode → J17 → panel. Cathodes = `PANEL_LED_WHITE_N_1..6` (6× white, 91 Ω ballast) + `PANEL_LED_RED_N_1` (red, 150 Ω). Dimming: **PANEL_LED_PWM (PE0, LPTIM2)** → Q23 → Q22 (non-inverting, active-high; Hi-Z reset = double default-OFF). Fault: **PANEL_LED_FAULT (PF12)** = U55 nFLG, R201 pull-up → 3V3_STM.
+**Panel-LED indicator array:** 5 V → RT9742 **U55** (EN = PANEL_LED_EN/PC0) → R199 **150 mΩ** shunt (INA228 **U54** @ 0x4C; all-on 132 mA = 19.8 mV = 48 % FS) → FB12 → V_PANEL_LED → **Q22 PNP high-side** → PANEL_LEDS_P common anode → J17 → panel. Cathodes = `PANEL_LED_WHITE_N_1..6` (6× white, 91 Ω ballast) + `PANEL_LED_RED_N_1` (red, 150 Ω). Dimming: **PANEL_LED_PWM (PE0, software PWM)** → Q23 → Q22 (non-inverting, active-high; Hi-Z reset = double default-OFF; ~100 Hz, 10-step duty from 1 kHz scan). Fault: **PANEL_LED_FAULT (PF12)** = U55 nFLG, R201 pull-up → 3V3_STM.
 
 **Buttons, encoder, touch & presence — all direct GPIO (no I/O expander):**
 

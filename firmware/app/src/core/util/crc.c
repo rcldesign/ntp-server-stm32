@@ -30,7 +30,7 @@ static const uint16_t tab16[16] = {
 	0xC18CU, 0xD1ADU, 0xE1CEU, 0xF1EFU,
 };
 
-uint32_t crc32_ieee_update(uint32_t crc, const void *data, size_t len)
+uint32_t sts_crc32_ieee_update(uint32_t crc, const void *data, size_t len)
 {
 	const uint8_t *p = (const uint8_t *)data;
 	uint32_t c;
@@ -51,12 +51,12 @@ uint32_t crc32_ieee_update(uint32_t crc, const void *data, size_t len)
 	return ~c;
 }
 
-uint32_t crc32_ieee(const void *data, size_t len)
+uint32_t sts_crc32_ieee(const void *data, size_t len)
 {
-	return crc32_ieee_update(CRC32_IEEE_SEED, data, len);
+	return sts_crc32_ieee_update(CRC32_IEEE_SEED, data, len);
 }
 
-uint16_t crc16_ccitt_update(uint16_t crc, const void *data, size_t len)
+uint16_t sts_crc16_ccitt_update(uint16_t crc, const void *data, size_t len)
 {
 	const uint8_t *p = (const uint8_t *)data;
 	uint16_t c = crc;
@@ -75,7 +75,7 @@ uint16_t crc16_ccitt_update(uint16_t crc, const void *data, size_t len)
 	return c;
 }
 
-uint16_t crc16_ccitt(const void *data, size_t len)
+uint16_t sts_crc16_ccitt(const void *data, size_t len)
 {
-	return crc16_ccitt_update(CRC16_CCITT_SEED, data, len);
+	return sts_crc16_ccitt_update(CRC16_CCITT_SEED, data, len);
 }

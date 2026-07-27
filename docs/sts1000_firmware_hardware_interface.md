@@ -61,7 +61,7 @@ assignments follow the STM32H563 AF table.
 
 | Pin | Net | Dir | Peripheral / AF | Function | Default / reset state | Active pol. | Notes |
 |----:|-----|-----|-----------------|----------|-----------------------|-------------|-------|
-| 1 | USB_VBUS_SENSE | AIN | ADC (PE2) | USB-C VBUS present (÷ divider, k≈0.547) | follows VBUS | high=present | **Polled**, not EXTI (line shares w/ PC2). ≈2.87 V @ 5.25 V. |
+| 1 | USB_VBUS_SENSE | IN | GPIO (PE2) | USB-C VBUS present (÷ divider, k≈0.547) | follows VBUS | high=present | **Digital presence detect** (÷ divider ≈2.87 V @5.25 V ≥ VIH); PE2 has no ADC channel — **polled GPIO**, not EXTI (line shared w/ PC2). |
 | 2 | RB_OV_DET | IN | GPIO (PE3) | Rb 26 V OV-latch tripped indicator | low (latch idle) | high=OV tripped | =3.24 V when tripped (÷ from 5 V). **Polled.** |
 | 3 | RB_RS232_CMOS_SW | OUT | GPIO (PE4) | Rb serial DPDT relay mode select | **low = RS-232** (R169 pd) | high=CMOS | De-energized relay = RS-232 (fail-safe). |
 | 4 | FAN_PWM | OUT | TIM PWM (PE5) | Fan speed PWM, 25 kHz | Hi-Z → **max fan** | duty | **Fail-safe: undriven = full speed.** |
@@ -152,8 +152,8 @@ assignments follow the STM32H563 AF table.
 | 111 | REF_TERM_EN | OUT | GPIO (PC10) | Ext-ref 50 Ω termination select | **high = terminated** (R176 100k↑) | high=term | Default terminated (safe). |
 | 112 | DISP_EN | OUT | GPIO (PC11) | Display 5V RT9742 U33 enable + PCA9306 EN | **low = off** (R104 10k↓) | high=on | Default OFF; deferrable under PoE pressure. |
 | 113 | WDT_EN | OUT | GPIO (PC12) | External WDT (TPS3430) enable | **low = WDT disabled** (R213 100k↓) | high=enable | Boot-disabled; FW enables after init. |
-| 114 | GPS_TXD2 | OUT | UART4_TX (PD0) | F9T RXD2 (2nd port) | Hi-Z | — | Secondary/RTCM path. |
-| 115 | GPS_RXD2 | IN | UART4_RX (PD1) | F9T TXD2 (2nd port) | driven | — | — |
+| 114 | GPS_TXD2 | IN | UART4_RX (PD0) | F9T TXD2 (2nd port) | driven | — | Secondary/RTCM path. |
+| 115 | GPS_RXD2 | OUT | UART4_TX (PD1) | F9T RXD2 (2nd port) | Hi-Z | — | — |
 | 116 | SPI_DPOT_CS | OUT | GPIO (PD2) | Rb digipot U43 chip-select | high (R135 10k↑, deselect) | **low**=selected | SPI4 shared bus. |
 | 117 | RB_OV_RESET | OUT | GPIO (PD3) | Rb OV-latch reset | **low** (R146 pd) | pulse **high**=clear | Default low; pulse HIGH clears latch. |
 | 118 | GPS_ANT_OFF_MON | IN | GPIO/EXTI4 (PD4) | F9T ANT_OFF (LNA-disable) observe | driven by F9T | high=LNA off | Corroborates antenna supervisor. |
@@ -174,7 +174,7 @@ assignments follow the STM32H563 AF table.
 | 137 | RB_PWR_EN | OUT | GPIO (PB7) | Rb rail buck (U40) enable | **low = off** (R164 100k↓) | high=on | **Enable ONLY after safe digipot code + INA228 0x47 verify.** |
 | 139 | I2C_SCL | OD | **I2C1 AF4** (PB8) | I²C1 clock | high (R202 4.7k↑) | — | 400 kHz, LTC4311 accelerated. |
 | 140 | I2C_SDA | OD | **I2C1 AF4** (PB9) | I²C1 data | high (R203 4.7k↑) | — | Shared 15-device bus. |
-| 141 | PANEL_LED_PWM | OUT | TIM PWM (PE0) | Panel-LED brightness PWM | **low = off** (Q23 base pd) | duty | Hi-Z reset = double default-OFF. Window ≫ PWM period (§4). |
+| 141 | PANEL_LED_PWM | OUT | GPIO (PE0, software PWM) | Panel-LED brightness PWM | **low = off** (Q23 base pd) | duty | Hi-Z reset = double default-OFF. **Software PWM** (~100 Hz, 10-step duty from 1 kHz scan); averaging window ≫ PWM period (§4.1). |
 
 ### 1.2 Power / ground / analog-reference pins
 
@@ -335,8 +335,8 @@ over/under-voltage, over-power, conversion-ready), then run alarm evaluation. Sh
 register constants are in §4.2.
 
 ### 4.1 Panel-LED current averaging
-The panel LEDs are PWM-dimmed (`PANEL_LED_PWM`, PE0). INA228 U54 (0x4C) must average over a
-window **≫ the 1 ms PWM period** so the ALERT fires on the averaged (not instantaneous) current.
+The panel LEDs are PWM-dimmed (`PANEL_LED_PWM`, PE0, **software PWM** ~100 Hz, 10-step duty). INA228 U54 (0x4C) must average over a
+window **≫ the ~10 ms software-PWM period** so the ALERT fires on the averaged (not instantaneous) current.
 Firmware **duty-normalizes**: I_true ≈ I_avg / duty. Health check = duty-normalized current within
 the expected all-on band (≈126–132 mA at full duty), corroborated by `PANEL_LED_FAULT` (PF12).
 At R199 = 150 mΩ one CURRENT LSB is 520.833 nA — about 0.4 % of a single LED's ~17 mA, so a dead or
@@ -542,7 +542,7 @@ Firmware MUST arbitrate the shared bus (mutex) and reconfigure CPOL/CPHA/speed p
 | UART | Pins | Use |
 |------|------|-----|
 | USART3 | PD8 (TX→GPS_RX) / PD9 (RX←GPS_TX) | Primary GNSS UBX/NMEA; also FW-upgrade path w/ RESET_N/SAFEBOOT_N. |
-| UART4 | PD0 (TX) / PD1 (RX) | GNSS 2nd port (RTCM/aux). |
+| UART4 | PD1 (TX) / PD0 (RX) | GNSS 2nd port (RTCM/aux). |
 | UART7 | PB4 (TX) / PE7 (RX) | FE-5680A Rb telemetry. |
 
 **USB console.** PA11/PA12 (D−/D+), self-powered device gated by `USB_VBUS_SENSE` (PE2, polled).
