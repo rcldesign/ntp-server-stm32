@@ -360,12 +360,20 @@ typedef struct {
 	uint8_t vc_bad_run;
 	bool vc_fault;
 
-	/* Holdover */
+	/* Holdover. The error estimate is ACCUMULATED, not recomputed from the
+	 * closed form each tick: RFC 5905 requires root dispersion to grow
+	 * monotonically through an outage, and a from-scratch recompute drops
+	 * when the temperature returns toward its entry value or a sensor
+	 * reading is lost. holdover_last_dt_c holds the most recent known
+	 * temperature excursion so a dropped TMP117 read freezes the growth
+	 * rate instead of zeroing it. */
 	uint64_t holdover_start_ms;
+	uint64_t holdover_prev_ms;      /* last update, for the incremental dt */
 	int32_t holdover_start_temp_mc;
 	bool holdover_start_temp_valid;
+	float holdover_last_dt_c;       /* last known excursion from entry, °C */
 	uint32_t holdover_elapsed_s;
-	float holdover_est_ns;
+	float holdover_est_ns;          /* monotonic non-decreasing while held */
 	uint32_t t_demote_s;
 
 	/* Tempco reference temperature, captured on first lock */

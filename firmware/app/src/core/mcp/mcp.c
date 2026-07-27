@@ -401,6 +401,26 @@ static int h_hello(mcp_ctx_t *c, const mcp_frame_t *f)
 	return mcp__reply(c, f->cmd, f->seq, (uint16_t)o);
 }
 
+/* Arm the brute-force backoff after a mismatch. Escalates from a doubling
+ * throttle window into a long lockout window (spec §9.4). */
+static void auth_penalise(mcp_ctx_t *c)
+{
+	c->auth_fails++;
+
+	if (c->auth_fails >= MCP_AUTH_LOCK_TRIES) {
+		c->auth_lock_until_ms = c->now_ms + MCP_AUTH_LOCKOUT_MS;
+	} else if (c->auth_fails > MCP_AUTH_FREE_TRIES) {
+		uint32_t step = c->auth_fails - MCP_AUTH_FREE_TRIES; /* 1,2,3… */
+		uint64_t delay = (uint64_t)MCP_AUTH_THROTTLE_MS
+				 << (step - 1U);
+
+		if (delay > MCP_AUTH_THROTTLE_MAX_MS) {
+			delay = MCP_AUTH_THROTTLE_MAX_MS;
+		}
+		c->auth_lock_until_ms = c->now_ms + delay;
+	}
+}
+
 static int h_auth(mcp_ctx_t *c, const mcp_frame_t *f)
 {
 	uint8_t blob[MCP_PW_BLOB_LEN];
@@ -413,7 +433,20 @@ static int h_auth(mcp_ctx_t *c, const mcp_frame_t *f)
 		return mcp__reply_status(c, f->cmd, f->seq,
 					 (uint8_t)MCP_ERR_NOTSUP);
 	}
+
+	/* Brute-force backoff: while a window is armed, refuse without testing
+	 * the password so guesses cannot be spun faster than the schedule. The
+	 * window is wall-clock based and survives a reconnect. */
+	if ((c->auth_lock_until_ms != 0U) &&
+	    (c->now_ms < c->auth_lock_until_ms)) {
+		c->stats.auth_throttled++;
+		return mcp__reply_status(c, f->cmd, f->seq,
+					 (uint8_t)MCP_ERR_BUSY);
+	}
+
 	if ((f->len == 0U) || (f->len > MCP_PW_MAX)) {
+		/* A malformed request is a client bug, not a guess: it neither
+		 * counts toward the lockout nor is throttled by it. */
 		return mcp__reply_status(c, f->cmd, f->seq,
 					 (uint8_t)MCP_ERR_ARG);
 	}
@@ -438,6 +471,7 @@ static int h_auth(mcp_ctx_t *c, const mcp_frame_t *f)
 	}
 	if (!ct_eq(mac, &blob[MCP_PW_SALT_LEN], MCP_PW_MAC_LEN)) {
 		c->stats.auth_fail++;
+		auth_penalise(c);
 		mcp__log(c, (uint8_t)LOGR_WARN, "auth: rejected");
 		return mcp__reply_status(c, f->cmd, f->seq,
 					 (uint8_t)MCP_ERR_AUTH);
@@ -445,6 +479,8 @@ static int h_auth(mcp_ctx_t *c, const mcp_frame_t *f)
 
 	c->authed = true;
 	c->last_activity_ms = c->now_ms;
+	c->auth_fails = 0U;
+	c->auth_lock_until_ms = 0U;
 	c->stats.auth_ok++;
 	mcp__log(c, (uint8_t)LOGR_NOTICE, "auth: session granted");
 
@@ -595,7 +631,15 @@ static int h_cfg_get(mcp_ctx_t *c, const mcp_frame_t *f)
 		return mcp__reply_status(c, f->cmd, f->seq,
 					 (uint8_t)MCP_ERR_ARG);
 	}
-	if (((k->flags & CFG_F_SECRET) != 0U) && !session_ok(c)) {
+	if ((k->flags & CFG_F_NOEXPORT) != 0U) {
+		/* Write-only over the wire (the admin credential): never read
+		 * back, regardless of session — see cfg_schema.h. */
+		return mcp__reply_status(c, f->cmd, f->seq,
+					 (uint8_t)MCP_ERR_AUTH);
+	}
+	if (((k->flags & CFG_F_SECRET) != 0U) && !c->authed) {
+		/* A real authenticated session, not merely session_ok(): a box
+		 * with auth disabled must still not leak secrets. */
 		return mcp__reply_status(c, f->cmd, f->seq,
 					 (uint8_t)MCP_ERR_AUTH);
 	}
@@ -666,17 +710,31 @@ static int h_cfg_commit(mcp_ctx_t *c, const mcp_frame_t *f)
 	}
 
 	rc = cfg_commit(c->w.cfg, &res);
-	if (rc != 0) {
+	/*
+	 * -EIO means the staged set validated and was applied to the live tree
+	 * but some keys did not reach non-volatile storage. Reporting that as a
+	 * bare error would tell the operator "nothing changed" and invite a
+	 * reboot that silently reverts the live change. Instead answer OK and
+	 * surface persist_errors so the tool can say "live now, N not saved".
+	 * Only a validation/cross-field failure (nothing applied) is an error.
+	 */
+	if ((rc != 0) && (rc != -EIO)) {
 		mcp__log(c, (uint8_t)LOGR_ERR, "cfg: commit rejected");
 		return mcp__reply_status(c, f->cmd, f->seq, cfg_err(rc));
 	}
 
-	mcp__log(c, (uint8_t)LOGR_NOTICE, "cfg: committed");
+	if (res.persist_errors != 0U) {
+		mcp__log(c, (uint8_t)LOGR_ERR,
+			 "cfg: applied to RAM, persist failed");
+	} else {
+		mcp__log(c, (uint8_t)LOGR_NOTICE, "cfg: committed");
+	}
 	p[0] = (uint8_t)MCP_OK;
 	bytes_put_le16(&p[1], res.applied);
 	bytes_put_le16(&p[3], res.reboot_keys);
 	bytes_put_le32(&p[5], res.reboot_groups);
-	return mcp__reply(c, f->cmd, f->seq, 9U);
+	bytes_put_le16(&p[9], res.persist_errors);
+	return mcp__reply(c, f->cmd, f->seq, 11U);
 }
 
 static int h_cfg_revert(mcp_ctx_t *c, const mcp_frame_t *f)
@@ -714,7 +772,9 @@ static int h_cfg_export(mcp_ctx_t *c, const mcp_frame_t *f)
 	flags = f->payload[4];
 	secrets = (flags & 0x01U) != 0U;
 
-	if (secrets && !session_ok(c)) {
+	if (secrets && !c->authed) {
+		/* A real session, not session_ok(): a box with auth disabled
+		 * must not hand out secrets. */
 		return mcp__reply_status(c, f->cmd, f->seq,
 					 (uint8_t)MCP_ERR_AUTH);
 	}
@@ -726,10 +786,24 @@ static int h_cfg_export(mcp_ctx_t *c, const mcp_frame_t *f)
 						 cfg_err(rc));
 		}
 		c->exp_active = true;
-	} else if (!c->exp_active || (off != c->exp.offset)) {
+		c->exp_prev_valid = false;
+	} else if (c->exp_active && (off == c->exp.offset)) {
+		/* Normal forward advance. */
+	} else if (c->exp_active && c->exp_prev_valid &&
+		   (off == c->exp_prev.offset)) {
+		/* Retransmit of the previous request after a lost response:
+		 * rewind the cursor to the start of that chunk and re-emit the
+		 * identical bytes (the CRC state is part of the snapshot). */
+		c->exp = c->exp_prev;
+	} else {
 		return mcp__reply_status(c, f->cmd, f->seq,
 					 (uint8_t)MCP_ERR_OFFSET);
 	}
+
+	/* Snapshot the cursor at the start of the chunk we are about to emit so
+	 * a repeat of this offset can rewind here. */
+	c->exp_prev = c->exp;
+	c->exp_prev_valid = true;
 
 	start = c->exp.offset;
 	rc = cfg_export_read(c->w.cfg, &c->exp, &p[6], MCP_MAX_PAYLOAD - 6U,
@@ -777,10 +851,40 @@ static int h_cfg_import(mcp_ctx_t *c, const mcp_frame_t *f)
 						 cfg_err(rc));
 		}
 		c->imp_active = true;
-	} else if (!c->imp_active || (off != c->imp.offset)) {
+		c->imp_prev_valid = false;
+		c->imp_done = false;
+	} else if (c->imp_done && (off == c->imp_done_off)) {
+		/* Retransmit of the committed final chunk after a lost
+		 * response: re-emit the cached result, do not re-commit. */
+		p[0] = (uint8_t)MCP_OK;
+		bytes_put_le32(&p[1], c->imp.offset);
+		p[5] = 1U;
+		bytes_put_le16(&p[6], c->imp_res.applied);
+		bytes_put_le32(&p[8], c->imp_res.reboot_groups);
+		bytes_put_le16(&p[12], c->imp_res.persist_errors);
+		return mcp__reply(c, f->cmd, f->seq, 14U);
+	} else if (c->imp_active && (off == c->imp.offset)) {
+		/* Normal forward advance. */
+	} else if (c->imp_active && c->imp_prev_valid &&
+		   (off == c->imp_prev_off)) {
+		/* Retransmit of the previous chunk after a lost response: we
+		 * already consumed those bytes, so absorb the repeat and just
+		 * re-report the current frontier — re-feeding would double the
+		 * parse state. */
+		p[0] = (uint8_t)MCP_OK;
+		bytes_put_le32(&p[1], c->imp.offset);
+		p[5] = 0U;
+		bytes_put_le16(&p[6], 0U);
+		bytes_put_le32(&p[8], 0U);
+		bytes_put_le16(&p[12], 0U);
+		return mcp__reply(c, f->cmd, f->seq, 14U);
+	} else {
 		return mcp__reply_status(c, f->cmd, f->seq,
 					 (uint8_t)MCP_ERR_OFFSET);
 	}
+
+	c->imp_prev_off = off;
+	c->imp_prev_valid = true;
 
 	rc = cfg_import_feed(c->w.cfg, &c->imp, &f->payload[5], dlen, NULL);
 	if (rc < 0) {
@@ -800,10 +904,15 @@ static int h_cfg_import(mcp_ctx_t *c, const mcp_frame_t *f)
 		}
 		rc = cfg_import_finish(c->w.cfg, &c->imp, &res);
 		c->imp_active = false;
-		if (rc != 0) {
+		/* As in CFG_COMMIT, -EIO means live-but-not-persisted; report
+		 * it through persist_errors, not as a failure. */
+		if ((rc != 0) && (rc != -EIO)) {
 			return mcp__reply_status(c, f->cmd, f->seq,
 						 cfg_err(rc));
 		}
+		c->imp_done = true;
+		c->imp_done_off = off;
+		c->imp_res = res;
 		mcp__log(c, (uint8_t)LOGR_NOTICE, "cfg: imported");
 		rc = 1;
 	}
@@ -813,7 +922,8 @@ static int h_cfg_import(mcp_ctx_t *c, const mcp_frame_t *f)
 	p[5] = (rc == 1) ? 1U : 0U;
 	bytes_put_le16(&p[6], res.applied);
 	bytes_put_le32(&p[8], res.reboot_groups);
-	return mcp__reply(c, f->cmd, f->seq, 12U);
+	bytes_put_le16(&p[12], res.persist_errors);
+	return mcp__reply(c, f->cmd, f->seq, 14U);
 }
 
 static int h_factory_reset(mcp_ctx_t *c, const mcp_frame_t *f)
@@ -853,6 +963,12 @@ static int status_pack(mcp_ctx_t *c, uint8_t g, uint8_t *p, size_t cap)
 	if (rc == 0) {
 		/* The version byte is mandatory: an empty group struct would be
 		 * indistinguishable from a truncated one on the wire. */
+		return -EPROTO;
+	}
+	if (rc > (int)cap) {
+		/* A callback that claims to have written past its buffer would
+		 * make us frame bytes it never produced. Refuse rather than
+		 * leak whatever follows the scratch. */
 		return -EPROTO;
 	}
 	return rc;
@@ -967,6 +1083,10 @@ static int h_diag(mcp_ctx_t *c, const mcp_frame_t *f)
 		}
 		n = c->w.diag_cb(c->w.diag_user, sub, &p[2],
 				 MCP_MAX_PAYLOAD - 2U);
+		if (n > (int)(MCP_MAX_PAYLOAD - 2U)) {
+			/* Same guard as status_pack: never frame past the cap. */
+			n = -EPROTO;
+		}
 	}
 
 	if (n < 0) {
@@ -1208,15 +1328,17 @@ static void handle_frame(mcp_ctx_t *c, const uint8_t *buf, size_t n)
 		return;
 	}
 
-	c->last_activity_ms = c->now_ms;
-
 	if (cmd_mutating(f.cmd) && !session_ok(c)) {
+		/* Refused before the activity timer is touched: an
+		 * unauthenticated peer spamming mutating commands must not keep
+		 * a lapsed session's idle timer alive. */
 		c->stats.auth_denied++;
 		(void)mcp__reply_status(c, f.cmd, f.seq,
 					(uint8_t)MCP_ERR_AUTH);
 		return;
 	}
 
+	c->last_activity_ms = c->now_ms;
 	(void)dispatch(c, &f);
 }
 
@@ -1326,6 +1448,8 @@ int mcp_init(mcp_ctx_t *c, const mcp_wiring_t *w)
 	mcp_dfu__reset(c);
 	c->dfu.erase_gran = (w->dfu_erase_gran != 0U) ? w->dfu_erase_gran
 						      : MCP_DFU_ERASE_GRAN;
+	c->dfu.write_block = (w->dfu_write_block != 0U) ? w->dfu_write_block
+							: MCP_DFU_WRITE_BLOCK;
 	return 0;
 }
 
@@ -1341,7 +1465,10 @@ void mcp_reset_session(mcp_ctx_t *c)
 	c->log_follow = false;
 	c->log_cursor = 0U;
 	c->exp_active = false;
+	c->exp_prev_valid = false;
 	c->imp_active = false;
+	c->imp_prev_valid = false;
+	c->imp_done = false;
 	c->tx_pending = false;
 	c->enc_len = 0U;
 	cobs_dec_reset(&c->dec);

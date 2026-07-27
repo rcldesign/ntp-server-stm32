@@ -4,21 +4,21 @@
  * Copyright (c) 2026 RCL Design
  * SPDX-License-Identifier: Apache-2.0
  *
- * See ui.h for the contract. Layout conventions used throughout:
+ * See ui.h for the contract. Layout convention used by every page:
  *
  *   row 0            header  — page title, live UTC time
  *   row 1            status  — stratum, lock, reference, SV count, alarm count
- *   rows 2..rows-3   body    — page specific
+ *   rows 2..         body    — page specific
  *   row rows-2       pager   — Home only: the §6.2 destination selector
  *   row rows-1       footer  — the keys that do something on this page
  *
  * Every write goes through the clipping surface primitives, so a surface too
  * small to hold the layout degrades to a truncated screen instead of a fault.
- * The host tests exercise a 4x16 grid for exactly that reason.
+ * The host tests render a 4x16 grid for exactly that reason.
  *
- * No stdio and no libm: all formatting is integer string-building (the sb_*
- * helpers) and the two float fields that reach the panel are scaled to integers
- * with an explicit non-finite guard.
+ * No stdio and no libm: all formatting is integer string building (the sb_*
+ * helpers below) and the four float fields that reach the panel are scaled to
+ * integers behind an explicit non-finite guard.
  */
 
 #include "ui/ui.h"
@@ -32,9 +32,9 @@
 
 /**
  * A cursor over a caller-owned char buffer that always leaves the result
- * NUL-terminated and never writes past the end. Overflow is silently truncated:
- * a panel field that does not fit is a cosmetic problem, and returning an error
- * from the middle of a layout would only produce a half-drawn screen.
+ * NUL-terminated and never writes past the end. Overflow truncates silently: a
+ * panel field that does not fit is a cosmetic problem, and an error return from
+ * the middle of a layout would only produce a half-drawn screen.
  */
 typedef struct {
 	char *b;
@@ -71,13 +71,27 @@ static void sb_str(sb_t *sb, const char *s)
 	}
 }
 
-/** Repeat @p c @p n times. */
-static void sb_rep(sb_t *sb, char c, size_t n)
+/** Append @p s with a-z folded to A-Z (panel headings, ASCII only). */
+static void sb_upper(sb_t *sb, const char *s)
 {
-	size_t i;
+	if (s == NULL) {
+		return;
+	}
+	while (*s != '\0') {
+		char c = *s++;
 
-	for (i = 0u; i < n; i++) {
+		if (c >= 'a' && c <= 'z') {
+			c = (char)(c - 'a' + 'A');
+		}
 		sb_ch(sb, c);
+	}
+}
+
+/** Pad with spaces until the cursor sits at column @p col. */
+static void sb_col(sb_t *sb, size_t col)
+{
+	while (sb->len < col) {
+		sb_ch(sb, ' ');
 	}
 }
 
@@ -111,7 +125,7 @@ static void sb_i64(sb_t *sb, int64_t v)
 
 	if (v < 0) {
 		sb_ch(sb, '-');
-		/* Negate in unsigned space so INT64_MIN is representable. */
+		/* Negate in unsigned space so INT64_MIN stays representable. */
 		mag = (uint64_t)(-(v + 1)) + 1u;
 	} else {
 		mag = (uint64_t)v;
@@ -152,11 +166,45 @@ static void sb_fix(sb_t *sb, int64_t scaled, unsigned int dec)
 	}
 }
 
+/** Append @p txt so that it ends at column @p end (right-justified field). */
+static void sb_rjust(sb_t *sb, const char *txt, size_t end)
+{
+	size_t n = (txt != NULL) ? strlen(txt) : 0u;
+
+	while (sb->len + n < end) {
+		sb_ch(sb, ' ');
+	}
+	sb_str(sb, txt);
+}
+
+/** Right-justified signed integer. */
+static void sb_rjust_i(sb_t *sb, int64_t v, size_t end)
+{
+	char tmp[24];
+	sb_t t;
+
+	sb_init(&t, tmp, sizeof(tmp));
+	sb_i64(&t, v);
+	sb_rjust(sb, tmp, end);
+}
+
+/** Right-justified fixed-point value with a trailing unit, e.g. "3.300 V". */
+static void sb_rjust_fix(sb_t *sb, int64_t scaled, unsigned int dec,
+			 const char *unit, size_t end)
+{
+	char tmp[32];
+	sb_t t;
+
+	sb_init(&t, tmp, sizeof(tmp));
+	sb_fix(&t, scaled, dec);
+	sb_str(&t, unit);
+	sb_rjust(sb, tmp, end);
+}
+
 /**
- * Engineering-formatted time interval in nanoseconds, e.g. "-12 ns",
- * "1.234 us", "12.345 ms", "1.234 s". Chosen over a fixed unit because the
- * panel shows PPS residuals (tens of ns) and holdover estimates (milliseconds)
- * in adjacent fields.
+ * Engineering-formatted interval in nanoseconds: "-12 ns", "1.234 us",
+ * "12.345 ms", "1.234 s". A single unit will not do — the panel puts PPS
+ * residuals (tens of ns) next to holdover estimates (milliseconds).
  */
 static void sb_ns(sb_t *sb, int64_t ns)
 {
@@ -166,11 +214,10 @@ static void sb_ns(sb_t *sb, int64_t ns)
 		sb_i64(sb, ns);
 		sb_str(sb, " ns");
 	} else if (mag < 10000000u) {
+		/* ns printed with 3 decimals *is* microseconds. */
 		sb_fix(sb, ns, 3u);
-		sb->len = sb->len; /* no-op: keeps the branch symmetric */
-		/* value was in ns; dividing by 1000 is the fixed point itself */
 		sb_str(sb, " us");
-	} else if (mag < 10000000000u) {
+	} else if (mag < UINT64_C(10000000000)) {
 		sb_fix(sb, ns / 1000, 3u);
 		sb_str(sb, " ms");
 	} else {
@@ -179,7 +226,7 @@ static void sb_ns(sb_t *sb, int64_t ns)
 	}
 }
 
-/** "HH:MM:SS" from a second count, hours unbounded. */
+/** "HH:MM:SS" from a second count; hours are unbounded. */
 static void sb_hms(sb_t *sb, uint32_t secs)
 {
 	sb_upad(sb, secs / 3600u, 2u);
@@ -189,7 +236,7 @@ static void sb_hms(sb_t *sb, uint32_t secs)
 	sb_upad(sb, secs % 60u, 2u);
 }
 
-/** "3d 04:12:33" or "04:12:33" when under a day. */
+/** "3d 04:12:33", or "04:12:33" when under a day. */
 static void sb_uptime(sb_t *sb, uint32_t secs)
 {
 	uint32_t days = secs / 86400u;
@@ -203,16 +250,16 @@ static void sb_uptime(sb_t *sb, uint32_t secs)
 
 /**
  * Scientific notation for the ADEV fields, e.g. "1.20e-11". There is no libm
- * here, so the exponent is found by repeated scaling; four decades either side
- * of unity covers every value an OCXO or rubidium can produce (1e-14..1e-6).
+ * here, so the exponent is found by repeated scaling; the loop bounds cover
+ * 1e-30..1e+30, far outside anything an OCXO or rubidium can produce.
  */
 static void sb_sci(sb_t *sb, float v)
 {
 	int exp10 = 0;
 	int mant;
 
-	/* Reject NaN, infinity, zero and negatives: an Allan deviation is a
-	 * positive real, and "--" is the honest rendering of anything else. */
+	/* An Allan deviation is a positive real. NaN, infinity, zero and
+	 * negatives all render as "--" rather than as a made-up number. */
 	if (!(v > 0.0f) || !(v < 1.0e30f)) {
 		sb_str(sb, "--");
 		return;
@@ -227,7 +274,7 @@ static void sb_sci(sb_t *sb, float v)
 		exp10--;
 	}
 
-	mant = (int)(v * 100.0f + 0.5f);
+	mant = (int)((v * 100.0f) + 0.5f);
 	if (mant >= 1000) { /* rounding carried past 9.995 */
 		mant = 100;
 		exp10++;
@@ -246,8 +293,8 @@ static void sb_sci(sb_t *sb, float v)
 
 /**
  * Scale a float by 1000 into an int32, mapping every non-finite or absurd input
- * to 0. The quality block carries four floats (sigma, mean, freq error, ADEV);
- * a NaN in any of them must produce a boring cell, not a wild one.
+ * to 0. The quality block carries four floats; a NaN in any of them must
+ * produce a boring cell, not a wild one.
  */
 static int32_t f_milli(float v)
 {
@@ -360,11 +407,11 @@ size_t ui_surface_fill(ui_surface_t *s, uint8_t row, uint8_t col, size_t len,
 
 int ui_surface_hint(ui_surface_t *s, const ui_hint_t *h)
 {
-	if (s == NULL || h == NULL || h->kind == UI_HINT_NONE ||
-	    h->kind >= UI_HINT__COUNT) {
+	if (s == NULL || h == NULL || h->kind == (uint8_t)UI_HINT_NONE ||
+	    h->kind >= (uint8_t)UI_HINT__COUNT) {
 		return -EINVAL;
 	}
-	if (s->hint_count >= UI_SURF_MAX_HINTS) {
+	if (s->hint_count >= (uint8_t)UI_SURF_MAX_HINTS) {
 		s->hint_dropped++;
 		return -ENOSPC;
 	}
@@ -380,8 +427,8 @@ bool ui_surface_is_bignum_tail(const ui_surface_t *s, uint8_t row)
 		return false;
 	}
 	for (i = 0u; i < s->hint_count; i++) {
-		if (s->hint[i].kind == UI_HINT_BIGNUM &&
-		    s->hint[i].row + 1u == row) {
+		if (s->hint[i].kind == (uint8_t)UI_HINT_BIGNUM &&
+		    (uint8_t)(s->hint[i].row + 1u) == row) {
 			return true;
 		}
 	}
@@ -395,10 +442,11 @@ size_t ui_surface_row_text(const ui_surface_t *s, uint8_t row, char *buf,
 	size_t n;
 	size_t i;
 
-	if (!surf_bound(s) || buf == NULL || cap == 0u || row >= s->rows) {
-		if (buf != NULL && cap > 0u) {
-			buf[0] = '\0';
-		}
+	if (buf == NULL || cap == 0u) {
+		return 0u;
+	}
+	buf[0] = '\0';
+	if (!surf_bound(s) || row >= s->rows) {
 		return 0u;
 	}
 
@@ -417,7 +465,6 @@ size_t ui_surface_row_text(const ui_surface_t *s, uint8_t row, char *buf,
 	return n;
 }
 
-/** True when the two surfaces describe the same grid. */
 static bool surf_same_geom(const ui_surface_t *a, const ui_surface_t *b)
 {
 	return a->rows == b->rows && a->cols == b->cols;
@@ -434,7 +481,7 @@ int ui_surface_diff_rows(const ui_surface_t *cur, const ui_surface_t *prev,
 	}
 	if (prev == NULL || !surf_bound(prev)) {
 		*out = (cur->rows >= 32u) ? 0xFFFFFFFFu
-					  : ((1u << cur->rows) - 1u);
+					  : (((uint32_t)1u << cur->rows) - 1u);
 		return 0;
 	}
 	if (!surf_same_geom(cur, prev)) {
@@ -502,7 +549,7 @@ const char *ui_page_name(uint8_t page)
 		"ALARMS", "MENU",     "EDIT",   "CONFIRM",
 	};
 
-	return (page < UI_PAGE__COUNT) ? names[page] : "?";
+	return (page < (uint8_t)UI_PAGE__COUNT) ? names[page] : "?";
 }
 
 const char *ui_menu_name(uint8_t item)
@@ -512,7 +559,7 @@ const char *ui_menu_name(uint8_t item)
 		"Factory reset",
 	};
 
-	return (item < UI_MENU__COUNT) ? names[item] : "?";
+	return (item < (uint8_t)UI_MENU__COUNT) ? names[item] : "?";
 }
 
 const char *ui_gnss_sys_name(uint8_t sys)
@@ -521,7 +568,7 @@ const char *ui_gnss_sys_name(uint8_t sys)
 		"GPS", "GAL", "GLO", "BDS", "SBS", "QZS", "OTH",
 	};
 
-	return (sys < UI_GNSS__COUNT) ? names[sys] : "???";
+	return (sys < (uint8_t)UI_GNSS__COUNT) ? names[sys] : "???";
 }
 
 const char *ui_ant_state_name(uint8_t st)
@@ -530,7 +577,7 @@ const char *ui_ant_state_name(uint8_t st)
 		"UNKNOWN", "OK", "OPEN", "SHORT", "OFF",
 	};
 
-	return (st < UI_ANT__COUNT) ? names[st] : "?";
+	return (st < (uint8_t)UI_ANT__COUNT) ? names[st] : "?";
 }
 
 const char *ui_ptp_state_name(uint8_t st)
@@ -539,12 +586,13 @@ const char *ui_ptp_state_name(uint8_t st)
 		"DISABLED", "LISTENING", "MASTER", "PASSIVE",
 	};
 
-	return (st < UI_PTP__COUNT) ? names[st] : "?";
+	return (st < (uint8_t)UI_PTP__COUNT) ? names[st] : "?";
 }
 
 static const uint8_t ui_home_dests[UI_HOME_DEST_COUNT] = {
-	UI_PAGE_SKYPLOT, UI_PAGE_CLOCKS, UI_PAGE_NETWORK,
-	UI_PAGE_POWER,   UI_PAGE_ALARMS, UI_PAGE_MENU,
+	(uint8_t)UI_PAGE_SKYPLOT, (uint8_t)UI_PAGE_CLOCKS,
+	(uint8_t)UI_PAGE_NETWORK, (uint8_t)UI_PAGE_POWER,
+	(uint8_t)UI_PAGE_ALARMS,  (uint8_t)UI_PAGE_MENU,
 };
 
 /** Short pager label for a Home destination. */
@@ -554,13 +602,13 @@ static const char *home_dest_tag(uint8_t i)
 		"SKY", "CLOCKS", "NET", "POWER", "ALARMS", "MENU",
 	};
 
-	return (i < UI_HOME_DEST_COUNT) ? tags[i] : "?";
+	return (i < (uint8_t)UI_HOME_DEST_COUNT) ? tags[i] : "?";
 }
 
 ui_page_t ui_home_dest(uint8_t i)
 {
-	return (i < UI_HOME_DEST_COUNT) ? (ui_page_t)ui_home_dests[i]
-					: UI_PAGE_HOME;
+	return (i < (uint8_t)UI_HOME_DEST_COUNT) ? (ui_page_t)ui_home_dests[i]
+						 : UI_PAGE_HOME;
 }
 
 const uint16_t ui_timeout_choices[UI_TIMEOUT_CHOICES] = {
@@ -583,8 +631,8 @@ void ui_cfg_default(ui_cfg_t *cfg)
 
 static bool cfg_valid(const ui_cfg_t *c)
 {
-	return c->brightness_pct >= UI_BRIGHTNESS_MIN_PCT &&
-	       c->brightness_pct <= UI_BRIGHTNESS_MAX_PCT;
+	return c->brightness_pct >= (uint8_t)UI_BRIGHTNESS_MIN_PCT &&
+	       c->brightness_pct <= (uint8_t)UI_BRIGHTNESS_MAX_PCT;
 }
 
 int ui_init(ui_ctx_t *ctx, const ui_cfg_t *cfg)
@@ -645,7 +693,8 @@ int ui_action_get(ui_ctx_t *ctx, ui_action_t *out)
 	}
 
 	*out = ctx->q[ctx->q_head];
-	ctx->q_head = (uint16_t)((ctx->q_head + 1u) % (uint16_t)UI_ACTION_QUEUE_LEN);
+	ctx->q_head =
+		(uint16_t)((ctx->q_head + 1u) % (uint16_t)UI_ACTION_QUEUE_LEN);
 	ctx->q_len--;
 	return 0;
 }
@@ -719,11 +768,11 @@ static uint8_t sel_move(uint8_t sel, int32_t d, uint8_t count)
 	if (count == 0u) {
 		return 0u;
 	}
-	v = (int32_t)sel + d;
-	/* Wrap into [0, count) without a modulo of a possibly negative value. */
-	v %= (int32_t)count;
+	v = (int32_t)sel + (d % (int32_t)count);
 	if (v < 0) {
 		v += (int32_t)count;
+	} else if (v >= (int32_t)count) {
+		v -= (int32_t)count;
 	}
 	return (uint8_t)v;
 }
@@ -751,11 +800,6 @@ uint16_t ui_backlight_permille(const ui_ctx_t *ctx)
 	return (uint16_t)((base * bl_step_permille(ctx->bl_step)) / 1000u);
 }
 
-static void ui_sleep(ui_ctx_t *ctx)
-{
-	ctx->awake = false;
-}
-
 /* ===================================================================== *
  *  Menu item helpers
  * ===================================================================== */
@@ -775,7 +819,7 @@ static int32_t menu_value(const ui_ctx_t *ctx, uint8_t item)
 	}
 }
 
-/** Step an edit value by @p d detents, saturating (brightness) or wrapping. */
+/** Step an edit value by @p d detents: brightness saturates, timeout wraps. */
 static int32_t menu_step(uint8_t item, int32_t cur, int32_t d)
 {
 	int32_t v;
@@ -784,7 +828,7 @@ static int32_t menu_step(uint8_t item, int32_t cur, int32_t d)
 
 	switch (item) {
 	case UI_MENU_BRIGHTNESS:
-		v = cur + d * (int32_t)UI_BRIGHTNESS_STEP_PCT;
+		v = cur + (d * (int32_t)UI_BRIGHTNESS_STEP_PCT);
 		if (v < (int32_t)UI_BRIGHTNESS_MIN_PCT) {
 			v = (int32_t)UI_BRIGHTNESS_MIN_PCT;
 		}
@@ -819,7 +863,17 @@ static uint8_t menu_confirm_stages(uint8_t item)
 	}
 }
 
-/** Commit an edit: update the local copy of cfg and request the same of glue. */
+static void identify_set(ui_ctx_t *ctx, bool on)
+{
+	if (ctx->identify == on) {
+		return;
+	}
+	ctx->identify = on;
+	ctx->identify_ms = 0u;
+	action_emit(ctx, UI_ACTION_IDENTIFY, on ? 1 : 0);
+}
+
+/** Commit an edit: update the local copy of cfg and ask the glue to persist. */
 static void menu_commit(ui_ctx_t *ctx, uint8_t item, int32_t val)
 {
 	switch (item) {
@@ -831,8 +885,8 @@ static void menu_commit(ui_ctx_t *ctx, uint8_t item, int32_t val)
 			val = (int32_t)UI_BRIGHTNESS_MAX_PCT;
 		}
 		ctx->cfg.brightness_pct = (uint8_t)val;
-		/* Editing brightness while the panel is dimmed would otherwise
-		 * show no effect at all, so a commit also restores full step. */
+		/* Committing a brightness while the panel sits at the Dim or
+		 * Night step would otherwise show no effect at all. */
 		ctx->bl_step = (uint8_t)UI_BL_FULL;
 		action_emit(ctx, UI_ACTION_SET_BRIGHTNESS, val);
 		break;
@@ -846,16 +900,6 @@ static void menu_commit(ui_ctx_t *ctx, uint8_t item, int32_t val)
 	default:
 		break;
 	}
-}
-
-static void identify_set(ui_ctx_t *ctx, bool on)
-{
-	if (ctx->identify == on) {
-		return;
-	}
-	ctx->identify = on;
-	ctx->identify_ms = 0u;
-	action_emit(ctx, UI_ACTION_IDENTIFY, on ? 1 : 0);
 }
 
 /** Activate the selected menu row. */
@@ -939,13 +983,14 @@ static void nav_move(ui_ctx_t *ctx, int32_t d)
 
 	/*
 	 * Scrolling page. The content length is only known at render time, so
-	 * the scroll offset is advanced optimistically and clamped by the
-	 * renderer; that keeps ui_input() independent of the health snapshot.
+	 * the offset advances optimistically here and the renderer clamps it;
+	 * that keeps ui_input() independent of the health snapshot.
 	 */
 	if (d < 0) {
 		uint32_t back = (uint32_t)(-d);
 
-		f->scroll = (f->scroll > back) ? (uint8_t)(f->scroll - back) : 0u;
+		f->scroll = (f->scroll > back) ? (uint8_t)(f->scroll - back)
+					       : 0u;
 	} else {
 		uint32_t fwd = (uint32_t)f->scroll + (uint32_t)d;
 
@@ -976,12 +1021,11 @@ static void nav_enter(ui_ctx_t *ctx)
 		if (f->sel == 0u) {
 			nav_pop(ctx);
 		} else if ((uint8_t)(f->stage + 1u) < menu_confirm_stages(item)) {
-			uint8_t stage = (uint8_t)(f->stage + 1u);
-
-			/* Second ask defaults to "No" on purpose: a double
-			 * confirmation that both defaults to Yes is one
-			 * dialog, not two. */
-			nav_push(ctx, UI_PAGE_CONFIRM, item, stage);
+			/* The second ask defaults to "No" on purpose: a double
+			 * confirmation that starts on Yes is one dialog with an
+			 * extra keypress, not two decisions. */
+			nav_push(ctx, UI_PAGE_CONFIRM, item,
+				 (uint8_t)(f->stage + 1u));
 		} else {
 			confirm_fire(ctx, item);
 		}
@@ -997,39 +1041,46 @@ static void nav_enter(ui_ctx_t *ctx)
 	}
 }
 
-/** Map a touch coordinate to a navigation event. */
-static void nav_touch(ui_ctx_t *ctx, uint16_t x, uint16_t y, uint8_t rows,
-		      uint8_t cell_h)
+/** Open the menu, or leave it if it is already on top (the MENU key). */
+static void nav_toggle_menu(ui_ctx_t *ctx)
+{
+	bool on_menu = (top(ctx)->page == (uint8_t)UI_PAGE_MENU);
+
+	nav_home(ctx);
+	if (!on_menu) {
+		nav_push(ctx, UI_PAGE_MENU, 0u, 0u);
+	}
+}
+
+/**
+ * Map a touch coordinate onto a navigation event.
+ *
+ * The geometry comes from the last ui_render(); a touch that arrives before the
+ * first frame has been drawn still wakes the panel but cannot be located, so it
+ * is dropped rather than guessed at.
+ */
+static void nav_touch(ui_ctx_t *ctx, uint16_t y)
 {
 	ui_frame_t *f = top(ctx);
+	uint8_t rows = ctx->geom_rows;
+	uint8_t cell_h = ctx->geom_cell_h;
 	uint8_t row;
 	uint8_t count;
-	uint8_t body_first = 2u;
 	uint8_t body_last;
 
-	(void)x;
-
-	if (cell_h == 0u || rows < 4u) {
+	if (rows < 4u || cell_h == 0u) {
 		return;
 	}
-	row = (uint8_t)(y / cell_h);
-	if (row >= rows) {
-		row = (uint8_t)(rows - 1u);
-	}
+
+	row = (uint16_t)(y / cell_h) >= rows ? (uint8_t)(rows - 1u)
+					     : (uint8_t)(y / cell_h);
 
 	if (row == 0u) {
-		/* Title bar is the back affordance. */
-		nav_pop(ctx);
+		nav_pop(ctx); /* the title bar is the back affordance */
 		return;
 	}
 	if (row == (uint8_t)(rows - 1u)) {
-		/* Footer is the menu affordance, mirroring the MENU key. */
-		if (f->page == (uint8_t)UI_PAGE_MENU) {
-			nav_home(ctx);
-		} else {
-			nav_home(ctx);
-			nav_push(ctx, UI_PAGE_MENU, 0u, 0u);
-		}
+		nav_toggle_menu(ctx); /* the footer mirrors the MENU key */
 		return;
 	}
 
@@ -1046,18 +1097,18 @@ static void nav_touch(ui_ctx_t *ctx, uint16_t x, uint16_t y, uint8_t rows,
 		}
 		return;
 	}
-	if (row < body_first || row > body_last) {
+	if (row < 2u || row > body_last) {
 		return;
 	}
 
 	{
-		uint8_t idx = (uint8_t)(row - body_first + f->scroll);
+		uint8_t idx = (uint8_t)(row - 2u + f->scroll);
 
 		if (idx >= count) {
 			return;
 		}
 		if (idx == f->sel) {
-			nav_enter(ctx); /* second tap on the same row opens it */
+			nav_enter(ctx); /* second tap on a row opens it */
 		} else {
 			f->sel = idx;
 		}
@@ -1069,7 +1120,8 @@ int ui_input(ui_ctx_t *ctx, const ui_input_t *in)
 	bool woke = false;
 
 	if (ctx == NULL || in == NULL || !ctx->started ||
-	    in->kind >= (uint8_t)UI_IN__COUNT || in->kind == (uint8_t)UI_IN_NONE) {
+	    in->kind == (uint8_t)UI_IN_NONE ||
+	    in->kind >= (uint8_t)UI_IN__COUNT) {
 		return -EINVAL;
 	}
 
@@ -1089,8 +1141,9 @@ int ui_input(ui_ctx_t *ctx, const ui_input_t *in)
 		if (ctx->awake) {
 			ctx->idle_ms += in->dt_ms;
 			if (ctx->cfg.timeout_s != 0u &&
-			    ctx->idle_ms >= (uint32_t)ctx->cfg.timeout_s * 1000u) {
-				ui_sleep(ctx);
+			    ctx->idle_ms >=
+				    (uint32_t)ctx->cfg.timeout_s * 1000u) {
+				ctx->awake = false;
 			}
 		}
 		return 0;
@@ -1106,9 +1159,11 @@ int ui_input(ui_ctx_t *ctx, const ui_input_t *in)
 
 	if (woke) {
 		/*
-		 * The waking event is consumed. Touch and proximity are the two
-		 * documented "wake to Home" surfaces; a button wakes in place so
-		 * a field engineer does not lose the page they were reading.
+		 * The waking event is consumed: the touch that lights the
+		 * screen must not also press whatever was underneath it. Touch
+		 * and proximity are the two documented "wake to Home"
+		 * surfaces; a button wakes in place so a field engineer does
+		 * not lose the page they were reading.
 		 */
 		if (in->kind == (uint8_t)UI_IN_TOUCH ||
 		    in->kind == (uint8_t)UI_IN_PROX) {
@@ -1141,21 +1196,17 @@ int ui_input(ui_ctx_t *ctx, const ui_input_t *in)
 		nav_enter(ctx);
 		break;
 	case UI_IN_FN:
-		if (top(ctx)->page == (uint8_t)UI_PAGE_MENU) {
-			nav_home(ctx);
-		} else {
-			nav_home(ctx);
-			nav_push(ctx, UI_PAGE_MENU, 0u, 0u);
-		}
+		nav_toggle_menu(ctx);
 		break;
 	case UI_IN_TOUCH:
-		nav_touch(ctx, in->x, in->y, 0u, 0u);
+		nav_touch(ctx, in->y);
 		break;
 	case UI_IN_PROX:
-		/* Awake already: presence only defers the blank timer. */
+		/* Already awake: presence only defers the blank timer. */
 		break;
 	case UI_IN_DISPLAY:
-		ctx->bl_step = (uint8_t)((ctx->bl_step + 1u) % (uint8_t)UI_BL__COUNT);
+		ctx->bl_step =
+			(uint8_t)((ctx->bl_step + 1u) % (uint8_t)UI_BL__COUNT);
 		break;
 	case UI_IN_ACK:
 		action_emit(ctx, UI_ACTION_ACK_ALARMS, UI_ALARM_ALL);
@@ -1196,20 +1247,11 @@ int ui_tick(ui_ctx_t *ctx, uint32_t dt_ms)
 	return ui_input(ctx, &in);
 }
 
-/*
- * Touch needs the surface geometry, which ui_input() does not have. The event
- * is therefore staged here and resolved against the last rendered geometry.
- * Keeping the pixel->cell mapping out of ui_input()'s signature is what lets
- * the glue post touches from the I2C worker without owning a surface.
- */
-static uint8_t ui_touch_rows = 20u;
-static uint8_t ui_touch_cell_h = 16u;
-
 /* ===================================================================== *
  *  Chrome
  * ===================================================================== */
 
-/** Right-align @p str so that it ends at column @p right_col inclusive. */
+/** Right-align @p str so that its last character sits at @p right_col. */
 static void put_right(ui_surface_t *s, uint8_t row, uint8_t right_col,
 		      const char *str, uint8_t attr)
 {
@@ -1224,18 +1266,15 @@ static void put_right(ui_surface_t *s, uint8_t row, uint8_t right_col,
 	(void)ui_surface_put(s, row, col, str, attr);
 }
 
-/** "Label ................ value", value right-aligned in a field of width. */
+/** Label at @p col, value right-aligned inside a field @p width wide. */
 static void kv(ui_surface_t *s, uint8_t row, uint8_t col, uint8_t width,
 	       const char *label, const char *value, uint8_t vattr)
 {
-	uint8_t right;
-
 	if (width == 0u) {
 		return;
 	}
 	(void)ui_surface_put(s, row, col, label, UI_ATTR_DIM);
-	right = (uint8_t)(col + width - 1u);
-	put_right(s, row, right, value, vattr);
+	put_right(s, row, (uint8_t)(col + width - 1u), value, vattr);
 }
 
 static void draw_rule(ui_surface_t *s, uint8_t row)
@@ -1326,18 +1365,17 @@ static void draw_status(const quality_block_t *q, const ui_health_t *h,
 	}
 
 	sb_init(&sb, buf, sizeof(buf));
-	sb_str(&sb, "S");
+	sb_ch(&sb, 'S');
 	sb_u32(&sb, q->stratum);
 	sb_str(&sb, "  ");
-	sb_str(&sb, quality_lock_state_name(q->lock_state));
+	sb_upper(&sb, quality_lock_state_name(q->lock_state));
 	sb_str(&sb, "  ");
-	sb_str(&sb, quality_ref_name(q->active_ref));
+	sb_upper(&sb, quality_ref_name(q->active_ref));
 	sb_str(&sb, "  SV ");
 	sb_u32(&sb, q->gnss_sv_used);
 	sb_ch(&sb, '/');
 	sb_u32(&sb, q->gnss_sv_visible);
 
-	attr = UI_ATTR_NORMAL;
 	if (q->stratum == QUALITY_STRATUM_PRIMARY) {
 		attr = UI_ATTR_OK;
 	} else if (q->holdover) {
@@ -1385,15 +1423,13 @@ static void draw_pager(const ui_ctx_t *ctx, ui_surface_t *s)
 		if ((size_t)col + n + 2u > (size_t)s->cols) {
 			break;
 		}
+		if (selected) {
+			(void)ui_surface_fill(s, row, col, n + 2u, ' ',
+					      UI_ATTR_INVERSE);
+		}
 		(void)ui_surface_put(s, row, (uint8_t)(col + 1u), tag,
 				     selected ? UI_ATTR_INVERSE : UI_ATTR_DIM);
-		if (selected) {
-			(void)ui_surface_fill(s, row, col, 1u, ' ',
-					      UI_ATTR_INVERSE);
-			(void)ui_surface_fill(s, row, (uint8_t)(col + 1u + n),
-					      1u, ' ', UI_ATTR_INVERSE);
-		}
-		col = (uint8_t)(col + n + 3u);
+		col = (uint8_t)((size_t)col + n + 3u);
 	}
 }
 
@@ -1401,46 +1437,54 @@ static void draw_pager(const ui_ctx_t *ctx, ui_surface_t *s)
  *  Pages
  * ===================================================================== */
 
-/** First body row; pages must not draw above it. */
+/** First body row; no page draws above it. */
 #define BODY_TOP 2u
 
-/** Last usable body row for a page with a footer (and pager, if any). */
+/**
+ * Last body row available to a page, given the footer (and the Home pager).
+ * Never returns less than BODY_TOP, so a caller can always write one row.
+ */
 static uint8_t body_bottom(const ui_surface_t *s, bool with_pager)
 {
-	uint8_t reserved = with_pager ? 2u : 1u;
+	unsigned int reserved = with_pager ? 2u : 1u;
 
-	if (s->rows <= BODY_TOP + reserved) {
-		return BODY_TOP;
+	if ((unsigned int)s->rows <= BODY_TOP + reserved) {
+		return (uint8_t)BODY_TOP;
 	}
-	return (uint8_t)(s->rows - reserved - 1u);
+	return (uint8_t)((unsigned int)s->rows - reserved - 1u);
 }
 
-static void page_home(const ui_ctx_t *ctx, const quality_block_t *q,
-		      const ui_health_t *h, ui_surface_t *s)
+/** Half-width of the two-column key/value grid used by several pages. */
+static uint8_t grid_half(const ui_surface_t *s)
+{
+	return (uint8_t)((s->cols > 4u) ? ((unsigned int)(s->cols - 2u) / 2u)
+					: 1u);
+}
+
+static void page_home(const quality_block_t *q, const ui_health_t *h,
+		      ui_surface_t *s)
 {
 	char buf[40];
 	sb_t sb;
 	ui_hint_t hint;
-	uint8_t half = (uint8_t)((s->cols > 4u) ? ((s->cols - 2u) / 2u) : 1u);
+	uint8_t half = grid_half(s);
 	uint8_t colb = (uint8_t)(1u + half);
 	uint8_t r;
 
-	(void)ctx;
-
-	/* Big clock, spanning rows 2 and 3. */
+	/* Big clock, occupying the pixel band of rows 2 and 3. */
 	sb_init(&sb, buf, sizeof(buf));
 	fmt_clock(&sb, &h->utc);
-	(void)ui_surface_put(s, BODY_TOP, 2u, buf, UI_ATTR_ACCENT);
+	(void)ui_surface_put(s, (uint8_t)BODY_TOP, 2u, buf, UI_ATTR_ACCENT);
 
 	memset(&hint, 0, sizeof(hint));
 	hint.kind = (uint8_t)UI_HINT_BIGNUM;
-	hint.row = BODY_TOP;
+	hint.row = (uint8_t)BODY_TOP;
 	hint.col = 2u;
 	hint.len = (uint8_t)strlen(buf);
 	hint.attr = UI_ATTR_ACCENT;
 	(void)ui_surface_hint(s, &hint);
 
-	r = BODY_TOP + 2u;
+	r = (uint8_t)(BODY_TOP + 2u);
 	sb_init(&sb, buf, sizeof(buf));
 	fmt_date(&sb, &h->utc);
 	(void)ui_surface_put(s, r, 2u, buf, UI_ATTR_DIM);
@@ -1457,14 +1501,18 @@ static void page_home(const ui_ctx_t *ctx, const quality_block_t *q,
 	sb_init(&sb, buf, sizeof(buf));
 	sb_u32(&sb, q->stratum);
 	kv(s, r, 1u, half, "Stratum", buf, UI_ATTR_NORMAL);
-	kv(s, r, colb, half, "Reference", quality_ref_name(q->active_ref),
-	   UI_ATTR_NORMAL);
+	sb_init(&sb, buf, sizeof(buf));
+	sb_upper(&sb, quality_ref_name(q->active_ref));
+	kv(s, r, colb, half, "Reference", buf, UI_ATTR_NORMAL);
 
 	r++;
-	kv(s, r, 1u, half, "Lock", quality_lock_state_name(q->lock_state),
-	   (q->lock_state == QUALITY_LOCK_LOCKED) ? UI_ATTR_OK : UI_ATTR_WARN);
+	sb_init(&sb, buf, sizeof(buf));
+	sb_upper(&sb, quality_lock_state_name(q->lock_state));
+	kv(s, r, 1u, half, "Lock", buf,
+	   (q->lock_state == (uint8_t)QUALITY_LOCK_LOCKED) ? UI_ATTR_OK
+							   : UI_ATTR_WARN);
 	kv(s, r, colb, half, "Antenna", ui_ant_state_name(h->ant_state),
-	   (h->ant_state == UI_ANT_OK) ? UI_ATTR_OK : UI_ATTR_WARN);
+	   (h->ant_state == (uint8_t)UI_ANT_OK) ? UI_ATTR_OK : UI_ATTR_WARN);
 
 	r++;
 	sb_init(&sb, buf, sizeof(buf));
@@ -1505,7 +1553,7 @@ static void page_home(const ui_ctx_t *ctx, const quality_block_t *q,
 }
 
 /**
- * Fill @p out with indices of the @p want strongest satellites by C/N0.
+ * Fill @p out with the indices of the @p want strongest satellites by C/N0.
  * Partial selection sort over a bounded array — no allocation, no qsort.
  */
 static uint8_t sky_top(const ui_health_t *h, uint8_t *out, uint8_t want)
@@ -1539,7 +1587,7 @@ static uint8_t sky_top(const ui_health_t *h, uint8_t *out, uint8_t want)
 	return n;
 }
 
-static void page_sky(const ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
+static void page_sky(const ui_health_t *h, ui_surface_t *s)
 {
 	char buf[64];
 	sb_t sb;
@@ -1550,10 +1598,9 @@ static void page_sky(const ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
 							   : h->sv_count;
 	uint8_t ntop;
 	uint8_t i;
-	uint8_t r = BODY_TOP;
+	uint8_t r = (uint8_t)BODY_TOP;
 	uint8_t last = body_bottom(s, false);
 
-	(void)ctx;
 	memset(used, 0, sizeof(used));
 	memset(vis, 0, sizeof(vis));
 
@@ -1582,7 +1629,7 @@ static void page_sky(const ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
 		sb_u32(&sb, vis[i]);
 		sb_str(&sb, "  ");
 	}
-	if (buf[0] == '\0') {
+	if (sb.len == 0u) {
 		sb_str(&sb, "no satellites tracked");
 	}
 	(void)ui_surface_put(s, r, 1u, buf, UI_ATTR_NORMAL);
@@ -1599,14 +1646,23 @@ static void page_sky(const ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
 		sb_str(&sb, " mm");
 	}
 	(void)ui_surface_put(s, r, 1u, buf,
-			     (h->ant_state == UI_ANT_OK) ? UI_ATTR_NORMAL
-							 : UI_ATTR_WARN);
+			     (h->ant_state == (uint8_t)UI_ANT_OK)
+				     ? UI_ATTR_NORMAL
+				     : UI_ATTR_WARN);
 
 	r++;
 	draw_rule(s, r);
+
 	r++;
-	(void)ui_surface_put(s, r, 1u, "SYS  SVID    AZ    EL  C/N0  USE",
-			     UI_ATTR_DIM);
+	sb_init(&sb, buf, sizeof(buf));
+	sb_str(&sb, "SYS");
+	sb_rjust(&sb, "SVID", 10u);
+	sb_rjust(&sb, "AZ", 16u);
+	sb_rjust(&sb, "EL", 22u);
+	sb_rjust(&sb, "C/N0", 29u);
+	sb_col(&sb, 32u);
+	sb_str(&sb, "USE");
+	(void)ui_surface_put(s, r, 1u, buf, UI_ATTR_DIM);
 
 	ntop = sky_top(h, top_idx, (uint8_t)UI_SKY_TOP_N);
 	for (i = 0u; i < ntop; i++) {
@@ -1618,25 +1674,19 @@ static void page_sky(const ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
 		}
 		sb_init(&sb, buf, sizeof(buf));
 		sb_str(&sb, ui_gnss_sys_name(sv->sys));
-		sb_rep(&sb, ' ', 3u);
-		sb_upad(&sb, sv->svid, 3u);
-		sb_rep(&sb, ' ', 3u);
-		sb_upad(&sb, (uint64_t)((sv->azim_deg < 0) ? 0 : sv->azim_deg),
-			3u);
-		sb_ch(&sb, ' ');
-		sb_rep(&sb, ' ', (sv->elev_deg < 0) ? 2u : 3u);
-		sb_i32(&sb, sv->elev_deg);
-		sb_rep(&sb, ' ', 4u);
-		sb_upad(&sb, sv->cno_dbhz, 2u);
-		sb_str(&sb, sv->used ? "   YES" : "    - ");
+		sb_rjust_i(&sb, sv->svid, 10u);
+		sb_rjust_i(&sb, sv->azim_deg, 16u);
+		sb_rjust_i(&sb, sv->elev_deg, 22u);
+		sb_rjust_i(&sb, sv->cno_dbhz, 29u);
+		sb_col(&sb, 32u);
+		sb_str(&sb, sv->used ? "YES" : "-");
 		(void)ui_surface_put(s, r, 1u, buf,
 				     sv->used ? UI_ATTR_OK : UI_ATTR_DIM);
 	}
 
-	if (ntop == 0u) {
-		r++;
-		(void)ui_surface_put(s, r, 1u, "(no satellite data)",
-				     UI_ATTR_DIM);
+	if (ntop == 0u && (uint8_t)(r + 1u) <= last) {
+		(void)ui_surface_put(s, (uint8_t)(r + 1u), 1u,
+				     "(no satellite data)", UI_ATTR_DIM);
 	}
 }
 
@@ -1645,9 +1695,9 @@ static void page_clocks(const quality_block_t *q, const ui_health_t *h,
 {
 	char buf[48];
 	sb_t sb;
-	uint8_t half = (uint8_t)((s->cols > 4u) ? ((s->cols - 2u) / 2u) : 1u);
+	uint8_t half = grid_half(s);
 	uint8_t colb = (uint8_t)(1u + half);
-	uint8_t r = BODY_TOP;
+	uint8_t r = (uint8_t)BODY_TOP;
 
 	(void)ui_surface_put(s, r, 0u, "OCXO", UI_ATTR_ACCENT);
 
@@ -1713,7 +1763,7 @@ static void page_clocks(const quality_block_t *q, const ui_health_t *h,
 	kv(s, r, 1u, half, "Rb temp", buf, UI_ATTR_NORMAL);
 	sb_init(&sb, buf, sizeof(buf));
 	if (h->extref_ok) {
-		sb_fix(&sb, (int64_t)h->extref_hz, 0u);
+		sb_u32(&sb, h->extref_hz);
 		sb_str(&sb, " Hz");
 	} else {
 		sb_str(&sb, "not in band");
@@ -1722,8 +1772,9 @@ static void page_clocks(const quality_block_t *q, const ui_health_t *h,
 	   h->extref_ok ? UI_ATTR_OK : UI_ATTR_DIM);
 
 	r++;
-	kv(s, r, 1u, half, "Active ref", quality_ref_name(q->active_ref),
-	   UI_ATTR_ACCENT);
+	sb_init(&sb, buf, sizeof(buf));
+	sb_upper(&sb, quality_ref_name(q->active_ref));
+	kv(s, r, 1u, half, "Active ref", buf, UI_ATTR_ACCENT);
 	sb_init(&sb, buf, sizeof(buf));
 	sb_ns(&sb, q->holdover_est_err_ns);
 	kv(s, r, colb, half, "Holdover err", buf,
@@ -1734,9 +1785,9 @@ static void page_network(const ui_health_t *h, ui_surface_t *s)
 {
 	char buf[48];
 	sb_t sb;
-	uint8_t half = (uint8_t)((s->cols > 4u) ? ((s->cols - 2u) / 2u) : 1u);
+	uint8_t half = grid_half(s);
 	uint8_t colb = (uint8_t)(1u + half);
-	uint8_t r = BODY_TOP;
+	uint8_t r = (uint8_t)BODY_TOP;
 
 	sb_init(&sb, buf, sizeof(buf));
 	if (h->link_up) {
@@ -1746,20 +1797,19 @@ static void page_network(const ui_health_t *h, ui_surface_t *s)
 	} else {
 		sb_str(&sb, "DOWN");
 	}
-	kv(s, r, 1u, half, "Link", buf,
-	   h->link_up ? UI_ATTR_OK : UI_ATTR_ALARM);
+	kv(s, r, 1u, half, "Link", buf, h->link_up ? UI_ATTR_OK : UI_ATTR_ALARM);
 	kv(s, r, colb, half, "Address", h->dhcp ? "DHCP" : "STATIC",
 	   UI_ATTR_NORMAL);
 
 	r++;
 	(void)ui_surface_put(s, r, 1u, "IPv4", UI_ATTR_DIM);
-	(void)ui_surface_put(s, r, 8u, h->ipv4, UI_ATTR_NORMAL);
+	(void)ui_surface_putn(s, r, 8u, h->ipv4, UI_STR_LEN, UI_ATTR_NORMAL);
 	r++;
 	(void)ui_surface_put(s, r, 1u, "IPv6", UI_ATTR_DIM);
-	(void)ui_surface_put(s, r, 8u, h->ipv6, UI_ATTR_NORMAL);
+	(void)ui_surface_putn(s, r, 8u, h->ipv6, UI_STR_LEN, UI_ATTR_NORMAL);
 	r++;
 	(void)ui_surface_put(s, r, 1u, "Host", UI_ATTR_DIM);
-	(void)ui_surface_put(s, r, 8u, h->hostname, UI_ATTR_NORMAL);
+	(void)ui_surface_putn(s, r, 8u, h->hostname, UI_STR_LEN, UI_ATTR_NORMAL);
 
 	r++;
 	draw_rule(s, r);
@@ -1790,11 +1840,11 @@ static void page_network(const ui_health_t *h, ui_surface_t *s)
 
 	r++;
 	kv(s, r, 1u, half, "PTP", ui_ptp_state_name(h->ptp_state),
-	   (h->ptp_state == UI_PTP_MASTER) ? UI_ATTR_OK : UI_ATTR_DIM);
+	   (h->ptp_state == (uint8_t)UI_PTP_MASTER) ? UI_ATTR_OK : UI_ATTR_DIM);
 	sb_init(&sb, buf, sizeof(buf));
 	sb_str(&sb, "class ");
 	sb_u32(&sb, h->ptp_clock_class);
-	sb_str(&sb, "  ");
+	sb_str(&sb, ", ");
 	sb_u32(&sb, h->ptp_clients);
 	sb_str(&sb, " cli");
 	kv(s, r, colb, half, "", buf, UI_ATTR_NORMAL);
@@ -1803,11 +1853,15 @@ static void page_network(const ui_health_t *h, ui_surface_t *s)
 	draw_rule(s, r);
 	r++;
 	(void)ui_surface_put(s, r, 1u, "F/W", UI_ATTR_DIM);
-	(void)ui_surface_put(s, r, 8u, h->fw_version, UI_ATTR_NORMAL);
+	(void)ui_surface_putn(s, r, 8u, h->fw_version, UI_STR_LEN,
+			      UI_ATTR_NORMAL);
 	r++;
 	(void)ui_surface_put(s, r, 1u, "S/N", UI_ATTR_DIM);
-	(void)ui_surface_put(s, r, 8u, h->serial, UI_ATTR_NORMAL);
+	(void)ui_surface_putn(s, r, 8u, h->serial, UI_STR_LEN, UI_ATTR_NORMAL);
 }
+
+/** Rows the Power page reserves at the bottom for its summary block. */
+#define POWER_SUMMARY_ROWS 4u
 
 static void page_power(ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
 {
@@ -1817,102 +1871,102 @@ static void page_power(ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
 	uint8_t count = (h->rail_count > (uint8_t)UI_MAX_RAILS)
 				? (uint8_t)UI_MAX_RAILS
 				: h->rail_count;
-	uint8_t last = body_bottom(s, false);
-	uint8_t r = BODY_TOP;
-	uint8_t summary_rows = 4u;
-	uint8_t visible;
-	uint8_t max_scroll;
+	unsigned int last = body_bottom(s, false);
+	unsigned int rule_row;
+	unsigned int visible;
+	uint8_t half = grid_half(s);
+	uint8_t colb = (uint8_t)(1u + half);
+	uint8_t r;
 	uint8_t i;
 
-	(void)ui_surface_put(s, r, 1u, "RAIL          VOLT      CURRENT  PG AL",
-			     UI_ATTR_DIM);
+	sb_init(&sb, buf, sizeof(buf));
+	sb_str(&sb, "RAIL");
+	sb_rjust(&sb, "VOLTAGE", 21u);
+	sb_rjust(&sb, "CURRENT", 31u);
+	sb_col(&sb, 34u);
+	sb_str(&sb, "PG");
+	sb_col(&sb, 38u);
+	sb_str(&sb, "AL");
+	(void)ui_surface_put(s, (uint8_t)BODY_TOP, 1u, buf, UI_ATTR_DIM);
 
-	visible = (last > (uint8_t)(r + summary_rows))
-			  ? (uint8_t)(last - r - summary_rows)
-			  : 0u;
-	max_scroll = (count > visible) ? (uint8_t)(count - visible) : 0u;
-	if (f->scroll > max_scroll) {
-		f->scroll = max_scroll;
+	/* The summary block occupies the last POWER_SUMMARY_ROWS rows of the
+	 * body: a rule and three key/value rows. Everything between the header
+	 * row and it belongs to the scrolling rail list. */
+	rule_row = (last >= BODY_TOP + POWER_SUMMARY_ROWS)
+			   ? (last - (POWER_SUMMARY_ROWS - 1u))
+			   : (BODY_TOP + 1u);
+	visible = (rule_row > BODY_TOP + 1u) ? (rule_row - BODY_TOP - 1u) : 0u;
+
+	{
+		unsigned int max_scroll =
+			(count > visible) ? ((unsigned int)count - visible) : 0u;
+
+		if ((unsigned int)f->scroll > max_scroll) {
+			f->scroll = (uint8_t)max_scroll;
+		}
 	}
 
-	for (i = 0u; i < visible; i++) {
-		uint8_t idx = (uint8_t)(f->scroll + i);
+	for (i = 0u; i < (uint8_t)visible; i++) {
+		unsigned int idx = (unsigned int)f->scroll + i;
 		const ui_rail_t *rail;
 
 		if (idx >= count) {
 			break;
 		}
 		rail = &h->rail[idx];
-		r++;
 
 		sb_init(&sb, buf, sizeof(buf));
 		sb_str(&sb, rail->name);
-		while (sb.len < 12u) {
-			sb_ch(&sb, ' ');
-		}
-		sb_fix(&sb, rail->mv, 3u);
-		sb_str(&sb, " V");
-		while (sb.len < 24u) {
-			sb_ch(&sb, ' ');
-		}
-		sb_fix(&sb, rail->ma, 3u);
-		sb_str(&sb, " A");
-		while (sb.len < 36u) {
-			sb_ch(&sb, ' ');
-		}
-		sb_str(&sb, rail->pg ? " OK" : "BAD");
-		sb_str(&sb, rail->alert ? " AL" : "  -");
-		(void)ui_surface_put(s, r, 1u, buf,
-				     (!rail->pg || rail->alert) ? UI_ATTR_ALARM
-								: UI_ATTR_NORMAL);
+		sb_col(&sb, 12u);
+		sb_rjust_fix(&sb, (int64_t)rail->mv, 3u, " V", 21u);
+		sb_rjust_fix(&sb, (int64_t)rail->ma, 3u, " A", 31u);
+		sb_col(&sb, 34u);
+		sb_str(&sb, rail->pg ? "OK" : "NO");
+		sb_col(&sb, 38u);
+		sb_str(&sb, rail->alert ? "AL" : "--");
+		(void)ui_surface_put(s, (uint8_t)(BODY_TOP + 1u + i), 1u, buf,
+				     (!rail->pg || rail->alert)
+					     ? UI_ATTR_ALARM
+					     : UI_ATTR_NORMAL);
 	}
 
-	r = (uint8_t)(last - summary_rows + 1u);
-	if (r < BODY_TOP + 1u) {
-		r = BODY_TOP + 1u;
-	}
+	r = (uint8_t)rule_row;
 	draw_rule(s, r);
 
-	{
-		uint8_t half = (uint8_t)((s->cols > 4u) ? ((s->cols - 2u) / 2u)
-							: 1u);
-		uint8_t colb = (uint8_t)(1u + half);
+	r++;
+	sb_init(&sb, buf, sizeof(buf));
+	sb_fix(&sb, h->temp_enclosure_mc, 3u);
+	sb_str(&sb, " C");
+	kv(s, r, 1u, half, "Enclosure", buf, UI_ATTR_NORMAL);
+	sb_init(&sb, buf, sizeof(buf));
+	sb_fix(&sb, h->temp_die_mc, 3u);
+	sb_str(&sb, " C");
+	kv(s, r, colb, half, "MCU die", buf, UI_ATTR_NORMAL);
 
-		r++;
-		sb_init(&sb, buf, sizeof(buf));
-		sb_fix(&sb, h->temp_enclosure_mc, 3u);
-		sb_str(&sb, " C");
-		kv(s, r, 1u, half, "Enclosure", buf, UI_ATTR_NORMAL);
-		sb_init(&sb, buf, sizeof(buf));
-		sb_fix(&sb, h->temp_die_mc, 3u);
-		sb_str(&sb, " C");
-		kv(s, r, colb, half, "MCU die", buf, UI_ATTR_NORMAL);
+	r++;
+	sb_init(&sb, buf, sizeof(buf));
+	sb_u32(&sb, h->fan_duty_pct);
+	sb_str(&sb, " %, ");
+	sb_u32(&sb, h->fan_rpm);
+	sb_str(&sb, " rpm");
+	kv(s, r, 1u, half, "Fan", buf, UI_ATTR_NORMAL);
+	sb_init(&sb, buf, sizeof(buf));
+	sb_fix(&sb, h->poe_mw, 3u);
+	sb_str(&sb, " W cls ");
+	sb_u32(&sb, h->poe_class);
+	kv(s, r, colb, half, "PoE", buf, UI_ATTR_NORMAL);
 
-		r++;
-		sb_init(&sb, buf, sizeof(buf));
-		sb_u32(&sb, h->fan_duty_pct);
-		sb_str(&sb, " %  ");
-		sb_u32(&sb, h->fan_rpm);
-		sb_str(&sb, " rpm");
-		kv(s, r, 1u, half, "Fan", buf, UI_ATTR_NORMAL);
-		sb_init(&sb, buf, sizeof(buf));
-		sb_fix(&sb, h->poe_mw, 3u);
-		sb_str(&sb, " W  class ");
-		sb_u32(&sb, h->poe_class);
-		kv(s, r, colb, half, "PoE", buf, UI_ATTR_NORMAL);
-
-		r++;
-		sb_init(&sb, buf, sizeof(buf));
-		sb_fix(&sb, h->supercap_stm_mv, 3u);
-		sb_str(&sb, " V");
-		kv(s, r, 1u, half, "Backup STM", buf,
-		   h->bkp_stm_pg ? UI_ATTR_OK : UI_ATTR_WARN);
-		sb_init(&sb, buf, sizeof(buf));
-		sb_fix(&sb, h->supercap_gps_mv, 3u);
-		sb_str(&sb, " V");
-		kv(s, r, colb, half, "Backup GPS", buf,
-		   h->bkp_gps_pg ? UI_ATTR_OK : UI_ATTR_WARN);
-	}
+	r++;
+	sb_init(&sb, buf, sizeof(buf));
+	sb_fix(&sb, h->supercap_stm_mv, 3u);
+	sb_str(&sb, " V");
+	kv(s, r, 1u, half, "Backup STM", buf,
+	   h->bkp_stm_pg ? UI_ATTR_OK : UI_ATTR_WARN);
+	sb_init(&sb, buf, sizeof(buf));
+	sb_fix(&sb, h->supercap_gps_mv, 3u);
+	sb_str(&sb, " V");
+	kv(s, r, colb, half, "Backup GPS", buf,
+	   h->bkp_gps_pg ? UI_ATTR_OK : UI_ATTR_WARN);
 }
 
 static void page_alarms(ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
@@ -1923,14 +1977,12 @@ static void page_alarms(ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
 	uint8_t count = (h->alarm_count > (uint8_t)UI_MAX_ALARMS)
 				? (uint8_t)UI_MAX_ALARMS
 				: h->alarm_count;
-	uint8_t last = body_bottom(s, false);
-	uint8_t visible = (last >= BODY_TOP) ? (uint8_t)(last - BODY_TOP + 1u)
-					     : 0u;
-	uint8_t max_scroll;
+	unsigned int last = body_bottom(s, false);
+	unsigned int visible = (last >= BODY_TOP) ? (last - BODY_TOP + 1u) : 0u;
 	uint8_t i;
 
-	/* Capture the row->id mapping so ENTER can acknowledge without the
-	 * health snapshot (see ui_ctx_t::alarm_id). */
+	/* Capture the row->id mapping so ENTER can acknowledge without needing
+	 * the health snapshot (see ui_ctx_t::alarm_id). */
 	ctx->alarm_id_count = count;
 	for (i = 0u; i < count; i++) {
 		ctx->alarm_id[i] = h->alarm[i].id;
@@ -1939,26 +1991,31 @@ static void page_alarms(ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
 	if (count == 0u) {
 		f->sel = 0u;
 		f->scroll = 0u;
-		(void)ui_surface_put(s, BODY_TOP, 1u, "No alarms latched.",
-				     UI_ATTR_OK);
+		(void)ui_surface_put(s, (uint8_t)BODY_TOP, 1u,
+				     "No alarms latched.", UI_ATTR_OK);
 		return;
 	}
 
 	if (f->sel >= count) {
 		f->sel = (uint8_t)(count - 1u);
 	}
-	max_scroll = (count > visible) ? (uint8_t)(count - visible) : 0u;
 	if (f->sel < f->scroll) {
 		f->scroll = f->sel;
-	} else if (visible != 0u && f->sel >= (uint8_t)(f->scroll + visible)) {
-		f->scroll = (uint8_t)(f->sel - visible + 1u);
+	} else if (visible != 0u &&
+		   (unsigned int)f->sel >= (unsigned int)f->scroll + visible) {
+		f->scroll = (uint8_t)((unsigned int)f->sel - visible + 1u);
 	}
-	if (f->scroll > max_scroll) {
-		f->scroll = max_scroll;
+	{
+		unsigned int max_scroll =
+			(count > visible) ? ((unsigned int)count - visible) : 0u;
+
+		if ((unsigned int)f->scroll > max_scroll) {
+			f->scroll = (uint8_t)max_scroll;
+		}
 	}
 
-	for (i = 0u; i < visible; i++) {
-		uint8_t idx = (uint8_t)(f->scroll + i);
+	for (i = 0u; i < (uint8_t)visible; i++) {
+		unsigned int idx = (unsigned int)f->scroll + i;
 		const ui_alarm_row_t *a;
 		uint8_t attr;
 
@@ -1975,19 +2032,13 @@ static void page_alarms(ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
 			sb_str(&sb, "ALARM ");
 			sb_u32(&sb, a->id);
 		}
-		while (sb.len < 22u) {
-			sb_ch(&sb, ' ');
-		}
-		sb_str(&sb, a->active ? "ACTIVE" : (a->latched ? "LATCHED"
-							       : "CLEAR"));
-		while (sb.len < 32u) {
-			sb_ch(&sb, ' ');
-		}
+		sb_col(&sb, 24u);
+		sb_str(&sb, a->active ? "ACTIVE"
+				      : (a->latched ? "LATCHED" : "CLEAR"));
+		sb_col(&sb, 33u);
 		sb_ch(&sb, 'x');
 		sb_u32(&sb, a->count);
-		while (sb.len < 38u) {
-			sb_ch(&sb, ' ');
-		}
+		sb_col(&sb, 39u);
 		sb_str(&sb, "at ");
 		sb_hms(&sb, a->first_s);
 
@@ -1999,7 +2050,9 @@ static void page_alarms(ui_ctx_t *ctx, const ui_health_t *h, ui_surface_t *s)
 			attr = UI_ATTR_DIM;
 		}
 		if (idx == f->sel) {
-			attr |= UI_ATTR_INVERSE;
+			attr = (uint8_t)(attr | UI_ATTR_INVERSE);
+			(void)ui_surface_fill(s, (uint8_t)(BODY_TOP + i), 0u,
+					      s->cols, ' ', attr);
 		}
 		(void)ui_surface_put(s, (uint8_t)(BODY_TOP + i), 0u, buf, attr);
 	}
@@ -2010,6 +2063,7 @@ static void page_menu(ui_ctx_t *ctx, ui_surface_t *s)
 	char buf[64];
 	sb_t sb;
 	ui_frame_t *f = top(ctx);
+	uint8_t last = body_bottom(s, false);
 	uint8_t i;
 
 	if (f->sel >= (uint8_t)UI_MENU__COUNT) {
@@ -2020,16 +2074,14 @@ static void page_menu(ui_ctx_t *ctx, ui_surface_t *s)
 		uint8_t row = (uint8_t)(BODY_TOP + i);
 		uint8_t attr = (i == f->sel) ? UI_ATTR_INVERSE : UI_ATTR_NORMAL;
 
-		if (row >= s->rows) {
+		if (row > last) {
 			break;
 		}
 
 		sb_init(&sb, buf, sizeof(buf));
 		sb_str(&sb, (i == f->sel) ? "> " : "  ");
 		sb_str(&sb, ui_menu_name(i));
-		while (sb.len < 24u) {
-			sb_ch(&sb, ' ');
-		}
+		sb_col(&sb, 24u);
 		switch (i) {
 		case UI_MENU_BRIGHTNESS:
 			sb_u32(&sb, ctx->cfg.brightness_pct);
@@ -2050,6 +2102,9 @@ static void page_menu(ui_ctx_t *ctx, ui_surface_t *s)
 			sb_str(&sb, ">");
 			break;
 		}
+		if (i == f->sel) {
+			(void)ui_surface_fill(s, row, 0u, s->cols, ' ', attr);
+		}
 		(void)ui_surface_put(s, row, 0u, buf, attr);
 	}
 }
@@ -2060,8 +2115,8 @@ static void page_edit(const ui_ctx_t *ctx, ui_surface_t *s)
 	sb_t sb;
 	const ui_frame_t *f = top_c(ctx);
 	ui_hint_t hint;
-	uint8_t r = BODY_TOP;
-	uint16_t permille = 0u;
+	uint8_t r = (uint8_t)BODY_TOP;
+	uint32_t permille = 0u;
 
 	(void)ui_surface_put(s, r, 1u, ui_menu_name(f->item), UI_ATTR_ACCENT);
 
@@ -2071,8 +2126,9 @@ static void page_edit(const ui_ctx_t *ctx, ui_surface_t *s)
 	case UI_MENU_BRIGHTNESS:
 		sb_i32(&sb, ctx->edit_val);
 		sb_str(&sb, " %");
-		permille = (uint16_t)((ctx->edit_val < 0) ? 0
-							  : (ctx->edit_val * 10));
+		permille = (ctx->edit_val <= 0)
+				   ? 0u
+				   : ((uint32_t)ctx->edit_val * 10u);
 		break;
 	case UI_MENU_TIMEOUT:
 		if (ctx->edit_val == 0) {
@@ -2081,8 +2137,9 @@ static void page_edit(const ui_ctx_t *ctx, ui_surface_t *s)
 			sb_i32(&sb, ctx->edit_val);
 			sb_str(&sb, " s");
 		}
-		permille = (uint16_t)((ctx->edit_val >= 600) ? 1000
-							     : (ctx->edit_val * 1000 / 600));
+		permille = (ctx->edit_val <= 0)
+				   ? 0u
+				   : ((uint32_t)ctx->edit_val * 1000u / 600u);
 		break;
 	default:
 		sb_i32(&sb, ctx->edit_val);
@@ -2108,7 +2165,7 @@ static void page_edit(const ui_ctx_t *ctx, ui_surface_t *s)
 		hint.col = 2u;
 		hint.len = (uint8_t)(s->cols - 4u);
 		hint.attr = UI_ATTR_ACCENT;
-		hint.value = (permille > 1000u) ? 1000u : permille;
+		hint.value = (permille > 1000u) ? 1000u : (uint16_t)permille;
 		(void)ui_surface_hint(s, &hint);
 	}
 }
@@ -2118,7 +2175,7 @@ static void page_confirm(const ui_ctx_t *ctx, ui_surface_t *s)
 	const ui_frame_t *f = top_c(ctx);
 	char buf[64];
 	sb_t sb;
-	uint8_t r = BODY_TOP;
+	uint8_t r = (uint8_t)BODY_TOP;
 	uint8_t row;
 	uint8_t col;
 
@@ -2127,6 +2184,15 @@ static void page_confirm(const ui_ctx_t *ctx, ui_surface_t *s)
 	sb_ch(&sb, '?');
 	(void)ui_surface_put(s, r, 1u, buf, UI_ATTR_ACCENT);
 
+	if (menu_confirm_stages(f->item) > 1u) {
+		sb_init(&sb, buf, sizeof(buf));
+		sb_str(&sb, "confirmation ");
+		sb_u32(&sb, (uint32_t)f->stage + 1u);
+		sb_str(&sb, " of ");
+		sb_u32(&sb, menu_confirm_stages(f->item));
+		put_right(s, r, (uint8_t)(s->cols - 1u), buf, UI_ATTR_DIM);
+	}
+
 	r = (uint8_t)(BODY_TOP + 2u);
 	switch (f->item) {
 	case UI_MENU_REBOOT:
@@ -2134,7 +2200,7 @@ static void page_confirm(const ui_ctx_t *ctx, ui_surface_t *s)
 				     "The unit restarts and the OCXO must",
 				     UI_ATTR_NORMAL);
 		(void)ui_surface_put(s, (uint8_t)(r + 1u), 1u,
-				     "re-discipline. Served time is lost",
+				     "re-discipline: served time degrades",
 				     UI_ATTR_NORMAL);
 		(void)ui_surface_put(s, (uint8_t)(r + 2u), 1u,
 				     "for several minutes.", UI_ATTR_NORMAL);
@@ -2149,7 +2215,7 @@ static void page_confirm(const ui_ctx_t *ctx, ui_surface_t *s)
 					     UI_ATTR_ALARM);
 		} else {
 			(void)ui_surface_put(s, r, 1u,
-					     "FINAL WARNING. Survey position,",
+					     "FINAL WARNING: survey position,",
 					     UI_ATTR_ALARM);
 			(void)ui_surface_put(s, (uint8_t)(r + 1u), 1u,
 					     "INA228 trims and NTS keys are",
@@ -2165,23 +2231,15 @@ static void page_confirm(const ui_ctx_t *ctx, ui_surface_t *s)
 		break;
 	}
 
-	if (menu_confirm_stages(f->item) > 1u) {
-		sb_init(&sb, buf, sizeof(buf));
-		sb_str(&sb, "confirmation ");
-		sb_u32(&sb, (uint32_t)f->stage + 1u);
-		sb_str(&sb, " of ");
-		sb_u32(&sb, menu_confirm_stages(f->item));
-		put_right(s, BODY_TOP, (uint8_t)(s->cols - 1u), buf,
-			  UI_ATTR_DIM);
-	}
-
 	row = body_bottom(s, false);
-	col = (s->cols > 24u) ? (uint8_t)((s->cols - 20u) / 2u) : 0u;
+	col = (s->cols > 24u) ? (uint8_t)((unsigned int)(s->cols - 20u) / 2u)
+			      : 0u;
 	(void)ui_surface_put(s, row, col, "[ No ]",
 			     (f->sel == 0u) ? UI_ATTR_INVERSE : UI_ATTR_DIM);
 	(void)ui_surface_put(s, row, (uint8_t)(col + 12u), "[ Yes ]",
-			     (f->sel == 1u) ? (UI_ATTR_INVERSE | UI_ATTR_ALARM)
-					    : UI_ATTR_DIM);
+			     (f->sel == 1u)
+				     ? (uint8_t)(UI_ATTR_INVERSE | UI_ATTR_ALARM)
+				     : UI_ATTR_DIM);
 }
 
 /* ===================================================================== *
@@ -2220,9 +2278,10 @@ int ui_render(ui_ctx_t *ctx, const quality_block_t *q, const ui_health_t *h,
 	ui_surface_clear(s);
 	ctx->renders++;
 
-	/* Remember the geometry so a later touch can be mapped to a cell. */
-	ui_touch_rows = s->rows;
-	ui_touch_cell_h = (s->cell_h != 0u) ? s->cell_h : 16u;
+	/* Remember the geometry so a later touch can be mapped onto a cell. */
+	ctx->geom_rows = s->rows;
+	ctx->geom_cols = s->cols;
+	ctx->geom_cell_h = (s->cell_h != 0u) ? s->cell_h : 16u;
 
 	page = top(ctx)->page;
 
@@ -2231,11 +2290,11 @@ int ui_render(ui_ctx_t *ctx, const quality_block_t *q, const ui_health_t *h,
 
 	switch (page) {
 	case UI_PAGE_HOME:
-		page_home(ctx, q, h, s);
+		page_home(q, h, s);
 		draw_pager(ctx, s);
 		break;
 	case UI_PAGE_SKYPLOT:
-		page_sky(ctx, h, s);
+		page_sky(h, s);
 		break;
 	case UI_PAGE_CLOCKS:
 		page_clocks(q, h, s);
@@ -2259,8 +2318,8 @@ int ui_render(ui_ctx_t *ctx, const quality_block_t *q, const ui_health_t *h,
 		page_confirm(ctx, s);
 		break;
 	default:
-		(void)ui_surface_put(s, BODY_TOP, 1u, "(no such page)",
-				     UI_ATTR_ALARM);
+		(void)ui_surface_put(s, (uint8_t)BODY_TOP, 1u,
+				     "(no such page)", UI_ATTR_ALARM);
 		break;
 	}
 

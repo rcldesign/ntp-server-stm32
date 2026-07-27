@@ -70,8 +70,8 @@ static void dbl128(uint8_t b[AES_SIV_BLOCK])
 typedef struct {
 	const port_crypto_t *crypto;
 	const uint8_t *key;
-	uint8_t k1[AES_SIV_BLOCK];
-	uint8_t k2[AES_SIV_BLOCK];
+	const uint8_t *k1;          /* subkeys borrowed, not owned */
+	const uint8_t *k2;
 	uint8_t x[AES_SIV_BLOCK];   /* CBC chaining state */
 	uint8_t blk[AES_SIV_BLOCK]; /* held-back block */
 	size_t blk_len;
@@ -85,26 +85,36 @@ static int aes_block(const port_crypto_t *cr, const uint8_t *key,
 				   AES_SIV_BLOCK);
 }
 
-static int cmac_init(cmac_t *c, const port_crypto_t *crypto, const uint8_t *key)
+/*
+ * RFC 4493 §2.3 subkey generation: L = AES(K, 0), K1 = dbl(L), K2 = dbl(K1).
+ * Costs one block-cipher call and depends only on the key, so callers that run
+ * several CMACs under one key derive the pair once and pass it to cmac_begin().
+ */
+static int cmac_subkeys(const port_crypto_t *crypto, const uint8_t *key,
+			uint8_t k1[AES_SIV_BLOCK], uint8_t k2[AES_SIV_BLOCK])
 {
 	static const uint8_t zero[AES_SIV_BLOCK] = { 0 };
 
+	if (aes_block(crypto, key, zero, k1) != 0) {
+		return -EIO;
+	}
+	dbl128(k1);
+	memcpy(k2, k1, AES_SIV_BLOCK);
+	dbl128(k2);
+	return 0;
+}
+
+/* Bind a CMAC to a key and its precomputed subkeys. No block-cipher call. */
+static void cmac_begin(cmac_t *c, const port_crypto_t *crypto,
+		       const uint8_t *key, const uint8_t *k1, const uint8_t *k2)
+{
 	c->crypto = crypto;
 	c->key = key;
+	c->k1 = k1;
+	c->k2 = k2;
 	c->blk_len = 0U;
 	c->err = 0;
 	memset(c->x, 0, sizeof(c->x));
-
-	/* RFC 4493 §2.3 subkey generation: L = AES(K, 0), K1 = dbl(L),
-	 * K2 = dbl(K1). */
-	if (aes_block(crypto, key, zero, c->k1) != 0) {
-		c->err = -EIO;
-		return -EIO;
-	}
-	dbl128(c->k1);
-	memcpy(c->k2, c->k1, sizeof(c->k2));
-	dbl128(c->k2);
-	return 0;
 }
 
 static void cmac_absorb(cmac_t *c, const uint8_t blk[AES_SIV_BLOCK])
@@ -166,16 +176,19 @@ int aes_cmac(const port_crypto_t *crypto, const uint8_t *key,
 	     const uint8_t *msg, size_t msg_len, uint8_t out[AES_SIV_BLOCK])
 {
 	cmac_t c;
+	uint8_t k1[AES_SIV_BLOCK];
+	uint8_t k2[AES_SIV_BLOCK];
 	int rc;
 
 	if (crypto == NULL || crypto->aes_ecb_encrypt == NULL || key == NULL ||
 	    out == NULL || (msg == NULL && msg_len != 0U)) {
 		return -EINVAL;
 	}
-	rc = cmac_init(&c, crypto, key);
+	rc = cmac_subkeys(crypto, key, k1, k2);
 	if (rc != 0) {
 		return rc;
 	}
+	cmac_begin(&c, crypto, key, k1, k2);
 	cmac_update(&c, msg, msg_len);
 	return cmac_final(&c, out);
 }
@@ -191,11 +204,9 @@ static int s2v(const aes_siv_ctx_t *c, const aes_siv_ad_t *ad, size_t n_ad,
 	cmac_t m;
 	int rc;
 
-	/* D = CMAC(K, <zero>) */
-	rc = cmac_init(&m, &c->crypto, c->k_s2v);
-	if (rc != 0) {
-		return rc;
-	}
+	/* D = CMAC(K, <zero>). Every CMAC here reuses the subkeys derived at
+	 * init, so none of them pays for its own L = AES(K, 0). */
+	cmac_begin(&m, &c->crypto, c->k_s2v, c->k1_s2v, c->k2_s2v);
 	cmac_update(&m, zero, sizeof(zero));
 	rc = cmac_final(&m, d);
 	if (rc != 0) {
@@ -205,10 +216,7 @@ static int s2v(const aes_siv_ctx_t *c, const aes_siv_ad_t *ad, size_t n_ad,
 	/* D = dbl(D) xor CMAC(K, Si) for every associated-data component. The
 	 * plaintext is S(n) and is handled below, not here. */
 	for (size_t i = 0U; i < n_ad; i++) {
-		rc = cmac_init(&m, &c->crypto, c->k_s2v);
-		if (rc != 0) {
-			return rc;
-		}
+		cmac_begin(&m, &c->crypto, c->k_s2v, c->k1_s2v, c->k2_s2v);
 		cmac_update(&m, ad[i].p, ad[i].len);
 		rc = cmac_final(&m, t);
 		if (rc != 0) {
@@ -218,10 +226,7 @@ static int s2v(const aes_siv_ctx_t *c, const aes_siv_ad_t *ad, size_t n_ad,
 		xor_into(d, t, AES_SIV_BLOCK);
 	}
 
-	rc = cmac_init(&m, &c->crypto, c->k_s2v);
-	if (rc != 0) {
-		return rc;
-	}
+	cmac_begin(&m, &c->crypto, c->k_s2v, c->k1_s2v, c->k2_s2v);
 
 	if (pt_len >= AES_SIV_BLOCK) {
 		/* T = Sn xorend D: CMAC the plaintext with D folded into its last
@@ -248,19 +253,52 @@ static int s2v(const aes_siv_ctx_t *c, const aes_siv_ad_t *ad, size_t n_ad,
 
 /* ------------------------------------------------------------------- CTR */
 
+/* Counter blocks generated per block-cipher call. The keystream for a whole
+ * chunk is produced by ONE multi-block aes_ecb_encrypt, so the port reloads the
+ * AES key schedule once per chunk instead of once per block — the difference
+ * that matters when the port is an accelerator with a per-call key load (M6).
+ * 16 blocks = 256 octets of stack, which covers a cookie (4 blocks) and a
+ * request authenticator in one pass and bounds a full 8-cookie response to a
+ * handful of calls. */
+#define CTR_CHUNK_BLOCKS 16U
+
+static void ctr_inc(uint8_t ctr[AES_SIV_BLOCK])
+{
+	for (size_t j = AES_SIV_BLOCK; j-- > 0U;) {
+		if (++ctr[j] != 0U) {
+			break;
+		}
+	}
+}
+
 static int ctr_xor(const aes_siv_ctx_t *c, const uint8_t iv[AES_SIV_BLOCK],
 		   const uint8_t *in, uint8_t *out, size_t len)
 {
 	uint8_t ctr[AES_SIV_BLOCK];
-	uint8_t ks[AES_SIV_BLOCK];
+	uint8_t ks[CTR_CHUNK_BLOCKS * AES_SIV_BLOCK];
 
 	memcpy(ctr, iv, AES_SIV_BLOCK);
 
 	while (len > 0U) {
-		size_t n = (len < AES_SIV_BLOCK) ? len : AES_SIV_BLOCK;
+		size_t blocks = (len + AES_SIV_BLOCK - 1U) / AES_SIV_BLOCK;
+		size_t n;
 
-		if (aes_block(&c->crypto, c->k_ctr, ctr, ks) != 0) {
+		if (blocks > CTR_CHUNK_BLOCKS) {
+			blocks = CTR_CHUNK_BLOCKS;
+		}
+		for (size_t b = 0U; b < blocks; b++) {
+			memcpy(&ks[b * AES_SIV_BLOCK], ctr, AES_SIV_BLOCK);
+			ctr_inc(ctr);
+		}
+		if (c->crypto.aes_ecb_encrypt(c->crypto.ctx, c->k_ctr, AES_SIV_BLOCK,
+					      ks, ks,
+					      blocks * AES_SIV_BLOCK) != 0) {
 			return -EIO;
+		}
+
+		n = blocks * AES_SIV_BLOCK;
+		if (n > len) {
+			n = len; /* the final block may be partial */
 		}
 		for (size_t i = 0U; i < n; i++) {
 			out[i] = (uint8_t)(in[i] ^ ks[i]);
@@ -268,12 +306,6 @@ static int ctr_xor(const aes_siv_ctx_t *c, const uint8_t iv[AES_SIV_BLOCK],
 		in += n;
 		out += n;
 		len -= n;
-
-		for (size_t j = AES_SIV_BLOCK; j-- > 0U;) {
-			if (++ctr[j] != 0U) {
-				break;
-			}
-		}
 	}
 	return 0;
 }
@@ -304,6 +336,13 @@ int aes_siv_init(aes_siv_ctx_t *c, const port_crypto_t *crypto,
 	c->crypto = *crypto;
 	memcpy(c->k_s2v, key, AES_SIV_BLOCK);
 	memcpy(c->k_ctr, &key[AES_SIV_BLOCK], AES_SIV_BLOCK);
+
+	/* Derive the S2V CMAC subkeys once, here, rather than on every S2V. */
+	if (cmac_subkeys(&c->crypto, c->k_s2v, c->k1_s2v, c->k2_s2v) != 0) {
+		memset(c, 0, sizeof(*c));
+		return -EIO;
+	}
+
 	c->ready = true;
 	return 0;
 }

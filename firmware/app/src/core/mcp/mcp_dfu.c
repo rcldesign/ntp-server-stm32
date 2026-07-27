@@ -63,10 +63,12 @@ uint8_t mcp_dfu__slot_flags(const port_image_info_t *info)
 void mcp_dfu__reset(mcp_ctx_t *c)
 {
 	uint32_t gran = c->dfu.erase_gran;
+	uint32_t wblk = c->dfu.write_block;
 
 	memset(&c->dfu, 0, sizeof(c->dfu));
 	c->dfu.state = (uint8_t)MCP_DFU_IDLE;
 	c->dfu.erase_gran = gran;
+	c->dfu.write_block = wblk;
 }
 
 void mcp_dfu__tick(mcp_ctx_t *c, uint64_t now_ms)
@@ -239,6 +241,8 @@ static int h_fw_info(mcp_ctx_t *c, const mcp_frame_t *f)
 	o += 4U;
 	bytes_put_le32(&p[o], (uint32_t)MCP_FW_CHUNK_MAX);
 	o += 4U;
+	bytes_put_le32(&p[o], c->dfu.write_block);
+	o += 4U;
 
 	return mcp__reply(c, f->cmd, f->seq, (uint16_t)o);
 }
@@ -260,6 +264,11 @@ static int h_fw_begin(mcp_ctx_t *c, const mcp_frame_t *f)
 	}
 
 	size = bytes_get_le32(f->payload);
+	/* staging_cap() is port_image_t::staging_size(): the max IMAGE size,
+	 * i.e. the slot capacity minus the MCUboot trailer region that
+	 * mark_pending() writes. Accepting size == cap is therefore correct
+	 * (the trailer is already excluded); size == cap + 1 is rejected. Core
+	 * never erases the trailer — the size guard is the whole protection. */
 	cap = staging_cap(c);
 	if (size == 0U) {
 		return mcp__reply_status(c, f->cmd, f->seq,
@@ -305,8 +314,9 @@ static int h_fw_begin(mcp_ctx_t *c, const mcp_frame_t *f)
 	p[0] = (uint8_t)MCP_OK;
 	bytes_put_le32(&p[1], c->dfu.written);
 	bytes_put_le32(&p[5], (uint32_t)MCP_FW_CHUNK_MAX);
-	p[9] = resumed ? 1U : 0U;
-	return mcp__reply(c, f->cmd, f->seq, 10U);
+	bytes_put_le32(&p[9], c->dfu.write_block);
+	p[13] = resumed ? 1U : 0U;
+	return mcp__reply(c, f->cmd, f->seq, 14U);
 }
 
 /* Every FW_DATA answer carries the frontier, success or not. */
@@ -346,6 +356,17 @@ static int h_fw_data(mcp_ctx_t *c, const mcp_frame_t *f)
 					 (uint8_t)MCP_ERR_ARG);
 	}
 
+	/* Only the final chunk (the one that reaches total) may be shorter than
+	 * a flash write block; the port buffers just that one. Every earlier
+	 * chunk must be a write-block multiple so the frontier stays aligned
+	 * and no earlier partial block ever needs buffering. */
+	if (((off + (uint32_t)dlen) != c->dfu.total) &&
+	    (c->dfu.write_block > 1U) &&
+	    ((dlen % c->dfu.write_block) != 0U)) {
+		return mcp__reply_status(c, f->cmd, f->seq,
+					 (uint8_t)MCP_ERR_ARG);
+	}
+
 	if (off != c->dfu.written) {
 		if ((off < c->dfu.written) &&
 		    ((off + (uint32_t)dlen) <= c->dfu.written)) {
@@ -371,8 +392,23 @@ static int h_fw_data(mcp_ctx_t *c, const mcp_frame_t *f)
 	rc = c->w.img->staging_write(c->w.img->ctx, off, &f->payload[4], dlen,
 				     flush);
 	if (rc != 0) {
-		mcp__log(c, (uint8_t)LOGR_ERR, "dfu: write failed");
-		return fw_data_reply(c, f, mcp__port_err(rc));
+		/*
+		 * A partial program may have left bytes half-written at this
+		 * offset. The frontier does NOT advance, so the tool retries at
+		 * the same offset — but reprogramming already-programmed flash
+		 * is a PGSERR on the H5, and the FW_BEGIN-resume path skips the
+		 * erase, so the wedge would survive a reconnect. Abandon the
+		 * session: the next FW_BEGIN then re-erases before rewriting.
+		 * (The erase-failure path above is safe to retry in place —
+		 * nothing was written and erase is idempotent — so it does not
+		 * reset.)
+		 */
+		uint8_t status = mcp__port_err(rc);
+
+		mcp__log(c, (uint8_t)LOGR_ERR,
+			 "dfu: write failed, session reset");
+		mcp_dfu__reset(c);
+		return fw_data_reply(c, f, status);
 	}
 
 	c->dfu.written = off + (uint32_t)dlen;

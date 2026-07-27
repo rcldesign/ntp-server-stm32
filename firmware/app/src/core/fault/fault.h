@@ -368,6 +368,20 @@ typedef struct {
 	/* alarms */
 	fault_alarm_t alarm[FAULT_ALARM_COUNT];
 	uint64_t relay_disqualify;
+
+	/*
+	 * Scanned signals (bit = FAULT_SIG_BIT) whose asserted level is
+	 * *expected* and therefore not a service fault. A rail that pwrseq has
+	 * deliberately gated off — a deferred or shed rubidium is a first-class
+	 * non-fault outcome, not a failure — drives its power-good low forever;
+	 * without this mask its alarm would sit active and paint the UI red on a
+	 * perfectly healthy OCXO-only unit. The bit suppresses the signal from
+	 * the *active* alarm aggregate (fault_alarms / fault_any_active /
+	 * relay_blocking); the raw level and its events are untouched, so the UI
+	 * can still show the rail as off, and the latched history still records
+	 * that it changed.
+	 */
+	uint32_t expected_off;
 } fault_ctx_t;
 
 /**

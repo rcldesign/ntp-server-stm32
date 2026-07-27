@@ -264,7 +264,10 @@ uint32_t ina228_conv_interval_us(const ina228_adc_config_t *cfg);
  * @param out          Receives the trimmed value.
  *
  * @retval 0        Trim computed.
- * @retval -EINVAL  @p out is NULL, or @p i_reported is 0 (no trim derivable).
+ * @retval -EINVAL  @p out is NULL, or @p i_ref or @p i_reported is 0. A zero
+ *                  @p i_reported yields no ratio; a zero @p i_ref would compute
+ *                  SHUNT_CAL = 0, which the part accepts silently and then
+ *                  reads 0 A forever with no error flag.
  * @retval -ERANGE  Result clamped to INA228_SHUNT_CAL_MAX; @p out is the clamp.
  */
 int ina228_shunt_cal_trim(uint16_t base, uint32_t i_ref, uint32_t i_reported,

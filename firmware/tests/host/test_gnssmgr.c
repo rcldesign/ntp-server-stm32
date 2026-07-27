@@ -926,10 +926,17 @@ static void test_send_failure_is_reported_and_retried(void)
 	TEST_ASSERT_EQUAL_INT(0, gnssmgr_step(&g_mgr, t + 1500U));
 	TEST_ASSERT_EQUAL_UINT(2U, g_fake.sends);
 
-	/* Once the transport recovers, the walk continues normally. */
+	/*
+	 * Once the transport recovers the next attempt reaches the wire, and
+	 * only then can an acknowledgement move the walk on. A frame that never
+	 * left cannot be acknowledged, so nothing was counted as outstanding.
+	 */
 	g_fake.send_rc = 0;
-	send_ack(true, t + 1600U);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_step(&g_mgr, t + 3000U));
 	TEST_ASSERT_EQUAL_UINT(3U, g_fake.sends);
+	send_ack(true, t + 3100U);
+	TEST_ASSERT_EQUAL_UINT(4U, g_fake.sends);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_CONFIG, gnssmgr_get_state(&g_mgr));
 }
 
 /*
@@ -965,19 +972,25 @@ static void test_duplicate_ack_after_retry_is_not_misattributed(void)
 
 	t += 10U;
 	send_ack(true, t);
-	/* The second advances exactly one step. */
+	/* The second advances exactly one step: step 2 of 8 is now on the wire,
+	 * in the third transmission (step 1 having been sent twice). */
 	TEST_ASSERT_EQUAL_UINT(3U, g_fake.sends);
 
-	/* The rest of the walk stays in step with the responses. */
+	/* The rest of the walk stays in step: one response, one step, no skips. */
 	{
-		unsigned int i;
+		unsigned int step;
 
-		for (i = 3U; i < WALK_STEPS; i++) {
+		for (step = 2U; step < WALK_STEPS; step++) {
+			unsigned int before = g_fake.sends;
+
 			t += 10U;
 			send_ack(true, t);
-			TEST_ASSERT_EQUAL_UINT(i + 1U, g_fake.sends);
+			TEST_ASSERT_EQUAL_UINT(before + 1U, g_fake.sends);
 		}
 	}
+	/* All eight steps configured, in exactly one extra transmission. */
+	TEST_ASSERT_EQUAL_UINT(WALK_STEPS + 1U, g_fake.sends);
+	TEST_ASSERT_TRUE(gnssmgr_txready_trusted(&g_mgr));
 	TEST_ASSERT_EQUAL_UINT64(UBX_TMODE_SURVEY_IN,
 				 valset_must_get(&g_fake, UBX_CFG_TMODE_MODE));
 	t += 10U;
@@ -1086,25 +1099,31 @@ static void test_final_step_nak_is_not_discarded(void)
 				 gnssmgr_step_name(gnssmgr_failed_step(&g_mgr)));
 }
 
-/* An acknowledgement arriving with nothing outstanding must do nothing. */
-static void test_unsolicited_ack_ignored(void)
+/*
+ * An acknowledgement for a frame that never reached the wire must do nothing.
+ * A refused send is not counted as outstanding, so there is nothing for the
+ * response to answer — and acting on it would advance a step the receiver has
+ * never been told about.
+ */
+static void test_ack_with_nothing_in_flight_is_ignored(void)
 {
 	uint32_t t = 1000U;
 
 	setup_mgr(NULL);
-	TEST_ASSERT_EQUAL_INT(0, gnssmgr_start(&g_mgr, t));
-	t += 10U;
-	send_ack(true, t);
-	TEST_ASSERT_EQUAL_UINT(2U, g_fake.sends);
+	g_fake.send_rc = -EIO;
+	TEST_ASSERT_EQUAL_INT(-EIO, gnssmgr_start(&g_mgr, t));
+	TEST_ASSERT_EQUAL_UINT(1U, g_fake.sends);
 
-	/* Two extra acks for a single outstanding copy: the first is taken, the
-	 * second finds nothing in flight and is dropped. */
 	t += 10U;
 	send_ack(true, t);
-	TEST_ASSERT_EQUAL_UINT(3U, g_fake.sends);
+	TEST_ASSERT_EQUAL_UINT(1U, g_fake.sends);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_CONFIG, gnssmgr_get_state(&g_mgr));
+
+	/* A NAK is equally meaningless and must not burn a retry either. */
 	t += 10U;
-	send_ack(true, t);
-	TEST_ASSERT_EQUAL_UINT(4U, g_fake.sends);
+	send_ack(false, t);
+	TEST_ASSERT_EQUAL_UINT(1U, g_fake.sends);
+	TEST_ASSERT_EQUAL_INT(GNSSMGR_ST_CONFIG, gnssmgr_get_state(&g_mgr));
 }
 
 /*
@@ -1800,6 +1819,22 @@ static void test_qerr_timescale_normalisation(void)
 	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
 	TEST_ASSERT_EQUAL_UINT32(13000UL, q.target_tow_ms); /* 604795+18-604800 */
 	TEST_ASSERT_EQUAL_UINT16(2501U, q.week);
+
+	/*
+	 * currLs is a signed field. GPS-UTC has only ever run positive, but a
+	 * receiver reporting otherwise must still yield an in-range time of
+	 * week rather than an out-of-range conversion — so the carry works in
+	 * both directions, retarding the week when it goes the other way.
+	 */
+	setup_mgr(NULL);
+	t = walk_config(1000U);
+	send_timels(-18, 0, 0, 0x03U, t);
+	t += 1000U;
+	send_tim_tp_base(5000UL, 0, false, true, 2500U, t);
+	TEST_ASSERT_EQUAL_INT(0, gnssmgr_qerr_for_pps(&g_mgr, &q));
+	TEST_ASSERT_EQUAL_UINT32(604787000UL, q.target_tow_ms); /* 5000-18000 */
+	TEST_ASSERT_EQUAL_UINT16(2499U, q.week);
+	TEST_ASSERT_TRUE(q.tow_from_utc);
 
 	/* --- Leap offset unknown: the record cannot be placed in time. --- */
 	setup_mgr(NULL);
@@ -2594,7 +2629,7 @@ int main(void)
 	RUN_TEST(test_txready_nak_never_sets_trusted);
 	RUN_TEST(test_nak_after_retry_retries_the_right_step);
 	RUN_TEST(test_final_step_nak_is_not_discarded);
-	RUN_TEST(test_unsolicited_ack_ignored);
+	RUN_TEST(test_ack_with_nothing_in_flight_is_ignored);
 	RUN_TEST(test_txready_nak_degrades_and_walk_completes);
 	RUN_TEST(test_txready_timeout_degrades);
 	RUN_TEST(test_essential_step_nak_fails_and_names_step);

@@ -21,6 +21,7 @@
 
 #include "fault/fault.h"
 #include "ina228/ina228.h"
+#include "quality/quality.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,8 +39,15 @@ extern "C" {
 /** Bring up the cfg context (RAM store), the log ring and the quality state. */
 int sts_app_early_init(void);
 
-/** Publish a new quality block. Discipline thread only (ARCHITECTURE.md §10.2). */
-int sts_app_publish_quality(const quality_block_t *blk);
+/**
+ * The one seqlock-published quality state.
+ *
+ * Handed to disc_tick_pps()/disc_tick_no_pps() so core/disc publishes straight
+ * into it: the discipline thread is the single writer (ARCHITECTURE.md §10.10)
+ * and routing the block through an intermediate copy would only add a window
+ * in which the published block and the loop's own state disagree.
+ */
+quality_state_t *sts_app_quality_state(void);
 
 /** Supervisor view: mask of registered liveness ids that are currently late. */
 uint32_t sts_liveness_stale_mask(uint32_t now_ms);

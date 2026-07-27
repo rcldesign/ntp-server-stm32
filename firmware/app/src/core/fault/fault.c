@@ -487,12 +487,20 @@ static void button_timers(fault_ctx_t *ctx, uint32_t mono_ms)
 		}
 
 		/*
-		 * Absolute deadline compared as a signed difference: wrap-safe,
-		 * and at most one repeat per scan even if the caller skips
-		 * ticks, so a stalled scan cannot produce a burst.
+		 * Absolute deadline, compared as a signed difference so it is
+		 * wrap-safe. The next deadline is re-anchored to *now* plus one
+		 * period, not advanced by one period from the old deadline:
+		 * after a scan stall the deadline is far in the past, and
+		 * advancing it by a single period would leave it still in the
+		 * past, so the next thousand 1 kHz scans would each fire one
+		 * repeat until the deadline caught up — a 4 Hz control turning
+		 * into a 1 kHz burst the instant scanning resumes. Re-anchoring
+		 * clamps the catch-up to a single repeat and restores the 4 Hz
+		 * cadence immediately.
 		 */
 		if ((int32_t)(mono_ms - ctx->next_repeat_ms[sig]) >= 0) {
-			ctx->next_repeat_ms[sig] += ctx->cfg.repeat_period_ms;
+			ctx->next_repeat_ms[sig] =
+				mono_ms + ctx->cfg.repeat_period_ms;
 			evt_push(ctx, FAULT_EVT_BUTTON_REPEAT, sig,
 				 FAULT_EDGE_ASSERT, mono_ms);
 		}

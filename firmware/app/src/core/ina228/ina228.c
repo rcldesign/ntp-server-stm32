@@ -251,7 +251,14 @@ int ina228_shunt_cal_trim(uint16_t base, uint32_t i_ref, uint32_t i_reported,
 {
 	int64_t v;
 
-	if ((out == NULL) || (i_reported == 0U)) {
+	/*
+	 * i_reported == 0 gives no derivable ratio. i_ref == 0 would compute a
+	 * SHUNT_CAL of 0, which the INA228 accepts silently and then reports
+	 * 0 A on every reading with no error flag — a monitor that looks
+	 * healthy and measures nothing. Reject both rather than write a
+	 * calibration that blinds the rail.
+	 */
+	if ((out == NULL) || (i_ref == 0U) || (i_reported == 0U)) {
 		return -EINVAL;
 	}
 

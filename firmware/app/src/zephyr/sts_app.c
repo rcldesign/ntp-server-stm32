@@ -49,9 +49,9 @@ uint64_t sts_mono_ms(void)
  */
 static quality_state_t sts_quality_state;
 
-int sts_app_publish_quality(const quality_block_t *blk)
+quality_state_t *sts_app_quality_state(void)
 {
-	return quality_publish(&sts_quality_state, blk);
+	return &sts_quality_state;
 }
 
 int sts_quality_snapshot(quality_block_t *out)

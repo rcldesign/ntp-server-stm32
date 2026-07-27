@@ -46,6 +46,21 @@ static bool cfg_valid(const refsel_cfg_t *c)
 	if (c->flap_window_ms == 0u) {
 		return false;
 	}
+	/*
+	 * Bound the timing parameters. settle_ms is handed to the glue as a
+	 * blocking WAIT_SETTLE_MS during which SYSCLK is on HSI, so an absurd
+	 * value would stall the changeover and free-wheel the PTP clock far
+	 * longer than intended — cap it hard at 1 s (a mux flip plus HSE
+	 * restart is milliseconds). hysteresis_ms and lockout_ms are debounce
+	 * windows; a week is a generous ceiling that still rejects garbage.
+	 */
+	if (c->settle_ms > REFSEL_MAX_SETTLE_MS) {
+		return false;
+	}
+	if (c->hysteresis_ms > REFSEL_MAX_WINDOW_MS ||
+	    c->lockout_ms > REFSEL_MAX_WINDOW_MS) {
+		return false;
+	}
 	return true;
 }
 
@@ -118,18 +133,26 @@ static void emit_actions(refsel_ctx_t *ctx, refsel_state_t target)
 	uint32_t mux = (target == REFSEL_OCXO_ACTIVE) ? REFSEL_MUX_A
 						      : REFSEL_MUX_B;
 
-	ctx->steps[0].act = REFSEL_ACT_BRIDGE_TO_HSI;
+	/* Park the discipline loop first so the DAC holds its last-good Vc
+	 * across the whole disturbance, and unpark only once the PLL is verified
+	 * — the glue must not leave the loop steering into a free-wheeling
+	 * clock. See the refsel_action_t doc for why the bracket exists. */
+	ctx->steps[0].act = REFSEL_ACT_PARK_DISCIPLINE;
 	ctx->steps[0].arg = 0u;
-	ctx->steps[1].act = REFSEL_ACT_SET_MUX;
-	ctx->steps[1].arg = mux;
-	ctx->steps[2].act = REFSEL_ACT_WAIT_SETTLE_MS;
-	ctx->steps[2].arg = ctx->cfg.settle_ms;
-	ctx->steps[3].act = REFSEL_ACT_RESELECT_HSE;
-	ctx->steps[3].arg = 0u;
-	ctx->steps[4].act = REFSEL_ACT_VERIFY_PLL;
+	ctx->steps[1].act = REFSEL_ACT_BRIDGE_TO_HSI;
+	ctx->steps[1].arg = 0u;
+	ctx->steps[2].act = REFSEL_ACT_SET_MUX;
+	ctx->steps[2].arg = mux;
+	ctx->steps[3].act = REFSEL_ACT_WAIT_SETTLE_MS;
+	ctx->steps[3].arg = ctx->cfg.settle_ms;
+	ctx->steps[4].act = REFSEL_ACT_RESELECT_HSE;
 	ctx->steps[4].arg = 0u;
-	ctx->steps[5].act = REFSEL_ACT_DONE;
+	ctx->steps[5].act = REFSEL_ACT_VERIFY_PLL;
 	ctx->steps[5].arg = 0u;
+	ctx->steps[6].act = REFSEL_ACT_UNPARK_DISCIPLINE;
+	ctx->steps[6].arg = 0u;
+	ctx->steps[7].act = REFSEL_ACT_DONE;
+	ctx->steps[7].arg = 0u;
 	ctx->n_steps = REFSEL_MAX_STEPS;
 }
 
@@ -368,8 +391,9 @@ const char *refsel_state_name(refsel_state_t s)
 const char *refsel_action_name(refsel_action_t a)
 {
 	static const char *const names[REFSEL_ACT__COUNT] = {
-		"none",	       "bridge_to_hsi", "set_mux", "wait_settle_ms",
-		"reselect_hse", "verify_pll",	"done",
+		"none",		"park_discipline", "bridge_to_hsi",
+		"set_mux",	"wait_settle_ms",  "reselect_hse",
+		"verify_pll",	"unpark_discipline", "done",
 	};
 
 	if ((unsigned int)a >= (unsigned int)REFSEL_ACT__COUNT) {

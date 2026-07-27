@@ -188,6 +188,25 @@ static bool cfg_valid(const disc_cfg_t *c)
 	if (!(c->base_disp_ns >= 0.0f)) {
 		return false;
 	}
+	/*
+	 * Every remaining float field must be finite. A `> 0` comparison
+	 * already rejects NaN, but it lets +Inf through, and an infinite
+	 * dispersion or holdover coefficient would later be cast to int64 for
+	 * the quality block — undefined behaviour. tau_s, pi_damping_a and
+	 * dac_full_scale_ppb are finiteness-checked above.
+	 */
+	if (!isfinite(c->mad_k) || !isfinite(c->mad_floor_ns) ||
+	    !isfinite(c->acq_exit_ns) || !isfinite(c->acq_reentry_ns) ||
+	    !isfinite(c->acq_ramp_max_ppb) || !isfinite(c->recover_ramp_max_ppb) ||
+	    !isfinite(c->slew_lsb_per_s) || !isfinite(c->slew_acq_lsb_per_s) ||
+	    !isfinite(c->tempco_ppb_per_c) || !isfinite(c->lock_phase_ns) ||
+	    !isfinite(c->lock_var_ns2) || !isfinite(c->demote_threshold_ns) ||
+	    !isfinite(c->base_disp_ns) || !isfinite(c->holdover.base_ns) ||
+	    !isfinite(c->holdover.drift_ns_per_s) ||
+	    !isfinite(c->holdover.aging_ns_per_s2) ||
+	    !isfinite(c->holdover.temp_ns_per_s_per_c)) {
+		return false;
+	}
 	return true;
 }
 
@@ -196,6 +215,23 @@ static bool cfg_valid(const disc_cfg_t *c)
 static float f_abs(float v)
 {
 	return (v < 0.0f) ? -v : v;
+}
+
+/*
+ * Saturating float -> int32. A direct cast of an out-of-range or NaN float to
+ * int32 is undefined behaviour in C, and last_e_ns can legitimately be a couple
+ * of billion ns on a garbage capture before the loop rejects it, so telemetry
+ * must clamp rather than cast blind.
+ */
+static int32_t clamp_i32(float v)
+{
+	if (!(v >= (float)INT32_MIN)) { /* also catches NaN */
+		return INT32_MIN;
+	}
+	if (v >= (float)INT32_MAX) {
+		return INT32_MAX;
+	}
+	return (int32_t)v;
 }
 
 /*
@@ -552,11 +588,16 @@ static void update_warm(disc_ctx_t *ctx, const disc_env_t *env)
 	}
 
 	/*
-	 * The sensor pair is the §3.3 criterion, but a stuck-cold TMP117 or a
-	 * mis-set threshold must not block stratum-1 for ever: after
-	 * warm_timeout_s the loop's own lock criteria (phase and variance) are
-	 * evidence enough that the oven is up. Set warm_timeout_s = 0 to
-	 * disable the backstop and trust the sensors absolutely.
+	 * DELIBERATE DEVIATION from the spec §3.3 MUST ("advertise stratum-1
+	 * only when ... OCXO warm (INA228 #5 + TMP117 #1)"). A stuck-cold
+	 * TMP117 or a mis-set threshold would otherwise block stratum-1 for
+	 * ever, turning one failed sensor into a total loss of service. After
+	 * warm_timeout_s the loop's own lock criteria (phase error and its
+	 * variance under threshold for the dwell) are taken as sufficient
+	 * evidence the oven is up — a disciplined OCXO is warm by definition.
+	 * Set warm_timeout_s = 0 to disable the backstop and honour the sensor
+	 * MUST absolutely. Recorded in the completion report as a known
+	 * deviation for the architect's ruling.
 	 */
 	ctx->ocxo_warm = (ctx->warm_run >= ctx->cfg.warm_dwell_s) ||
 			 ((ctx->cfg.warm_timeout_s != 0u) &&
@@ -596,24 +637,86 @@ static void update_vc_check(disc_ctx_t *ctx, const disc_env_t *env)
 
 /* ------------------------------------------------------------- holdover */
 
-static float holdover_dt_c(const disc_ctx_t *ctx, const disc_env_t *env)
+/*
+ * Current temperature excursion from the holdover entry temperature. When the
+ * live reading is missing the LAST KNOWN excursion is held (mirroring the
+ * hold-on-missing-data policy in update_vc_check): a dropped sensor must not
+ * zero the growth rate and so make the estimate stop rising — that would let
+ * the served dispersion, and with it the advertised stratum, recover with no
+ * actual reference behind it.
+ */
+static float holdover_dt_c(disc_ctx_t *ctx, const disc_env_t *env)
 {
-	if (!ctx->holdover_start_temp_valid || !env->osc_temp_valid) {
-		return 0.0f;
+	if (ctx->holdover_start_temp_valid && env->osc_temp_valid) {
+		ctx->holdover_last_dt_c =
+			(float)(env->osc_temp_mc - ctx->holdover_start_temp_mc) *
+			0.001f;
 	}
-	return (float)(env->osc_temp_mc - ctx->holdover_start_temp_mc) * 0.001f;
+	return ctx->holdover_last_dt_c;
+}
+
+/* Instantaneous growth rate d(est)/dt, ns/s, for the current excursion and
+ * elapsed time. All three terms are non-negative (aging is clamped). */
+static float holdover_slope(const disc_ctx_t *ctx, float dt_c, float t_s)
+{
+	const quality_holdover_model_t *m = &ctx->cfg.holdover;
+	float rate = m->drift_ns_per_s +
+		     m->temp_ns_per_s_per_c * f_abs(dt_c);
+	float aging = (m->aging_ns_per_s2 > 0.0f) ? m->aging_ns_per_s2 : 0.0f;
+
+	if (rate < 0.0f) {
+		rate = 0.0f; /* a negative characterised drift is nonsensical */
+	}
+	return rate + aging * t_s;
+}
+
+/* Seconds from now until the accumulated estimate reaches the demote
+ * threshold, anchored at the CURRENT estimate rather than at the model's base
+ * — so it is consistent with the monotonic accumulation and never implies more
+ * headroom than the estimate itself has already spent. */
+static uint32_t holdover_time_to_demote(const disc_ctx_t *ctx, float dt_c,
+					float t_s)
+{
+	float budget = ctx->cfg.demote_threshold_ns - ctx->holdover_est_ns;
+	float aging = (ctx->cfg.holdover.aging_ns_per_s2 > 0.0f)
+			      ? ctx->cfg.holdover.aging_ns_per_s2
+			      : 0.0f;
+	float slope = holdover_slope(ctx, dt_c, t_s);
+	float tau;
+
+	if (!(budget > 0.0f)) {
+		return 0u;
+	}
+	if (aging > 0.0f) {
+		float disc = slope * slope + 2.0f * aging * budget;
+
+		/* Stable positive root, conjugate form (see quality.c L7). */
+		tau = (2.0f * budget) / (slope + quality_sqrtf(disc));
+	} else if (slope > 0.0f) {
+		tau = budget / slope;
+	} else {
+		return UINT32_MAX;
+	}
+
+	if (!isfinite(tau)) {
+		return UINT32_MAX;
+	}
+	return (tau >= (float)UINT32_MAX) ? UINT32_MAX : (uint32_t)tau;
 }
 
 static void enter_holdover(disc_ctx_t *ctx, const disc_env_t *env)
 {
 	ctx->state = DISC_STATE_HOLDOVER;
 	ctx->holdover_start_ms = env->mono_ms;
+	ctx->holdover_prev_ms = env->mono_ms;
 	ctx->holdover_start_temp_mc = env->osc_temp_mc;
 	ctx->holdover_start_temp_valid = env->osc_temp_valid;
+	ctx->holdover_last_dt_c = 0.0f;
 	ctx->holdover_elapsed_s = 0u;
+	/* Seed at the model's base error (clamped non-negative). */
 	ctx->holdover_est_ns = quality_holdover_err_ns(&ctx->cfg.holdover, 0.0f,
 						       0.0f);
-	ctx->t_demote_s = UINT32_MAX;
+	ctx->t_demote_s = holdover_time_to_demote(ctx, 0.0f, 0.0f);
 
 	/* The actuator is frozen from here; nothing that assumes continuity of
 	 * the phase record survives the gap. */
@@ -624,9 +727,9 @@ static void enter_holdover(disc_ctx_t *ctx, const disc_env_t *env)
 
 static void update_holdover(disc_ctx_t *ctx, const disc_env_t *env)
 {
-	float t_s = 0.0f;
 	float dt_c = holdover_dt_c(ctx, env);
-	float t_total;
+	float t_s = 0.0f;
+	float dt_tick = 0.0f;
 
 	if (env->mono_ms >= ctx->holdover_start_ms) {
 		uint64_t ms = env->mono_ms - ctx->holdover_start_ms;
@@ -634,23 +737,29 @@ static void update_holdover(disc_ctx_t *ctx, const disc_env_t *env)
 		ctx->holdover_elapsed_s = (uint32_t)(ms / 1000u);
 		t_s = (float)ms * 0.001f;
 	}
-
-	ctx->holdover_est_ns = quality_holdover_err_ns(&ctx->cfg.holdover, t_s,
-						       dt_c);
-
-	t_total = quality_holdover_time_to_ns(&ctx->cfg.holdover, dt_c,
-					      ctx->cfg.demote_threshold_ns);
-	if (!isfinite(t_total)) {
-		ctx->t_demote_s = UINT32_MAX;
-	} else if (t_total <= t_s) {
-		ctx->t_demote_s = 0u;
-	} else {
-		float remain = t_total - t_s;
-
-		ctx->t_demote_s = (remain >= (float)UINT32_MAX)
-					  ? UINT32_MAX
-					  : (uint32_t)remain;
+	if (env->mono_ms > ctx->holdover_prev_ms) {
+		dt_tick = (float)(env->mono_ms - ctx->holdover_prev_ms) * 0.001f;
 	}
+	ctx->holdover_prev_ms = env->mono_ms;
+
+	/*
+	 * Accumulate: est += (d/dt)(est) * dt_tick, using the growth rate for
+	 * the excursion and elapsed time observed *now*. Integrating the rate
+	 * instead of re-evaluating the closed form means a temperature that
+	 * rises and falls leaves its accumulated contribution in place, and a
+	 * held-over sensor keeps the last rate — the estimate can only ever
+	 * grow. The increment is clamped non-negative as a final guard against
+	 * a pathological (negative) characterised drift.
+	 */
+	{
+		float delta = holdover_slope(ctx, dt_c, t_s) * dt_tick;
+
+		if (delta > 0.0f) {
+			ctx->holdover_est_ns += delta;
+		}
+	}
+
+	ctx->t_demote_s = holdover_time_to_demote(ctx, dt_c, t_s);
 }
 
 /* --------------------------------------------------------------- actuator */
@@ -790,7 +899,7 @@ static void publish(const disc_ctx_t *ctx, const disc_env_t *env,
 	b.holdover_est_err_ns = o->holdover_est_err_ns;
 	b.holdover_elapsed_s = o->holdover ? ctx->holdover_elapsed_s : 0u;
 	b.holdover_t_demote_s = o->holdover_t_demote_s;
-	b.last_pps_off_ns = (int32_t)ctx->last_e_ns;
+	b.last_pps_off_ns = clamp_i32(ctx->last_e_ns);
 	b.pps_off_mean_ns = ctx->pps_mean_ns;
 	b.pps_off_sigma_ns = ctx->pps_sigma_ns;
 	b.freq_err_ppb = ctx->freq_err_ppb;
@@ -805,7 +914,14 @@ static void publish(const disc_ctx_t *ctx, const disc_env_t *env,
 	b.leap_current_s = env->anc.leap_current_s;
 	b.leap_at_tai_s = env->anc.leap_at_tai_s;
 	b.osc_temp_mc = env->osc_temp_valid ? env->osc_temp_mc : 0;
+	/* Flag the two fields whose zero would otherwise be ambiguous. */
 	b.flags = o->flags;
+	if (ctx->vc_sense_valid) {
+		b.flags |= QUALITY_FLAG_VC_SENSE_VALID;
+	}
+	if (env->osc_temp_valid) {
+		b.flags |= QUALITY_FLAG_OSC_TEMP_VALID;
+	}
 
 	(void)quality_publish(qs, &b);
 }
@@ -974,13 +1090,34 @@ static bool condition_sample(const disc_ctx_t *ctx, const disc_pps_t *p,
 	return true;
 }
 
-/* §3.3 lock criteria. */
+/*
+ * §3.3 lock criteria. The variance must merely be defined (>= 2 samples), not
+ * computed over a full lock_dwell_s window: the dwell itself is enforced
+ * separately by lock_run counting consecutive seconds these criteria hold, so
+ * requiring a full window here as well made the effective lock time ~2*dwell.
+ * By the time lock_run reaches the dwell the window is full anyway, so the
+ * variance that actually gates the promotion is over the whole window.
+ */
 static bool lock_criteria_met(const disc_ctx_t *ctx, const disc_env_t *env,
 			      float e, float var)
 {
 	return (f_abs(e) < ctx->cfg.lock_phase_ns) &&
-	       (var < ctx->cfg.lock_var_ns2) && (ctx->lock_n >= ctx->cfg.lock_dwell_s) &&
+	       (var < ctx->cfg.lock_var_ns2) && (ctx->lock_n >= 2u) &&
 	       ctx->ocxo_warm && env->gnss_time_locked;
+}
+
+/* Promote to LOCKED from LOCKING or RECOVERING. */
+static void promote_to_locked(disc_ctx_t *ctx, const disc_env_t *env)
+{
+	ctx->state = DISC_STATE_LOCKED;
+	ctx->ever_locked = true;
+	/* Reference temperature for the §3.3 feed-forward, captured once so the
+	 * term is zero the moment it starts being applied and the actuator does
+	 * not bump. Only meaningful with a live sensor. */
+	if (!ctx->tref_valid && env->osc_temp_valid) {
+		ctx->tref_mc = env->osc_temp_mc;
+		ctx->tref_valid = true;
+	}
 }
 
 int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
@@ -1252,21 +1389,34 @@ int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
 		}
 		break;
 	case DISC_STATE_LOCKING:
-	case DISC_STATE_RECOVERING:
+		/*
+		 * Cold-start path only. LOCKING has never served a primary
+		 * stratum (served_stratum() returns 16 for it), so a large
+		 * phase excursion can safely drop back to the fast FLL pull-in
+		 * — no client sees a step.
+		 */
 		if (f_abs(e) > ctx->cfg.acq_reentry_ns) {
 			ctx->state = DISC_STATE_ACQUIRING;
 			ctx->acq_ticks = 0u;
 		} else if (ctx->lock_run >= (uint16_t)ctx->cfg.lock_dwell_s) {
-			ctx->state = DISC_STATE_LOCKED;
-			ctx->ever_locked = true;
-			/* Reference temperature for the §3.3 feed-forward, so
-			 * the term is zero the moment it starts being applied
-			 * and the actuator does not bump. Only meaningful with
-			 * a live sensor. */
-			if (!ctx->tref_valid && env->osc_temp_valid) {
-				ctx->tref_mc = env->osc_temp_mc;
-				ctx->tref_valid = true;
-			}
+			promote_to_locked(ctx, env);
+		}
+		break;
+	case DISC_STATE_RECOVERING:
+		/*
+		 * §3.6 / the disc.h banner: RECOVERING exists precisely because
+		 * the frequency estimate SURVIVED holdover, so re-convergence is
+		 * a rate-limited phase pull-in with NO step — regardless of how
+		 * large the post-holdover excursion is. It must NOT fall back to
+		 * ACQUIRING (400 ppb ramp, 256 LSB/s slew ≈ 50 ppb/s DAC slam)
+		 * or a healthy GNSS-return would jump a stratum-1 server's time
+		 * and demote it. The FLL assist (run while the phase ramp is
+		 * clamped) re-learns any frequency lost during the outage, still
+		 * bounded by slew_lsb_per_s; served stratum follows the
+		 * dispersion/demote policy in served_stratum().
+		 */
+		if (ctx->lock_run >= (uint16_t)ctx->cfg.lock_dwell_s) {
+			promote_to_locked(ctx, env);
 		}
 		break;
 	case DISC_STATE_LOCKED:

@@ -593,6 +593,17 @@ typedef struct {
 	uint16_t alarm_id[UI_MAX_ALARMS];
 	uint8_t alarm_id_count;
 
+	/*
+	 * Geometry of the last rendered surface. A touch arrives as a pixel
+	 * coordinate and has to be mapped onto a cell; ui_input() has no
+	 * surface, so the mapping uses what the last ui_render() saw. Zero
+	 * until the first render, in which case a touch still wakes the panel
+	 * but is not located.
+	 */
+	uint8_t geom_rows;
+	uint8_t geom_cols;
+	uint8_t geom_cell_h;
+
 	ui_action_t q[UI_ACTION_QUEUE_LEN];
 	uint16_t q_head;
 	uint16_t q_len;

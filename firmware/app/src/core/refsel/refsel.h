@@ -17,8 +17,12 @@
  * decision logic — it never touches hardware. It emits an ordered action list
  * that the Zephyr glue executes:
  *
- *     BRIDGE_TO_HSI -> SET_MUX(target) -> WAIT_SETTLE_MS(n)
- *                   -> RESELECT_HSE -> VERIFY_PLL -> DONE
+ *     PARK_DISCIPLINE -> BRIDGE_TO_HSI -> SET_MUX(target) -> WAIT_SETTLE_MS(n)
+ *                     -> RESELECT_HSE -> VERIFY_PLL -> UNPARK_DISCIPLINE -> DONE
+ *
+ * The PARK/UNPARK bracket keeps the discipline loop from mistaking the
+ * HSI-bridge clock discontinuity for a reference glitch — see the
+ * refsel_action_t doc.
  *
  * A plain selector is used rather than a glitch-free mux IC on purpose (see
  * docs/sts1000_clock_mux.md §0): a glitch-free part completes its handoff on
@@ -51,7 +55,7 @@ extern "C" {
 #endif
 
 /** Longest action list the machine can emit (the sequence above). */
-#define REFSEL_MAX_STEPS 6u
+#define REFSEL_MAX_STEPS 8u
 
 /** Revert timestamps retained for the flap window. */
 #define REFSEL_FLAP_HISTORY 8u
@@ -75,14 +79,29 @@ typedef enum {
 	REFSEL_REQ__COUNT
 } refsel_request_t;
 
-/** One step of the glitchless handoff, for the glue to execute in order. */
+/**
+ * One step of the glitchless handoff, for the glue to execute in order.
+ *
+ * The list is bracketed by PARK_DISCIPLINE / UNPARK_DISCIPLINE. Reparenting
+ * SYSCLK to HSI for the settle window free-wheels the ETH PTP clock and the
+ * TIM2/TIM3 PPS timebase for a few milliseconds, so the very next PPS capture
+ * carries a multi-millisecond apparent phase step. Without the bracket the
+ * discipline loop's median/MAD gate would reject that second, trip its missed-
+ * PPS counter and fall into HOLDOVER — a *healthy* OCXO->Rb upgrade would
+ * demote the server. The glue therefore calls disc_park() before disturbing the
+ * clock and disc_unpark() after the PLL is verified; disc_unpark() resumes in
+ * RECOVERING, whose rate-limited pull-in absorbs the residual realignment with
+ * no time step (see disc.h). See docs/sts1000_clock_mux.md §4.2.
+ */
 typedef enum {
 	REFSEL_ACT_NONE = 0,
-	REFSEL_ACT_BRIDGE_TO_HSI, /**< SYSCLK <- HSI before touching the mux */
-	REFSEL_ACT_SET_MUX,       /**< write PB6; arg 0 = input A, 1 = input B */
-	REFSEL_ACT_WAIT_SETTLE_MS,/**< arg = milliseconds to let the mux settle */
-	REFSEL_ACT_RESELECT_HSE,  /**< re-enable HSE bypass, poll HSERDY */
-	REFSEL_ACT_VERIFY_PLL,    /**< re-lock the PLL, re-arm CSS, SYSCLK <- PLL */
+	REFSEL_ACT_PARK_DISCIPLINE,   /**< disc_park(): freeze the DAC, hold Vc */
+	REFSEL_ACT_BRIDGE_TO_HSI,     /**< SYSCLK <- HSI before touching the mux */
+	REFSEL_ACT_SET_MUX,           /**< write PB6; arg 0 = input A, 1 = input B */
+	REFSEL_ACT_WAIT_SETTLE_MS,    /**< arg = ms to let the mux/HSE settle */
+	REFSEL_ACT_RESELECT_HSE,      /**< re-enable HSE bypass, poll HSERDY */
+	REFSEL_ACT_VERIFY_PLL,        /**< re-lock the PLL, re-arm CSS, SYSCLK<-PLL */
+	REFSEL_ACT_UNPARK_DISCIPLINE, /**< disc_unpark(): resume in RECOVERING */
 	REFSEL_ACT_DONE,
 	REFSEL_ACT__COUNT
 } refsel_action_t;

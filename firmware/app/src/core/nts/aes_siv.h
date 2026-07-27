@@ -63,6 +63,12 @@ typedef struct {
 	port_crypto_t crypto;
 	uint8_t k_s2v[AES_SIV_BLOCK]; /* leftmost half: S2V / CMAC */
 	uint8_t k_ctr[AES_SIV_BLOCK]; /* rightmost half: CTR */
+	/* CMAC subkeys for k_s2v, derived once at init and reused across every
+	 * S2V invocation. S2V runs three to six CMACs per call, all under the
+	 * same key, so recomputing L = AES(K,0) each time was one wasted block
+	 * cipher call per CMAC on the hot cookie path (M6). */
+	uint8_t k1_s2v[AES_SIV_BLOCK];
+	uint8_t k2_s2v[AES_SIV_BLOCK];
 	bool ready;
 } aes_siv_ctx_t;
 
@@ -76,6 +82,8 @@ typedef struct {
  * @retval 0        Ready.
  * @retval -EINVAL  NULL argument, wrong key length, or a port with no
  *                  aes_ecb_encrypt.
+ * @retval -EIO     The AES port failed while deriving the CMAC subkeys; the
+ *                  context is left not-ready.
  */
 int aes_siv_init(aes_siv_ctx_t *c, const port_crypto_t *crypto,
 		 const uint8_t *key, size_t key_len);

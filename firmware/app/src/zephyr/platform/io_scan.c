@@ -155,6 +155,42 @@ static int io_scan_configure_pins(void)
  * Event dispatch
  * -------------------------------------------------------------------------- */
 
+/*
+ * Which of the nine monitors owns an ALERT signal.
+ *
+ * Resolved against ina228_rail_tbl[]'s own alert_port/alert_bit fields rather
+ * than a second hand-written table, so the scan and the register map cannot
+ * drift apart — the GPS monitor being at 0x4A and the panel monitor's alert
+ * being the one on GPIOF are both facts this lookup inherits for free.
+ */
+static int io_scan_ina_rail_for_sig(fault_sig_t sig, ina228_rail_t *out)
+{
+	uint8_t port;
+	uint8_t bit;
+
+	if (out == NULL || (unsigned int)sig >= FAULT_SIG_COUNT) {
+		return -EINVAL;
+	}
+
+	if ((unsigned int)sig < 16U) {
+		port = 'F';
+		bit = (uint8_t)sig;
+	} else {
+		port = 'G';
+		bit = (uint8_t)((unsigned int)sig - 16U);
+	}
+
+	for (size_t i = 0; i < INA228_RAIL_COUNT; i++) {
+		if (ina228_rail_tbl[i].alert_port == port &&
+		    ina228_rail_tbl[i].alert_bit == bit) {
+			*out = (ina228_rail_t)i;
+			return 0;
+		}
+	}
+
+	return -ENOENT;
+}
+
 static void io_scan_post_ui(uint8_t type, const fault_evt_t *evt, int16_t value)
 {
 	sts_input_evt_t ui = {
