@@ -59,7 +59,35 @@ typedef struct {
 	bool hold_no_lock;   /* inject: RB_LOCK never asserts */
 	bool hold_no_extref; /* inject: EXTREF_MON never in band */
 	int32_t force_op_rail_mv; /* inject: rail while operating code active (0=auto) */
+
+	/*
+	 * The real telemetry path, modelled.
+	 *
+	 * The old harness updated in.ina_vbus_mv[VCC_RB] synchronously with the
+	 * digipot action — a zero-latency buck AND a zero-latency telemetry cache.
+	 * That single simplification is why a guarded Rb sequence that cannot
+	 * complete on any real board passed its unit tests: the rail was always
+	 * already at the commanded voltage by the time the step looked.
+	 *
+	 * `rail_mv` is the buck's *actual* output; `cache_*` is what the glue's
+	 * housekeeping snapshot holds, refreshed only when the modelled sweep or an
+	 * explicit re-read request fires. cache_stamp_ms feeds ina_age_ms, so a
+	 * staleness bug shows up as a staleness bug.
+	 */
+	int32_t rail_mv;           /* buck output right now */
+	uint32_t rail_settle_at_ms;/* when the buck reaches the commanded voltage */
+	int32_t rail_target_mv;
+	int32_t cache_mv;          /* what the cache reports for VCC_RB */
+	uint32_t cache_stamp_ms;   /* when the cache reading was taken */
+	uint32_t cache_next_ms;    /* next unconditional 1 Hz sweep */
+	bool cache_requested;      /* an on-action re-read is pending */
+	bool no_ina_refresh;       /* inject: the cache never updates again */
 } model_t;
+
+/* The board's real cadences, so a test cannot accidentally model a faster one. */
+#define HK_TICK_MS       250U  /* hk.c HK_PERIOD_MS: the pwrseq_step() rate */
+#define HK_SWEEP_MS     1000U  /* hk.c hk_sweep_1hz(): unconditional INA sweep */
+#define BUCK_SETTLE_MS    80U  /* MIC28516 precharge -> setpoint ramp */
 
 /* A board where every reading is nominal and every flag is the happy one. */
 static void in_healthy(pwrseq_in_t *in)
@@ -78,6 +106,7 @@ static void in_healthy(pwrseq_in_t *in)
 		in->ina_valid[i] = true;
 		in->ina_vbus_mv[i] = ina228_rail_tbl[i].nominal_mv;
 		in->ina_current_ma[i] = 10;
+		in->ina_age_ms[i] = 0U; /* just swept */
 	}
 	/*
 	 * VCC_RB is the exception: its nominal is a documentation figure for a
@@ -115,6 +144,12 @@ static void model_init(model_t *m, const pwrseq_cfg_t *cfg)
 	in_healthy(&m->in);
 	m->rb_glue = true;
 	m->rb_cmd = m->ctx.cfg.digipot_safe_code;
+	/* The rail is off and the cache says so, freshly. */
+	m->rail_mv = 0;
+	m->rail_target_mv = 0;
+	m->cache_mv = 0;
+	m->cache_stamp_ms = 0U;
+	m->cache_next_ms = HK_SWEEP_MS;
 	TEST_ASSERT_EQUAL_INT(0, pwrseq_start(&m->ctx, 0U));
 }
 
@@ -124,18 +159,44 @@ static void model_init(model_t *m, const pwrseq_cfg_t *cfg)
  * that code implies once RB_PWR_EN is up. This is what makes the two-code
  * guarded sequence testable end to end.
  */
-static void glue_apply(model_t *m, size_t from)
+/* Where the buck will end up for the currently commanded code. */
+static int32_t glue_rail_target(const model_t *m)
+{
+	if (!m->rb_powered) {
+		return 0;
+	}
+	if ((m->force_op_rail_mv != 0) &&
+	    (m->rb_cmd == m->ctx.cfg.digipot_operating_code)) {
+		return m->force_op_rail_mv;
+	}
+	return pwrseq_rb_expected_mv(&m->ctx.cfg.rb_xfer, m->rb_cmd);
+}
+
+/*
+ * The glue, as it actually behaves: a buck that takes time to move and a
+ * telemetry cache that only refreshes when something refreshes it.
+ *
+ * @param from  First new action in the log.
+ * @param ms    The tick's timestamp.
+ */
+static void glue_apply(model_t *m, size_t from, uint32_t ms)
 {
 	size_t i;
+	int32_t target;
 
 	for (i = from; i < m->log_len; i++) {
 		switch (m->log[i].action) {
 		case PWRSEQ_ACT_DIGIPOT_WRITE:
 		case PWRSEQ_ACT_DIGIPOT_WRITE_OP:
 			m->rb_cmd = m->log[i].arg;
+			/* pwrseq_exec.c requests a VCC_RB re-read on the operating
+			 * write, because the window step that follows cannot wait
+			 * for the 1 Hz sweep. */
+			m->cache_requested = true;
 			break;
 		case PWRSEQ_ACT_RB_PWR_EN:
 			m->rb_powered = true;
+			m->cache_requested = true;
 			break;
 		case PWRSEQ_ACT_RB_PWR_DIS:
 			m->rb_powered = false;
@@ -145,6 +206,7 @@ static void glue_apply(model_t *m, size_t from)
 		}
 	}
 
+	/* The digipot is SPI: written and read back synchronously, no cache. */
 	if (m->bad_readback) {
 		m->in.digipot_readback_valid = false;
 	} else if (m->wrong_readback) {
@@ -156,15 +218,37 @@ static void glue_apply(model_t *m, size_t from)
 		m->in.digipot_readback_valid = true;
 	}
 
-	if (!m->rb_powered) {
-		m->in.ina_vbus_mv[INA228_RAIL_VCC_RB] = 0;
-	} else if ((m->force_op_rail_mv != 0) &&
-		   (m->rb_cmd == m->ctx.cfg.digipot_operating_code)) {
-		m->in.ina_vbus_mv[INA228_RAIL_VCC_RB] = m->force_op_rail_mv;
-	} else {
-		m->in.ina_vbus_mv[INA228_RAIL_VCC_RB] =
-			pwrseq_rb_expected_mv(&m->ctx.cfg.rb_xfer, m->rb_cmd);
+	/* The buck: a commanded change takes BUCK_SETTLE_MS to arrive. */
+	target = glue_rail_target(m);
+	if (target != m->rail_target_mv) {
+		m->rail_target_mv = target;
+		m->rail_settle_at_ms = ms + BUCK_SETTLE_MS;
 	}
+	if ((int32_t)(ms - m->rail_settle_at_ms) >= 0) {
+		m->rail_mv = m->rail_target_mv;
+	}
+
+	/* The cache: the 1 Hz sweep, plus any on-action re-read the executor
+	 * requested (serviced on the next 4 Hz tick, as hk_service_requests does). */
+	if (!m->no_ina_refresh) {
+		bool refresh = false;
+
+		if ((int32_t)(ms - m->cache_next_ms) >= 0) {
+			m->cache_next_ms = ms + HK_SWEEP_MS;
+			refresh = true;
+		}
+		if (m->cache_requested) {
+			m->cache_requested = false;
+			refresh = true;
+		}
+		if (refresh) {
+			m->cache_mv = m->rail_mv;
+			m->cache_stamp_ms = ms;
+		}
+	}
+
+	m->in.ina_vbus_mv[INA228_RAIL_VCC_RB] = m->cache_mv;
+	m->in.ina_age_ms[INA228_RAIL_VCC_RB] = ms - m->cache_stamp_ms;
 
 	m->in.rb_lock = !m->hold_no_lock;
 	m->in.extref_in_band = !m->hold_no_extref;
@@ -183,7 +267,7 @@ static void pump(model_t *m)
 		m->log[m->log_len++] = a;
 	}
 	if (m->rb_glue) {
-		glue_apply(m, before);
+		glue_apply(m, before, m->in.mono_ms);
 	}
 }
 
@@ -206,6 +290,17 @@ static void run_out(model_t *m, uint32_t step_ms, unsigned int max_iters)
 		}
 		advance(m, step_ms);
 	}
+}
+
+/*
+ * Run bring-up at the rates the board actually uses: pwrseq_step() every
+ * HK_TICK_MS and the unconditional INA sweep every HK_SWEEP_MS. Every test that
+ * cares whether the sequence can complete uses this rather than run_out() with a
+ * hand-picked interval.
+ */
+static void run_out_realtime(model_t *m, unsigned int max_ticks)
+{
+	run_out(m, HK_TICK_MS, max_ticks);
 }
 
 /*
@@ -628,7 +723,7 @@ static void test_full_bring_up_emits_the_documented_sequence(void)
 	model_t m;
 
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 
 	expect_seq(&m, want, ARRAY_LEN(want));
 
@@ -681,7 +776,7 @@ static void test_action_arguments_come_from_config(void)
 	cfg.panel_led_duty_pct = 40U;
 
 	model_init(&m, &cfg);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_TRUE(m.ctx.rb_gated);
@@ -740,7 +835,7 @@ static void test_guards_skip_the_optional_stages(void)
 	m.in.ui_wanted = false;
 	m.in.rb_wanted = false;
 	m.in.debugger_attached = true;
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 
 	expect_seq(&m, want, ARRAY_LEN(want));
 
@@ -756,7 +851,6 @@ static void test_guards_skip_the_optional_stages(void)
 	 */
 	TEST_ASSERT_FALSE(pwrseq_wdt_armed(&m.ctx));
 	TEST_ASSERT_TRUE(m.ctx.relay_eligible);
-	TEST_ASSERT_FALSE(pwrseq_wdt_kick_ok(&m.ctx, PWRSEQ_LIVE_ALL, 100000U));
 }
 
 /* -------------------------------------------------- the rubidium interlocks */
@@ -766,7 +860,7 @@ static void test_rb_never_powers_before_the_digipot_is_verified(void)
 	model_t m;
 
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 
 	/* Both must be present, and in this order — ARCHITECTURE.md
 	 * invariant 3. */
@@ -787,7 +881,7 @@ static void test_a_digipot_that_will_not_read_back_stops_the_sequence(void)
 
 	model_init(&m, NULL);
 	m.bad_readback = true; /* SPI dead: readback never valid */
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 
 	/*
 	 * The safe-code write is attempted, its verify retried three times, and
@@ -827,7 +921,7 @@ static void test_a_digipot_that_reads_back_the_wrong_code_is_rejected(void)
 	 */
 	model_init(&m, NULL);
 	m.wrong_readback = true;
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 
 	expect_absent(&m, PWRSEQ_ACT_RB_PWR_EN);
 	TEST_ASSERT_TRUE(pwrseq_rb_fault(&m.ctx));
@@ -844,7 +938,7 @@ static void test_rb_never_gates_before_the_rail_window_is_proven(void)
 	 * regulates to 12 V — out of window. The precharge safe-low rail is
 	 * fine, so the sequence powers up and reaches the operating check. */
 	m.force_op_rail_mv = 12000;
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 
 	/* Powered, because that is how the rail is measured at all... */
 	expect_present(&m, PWRSEQ_ACT_RB_PWR_EN);
@@ -880,23 +974,23 @@ static void test_a_rail_just_outside_the_window_is_still_rejected(void)
 	 */
 	model_init(&m, NULL);
 	m.force_op_rail_mv = 14964; /* one past the top edge */
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 
 	model_init(&m, NULL);
 	m.force_op_rail_mv = 14963; /* exactly the top edge */
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 	expect_present(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 	TEST_ASSERT_FALSE(pwrseq_rb_fault(&m.ctx));
 
 	model_init(&m, NULL);
 	m.force_op_rail_mv = 13537; /* exactly the bottom edge */
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 	expect_present(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 
 	model_init(&m, NULL);
 	m.force_op_rail_mv = 13536; /* one below */
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 }
 
@@ -937,7 +1031,7 @@ static void test_rb_measured_over_vmax_is_refused_even_inside_the_window(void)
 
 	model_init(&m, &cfg);
 	m.force_op_rail_mv = 15100; /* in window, over vmax */
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 
 	expect_present(&m, PWRSEQ_ACT_RB_PWR_EN);
 	expect_absent(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
@@ -954,7 +1048,7 @@ static void test_a_stale_vcc_rb_reading_is_not_a_pass(void)
 
 	model_init(&m, NULL);
 	m.in.ina_valid[INA228_RAIL_VCC_RB] = false;
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 
 	/* Stage 3's baseline needs all nine, so the sequence never reaches the
 	 * rubidium at all — but if it did, an invalid reading must not satisfy
@@ -1004,7 +1098,7 @@ static void test_a_rail_excursion_after_gating_drops_the_rubidium(void)
 	size_t settled;
 
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_TRUE(m.ctx.rb_gated);
 	settled = m.log_len;
@@ -1041,7 +1135,7 @@ static void test_a_gated_rail_going_unreadable_drops_the_rubidium(void)
 	 * path, which the window check would otherwise mask.
 	 */
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_TRUE(m.ctx.rb_gated);
 	settled = m.log_len;
 
@@ -1065,7 +1159,7 @@ static void test_an_over_voltage_latch_drops_the_rubidium_at_any_stage(void)
 	size_t settled;
 
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	settled = m.log_len;
 	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
 
@@ -1120,7 +1214,7 @@ static void test_a_budget_exactly_at_the_cold_start_figure_is_enough(void)
 	model_init(&m, NULL);
 	m.in.poe_granted_mw = 30000U;
 	m.in.poe_measured_mw = 14000U; /* headroom exactly 16000 */
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	expect_present(&m, PWRSEQ_ACT_RB_PWR_EN);
 
 	model_init(&m, NULL);
@@ -1152,7 +1246,7 @@ static void test_shedding_the_display_frees_budget_for_a_retry(void)
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_EQUAL_UINT32(0U, pwrseq_alarms(&m.ctx));
 
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	expect_present(&m, PWRSEQ_ACT_RB_PWR_EN);
 	expect_present(&m, PWRSEQ_ACT_RB_VCC_GATE_EN);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
@@ -1217,7 +1311,7 @@ static void test_alarm_policy_abandons_the_stage_and_continues(void)
 
 	model_init(&m, NULL);
 	m.in.gnss_cfg_ack = false;
-	run_out(&m, 1000U, 60U);
+	run_out_realtime(&m, 400U);
 
 	/* Three attempts at the config request, then on with bring-up. */
 	TEST_ASSERT_EQUAL_UINT(3U,
@@ -1234,7 +1328,7 @@ static void test_a_failed_gps_rail_never_reaches_the_antenna_bias(void)
 
 	model_init(&m, NULL);
 	m.in.pg_mask &= (uint8_t)~PWRSEQ_PG_3V3_GPS_LDO;
-	run_out(&m, 250U, 60U);
+	run_out_realtime(&m, 200U);
 
 	/* Two attempts (one retry), then the rail is dropped and the rest of
 	 * stage 5 is abandoned — no bias onto a receiver that has no supply. */
@@ -1258,7 +1352,7 @@ static void test_halt_policy_stops_the_sequencer(void)
 
 	model_init(&m, NULL);
 	m.in.ina_vbus_mv[INA228_RAIL_3V3_MAIN] = 2000; /* nowhere near 3.3 V */
-	run_out(&m, 250U, 40U);
+	run_out_realtime(&m, 200U);
 
 	TEST_ASSERT_TRUE(m.ctx.halted);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_3_RAILS, pwrseq_stage(&m.ctx));
@@ -1289,7 +1383,7 @@ static void test_pg4_must_corroborate_the_3v3_telemetry(void)
 	 * A good reading with a dead power-good is not a good rail. */
 	model_init(&m, NULL);
 	m.in.pg_mask &= (uint8_t)~PWRSEQ_PG_3V3_PSU;
-	run_out(&m, 250U, 40U);
+	run_out_realtime(&m, 200U);
 
 	TEST_ASSERT_TRUE(m.ctx.halted);
 	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
@@ -1302,7 +1396,7 @@ static void test_a_sagging_poe_bus_alarms_but_does_not_halt(void)
 
 	model_init(&m, NULL);
 	m.in.ina_vbus_mv[INA228_RAIL_POE] = 40000; /* under the 42.5 V floor */
-	run_out(&m, 250U, 60U);
+	run_out_realtime(&m, 200U);
 
 	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
 			  PWRSEQ_ALARM_BIT(PWRSEQ_ALARM_RAIL_POE)) != 0U);
@@ -1316,7 +1410,7 @@ static void test_stage_re_entry_after_a_failure(void)
 
 	model_init(&m, NULL);
 	m.in.ina_vbus_mv[INA228_RAIL_3V3_MAIN] = 2000;
-	run_out(&m, 250U, 40U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_TRUE(m.ctx.halted);
 
 	/* Fix the rail and re-enter the stage: the halt clears and the trim
@@ -1328,7 +1422,7 @@ static void test_stage_re_entry_after_a_failure(void)
 	TEST_ASSERT_FALSE(m.ctx.halted);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_3_RAILS, pwrseq_stage(&m.ctx));
 
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_EQUAL_UINT(2U, count_of(&m, PWRSEQ_ACT_APPLY_SHUNT_TRIMS));
 	TEST_ASSERT_TRUE(m.ctx.relay_eligible);
@@ -1355,7 +1449,7 @@ static void test_an_i2c_probe_that_never_answers_alarms(void)
 
 	model_init(&m, NULL);
 	m.in.i2c_probe_ok = false;
-	run_out(&m, 250U, 60U);
+	run_out_realtime(&m, 200U);
 
 	TEST_ASSERT_EQUAL_UINT(3U, count_of(&m, PWRSEQ_ACT_I2C_PROBE));
 	TEST_ASSERT_TRUE((pwrseq_alarms(&m.ctx) &
@@ -1378,7 +1472,7 @@ static void test_shunt_trims_that_never_apply_stop_the_rail_checks(void)
 	 */
 	model_init(&m, NULL);
 	m.in.shunt_trims_applied = false;
-	run_out(&m, 100U, 60U);
+	run_out_realtime(&m, 200U);
 
 	TEST_ASSERT_EQUAL_UINT(3U, count_of(&m, PWRSEQ_ACT_APPLY_SHUNT_TRIMS));
 	expect_absent(&m, PWRSEQ_ACT_READ_RAIL_BASELINE);
@@ -1397,7 +1491,7 @@ static void test_a_missing_phy_reference_clock_holds_the_reset(void)
 	 * clock reads back an all-ones ID and never links. */
 	model_init(&m, NULL);
 	m.in.phy_refclk_stable = false;
-	run_out(&m, 250U, 60U);
+	run_out_realtime(&m, 200U);
 
 	expect_absent(&m, PWRSEQ_ACT_LAN_RST_RELEASE);
 	expect_absent(&m, PWRSEQ_ACT_PHY_MDIO_POLL);
@@ -1413,7 +1507,7 @@ static void test_a_phy_that_will_not_identify_alarms(void)
 
 	model_init(&m, NULL);
 	m.in.phy_id_ok = false;
-	run_out(&m, 250U, 80U);
+	run_out_realtime(&m, 200U);
 
 	expect_present(&m, PWRSEQ_ACT_LAN_RST_RELEASE);
 	TEST_ASSERT_EQUAL_UINT(3U, count_of(&m, PWRSEQ_ACT_PHY_MDIO_POLL));
@@ -1433,7 +1527,7 @@ static void test_an_unreadable_antenna_current_drops_the_bias(void)
 	/* The monitor answered at the stage-3 baseline and has since gone
 	 * quiet — the antenna supervisor would be blind. */
 	m.in.ina_valid[INA228_RAIL_V_ANT] = false;
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 
 	expect_present(&m, PWRSEQ_ACT_ANT_BIAS_EN);
 	expect_present(&m, PWRSEQ_ACT_ANT_BIAS_DIS);
@@ -1456,7 +1550,7 @@ static void test_a_display_rail_that_never_comes_up_is_dropped(void)
 	 * step() call would otherwise walk stage 6 to completion. */
 	run_to_stage(&m, PWRSEQ_STAGE_5_GNSS, 10U, 200U);
 	m.in.ina_valid[INA228_RAIL_5V_DISP] = false;
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 
 	expect_present(&m, PWRSEQ_ACT_DISP_EN);
 	expect_present(&m, PWRSEQ_ACT_DISP_DIS);
@@ -1476,7 +1570,7 @@ static void test_a_panel_rail_that_never_comes_up_is_dropped(void)
 	model_init(&m, NULL);
 	run_to_stage(&m, PWRSEQ_STAGE_5_GNSS, 10U, 200U);
 	m.in.ina_vbus_mv[INA228_RAIL_PANEL_5V] = 1000; /* nowhere near 5 V */
-	run_out(&m, 100U, 200U);
+	run_out_realtime(&m, 200U);
 
 	/* The display still comes up; only the LED string is dropped. */
 	expect_present(&m, PWRSEQ_ACT_DISP_EN);
@@ -1521,7 +1615,7 @@ static void test_a_rail_excursion_between_gating_and_lock_aborts_stage_8(void)
 	 */
 	model_init(&m, NULL);
 	m.hold_no_lock = true;
-	run_out(&m, 100U, 40U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_TRUE(m.ctx.rb_gated);
 
@@ -1543,7 +1637,7 @@ static void test_a_rail_excursion_between_gating_and_lock_aborts_stage_8(void)
 	/* The abort abandons stage 8 rather than sitting out the ten-minute
 	 * lock timeout, so bring-up finishes promptly on the OCXO. */
 	TEST_ASSERT_TRUE(pwrseq_stage(&m.ctx) >= PWRSEQ_STAGE_9_ARM);
-	run_out(&m, 100U, 40U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_TRUE(m.ctx.relay_eligible);
 }
@@ -1554,7 +1648,7 @@ static void test_an_over_voltage_during_the_lock_wait_aborts_stage_8(void)
 
 	model_init(&m, NULL);
 	m.hold_no_lock = true;
-	run_out(&m, 100U, 40U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
 
 	m.in.rb_ov_det = true;
@@ -1569,7 +1663,7 @@ static void test_an_over_voltage_during_the_lock_wait_aborts_stage_8(void)
 	/* The latch is still set, so a clear is refused until PE3 goes low. */
 	TEST_ASSERT_EQUAL_INT(-EBUSY, pwrseq_ov_clear(&m.ctx, m.in.mono_ms));
 
-	run_out(&m, 100U, 40U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_TRUE(m.ctx.relay_eligible);
 }
@@ -1636,7 +1730,7 @@ static void test_shed_ladder_order_and_exhaustion(void)
 	size_t base;
 
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	base = m.log_len;
 
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_SHED_NONE, pwrseq_shed_level(&m.ctx));
@@ -1676,7 +1770,7 @@ static void test_restoring_the_rubidium_re_runs_the_guarded_sequence(void)
 	size_t base;
 
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 
 	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_step(&m.ctx, 1000U)); /* display */
 	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_step(&m.ctx, 1000U)); /* panel */
@@ -1695,7 +1789,7 @@ static void test_restoring_the_rubidium_re_runs_the_guarded_sequence(void)
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
 
 	m.in.mono_ms = 2000U;
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 
 	/*
 	 * The whole two-code interlock ran again, in order: safe write + verify,
@@ -1735,7 +1829,7 @@ static void test_a_shed_load_is_not_re_enabled_by_a_stage_replay(void)
 	model_t m;
 
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_step(&m.ctx, 1000U)); /* display */
 	pump(&m);
 
@@ -1748,7 +1842,7 @@ static void test_a_shed_load_is_not_re_enabled_by_a_stage_replay(void)
 			0, pwrseq_restart_stage(&m.ctx, PWRSEQ_STAGE_6_PANEL,
 						2000U));
 		m.in.mono_ms = 2000U;
-		run_out(&m, 100U, 100U);
+		run_out_realtime(&m, 200U);
 
 		/* Nothing after the shed re-enables the display... */
 		TEST_ASSERT_EQUAL_INT(-1, idx_of_from(&m, PWRSEQ_ACT_DISP_EN,
@@ -1828,7 +1922,7 @@ static void test_pfi_emits_the_park_list_in_priority_order(void)
 	size_t i;
 
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
 
 	/* Queue something the sequencer wanted, to prove PFI discards it. */
@@ -1878,7 +1972,7 @@ static void test_pfi_shuts_down_the_rubidium_unconditionally(void)
 	 */
 	model_init(&m, NULL);
 	m.in.rb_wanted = false;
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_FALSE(m.ctx.rb_enabled);
 
 	TEST_ASSERT_EQUAL_INT(0, pwrseq_pfi(&m.ctx, 9000U));
@@ -1908,7 +2002,7 @@ static void test_pfi_shutdown_survives_an_undrained_supervisor_shutdown(void)
 	 * the queue after the purge.
 	 */
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
 
 	/* Provoke a supervisor shutdown but do NOT drain it. */
@@ -1965,52 +2059,236 @@ static void test_a_commanded_kill_makes_the_following_pfi_expected(void)
 
 /* ---------------------------------------------------------------- watchdog */
 
-static void test_wdt_kick_requires_arming_liveness_and_cadence(void)
+/*
+ * The supervisor's actual cadence decision, driven at the real call rate.
+ *
+ * This is the test the previous suite did not have. pwrseq_wdt_kick_ok() was
+ * pinned exhaustively — while nothing in the firmware called it, and the
+ * supervisor kicked unconditionally once per 250 ms housekeeping tick. That is a
+ * TPS3430 RUNAWAY fault on every tick: WDO_N -> POE_KILL -> the board drops its
+ * PoE port and restarts, forever. So the property under test is not "the
+ * predicate is correct", it is "driving the decision at the caller's rate
+ * produces at most one kick per window".
+ */
+static void wdt_run(pwrseq_wdt_t *w, uint32_t tick_ms, uint32_t duration_ms,
+		    uint32_t liveness, uint32_t *out_kicks,
+		    uint32_t *out_min_interval, uint32_t *out_max_interval)
 {
-	model_t m;
-	uint32_t t;
+	uint32_t ms;
+	uint32_t kicks = 0U;
+	uint32_t min_i = UINT32_MAX;
+	uint32_t max_i = 0U;
 
-	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
-	TEST_ASSERT_TRUE(pwrseq_wdt_armed(&m.ctx));
+	for (ms = tick_ms; ms <= duration_ms; ms += tick_ms) {
+		pwrseq_wdt_tick_t t;
 
-	t = m.in.mono_ms;
+		TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_service(w, liveness, ms, &t));
+		if (!t.kick) {
+			continue;
+		}
+		kicks++;
+		if (t.verdict_valid) {
+			if (t.interval_ms < min_i) {
+				min_i = t.interval_ms;
+			}
+			if (t.interval_ms > max_i) {
+				max_i = t.interval_ms;
+			}
+		}
+	}
 
-	/* The cadence has not elapsed since WDT_KICK_START. */
-	TEST_ASSERT_FALSE(pwrseq_wdt_kick_ok(&m.ctx, PWRSEQ_LIVE_ALL, t));
+	if (out_kicks != NULL) {
+		*out_kicks = kicks;
+	}
+	if (out_min_interval != NULL) {
+		*out_min_interval = min_i;
+	}
+	if (out_max_interval != NULL) {
+		*out_max_interval = max_i;
+	}
+}
 
-	t = m.ctx.last_kick_ms + PWRSEQ_WDT_KICK_PERIOD_MS - 1U;
-	TEST_ASSERT_FALSE(pwrseq_wdt_kick_ok(&m.ctx, PWRSEQ_LIVE_ALL, t));
-	t++;
-	TEST_ASSERT_TRUE(pwrseq_wdt_kick_ok(&m.ctx, PWRSEQ_LIVE_ALL, t));
+static void test_wdt_cadence_at_the_real_250ms_call_rate(void)
+{
+	pwrseq_wdt_t w;
+	uint32_t kicks = 0U;
+	uint32_t min_i = 0U;
+	uint32_t max_i = 0U;
+	uint32_t expect;
+
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_init(&w, PWRSEQ_WDT_KICK_PERIOD_MS));
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_arm(&w, 0U));
+
+	/* Sixty seconds of housekeeping ticks at hk.c's HK_PERIOD_MS. */
+	wdt_run(&w, HK_TICK_MS, 60000U, PWRSEQ_LIVE_ALL, &kicks, &min_i, &max_i);
 
 	/*
-	 * Liveness is an AND gate. Kicking a windowed watchdog on a bare timer
-	 * protects nothing — a stalled thread has to be able to stop the kick.
+	 * Every observed interval inside the TPS3430 window. This is the assertion
+	 * that fails against the old unconditional kick: there the interval is the
+	 * call period, 250 ms, which is below tWDL(min) = 680 ms — a runaway fault.
 	 */
-	TEST_ASSERT_FALSE(pwrseq_wdt_kick_ok(&m.ctx, 0U, t));
-	TEST_ASSERT_FALSE(
-		pwrseq_wdt_kick_ok(&m.ctx, PWRSEQ_LIVE_TIMING, t));
-	TEST_ASSERT_FALSE(pwrseq_wdt_kick_ok(
-		&m.ctx, PWRSEQ_LIVE_TIMING | PWRSEQ_LIVE_NETWORK, t));
-	TEST_ASSERT_FALSE(pwrseq_wdt_kick_ok(
-		&m.ctx, PWRSEQ_LIVE_NETWORK | PWRSEQ_LIVE_HOUSEKEEPING, t));
-	TEST_ASSERT_TRUE(pwrseq_wdt_kick_ok(&m.ctx, PWRSEQ_LIVE_ALL, t));
+	TEST_ASSERT_TRUE_MESSAGE(min_i >= PWRSEQ_WDT_WINDOW_MIN_MS,
+				 "a kick landed inside the runaway boundary");
+	TEST_ASSERT_TRUE_MESSAGE(max_i <= PWRSEQ_WDT_WINDOW_MAX_MS,
+				 "a kick landed past the stall boundary");
+	TEST_ASSERT_EQUAL_UINT32(0U, w.early);
+	TEST_ASSERT_EQUAL_UINT32(0U, w.late);
 
-	/* Recording a kick restarts the cadence. */
-	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_kicked(&m.ctx, t));
-	TEST_ASSERT_FALSE(pwrseq_wdt_kick_ok(&m.ctx, PWRSEQ_LIVE_ALL, t));
-	TEST_ASSERT_TRUE(pwrseq_wdt_kick_ok(
-		&m.ctx, PWRSEQ_LIVE_ALL, t + PWRSEQ_WDT_KICK_PERIOD_MS));
+	/*
+	 * At most one kick per window: 60 s of a 1100 ms cadence quantised to the
+	 * 250 ms tick is 1250 ms per kick, so 48. Unconditional kicking would give
+	 * 240.
+	 */
+	expect = 60000U / 1250U;
+	TEST_ASSERT_EQUAL_UINT32(expect, kicks);
+	TEST_ASSERT_TRUE(kicks < (60000U / PWRSEQ_WDT_WINDOW_MIN_MS) + 1U);
 
-	/* Wrap-safe. */
-	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_kicked(&m.ctx, 0xFFFFFF00U));
-	TEST_ASSERT_FALSE(pwrseq_wdt_kick_ok(&m.ctx, PWRSEQ_LIVE_ALL, 0x00000100U));
-	TEST_ASSERT_TRUE(pwrseq_wdt_kick_ok(&m.ctx, PWRSEQ_LIVE_ALL, 0x00000400U));
+	/* The arm counts as a kick, so the total is one more than the serviced ones. */
+	TEST_ASSERT_EQUAL_UINT32(kicks + 1U, w.kicks);
+}
 
-	TEST_ASSERT_FALSE(pwrseq_wdt_kick_ok(NULL, PWRSEQ_LIVE_ALL, 0U));
-	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_wdt_kicked(NULL, 0U));
+static void test_wdt_cadence_holds_at_every_plausible_call_rate(void)
+{
+	const uint32_t rates[] = { 10U, 50U, 100U, 250U, 500U };
+	size_t i;
+
+	/*
+	 * The cadence must come from the decision, not the call rate — including a
+	 * caller fast enough that a per-call kick would be catastrophic and one slow
+	 * enough to be a real risk of quantising past the late boundary.
+	 */
+	for (i = 0U; i < ARRAY_LEN(rates); i++) {
+		pwrseq_wdt_t w;
+		uint32_t min_i = 0U;
+		uint32_t max_i = 0U;
+		char msg[64];
+
+		TEST_ASSERT_EQUAL_INT(0,
+				      pwrseq_wdt_init(&w, PWRSEQ_WDT_KICK_PERIOD_MS));
+		TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_arm(&w, 0U));
+		wdt_run(&w, rates[i], 30000U, PWRSEQ_LIVE_ALL, NULL, &min_i, &max_i);
+
+		(void)snprintf(msg, sizeof(msg), "call rate %u ms", rates[i]);
+		TEST_ASSERT_TRUE_MESSAGE(min_i >= PWRSEQ_WDT_WINDOW_MIN_MS, msg);
+		TEST_ASSERT_TRUE_MESSAGE(max_i <= PWRSEQ_WDT_WINDOW_MAX_MS, msg);
+	}
+}
+
+static void test_wdt_needs_arming_and_full_liveness(void)
+{
+	pwrseq_wdt_t w;
+	pwrseq_wdt_tick_t t;
+
+	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_wdt_init(NULL, 1100U));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      pwrseq_wdt_init(&w, PWRSEQ_WDT_WINDOW_MIN_MS - 1U));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      pwrseq_wdt_init(&w, PWRSEQ_WDT_WINDOW_MAX_MS + 1U));
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_init(&w, PWRSEQ_WDT_KICK_PERIOD_MS));
+
+	/* Disarmed: the TPS3430 is not watching, so there is nothing to feed. */
+	TEST_ASSERT_FALSE(pwrseq_wdt_is_armed(&w));
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_service(&w, PWRSEQ_LIVE_ALL, 99999U, &t));
+	TEST_ASSERT_FALSE(t.kick);
+	TEST_ASSERT_FALSE(t.due);
+
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_arm(&w, 1000U));
+	TEST_ASSERT_TRUE(pwrseq_wdt_is_armed(&w));
+
+	/* Cadence not yet elapsed. */
+	TEST_ASSERT_EQUAL_INT(
+		0, pwrseq_wdt_service(&w, PWRSEQ_LIVE_ALL,
+				      1000U + PWRSEQ_WDT_KICK_PERIOD_MS - 1U, &t));
+	TEST_ASSERT_FALSE(t.kick);
+	TEST_ASSERT_FALSE(t.due);
+
+	/* Due, but liveness is an AND gate — a partial mask must withhold. */
+	{
+		const uint32_t partial[] = {
+			0U,
+			PWRSEQ_LIVE_TIMING,
+			PWRSEQ_LIVE_TIMING | PWRSEQ_LIVE_NETWORK,
+			PWRSEQ_LIVE_NETWORK | PWRSEQ_LIVE_HOUSEKEEPING,
+		};
+		size_t i;
+
+		for (i = 0U; i < ARRAY_LEN(partial); i++) {
+			TEST_ASSERT_EQUAL_INT(
+				0, pwrseq_wdt_service(
+					   &w, partial[i],
+					   1000U + PWRSEQ_WDT_KICK_PERIOD_MS, &t));
+			TEST_ASSERT_FALSE(t.kick);
+			TEST_ASSERT_TRUE(t.due);
+			TEST_ASSERT_FALSE(t.liveness_ok);
+		}
+		TEST_ASSERT_EQUAL_UINT32(ARRAY_LEN(partial), w.withheld);
+	}
+
+	/* Full mask, cadence elapsed: kick, and the interval is reported. */
+	TEST_ASSERT_EQUAL_INT(
+		0, pwrseq_wdt_service(&w, PWRSEQ_LIVE_ALL,
+				      1000U + PWRSEQ_WDT_KICK_PERIOD_MS, &t));
+	TEST_ASSERT_TRUE(t.kick);
+	TEST_ASSERT_TRUE(t.verdict_valid);
+	TEST_ASSERT_EQUAL_UINT32(PWRSEQ_WDT_KICK_PERIOD_MS, t.interval_ms);
+	TEST_ASSERT_EQUAL_UINT8(PWRSEQ_WDT_INTERVAL_OK, t.verdict);
+
+	/* Wrap-safe across the 49.7-day k_uptime_get_32 rollover. */
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_init(&w, PWRSEQ_WDT_KICK_PERIOD_MS));
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_arm(&w, 0xFFFFFF00U));
+	TEST_ASSERT_EQUAL_INT(0,
+			      pwrseq_wdt_service(&w, PWRSEQ_LIVE_ALL, 0x00000100U, &t));
+	TEST_ASSERT_FALSE(t.kick); /* 512 ms elapsed */
+	TEST_ASSERT_EQUAL_INT(0,
+			      pwrseq_wdt_service(&w, PWRSEQ_LIVE_ALL, 0x00000400U, &t));
+	TEST_ASSERT_TRUE(t.kick); /* 1280 ms elapsed */
+
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      pwrseq_wdt_service(NULL, PWRSEQ_LIVE_ALL, 0U, &t));
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      pwrseq_wdt_service(&w, PWRSEQ_LIVE_ALL, 0U, NULL));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, pwrseq_wdt_arm(NULL, 0U));
+	TEST_ASSERT_FALSE(pwrseq_wdt_is_armed(NULL));
 	TEST_ASSERT_FALSE(pwrseq_wdt_armed(NULL));
+}
+
+static void test_wdt_window_violations_are_counted_not_hidden(void)
+{
+	pwrseq_wdt_t w;
+	pwrseq_wdt_tick_t t;
+
+	/*
+	 * A cadence bug must be *observable*. The classifier is what turns "the
+	 * board keeps rebooting" into a log line naming the measured interval.
+	 */
+	TEST_ASSERT_EQUAL_UINT8(PWRSEQ_WDT_INTERVAL_EARLY,
+				pwrseq_wdt_classify_interval(0U));
+	TEST_ASSERT_EQUAL_UINT8(PWRSEQ_WDT_INTERVAL_EARLY,
+				pwrseq_wdt_classify_interval(HK_TICK_MS));
+	TEST_ASSERT_EQUAL_UINT8(PWRSEQ_WDT_INTERVAL_EARLY,
+				pwrseq_wdt_classify_interval(
+					PWRSEQ_WDT_WINDOW_MIN_MS - 1U));
+	TEST_ASSERT_EQUAL_UINT8(PWRSEQ_WDT_INTERVAL_OK,
+				pwrseq_wdt_classify_interval(
+					PWRSEQ_WDT_WINDOW_MIN_MS));
+	TEST_ASSERT_EQUAL_UINT8(PWRSEQ_WDT_INTERVAL_OK,
+				pwrseq_wdt_classify_interval(
+					PWRSEQ_WDT_KICK_PERIOD_MS));
+	TEST_ASSERT_EQUAL_UINT8(PWRSEQ_WDT_INTERVAL_OK,
+				pwrseq_wdt_classify_interval(
+					PWRSEQ_WDT_WINDOW_MAX_MS));
+	TEST_ASSERT_EQUAL_UINT8(PWRSEQ_WDT_INTERVAL_LATE,
+				pwrseq_wdt_classify_interval(
+					PWRSEQ_WDT_WINDOW_MAX_MS + 1U));
+
+	/* A caller that ignores the decision and services far too late is caught. */
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_init(&w, PWRSEQ_WDT_KICK_PERIOD_MS));
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_arm(&w, 0U));
+	TEST_ASSERT_EQUAL_INT(0, pwrseq_wdt_service(&w, PWRSEQ_LIVE_ALL, 5000U, &t));
+	TEST_ASSERT_TRUE(t.kick);
+	TEST_ASSERT_EQUAL_UINT8(PWRSEQ_WDT_INTERVAL_LATE, t.verdict);
+	TEST_ASSERT_EQUAL_UINT32(1U, w.late);
+	TEST_ASSERT_EQUAL_UINT32(0U, w.early);
 }
 
 static void test_wdt_is_not_armed_until_liveness_passes(void)
@@ -2099,7 +2377,7 @@ static void test_the_step_machine_stalls_rather_than_overflowing(void)
 	/* Draining lets it pick up exactly where it stopped. */
 	while (pwrseq_action_get(&m.ctx, &a) == 0) {
 	}
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_EQUAL_UINT32(0U, pwrseq_actions_dropped(&m.ctx));
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_ACT_NOR_RST_RELEASE, (int)m.log[0].action);
@@ -2134,7 +2412,7 @@ static void test_rb_shutdown_waits_for_queue_room_rather_than_half_applying(void
 	pwrseq_act_t a;
 
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
 
 	/* Wedge the queue with undrained out-of-band actions. */
@@ -2288,7 +2566,7 @@ static void test_withdrawing_rb_wanted_mid_stage_8_shuts_down(void)
 	 */
 	model_init(&m, NULL);
 	m.hold_no_lock = true;
-	run_out(&m, 100U, 40U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_8_RB, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
 	TEST_ASSERT_TRUE(m.ctx.rb_gated);
@@ -2307,7 +2585,7 @@ static void test_withdrawing_rb_wanted_mid_stage_8_shuts_down(void)
 	TEST_ASSERT_TRUE(idx_of_from(&m, PWRSEQ_ACT_RB_PWR_DIS, base) >= 0);
 
 	/* Bring-up still completes on the OCXO. */
-	run_out(&m, 100U, 40U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_DONE, pwrseq_stage(&m.ctx));
 	TEST_ASSERT_TRUE(m.ctx.relay_eligible);
 }
@@ -2348,7 +2626,7 @@ static void test_halted_board_refuses_rb_retry_and_shed_restore(void)
 	 */
 	model_init(&m, NULL);
 	m.in.ina_vbus_mv[INA228_RAIL_3V3_MAIN] = 2000; /* rail verify fails */
-	run_out(&m, 250U, 40U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_TRUE(m.ctx.halted);
 	TEST_ASSERT_EQUAL_INT(PWRSEQ_STAGE_3_RAILS, pwrseq_stage(&m.ctx));
 
@@ -2380,7 +2658,7 @@ static void test_ov_clear_also_clears_the_rb_fault_umbrella(void)
 	 * board reading permanently Rb-faulted.
 	 */
 	model_init(&m, NULL);
-	run_out(&m, 100U, 100U);
+	run_out_realtime(&m, 200U);
 	TEST_ASSERT_TRUE(m.ctx.rb_enabled);
 
 	m.in.rb_ov_det = true;
@@ -2470,7 +2748,10 @@ int main(void)
 	RUN_TEST(test_pfi_shutdown_survives_an_undrained_supervisor_shutdown);
 	RUN_TEST(test_a_commanded_kill_makes_the_following_pfi_expected);
 
-	RUN_TEST(test_wdt_kick_requires_arming_liveness_and_cadence);
+	RUN_TEST(test_wdt_cadence_at_the_real_250ms_call_rate);
+	RUN_TEST(test_wdt_cadence_holds_at_every_plausible_call_rate);
+	RUN_TEST(test_wdt_needs_arming_and_full_liveness);
+	RUN_TEST(test_wdt_window_violations_are_counted_not_hidden);
 	RUN_TEST(test_wdt_is_not_armed_until_liveness_passes);
 
 	RUN_TEST(test_the_step_machine_never_drops_an_action);

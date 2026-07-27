@@ -290,6 +290,13 @@ static void jw_pop(web_jw_t *w, char close)
 		w->err = true;
 		return;
 	}
+	if (jw_key_pending(w)) {
+		/* `{"k":}` — a key was emitted and then the container closed.
+		 * Caught here rather than at web_jw_finish(), which would see a
+		 * '}' as the last byte and think the document was balanced. */
+		w->err = true;
+		return;
+	}
 	w->depth--;
 	jw_ch(w, close);
 }

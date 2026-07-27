@@ -479,7 +479,6 @@ int ntp_parse(const uint8_t *pkt, size_t len, ntp_pkt_t *out)
 			out->mac_len = rem;
 			out->keyid = bytes_get_be32(&pkt[off]);
 			out->mac_unsupported = (rem == MAC_LEN_NAK);
-			mac_cand_off = 0U; /* a real MAC field settles it */
 			break;
 		}
 		if (rem == MAC_LEN_256 || rem == MAC_LEN_384 ||
@@ -504,9 +503,11 @@ int ntp_parse(const uint8_t *pkt, size_t len, ntp_pkt_t *out)
 		break; /* malformed tail: tolerated, not echoed */
 	}
 
-	/* The tail was consumed entirely as extension fields, yet a MAC-shaped
-	 * remainder was passed on the way: that remainder is the MAC. */
-	if (off == len && mac_cand_off != 0U) {
+	/* The walk ended without finding a MAC field, yet a MAC-shaped remainder
+	 * was passed on the way — whether the tail was consumed entirely as
+	 * extension fields or the walk stopped on a malformed one. That remainder
+	 * is the MAC. */
+	if (out->mac_len == 0U && mac_cand_off != 0U) {
 		out->mac_off = mac_cand_off;
 		out->mac_len = mac_cand_len;
 		out->keyid = bytes_get_be32(&pkt[mac_cand_off]);

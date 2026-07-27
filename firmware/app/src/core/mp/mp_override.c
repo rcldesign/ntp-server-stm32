@@ -501,8 +501,8 @@ static uint32_t make_nonce(mp_ovr_ctx_t *c, uint32_t now_ms, uint16_t obj1,
 }
 
 int mp_ovr_guard(mp_ovr_ctx_t *c, uint8_t guard, uint32_t sid, uint16_t obj1,
-		 uint8_t tag, const char *confirm, uint32_t nonce,
-		 uint32_t now_ms, mp_gc_arm_t *arm)
+		 uint8_t tag, const char *confirm, const char *phrase,
+		 uint32_t nonce, uint32_t now_ms, mp_gc_arm_t *arm)
 {
 	if (c == NULL) {
 		return -EINVAL;
@@ -540,11 +540,11 @@ int mp_ovr_guard(mp_ovr_ctx_t *c, uint8_t guard, uint32_t sid, uint16_t obj1,
 		return (int)MP_GC_OK;
 	}
 
-	/* G3: typed phrase + hold. Two phases. */
+	/* G3: typed phrase + hold, on top of the serial checked above. */
 	if (nonce == 0U) {
 		/* Phase 1: arm. The phrase is required to arm, so an accidental
 		 * request never reaches the hold at all. */
-		if (!confirm_eq(c->phrase, confirm)) {
+		if (!confirm_eq(c->phrase, phrase)) {
 			c->refusals++;
 			return (int)MP_GC_NEED_PHRASE;
 		}

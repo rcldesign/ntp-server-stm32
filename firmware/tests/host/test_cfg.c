@@ -258,6 +258,114 @@ static void test_schema_defaults_pass_their_own_bounds(void)
 				 cfg_staged_count(&g_cfg));
 }
 
+/*
+ * Defaults that are security- or availability-relevant, pinned so a later edit
+ * has to argue with a test rather than slip through.
+ *
+ * A schema default is what a factory-reset box, a corrupt-NVS boot and every
+ * first power-up actually run on, so "insecure but documented" is not a
+ * position — nobody reads the doc before the box is on the network.
+ */
+static void test_schema_defaults_fail_safe(void)
+{
+	uint64_t u = 0U;
+	uint8_t buf[CFG_VAL_MAX];
+	size_t len = 1U;
+
+	/* SNMPv2c's community string IS its authentication. "public" would have
+	 * shipped a world-readable agent on every box; empty makes core/snmp
+	 * answer -EACCES and the glue pass NULL, which disables the agent. */
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_get_bytes(&g_cfg, CFG_ID_SNMP_COMMUNITY, buf, sizeof(buf),
+			      &len));
+	TEST_ASSERT_EQUAL_size_t(0U, len);
+
+	/* And the agent is off to begin with. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_SNMP_ENABLE, &u));
+	TEST_ASSERT_EQUAL_UINT64(0U, u);
+
+	/* Interleaved mode is opt-in: the glue reads this key rather than
+	 * core/ntp's library default, so a 1 here is what puts the mode and its
+	 * per-client timestamp cache live on a shipped box. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_NTP_INTERLEAVED, &u));
+	TEST_ASSERT_EQUAL_UINT64(0U, u);
+
+	/* The per-client token bucket must be armed. 0 disables it, which lets a
+	 * single source drain the aggregate bucket and KoD every other client.
+	 * core/ntp documents 8 req/s burst 16 as its own default. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_NTP_RATE_QPS, &u));
+	TEST_ASSERT_EQUAL_UINT64(8U, u);
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_NTP_RATE_BURST, &u));
+	TEST_ASSERT_EQUAL_UINT64(16U, u);
+
+	/* Still reachable: 0 is a legal value an operator may ask for. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_set_u64(&g_cfg, CFG_ID_NTP_RATE_QPS, 0U));
+	TEST_ASSERT_EQUAL_INT(0, cfg_commit(&g_cfg, NULL));
+
+	/* Auth is required and the console is read-only out of the box. */
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_get_u64(&g_cfg, CFG_ID_SEC_AUTH_REQUIRED, &u));
+	TEST_ASSERT_EQUAL_UINT64(1U, u);
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_SEC_CONSOLE_RO, &u));
+	TEST_ASSERT_EQUAL_UINT64(1U, u);
+}
+
+/*
+ * cfg_schema_xvalidate(): the schema's own joint constraints. snmp.enable
+ * requires a non-empty snmp.community, so the empty default cannot be turned
+ * into an open agent by enabling the service and forgetting the community.
+ */
+static void test_schema_xvalidate_gates_snmp_on_its_community(void)
+{
+	TEST_ASSERT_EQUAL_INT(-EINVAL, cfg_schema_xvalidate(NULL, NULL));
+
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_set_validate_hook(&g_cfg, cfg_schema_xvalidate, NULL));
+
+	/* Defaults are consistent: the agent is off, so the empty community is
+	 * not a problem and an unrelated commit still works. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_schema_xvalidate(&g_cfg, NULL));
+	TEST_ASSERT_EQUAL_INT(0, cfg_set_u64(&g_cfg, CFG_ID_UI_BRIGHTNESS, 42U));
+	TEST_ASSERT_EQUAL_INT(0, cfg_commit(&g_cfg, NULL));
+
+	/* Enabling the agent alone is refused, and nothing is applied. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_set_u64(&g_cfg, CFG_ID_SNMP_ENABLE, 1U));
+	TEST_ASSERT_EQUAL_INT(-EPROTO, cfg_commit(&g_cfg, NULL));
+	{
+		uint64_t u = 1U;
+
+		TEST_ASSERT_EQUAL_INT(0,
+			cfg_get_u64(&g_cfg, CFG_ID_SNMP_ENABLE, &u));
+		TEST_ASSERT_EQUAL_UINT64(0U, u);
+	}
+	/* Staging survives so the operator can supply the missing field. */
+	TEST_ASSERT_TRUE(cfg_is_staged(&g_cfg, CFG_ID_SNMP_ENABLE));
+
+	/* Enabling it together with a community in ONE commit is accepted: the
+	 * hook reads the effective tree, not the live one. */
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_set_bytes(&g_cfg, CFG_ID_SNMP_COMMUNITY,
+			      (const uint8_t *)"n0tpublic", 9U));
+	TEST_ASSERT_EQUAL_INT(0, cfg_commit(&g_cfg, NULL));
+
+	/* And blanking the community while the agent is live is refused too —
+	 * the rule is a property of the tree, not of one command. */
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_set_bytes(&g_cfg, CFG_ID_SNMP_COMMUNITY, NULL, 0U));
+	TEST_ASSERT_EQUAL_INT(-EPROTO, cfg_commit(&g_cfg, NULL));
+
+	/* Disabling the agent in the same commit makes it acceptable again. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_set_u64(&g_cfg, CFG_ID_SNMP_ENABLE, 0U));
+	TEST_ASSERT_EQUAL_INT(0, cfg_commit(&g_cfg, NULL));
+
+	/* The schema defaults themselves satisfy the hook, so a factory reset
+	 * cannot leave a tree that refuses to commit. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_factory_reset(&g_cfg));
+	TEST_ASSERT_EQUAL_INT(0, cfg_schema_xvalidate(&g_cfg, NULL));
+
+	TEST_ASSERT_EQUAL_INT(0, cfg_set_validate_hook(&g_cfg, NULL, NULL));
+}
+
 static void test_schema_lookup(void)
 {
 	TEST_ASSERT_EQUAL_UINT16(CFG_ID_NET_DHCP,
@@ -1364,6 +1472,8 @@ int main(void)
 	RUN_TEST(test_schema_group_census);
 	RUN_TEST(test_schema_is_sorted_and_well_formed);
 	RUN_TEST(test_schema_defaults_pass_their_own_bounds);
+	RUN_TEST(test_schema_defaults_fail_safe);
+	RUN_TEST(test_schema_xvalidate_gates_snmp_on_its_community);
 	RUN_TEST(test_schema_lookup);
 	RUN_TEST(test_type_widths);
 

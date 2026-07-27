@@ -849,13 +849,26 @@ static void test_auth_without_a_provisioned_credential_locks_the_box(void)
 	/* Counted as a failure, exactly like a mismatch. */
 	TEST_ASSERT_EQUAL_UINT32(1U, mcp_stats(&g_mcp)->auth_fail);
 
-	/* And throttled: past MCP_AUTH_FREE_TRIES the backoff window arms and
-	 * further attempts are refused with BUSY without being tested. */
+	/*
+	 * And throttled. The window arms once the count passes
+	 * MCP_AUTH_FREE_TRIES, so attempts 2..FREE_TRIES+1 are still tested and
+	 * the one after that is refused with BUSY without being tested. The
+	 * unprovisioned branch used to return before auth_penalise() and was
+	 * therefore the one AUTH path an attacker could spin at link speed.
+	 */
 	for (i = 1U; i <= MCP_AUTH_FREE_TRIES; i++) {
 		(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"anything", 8U);
+		expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_AUTH);
 	}
-	TEST_ASSERT_EQUAL_HEX8((uint8_t)MCP_ERR_BUSY, tx_status(last_tx()));
-	TEST_ASSERT_TRUE(mcp_stats(&g_mcp)->auth_throttled > 0U);
+	TEST_ASSERT_EQUAL_UINT32(MCP_AUTH_FREE_TRIES + 1U,
+				 mcp_stats(&g_mcp)->auth_fail);
+
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"anything", 8U);
+	expect_status(MCP_CMD_AUTH, g_seq, (uint8_t)MCP_ERR_BUSY);
+	TEST_ASSERT_EQUAL_UINT32(1U, mcp_stats(&g_mcp)->auth_throttled);
+	/* Refused without being tested: the failure count did not move. */
+	TEST_ASSERT_EQUAL_UINT32(MCP_AUTH_FREE_TRIES + 1U,
+				 mcp_stats(&g_mcp)->auth_fail);
 
 	(void)feed_req(MCP_CMD_CFG_COMMIT, NULL, 0U);
 	expect_status(MCP_CMD_CFG_COMMIT, g_seq, (uint8_t)MCP_ERR_AUTH);
@@ -2329,11 +2342,14 @@ static void wire_up_with_glue(void)
 	TEST_ASSERT_EQUAL_INT(0, mcp_init(&g_mcp, &w));
 	policy_no_auth();
 
-	/* policy_no_auth() commits directly, outside the engine. */
+	/* policy_no_auth() commits directly, outside the engine: discount it. */
 	g_applied_n = 0U;
 	g_commit_calls = 0U;
+	g_lock_calls = 0U;
 	g_lock_depth = 0;
 	g_lock_max_depth = 0;
+	g_validate_calls = 0U;
+	g_validate_depth_seen = -1;
 }
 
 static bool applied_contains(uint8_t group)

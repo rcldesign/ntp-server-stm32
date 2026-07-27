@@ -351,12 +351,20 @@ typedef struct {
 /**
  * Evaluate the guard for an action.
  *
+ * The escalation is cumulative, so G3 needs **both** confirmations: the device
+ * serial in @p confirm (the G2 requirement, which does not go away) and the
+ * phrase in @p phrase. They are separate fields rather than one, because one
+ * field could only ever carry one of them and the spec asks for both.
+ *
  * @param guard    Required class (mp_guard_t).
  * @param sid      Caller's session id (0 when it presented none).
  * @param obj1     Manifest index + 1 for an object action, else 0.
  * @param tag      Action tag for a non-object G3 action (sys.reboot, a G3
  *                 diagnostic). Ignored when @p obj1 is non-zero.
- * @param confirm  The request's `confirm` string, or NULL.
+ * @param confirm  The request's `confirm` string (device serial), or NULL.
+ * @param phrase   The request's `phrase` string (G3 arming only), or NULL. Not
+ *                 required again on the second phase: it has been typed, and
+ *                 the nonce is what binds the completion to it.
  * @param nonce    The request's `nonce` (G3 second phase), or 0.
  * @param arm      Optional; filled when the result is MP_GC_ARMED.
  *
@@ -365,8 +373,8 @@ typedef struct {
  *         demonstrably alive.
  */
 int mp_ovr_guard(mp_ovr_ctx_t *c, uint8_t guard, uint32_t sid, uint16_t obj1,
-		 uint8_t tag, const char *confirm, uint32_t nonce,
-		 uint32_t now_ms, mp_gc_arm_t *arm);
+		 uint8_t tag, const char *confirm, const char *phrase,
+		 uint32_t nonce, uint32_t now_ms, mp_gc_arm_t *arm);
 
 /** Drop any armed G3 action on the open session. */
 void mp_ovr_disarm(mp_ovr_ctx_t *c);

@@ -265,6 +265,7 @@ static int guard_or_fail(mp_ctx_t *c, uint8_t guard, const mp_json_t *p,
 			 int params, uint16_t obj1, uint8_t tag, mp_jw_t *w)
 {
 	char confirm[MP_CONFIRM_MAX];
+	char phrase[MP_CONFIRM_MAX];
 	uint32_t sid = 0U;
 	uint32_t nonce = 0U;
 	mp_gc_arm_t arm;
@@ -273,9 +274,10 @@ static int guard_or_fail(mp_ctx_t *c, uint8_t guard, const mp_json_t *p,
 	(void)p_u32(p, params, "sid", 0U, &sid);
 	(void)p_u32(p, params, "nonce", 0U, &nonce);
 	(void)p_str(p, params, "confirm", confirm, sizeof(confirm));
+	(void)p_str(p, params, "phrase", phrase, sizeof(phrase));
 
 	(void)memset(&arm, 0, sizeof(arm));
-	gc = mp_ovr_guard(&c->ovr, guard, sid, obj1, tag, confirm, nonce,
+	gc = mp_ovr_guard(&c->ovr, guard, sid, obj1, tag, confirm, phrase, nonce,
 			  mp_now(c), &arm);
 	if (gc < 0) {
 		mp_fail(c, MP_E_INTERNAL, "guard");

@@ -95,8 +95,32 @@ LOG_MODULE_REGISTER(sts_ntp, CONFIG_STS1000_LOG_LEVEL);
  */
 #define NTP_PRECISION_LOG2 (-20)
 
-/** Outstanding responses awaiting their hardware egress timestamp. */
-#define TX_PENDING_SLOTS 8U
+/**
+ * Datagrams handled per pass over one ready socket before yielding.
+ *
+ * zsock_poll() returns immediately while anything is queued, and Zephyr gives
+ * no timeslice across priorities, so an uncapped inner loop turns a UDP flood
+ * into a permanently-runnable priority-8 thread that starves `housekeeping`
+ * (priority 14) — the only caller of the external watchdog kick. Starving it
+ * withholds the kick, the TPS3430 asserts WDO_N, and POE_KILL cold-cycles the
+ * board, which the attacker simply repeats (F12). Draining a batch keeps the
+ * good case fast; yielding between batches keeps the box alive.
+ */
+#define NTP_RX_BUDGET 16U
+
+/**
+ * Outstanding responses awaiting their hardware egress timestamp.
+ *
+ * The stamp comes back on the net_if TX-timestamp thread within a frame time or
+ * two, so this only has to cover responses in flight. Eight silently
+ * overwrote live entries at any real query rate; 32 covers the ~10 k req/s
+ * design target with margin, entries expire by age rather than by being
+ * clobbered, and the overrun is counted instead of hidden (F5).
+ */
+#define TX_PENDING_SLOTS 32U
+
+/** A pending entry older than this will never be matched; reclaim it. */
+#define TX_PENDING_TTL_MS 250U
 
 /* Static: ntp_ctx_t carries a 256-way client table and is far too large to
  * live on a 4 kB thread stack. */
@@ -113,18 +137,22 @@ static int sock6 = -1;
 
 static struct {
 	uint64_t xmt_field;    /* on-wire transmit field: the demux key */
+	uint64_t added_ms;     /* monotonic ms the entry was armed */
 	uint32_t client_id;
 	uint32_t xl_token;     /* RFC 9769 interleave pairing token (core) */
+	uint32_t seq;          /* arming order, for oldest-first eviction */
 	int32_t tai_minus_utc; /* the offset the response was built with */
 	bool used;
 } tx_pending[TX_PENDING_SLOTS];
-static uint8_t tx_pending_next;
+static uint32_t tx_pending_seq;
 static struct k_spinlock tx_lock;
 
 static struct {
 	uint32_t rx_no_hw_ts;
 	uint32_t tx_errors;
 	uint32_t txts_matched;
+	uint32_t txts_ambiguous; /* stamps discarded: the key was not unique */
+	uint32_t tx_pending_overrun; /* entries evicted before their stamp landed */
 	bool running;
 } gstat;
 
@@ -158,14 +186,26 @@ static void load_cfg(ntp_cfg_t *c)
 /* quality projection                                                        */
 /* ------------------------------------------------------------------------- */
 
-/** How far ahead of the event the leap indicator is advertised (RFC 5905). */
-#define LEAP_ANNOUNCE_WINDOW_S UINT64_C(86400)
-
+/**
+ * Project the §3.8 block onto the NTP header view.
+ *
+ * The mapping itself lives in core/ntp (ntp_quality_view_from_block), so it is
+ * under host test rather than hand-rolled here. This function's own job is to
+ * supply the three inputs core cannot reach — the snapshot, the current time,
+ * and whether the served timescale is actually traceable.
+ *
+ * That last input is the important one. `disc` publishing stratum 1 says the
+ * oscillator is locked to the PPS; it does not say the MAC counter every
+ * timestamp is read from has been placed on TAI, and on this board those are
+ * separate mechanisms. With the counter unplaced this server previously
+ * answered LI=0 / stratum 1 / refid 'GPS' carrying a 1900-era instant (F1).
+ * sts_time_is_fallback() did not catch it: it reports only whether a TAI source
+ * was ever registered, and one is registered from boot.
+ */
 static void quality_view(ntp_quality_view_t *v)
 {
 	quality_block_t q;
 	uint64_t now_tai_ns = 0U;
-	uint64_t mono_now;
 
 	ntp_quality_view_default(v);
 	v->precision = NTP_PRECISION_LOG2;
@@ -173,46 +213,12 @@ static void quality_view(ntp_quality_view_t *v)
 	if (sts_quality_snapshot(&q) != 0) {
 		return;
 	}
+	(void)sts_time_tai_ns(&now_tai_ns);
 
-	v->stratum = q.stratum;
-	v->refid = q.refid;
-	v->root_delay_q16 = q.root_delay_q16;
-	v->root_disp_q16 = q.root_disp_q16;
-	v->tai_minus_utc = q.leap_current_s;
-	v->holdover = q.holdover;
-	v->synchronized = (q.stratum == QUALITY_STRATUM_PRIMARY) &&
-			  !sts_time_is_fallback();
-
-	v->leap = NTP_LI_NONE;
-	if (q.leap_pending != 0 && sts_time_tai_ns(&now_tai_ns) == 0) {
-		uint64_t now_s = now_tai_ns / UINT64_C(1000000000);
-
-		if (q.leap_at_tai_s > now_s &&
-		    (q.leap_at_tai_s - now_s) <= LEAP_ANNOUNCE_WINDOW_S) {
-			v->leap = (q.leap_pending > 0) ? NTP_LI_ADD
-						       : NTP_LI_DEL;
-		}
-	}
-
-	/*
-	 * Reference timestamp = the instant `discipline` last published. The
-	 * block records it in monotonic milliseconds, so it is projected back
-	 * onto TAI here. In holdover this correctly stops advancing, which is
-	 * how a client sees the staleness (RFC 5905 §7.3).
-	 */
-	if (now_tai_ns == 0U) {
-		(void)sts_time_tai_ns(&now_tai_ns);
-	}
-	mono_now = sts_mono_ms();
-	if (now_tai_ns != 0U && q.updated_mono_ms != 0U &&
-	    mono_now >= q.updated_mono_ms) {
-		uint64_t age_ns = (mono_now - q.updated_mono_ms) *
-				  UINT64_C(1000000);
-
-		if (age_ns < now_tai_ns) {
-			v->ref_tai_ns = (int64_t)(now_tai_ns - age_ns);
-		}
-	}
+	(void)ntp_quality_view_from_block(&q, now_tai_ns, sts_mono_ms(),
+					  sts_ptpclk_traceable() &&
+						  !sts_time_is_fallback(),
+					  NTP_PRECISION_LOG2, v);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -227,18 +233,25 @@ static void quality_view(ntp_quality_view_t *v)
  * excluded: a client that re-binds between polls must keep its bucket and its
  * interleave state, and including the port would also let one host multiply its
  * allowance by opening sockets.
+ *
+ * The derivation is ntp_client_id(), a *keyed* hash. It used to be an unkeyed
+ * CRC-32, which for a 16-octet IPv6 address made a collision with a chosen
+ * victim solvable rather than searchable — anyone with a routable /64 could pick
+ * a source sharing a specific customer's token bucket and interleave state and
+ * drain it into Kiss-o'-Death (F8). See ntp_client_id() for why salting the
+ * table slot alone did not help.
  */
 static uint32_t client_id_of(const struct sockaddr *sa)
 {
 	if (sa->sa_family == AF_INET) {
 		const struct sockaddr_in *s4 = (const struct sockaddr_in *)sa;
 
-		return sts_crc32_ieee(&s4->sin_addr, sizeof(s4->sin_addr));
+		return ntp_client_id(&ntp, &s4->sin_addr, sizeof(s4->sin_addr));
 	}
 	if (sa->sa_family == AF_INET6) {
 		const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)sa;
 
-		return sts_crc32_ieee(&s6->sin6_addr, sizeof(s6->sin6_addr));
+		return ntp_client_id(&ntp, &s6->sin6_addr, sizeof(s6->sin6_addr));
 	}
 	return 0U;
 }
@@ -247,26 +260,77 @@ static uint32_t client_id_of(const struct sockaddr *sa)
 /* TX timestamp feedback                                                     */
 /* ------------------------------------------------------------------------- */
 
+/**
+ * Arm the egress-timestamp feedback for one response.
+ *
+ * The key is the on-wire transmit field, because that is the only per-response
+ * value sts_txts.c can see in the transmitted bytes. core/ntp guarantees the
+ * field is distinct across consecutive responses (NTP_XMT_DISTINCT_WINDOW), so
+ * a duplicate here means something upstream broke that guarantee. It is
+ * *rejected* rather than allowed to shadow the live entry: two entries under one
+ * key are indistinguishable, and pairing the wrong one reports one client's
+ * transmit instant to another as its own t3 (F5). Losing an interleave
+ * opportunity is the correct failure.
+ */
 static void tx_pending_add(uint64_t xmt_field, uint32_t client_id,
 			   uint32_t xl_token, int32_t tai_minus_utc)
 {
+	uint64_t now_ms = sts_mono_ms();
+	bool dup = false;
+
 	if (xmt_field == 0U || xl_token == 0U) {
 		return;
 	}
 	K_SPINLOCK(&tx_lock) {
-		tx_pending[tx_pending_next].xmt_field = xmt_field;
-		tx_pending[tx_pending_next].client_id = client_id;
-		tx_pending[tx_pending_next].xl_token = xl_token;
-		tx_pending[tx_pending_next].tai_minus_utc = tai_minus_utc;
-		tx_pending[tx_pending_next].used = true;
-		tx_pending_next =
-			(uint8_t)((tx_pending_next + 1U) % TX_PENDING_SLOTS);
+		size_t slot = TX_PENDING_SLOTS;
+		size_t oldest = 0U;
+		uint32_t oldest_seq = UINT32_MAX;
+		size_t i;
+
+		for (i = 0U; i < TX_PENDING_SLOTS; i++) {
+			if (tx_pending[i].used &&
+			    (now_ms - tx_pending[i].added_ms) >
+				    TX_PENDING_TTL_MS) {
+				/* Its stamp is never coming; reclaim quietly. */
+				tx_pending[i].used = false;
+			}
+			if (tx_pending[i].used &&
+			    tx_pending[i].xmt_field == xmt_field) {
+				tx_pending[i].used = false;
+				dup = true;
+			}
+			if (!tx_pending[i].used) {
+				if (slot == TX_PENDING_SLOTS) {
+					slot = i;
+				}
+			} else if (tx_pending[i].seq < oldest_seq) {
+				oldest_seq = tx_pending[i].seq;
+				oldest = i;
+			}
+		}
+
+		if (dup) {
+			/* Neither response can be identified any more. */
+			gstat.txts_ambiguous++;
+		} else {
+			if (slot == TX_PENDING_SLOTS) {
+				slot = oldest;
+				gstat.tx_pending_overrun++;
+			}
+			tx_pending[slot].xmt_field = xmt_field;
+			tx_pending[slot].added_ms = now_ms;
+			tx_pending[slot].client_id = client_id;
+			tx_pending[slot].xl_token = xl_token;
+			tx_pending[slot].tai_minus_utc = tai_minus_utc;
+			tx_pending[slot].seq = ++tx_pending_seq;
+			tx_pending[slot].used = true;
+		}
 	}
 }
 
 /**
  * Called from the net_if TX-timestamp thread (cooperative, above every service
- * thread). Does the minimum: match the token, hand the measured stamp to
+ * thread). Does the minimum: match the key, hand the measured stamp to
  * core/ntp, clear the slot.
  */
 static void on_tx_timestamp(uint64_t xmt_field, uint64_t tai_ns)
@@ -274,24 +338,44 @@ static void on_tx_timestamp(uint64_t xmt_field, uint64_t tai_ns)
 	uint32_t client_id = 0U;
 	uint32_t xl_token = 0U;
 	int32_t tai_minus_utc = 0;
-	bool found = false;
+	unsigned int matches = 0U;
 	size_t i;
 
 	K_SPINLOCK(&tx_lock) {
+		size_t hit = TX_PENDING_SLOTS;
+
+		/*
+		 * Scan the whole table and count, rather than taking the first
+		 * hit. The token guard in ntp_tx_complete() cannot detect a
+		 * mispair, because both the client id and the token are read out
+		 * of whichever slot matched — a wrong slot yields a *consistent*
+		 * pair and is accepted. So ambiguity has to be resolved here, and
+		 * the only safe resolution is to discard the measurement (F5).
+		 */
 		for (i = 0U; i < TX_PENDING_SLOTS; i++) {
 			if (tx_pending[i].used &&
 			    tx_pending[i].xmt_field == xmt_field) {
-				client_id = tx_pending[i].client_id;
-				xl_token = tx_pending[i].xl_token;
-				tai_minus_utc = tx_pending[i].tai_minus_utc;
-				tx_pending[i].used = false;
-				found = true;
-				break;
+				hit = i;
+				matches++;
 			}
+		}
+		if (matches == 1U) {
+			client_id = tx_pending[hit].client_id;
+			xl_token = tx_pending[hit].xl_token;
+			tai_minus_utc = tx_pending[hit].tai_minus_utc;
+			tx_pending[hit].used = false;
+		} else if (matches > 1U) {
+			for (i = 0U; i < TX_PENDING_SLOTS; i++) {
+				if (tx_pending[i].used &&
+				    tx_pending[i].xmt_field == xmt_field) {
+					tx_pending[i].used = false;
+				}
+			}
+			gstat.txts_ambiguous++;
 		}
 	}
 
-	if (!found) {
+	if (matches != 1U) {
 		return;
 	}
 
@@ -301,11 +385,9 @@ static void on_tx_timestamp(uint64_t xmt_field, uint64_t tai_ns)
 	 * TAI-UTC offset (ntp_ts_from_tai subtracts it). Passing 0 would shift
 	 * the interleaved reply by the whole leap-second offset.
 	 *
-	 * The RFC 9769 pairing token (res.xl_token) is passed straight through:
-	 * if a later request from this client already superseded this response,
-	 * core rejects the stale token rather than mispairing the timestamp, so
-	 * a wrong wire-match here can only drop an interleave opportunity, never
-	 * corrupt one.
+	 * The RFC 9769 pairing token (res.xl_token) is passed straight through so
+	 * core can reject a response a later request already superseded. Note it
+	 * is *not* protection against a wrong wire-match — see the scan above.
 	 *
 	 * ntp_tx_complete() only touches that client's cached interleave state
 	 * and takes no lock of its own; the NTP thread is the only other writer
@@ -398,7 +480,8 @@ static uint64_t rx_stamp_from_msg(const struct msghdr *msg)
 	return 0U;
 }
 
-static void serve_one(int fd)
+/** @return true when a datagram was handled, false when the socket ran dry. */
+static bool serve_one(int fd)
 {
 	struct sockaddr_storage peer;
 	struct iovec iov;
@@ -423,7 +506,7 @@ static void serve_one(int fd)
 
 	n = zsock_recvmsg(fd, &msg, 0);
 	if (n <= 0) {
-		return;
+		return false;
 	}
 
 	memset(&rx, 0, sizeof(rx));
@@ -452,13 +535,13 @@ static void serve_one(int fd)
 
 	rc = ntp_handle_request(&ntp, &rx, &qv, tx_buf, sizeof(tx_buf), &res);
 	if (rc != 0 || res.action == NTP_ACT_IGNORE) {
-		return;
+		return true;
 	}
 
 	if (zsock_sendto(fd, tx_buf, res.len, 0, (struct sockaddr *)&peer,
 			 msg.msg_namelen) < 0) {
 		gstat.tx_errors++;
-		return;
+		return true;
 	}
 
 	/* Arm the interleave feedback only when core armed a pairing (xl_token
@@ -467,6 +550,7 @@ static void serve_one(int fd)
 		tx_pending_add(res.xmt, rx.client_id, res.xl_token,
 			       qv.tai_minus_utc);
 	}
+	return true;
 }
 
 static void ntp_loop(void *a, void *b, void *c)
@@ -508,8 +592,18 @@ static void ntp_loop(void *a, void *b, void *c)
 			int i;
 
 			for (i = 0; i < nfds; i++) {
-				if ((fds[i].revents & ZSOCK_POLLIN) != 0) {
-					serve_one(fds[i].fd);
+				unsigned int n;
+
+				if ((fds[i].revents & ZSOCK_POLLIN) == 0) {
+					continue;
+				}
+				/* Drain a bounded batch, then fall out to the
+				 * liveness feed and the yield below. See
+				 * NTP_RX_BUDGET. */
+				for (n = 0U; n < NTP_RX_BUDGET; n++) {
+					if (!serve_one(fds[i].fd)) {
+						break;
+					}
 				}
 			}
 		}
@@ -522,6 +616,15 @@ static void ntp_loop(void *a, void *b, void *c)
 		if (live_id >= 0) {
 			sts_liveness_feed(live_id);
 		}
+
+		/*
+		 * Give every equal- and lower-priority thread a turn, whatever the
+		 * ingress rate. Zephyr does not timeslice across priorities, so
+		 * without this a sustained flood keeps this thread runnable and
+		 * `housekeeping` — the only caller of the watchdog kick — never
+		 * runs (F12).
+		 */
+		k_yield();
 	}
 }
 
@@ -542,6 +645,9 @@ void sts_ntp_stats(sts_ntp_stats_t *out)
 	out->rx_no_hw_ts = gstat.rx_no_hw_ts;
 	out->tx_errors = gstat.tx_errors;
 	out->txts_matched = gstat.txts_matched;
+	out->txts_ambiguous = gstat.txts_ambiguous;
+	out->tx_pending_overrun = gstat.tx_pending_overrun;
+	out->nts_enabled = nts_enabled;
 	out->running = gstat.running;
 }
 
@@ -562,7 +668,16 @@ int sts_ntp_start(void)
 		return rc;
 	}
 
-	if (sts_net_keyring() != NULL) {
+	/*
+	 * The NTS datapath is only worth arming when a client can actually obtain
+	 * a cookie, and the only way to get one is the NTS-KE key exchange. That
+	 * is compiled out unless mbedTLS carries the RFC 8446 exporter (see
+	 * sts_ntske.c and conf/net.conf), so enabling the datapath regardless left
+	 * the appliance accepting and NAKing NTS packets that no client could ever
+	 * have been issued a cookie for, while `nts.enable` and the status blob both
+	 * claimed NTS was on (F13). Advertise what the build can do.
+	 */
+	if (sts_net_keyring() != NULL && sts_ntske_supported()) {
 		rc = nts_init(&nts, sts_net_keyring(), NTS_COOKIES_MAX);
 		if (rc == 0) {
 			nts_hook.build = nts_ntp_ext_build;
@@ -572,6 +687,10 @@ int sts_ntp_start(void)
 		} else {
 			LOG_ERR("nts_init: %d; serving plain NTP only", rc);
 		}
+	} else if (sts_net_keyring() != NULL) {
+		LOG_WRN("NTS datapath off: this build has no NTS-KE key exchange "
+			"(mbedTLS lacks MBEDTLS_SSL_KEYING_MATERIAL_EXPORT), so no "
+			"client can obtain a cookie; serving plain NTP only");
 	}
 
 	sock4 = open_socket(AF_INET);

@@ -115,6 +115,12 @@ module_deps(bytes    util)
 module_deps(aes_siv  nts)
 module_deps(mcp_dfu  mcp util cfg logring quality)
 
+# `glue_policy` covers the Zephyr glue's decision logic — the §8.3 self-confirm
+# gate, the MCUboot staging-slot ceiling, the config-applier registry — which
+# lives in dependency-free headers under app/src/zephyr precisely so it can be
+# tested here. It compiles no core module, hence the empty dependency list.
+module_deps(glue_policy)
+
 # The Wave-4c security cluster. `core/auth` holds the AAA chain plus the RADIUS,
 # TACACS+ and LDAP codecs, so all four suites compile the same source set; the
 # LDAP codec has no suite of its own and is covered from test_auth.c, next to

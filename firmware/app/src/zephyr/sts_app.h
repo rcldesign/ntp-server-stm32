@@ -78,18 +78,21 @@ uint64_t sts_mono_ms(void);
  *
  * MUTEX-GUARDED. A cfg_ctx_t is not internally locked (cfg.h) and this one is
  * shared by the MCP engine, the Zephyr shell backend and the ui_local thread.
- * Every cfg_set/cfg_revert/cfg_import_*/cfg_factory_reset call on it, and every
+ * Every cfg_set/cfg_revert/cfg_import/cfg_factory_reset call on it, and every
  * read that must not see a half-applied commit, MUST be bracketed by
  * sts_cfg_lock()/sts_cfg_unlock(). sts_cfg_commit() takes the lock itself. */
 cfg_ctx_t *sts_cfg(void);
 
-/* Enter/leave mutual exclusion over sts_cfg(). Recursive: the same thread may
- * nest these (Zephyr k_mutex counts ownership), which is what lets a caller
- * hold the section across a multi-step operation and still call
- * sts_cfg_commit(). Callable from any thread, not from an ISR.
+/* Enter/leave mutual exclusion over sts_cfg(). Callable from any thread, not
+ * from an ISR. Hold it across a whole multi-step operation (stage several keys,
+ * feed an import chunk) so another cfg user cannot commit half of it.
  *
- * Do NOT hold this across a long operation an unrelated thread would notice —
- * the shell, the UI and the MCP channel all contend for it. */
+ * Do NOT hold it across sts_cfg_commit(): that call takes the mutex itself and
+ * then dispatches config appliers with it RELEASED, and an applier may block on
+ * sockets, DNS or display I/O. The lock is recursive (Zephyr k_mutex counts
+ * ownership) so nesting would not deadlock — it would quietly run those appliers
+ * inside the config critical section, where every other cfg user waits on them.
+ * Release, commit, re-acquire if you still need the section. */
 void sts_cfg_lock(void);
 void sts_cfg_unlock(void);
 
