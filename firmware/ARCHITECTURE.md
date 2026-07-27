@@ -103,7 +103,9 @@ Conventions:
   `ubx→util`; `gnssmgr→ubx,util`; `disc→util,quality`; `refsel→util`; `quality→util`;
   `thermal→util`; `ntp→util,quality`; `nts→util`; `ptp→util,quality`; `ina228→util`;
   `fault→util`; `pwrseq→ina228,util`; `mcp→util,cfg,logring,quality`; `cfg→util`;
-  `logring→util`; `snmp→util,quality`; `ui→util,quality`.
+  `logring→util`; `snmp→util,quality`; `ui→util,quality`;
+  `web→util,cfg,logring,quality`; `mp→util,cfg,logring,quality`;
+  `atecc→util`; `auth→util,cfg`; `fwupd→util,ubx`.
 
 ---
 
@@ -130,11 +132,27 @@ Conventions:
 | `snmp` | Compact SNMPv2c **read-only** agent + traps: BER codec, OID table walk bound to quality/health metrics catalog (§10.5 subset); v3 deferred (documented) | `snmp_handle(pkt)`, `snmp_make_trap()` |
 | `ui` | Screen-stack nav SM (§6.1/6.2), button/encoder event consumption, page render into an abstract "text/tile" surface (glue rasterizes to ST7796), RGB pattern selector (§2.8), backlight/wake policy | `ui_input()`, `ui_render(surface)` |
 
-**Deferred this phase (documented, stubs where structural):** HTTPS/web SPA + REST/WSS,
-SNMPv3 USM, RADIUS/LDAP/TACACS+, ACME, ATECC608B CryptoAuthLib binding (a `port_crypto`
-soft-key path via PSA/ITS keeps TLS/NTS functional without the part), PTP Annex-P ICV,
-Telecom/Power PTP profiles (config plumbing present; Default profile implemented),
-F9T firmware passthrough (`gnss fw`), Rb EFC fine-trim (hands-off default per spec).
+### Phase-2 modules (all landed; see the FMT spec for the maintenance surface)
+
+| Module | Purpose | Key API surface |
+|---|---|---|
+| `web` | HTTPS management plane: HTTP/1.1 parser, versioned REST router (`/api/v1`), RFC 6455 WSS telemetry/log push, session + CSRF auth with lockout. Glue adds the TLS listener, persisted self-signed cert/CSR and LittleFS asset serving. DFU reuses `mcp_dfu` over the same `port_image` — one state machine | `http_parse()`, `rest_dispatch()`, `wss_*`, `auth_web_*` |
+| `mp` | Maintenance Protocol for the Field Maintenance Tool: COBS+CRC16 channel mux, JSON-RPC control plane, capability manifest, override/lease engine with dead-man revert and G0–G3 guards, CBOR telemetry/PPS/log/event streams, UART tunnels, diag runner, **panel mirror** (screen tiles + lamp state + live inputs) | `mp_input()`, `mp_manifest_*`, `mp_override_*`, `mp_mirror_*` |
+| `snmp` | SNMPv2c **and v3 USM** (HMAC-SHA-256 auth, AES-128-CFB priv, RFC 3414 key localization, engineID from the ATECC serial), traps/informs, notification gating | `snmp_handle()`, `snmp_make_trap()` |
+| `auth` | AAA chain local → RADIUS → TACACS+ → LDAP, role mapping (admin/operator/viewer), TTL cache, lockout shared with the local path | `auth_check()` |
+| `atecc` | ATECC608B protocol layer (ATCA framing/CRC16, wake/idle/sleep, Info/Random/Sign/Verify/ECDH/SHA/HMAC/Counter/…). Transport via callback; tolerates an absent part by falling back to software keys | `atecc_cmd_*`, `atecc_resp_parse()` |
+| `fwupd` | **Multi-IC firmware update orchestrator + component inventory** (11 rows: STM32, ZED-F9T, FE-5680A variant-gated, plus the read-only-ID parts). Per-target QUERY→PREPARE→TRANSFER→VERIFY→RESTORE with `restore()` guaranteed once per `prepare()` on every exit path | `fwupd_inventory()`, `fwupd_begin/data/end/abort()` |
+| `ptp` (extended) | Telecom **G.8275.1/.2** and Power **C37.238** profiles (Default provably unchanged), Annex-P AUTHENTICATION TLV with replay window verified *after* the ICV, `ever_locked` gate so a never-locked unit advertises clockClass 248 | `ptp_cfg_apply_profile()`, `ptp_icv_*` |
+| `ui` (extended) | Polar skyplot renderer (az/el, constellation colour, used-vs-visible fill, true-north with declination + tilt, "north unverified" badge) with golden-image tests | `skyplot_render()` |
+
+**Still deferred, with the reason:** ACME (compiled-out skeleton; needs an HTTPS
+client, base64url/JWS-ES256 and a trustworthy clock at first boot — the gaps are
+enumerated in `sts_cert.c`); operator/viewer accounts (need their own persisted cfg
+keys — refused to create RAM-only ghosts); Argon2id credential stretching (plumbed via
+`auth_kdf_t`, but switching it is a coordinated flag day with MCP because the 48-byte
+envelope cannot record which KDF produced the tag); key zeroization on factory reset;
+FE-5680A firmware update (no loader protocol is documented anywhere reachable — reported
+as `NOT_SUPPORTED` rather than attempted).
 
 ---
 
