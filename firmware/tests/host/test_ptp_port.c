@@ -784,6 +784,22 @@ static void test_view_from_block_source_and_accuracy(void)
 	TEST_ASSERT_EQUAL_INT(0, ptp_quality_view_from_block(&b, 0U, &v));
 	TEST_ASSERT_EQUAL_UINT64(4200U, v.est_accuracy_ns);
 
+	/*
+	 * The magnitude is taken without ever evaluating -INT64_MIN, which is
+	 * undefined. Under UBSan this case is the proof, not the comment.
+	 */
+	b.holdover_est_err_ns = INT64_MIN;
+	TEST_ASSERT_EQUAL_INT(0, ptp_quality_view_from_block(&b, 0U, &v));
+	TEST_ASSERT_EQUAL_UINT64(9223372036854775808ULL, v.est_accuracy_ns);
+
+	b.holdover_est_err_ns = INT64_MAX;
+	TEST_ASSERT_EQUAL_INT(0, ptp_quality_view_from_block(&b, 0U, &v));
+	TEST_ASSERT_EQUAL_UINT64((uint64_t)INT64_MAX, v.est_accuracy_ns);
+
+	b.holdover_est_err_ns = -1;
+	TEST_ASSERT_EQUAL_INT(0, ptp_quality_view_from_block(&b, 0U, &v));
+	TEST_ASSERT_EQUAL_UINT64(1U, v.est_accuracy_ns);
+
 	/* No receiver estimate: fall back to the rolling PPS sigma. */
 	quality_block_init(&b);
 	b.lock_state = (uint8_t)QUALITY_LOCK_LOCKED;
@@ -1859,9 +1875,10 @@ static void test_delay_req_ignored_unless_master(void)
 		announce_twice(&r.c, &s, 200U, 2200U);
 		TEST_ASSERT_EQUAL_INT(PTP_PS_PASSIVE, ptp_port_state(&r.c));
 	}
-	TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&r.c, req, len, 0U, 2300U));
+	TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&r.c, req, len, 4242ULL, 2300U));
 	TEST_ASSERT_EQUAL_size_t(0U, count_tx(&r.f, (uint8_t)PTP_MSG_DELAY_RESP));
 	TEST_ASSERT_EQUAL_UINT32(2U, ctr->rx_ignored);
+	TEST_ASSERT_EQUAL_UINT32(0U, ctr->rx_no_timestamp);
 }
 
 /* --------------------------------------------------------------- receive -- */
@@ -1979,7 +1996,8 @@ static void test_rx_ignores_what_a_grandmaster_cannot_use(void)
 		buf[O_SRC_PORT + 1U] = 0x01U;
 		buf[O_CONTROL] = ptp_msg_control_field(types[i]);
 
-		TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&r.c, buf, len, 0U, 7000U));
+		/* Event types among these need a real ingress timestamp. */
+		TEST_ASSERT_EQUAL_INT(0, ptp_port_rx(&r.c, buf, len, 4242ULL, 7000U));
 		TEST_ASSERT_EQUAL_UINT32(1U, ctr->rx[types[i]]);
 		/* Nothing is emitted in response, and nothing crashes. */
 		TEST_ASSERT_EQUAL_size_t(before, r.f.n);
@@ -2046,8 +2064,15 @@ static void test_rx_fuzz_does_not_disturb_the_engine(void)
 			buf[O_LENGTH + 1U] = (uint8_t)len;
 		}
 
-		rc = ptp_port_rx(&r.c, buf, len, 0U, 7000U + iter);
-		TEST_ASSERT_TRUE((rc == 0) || (rc == -EBADMSG) || (rc == -EPROTO));
+		/*
+		 * A plausible ingress timestamp, so event messages reach the
+		 * dispatch instead of stopping at the missing-timestamp check;
+		 * -ENODATA is still allowed because the timestamp is only
+		 * consulted for types the fuzzer picks at random.
+		 */
+		rc = ptp_port_rx(&r.c, buf, len, 4242ULL + iter, 7000U + iter);
+		TEST_ASSERT_TRUE((rc == 0) || (rc == -EBADMSG) ||
+				 (rc == -EPROTO) || (rc == -ENODATA));
 
 		/* Random noise must never leave the engine in a nonsense state. */
 		switch (ptp_port_state(&r.c)) {

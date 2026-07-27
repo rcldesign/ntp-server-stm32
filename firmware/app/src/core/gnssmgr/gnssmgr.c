@@ -392,12 +392,23 @@ static int begin_walk(gnssmgr_t *g, uint8_t step, uint32_t now_ms)
 /* ------------------------------------------------------- message handlers -- */
 
 /**
- * Did the receiver's time-of-week jump backwards far enough to mean a restart?
+ * Did the receiver's time-of-week jump far enough to mean a restart?
  *
- * A week rollover is a legitimate backwards jump of nearly a full week and must
- * not be mistaken for one. This is only a safety net: a receiver that restarts
- * with its backup domain intact keeps counting and never trips it, which is why
- * gnssmgr_notify_reset() exists and is the primary signal.
+ * iTOW is modular: it counts to the end of the GPS week and returns to zero, so
+ * a smaller value than last time proves nothing on its own. What matters is the
+ * distance travelled *forwards* — the direction time actually moves — measured
+ * the long way round the week:
+ *
+ *     forward = (WEEK_MS - prev) + itow
+ *
+ * A rollover between two 1 Hz epochs is a forward step of 1000 ms; a receiver
+ * that restarted and re-acquired is a step of minutes. Judging on the raw
+ * backwards difference instead made every rollover look like a ~604 800 s jump
+ * and flagged an ordinary Saturday-midnight epoch as a restart.
+ *
+ * This is only a safety net: a receiver that restarts with its backup domain
+ * intact keeps counting and never trips it, which is why gnssmgr_notify_reset()
+ * exists and is the primary signal.
  */
 static bool itow_backstep(const gnssmgr_t *g, uint32_t itow_ms)
 {
@@ -406,11 +417,13 @@ static bool itow_backstep(const gnssmgr_t *g, uint32_t itow_ms)
 	if (itow_ms >= prev) {
 		return false;
 	}
-	if ((prev > (GNSSMGR_WEEK_MS - g->cfg.itow_backstep_ms)) &&
-	    (itow_ms < g->cfg.itow_backstep_ms)) {
-		return false; /* week rollover */
+	if ((prev >= GNSSMGR_WEEK_MS) || (itow_ms >= GNSSMGR_WEEK_MS)) {
+		/* Out of range for a time of week. Garbage is not evidence of a
+		 * restart, and acting on it would re-run the config walk on
+		 * every corrupt message. */
+		return false;
 	}
-	return (prev - itow_ms) > g->cfg.itow_backstep_ms;
+	return ((GNSSMGR_WEEK_MS - prev) + itow_ms) > g->cfg.itow_backstep_ms;
 }
 
 static void on_nav_pvt(gnssmgr_t *g, const ubx_nav_pvt_t *p, uint32_t now_ms)
@@ -772,27 +785,27 @@ static void on_ack(gnssmgr_t *g, const ubx_ack_t *a, uint32_t now_ms)
  * Rules, from gnss_antenna_bias_supervisor.md §9.2/§9.3:
  *   - Commanded off wins outright. With Q11 off the feed node collapses and the
  *     analog supervisor reports SHORT and "absent" even though nothing is
- *     wrong, so those flags must be masked, not debounced.
- *   - Otherwise a fault claimed by *either* source counts, and SHORT beats
- *     OPEN. Debouncing, not source arbitration, is what stops a transient.
+ *     wrong, so those flags must be masked, not debounced. Three signals say
+ *     "off": our own ANT_BIAS_EN, the F9T's ANT_OFF on PD4, and MON-RF
+ *     antPower. The third is corroboration only — it can mask a fault but
+ *     never raise one, so a receiver reporting DONTKNOW changes nothing.
+ *   - Otherwise a fault claimed by *either* measuring source counts, and SHORT
+ *     beats OPEN. Debouncing, not source arbitration, is what stops a transient.
  */
 static uint8_t ant_classify(const gnssmgr_t *g, const gnssmgr_ant_input_t *in)
 {
 	bool sh = false;
 	bool op = false;
+	bool rf_says_off = g->rf.valid &&
+			   (g->rf.ant_power == (uint8_t)UBX_ANT_POWER_OFF);
 
-	if (!in->bias_en || in->ant_off_mon) {
+	if (!in->bias_en || in->ant_off_mon || rf_says_off) {
 		return (uint8_t)GNSSMGR_ANT_OFF;
 	}
 
-	if (g->mon_rf_valid) {
-		if (g->mon_rf_ant_status == (uint8_t)UBX_ANT_STATUS_SHORT) {
-			sh = true;
-		} else if (g->mon_rf_ant_status == (uint8_t)UBX_ANT_STATUS_OPEN) {
-			op = true;
-		} else {
-			/* INIT / DONTKNOW / OK carry no fault claim. */
-		}
+	if (g->rf.valid) {
+		sh = g->rf.ant_short;
+		op = g->rf.ant_open;
 	}
 	if (in->current_valid) {
 		if (in->current_ua >= g->cfg.ant_short_ua) {
@@ -810,7 +823,7 @@ static uint8_t ant_classify(const gnssmgr_t *g, const gnssmgr_ant_input_t *in)
 	if (op) {
 		return (uint8_t)GNSSMGR_ANT_OPEN;
 	}
-	if (g->mon_rf_valid || in->current_valid) {
+	if (g->rf.valid || in->current_valid) {
 		return (uint8_t)GNSSMGR_ANT_OK;
 	}
 	return (uint8_t)GNSSMGR_ANT_UNKNOWN;
@@ -938,6 +951,15 @@ static bool cfg_valid(const gnssmgr_cfg_t *c)
 	if ((c->ack_timeout_ms == 0U) || (c->pvt_stale_ms == 0U)) {
 		return false;
 	}
+	/*
+	 * `attempt` is a uint8_t. At 255 retries it would wrap past the
+	 * comparison in retry_or_fail() and the walk would retry the same step
+	 * for ever, never reaching CONFIG_FAILED. Leave headroom rather than
+	 * sitting exactly on the boundary.
+	 */
+	if (c->ack_retries > 250U) {
+		return false;
+	}
 	if ((c->cfg_layers & (uint8_t)UBX_CFG_LAYER_ALL) == 0U) {
 		return false;
 	}
@@ -1029,7 +1051,8 @@ int gnssmgr_notify_reset(gnssmgr_t *g, uint32_t mono_ms)
 	g->qerr.valid = false;
 	g->svin.valid_msg = false;
 	g->sats.valid = false;
-	g->mon_rf_valid = false;
+	(void)memset(&g->rf, 0, sizeof(g->rf));
+	g->svin_started = false;
 	alarm_set(g, GNSSMGR_ALARM_TIME_UNLOCKED, false);
 
 	return gnssmgr_start(g, mono_ms);

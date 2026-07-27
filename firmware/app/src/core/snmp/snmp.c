@@ -1446,9 +1446,6 @@ static int build_response(snmp_ctx_t *c, req_t *rq, int32_t err,
 				break;
 			}
 		}
-		if (stop && !truncate) {
-			return -ENOSPC;
-		}
 	}
 
 	rc = snmp_wr_end(&w, m_vbl);
@@ -1466,6 +1463,7 @@ close:
 		return rc;
 	}
 
+	c->stats.varbinds += emitted;
 	*out_len = snmp_wr_len(&w);
 	return 0;
 }
@@ -1666,8 +1664,8 @@ int snmp_handle(snmp_ctx_t *c, const uint8_t *req, size_t req_len,
 		 * standard way to say so, and it needs the request-id, which
 		 * parse_request() has already recovered. */
 		c->stats.too_big++;
-		rc = build_response(c, &rq, SNMP_ERR_TOO_BIG, 0, false,
-				    uptime_cs, rsp, rsp_cap, &out);
+		rc = build_response(c, &rq, SNMP_ERR_TOO_BIG, 0, uptime_cs, rsp,
+				    rsp_cap, &out);
 		if (rc != 0) {
 			return -ENOSPC;
 		}
@@ -1682,8 +1680,8 @@ int snmp_handle(snmp_ctx_t *c, const uint8_t *req, size_t req_len,
 	if (rq.pdu == SNMP_PDU_SET) {
 		c->stats.set_refused++;
 		rc = build_response(c, &rq, SNMP_ERR_NOT_WRITABLE,
-				    (rq.n_vb > 0U) ? 1 : 0, false, uptime_cs,
-				    rsp, rsp_cap, &out);
+				    (rq.n_vb > 0U) ? 1 : 0, uptime_cs, rsp,
+				    rsp_cap, &out);
 		if (rc != 0) {
 			return -ENOSPC;
 		}
@@ -1700,16 +1698,15 @@ int snmp_handle(snmp_ctx_t *c, const uint8_t *req, size_t req_len,
 		c->stats.getbulk++;
 	}
 
-	rc = build_response(c, &rq, SNMP_ERR_NO_ERROR, 0,
-			    rq.pdu == SNMP_PDU_GETBULK, uptime_cs, rsp, rsp_cap,
-			    &out);
+	rc = build_response(c, &rq, SNMP_ERR_NO_ERROR, 0, uptime_cs, rsp,
+			    rsp_cap, &out);
 	if (rc == -ENOSPC) {
 		/* RFC 3416 §4.2.1/§4.2.2: a Get or GetNext whose response does
 		 * not fit is answered with tooBig and an empty varbind list.
 		 * GetBulk instead returns what fitted, so it never lands here. */
 		c->stats.too_big++;
-		rc = build_response(c, &rq, SNMP_ERR_TOO_BIG, 0, false,
-				    uptime_cs, rsp, rsp_cap, &out);
+		rc = build_response(c, &rq, SNMP_ERR_TOO_BIG, 0, uptime_cs, rsp,
+				    rsp_cap, &out);
 	}
 	if (rc != 0) {
 		return -ENOSPC;
