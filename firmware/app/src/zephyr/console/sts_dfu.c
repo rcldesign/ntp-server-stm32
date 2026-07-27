@@ -572,16 +572,27 @@ static int dfu_mark_pending(void *ctx)
 	 * this costs nothing in security — but its logging is compiled out, so
 	 * the operator's experience of a rolled-back image is "upload OK",
 	 * "staged, pending", reboot, and the same version still running, with
-	 * nothing anywhere saying why. Checking before the trailer is written
-	 * turns that into an error at the moment the decision is made.
+	 * nothing anywhere saying why. Checking here turns that into an error at
+	 * the moment the decision is made.
 	 *
-	 * Deliberately before boot_request_upgrade() and after the erase: the
-	 * erase is idempotent, whereas a trailer already marked pending would
-	 * have to be un-marked.
+	 * Before the trailer erase, not after: a refusal must leave slot 1
+	 * exactly as it was. Erasing first would blank the trailer of an image
+	 * we then decline, which is a write we had no reason to perform.
 	 */
 	rc = sts_rollback_check_staged();
 	if (rc != 0) {
 		return (rc == -EPERM) ? PORT_ENOTSUP : rc;
+	}
+
+	/*
+	 * Blank the trailer page so boot_request_upgrade() can write the boot
+	 * magic into it. Dropping this call makes the request land in
+	 * already-programmed flash, where the magic silently does not take and
+	 * the update never applies.
+	 */
+	rc = dfu_erase_trailer();
+	if (rc != 0) {
+		return rc;
 	}
 
 	rc = boot_request_upgrade(BOOT_UPGRADE_TEST);
