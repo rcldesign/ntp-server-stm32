@@ -911,7 +911,7 @@
 					)
 				)
 			)
-			(property "Footprint" "VSSOP10_DGS_TEX"
+			(property "Footprint" "sts1000:VSSOP10_DGS_TEX"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -1686,7 +1686,7 @@
 					)
 				)
 			)
-			(property "Footprint" "RGR20_2P05X2P05_TEX"
+			(property "Footprint" "sts1000:RGR20_2P05X2P05_TEX"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -8083,7 +8083,7 @@
 				)
 			)
 		)
-		(property "Footprint" "RGR20_2P05X2P05_TEX"
+		(property "Footprint" "sts1000:RGR20_2P05X2P05_TEX"
 			(at 299.72 125.73 0)
 			(hide yes)
 			(show_name no)
@@ -10582,7 +10582,7 @@
 				)
 			)
 		)
-		(property "Footprint" "VSSOP10_DGS_TEX"
+		(property "Footprint" "sts1000:VSSOP10_DGS_TEX"
 			(at 198.12 160.02 0)
 			(hide yes)
 			(show_name no)

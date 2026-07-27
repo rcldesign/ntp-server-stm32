@@ -13632,7 +13632,7 @@
 				)
 			)
 		)
-		(property "Value" "174k"
+		(property "Value" "162k"
 			(at 289.56 151.13 90)
 			(show_name no)
 			(do_not_autoplace no)
@@ -13642,7 +13642,7 @@
 				)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 289.56 145.542 90)
 			(hide yes)
 			(show_name no)
@@ -13664,7 +13664,7 @@
 				)
 			)
 		)
-		(property "Description" "RES SMD 174K OHM 1% 1/10W 0402"
+		(property "Description" "RES SMD 162K OHM 1% 1/4W 1206"
 			(at 289.56 147.32 0)
 			(hide yes)
 			(show_name no)
@@ -13719,7 +13719,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1743X"
+		(property "MANUFACTURER_PART_NUMBER" "ERJ-8ENF1623V"
 			(at 387.35 -81.28 0)
 			(hide yes)
 			(show_name no)
@@ -13730,7 +13730,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "P174KLCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "P162KFCT-ND"
 			(at 289.56 147.32 90)
 			(hide yes)
 			(show_name no)

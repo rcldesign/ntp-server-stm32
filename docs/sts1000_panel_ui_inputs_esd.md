@@ -31,7 +31,7 @@ driven pulse from the FT6336U.
 ## 2. Buttons — PF0–PF6 (direct GPIO)
 
 ```
-[Panel SPST]──J11──TVS(U19/U20)──●node●──PFn (U12)
+[Panel SPST]──J17──TVS(U19/U20)──●node●──PFn (U12)
                                  │      │
                          10k→3V3_STM  100nF→GND
 ```
@@ -152,7 +152,7 @@ MCU PF7 input survives the residual on its own ESD cells — acceptable for a sp
   `DISP_BL` PWM duty change only — DISP_EN and the 5 V rail stay asserted through dim/blank, so the
   touch controller stays powered and its INT stays live.
 - **Touch bring-up sequencing:** on DISP_EN enable, allow rail soft-start, release DISP_RST past the
-  touch-controller reset margin, then I²C-init touch. Mask `V_DISP_EN_FAULT_N` (PF9, U33 RT9742
+  touch-controller reset margin, then I²C-init touch. Mask `V_DISP_EN_FAULT` (PF9, U33 RT9742
   nFLG) for the soft-start window so inrush current-limit isn't logged as a fault.
 
 ### 6.2 STM32 TAMP (PC13)

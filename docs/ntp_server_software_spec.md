@@ -118,16 +118,16 @@ This is the contract between firmware and the board: for each net, what the soft
 
 |Device (addr, ref)              |Software role & cadence                                                                                                                                                    |
 |--------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-|INA228 #1 PoE in (0x40, U10)    |Input power/PoE budget accounting; class-vs-draw sanity; brownout precursor. 4 Hz. R30 sits in the series path → voltage + current both usable.|
-|INA228 #2 STM 3V3 (0x41, U31)   |MCU rail health. 1 Hz.                                                                                                                                                     |
-|INA228 #7 5V_DISP (0x42, U32)   |Display 5 V rail. 1 Hz.                                                                                                                                                    |
-|INA228 #8 main 3V3 (0x43, U30)  |Main/general 3V3 rail; 3V3-good telemetry corroborating PG4 (AP3441 PG drives to VIN when good → ~2.98 V). 1 Hz.                                    |
-|INA228 #4 Antenna (0x45, U26)   |**Antenna supervisor**: open (low I) / short (high I) / OK; cross-checks UBX-MON-RF + PD4. 4 Hz.                                                                           |
-|INA228 #5 OCXO (0x46, U37)      |Warm-up vs steady; oven-fault detection; always reporting. 4 Hz during warm-up, 1 Hz steady.                                                                               |
-|INA228 #6 Rb (0x47, U44)        |**Closed-loop verify** of the digipot-set Rb rail before trusting Rb; continuous Rb health. 4 Hz. ALERT (PG15) pull-up R265 10k→3V3_STM.           |
+|INA228 #1 PoE in (0x40, U10)    |Input power/PoE budget accounting; class-vs-draw sanity; brownout precursor. 4 Hz. R30 **25 mΩ** sits in the series path → voltage + current both usable; VBUS reads the 54 V bus directly (no divider). ±1.6384 A FS, 3.125 µA/LSB.|
+|INA228 #2 STM 3V3 (0x41, U31)   |MCU rail health. 1 Hz. R106 **100 mΩ**, ±409.6 mA FS, 781.25 nA/LSB.                                                                                                       |
+|INA228 #7 5V_DISP (0x42, U32)   |Display 5 V rail. 1 Hz. R107 **100 mΩ**, ±409.6 mA FS. May clip on a hard short (RT9742 limit can exceed FS) — annunciation still valid via ALERT + `V_DISP_EN_FAULT`.      |
+|INA228 #8 main 3V3 (0x43, U30)  |Main/general 3V3 rail; 3V3-good telemetry corroborating PG4 (AP3441 PG drives to VIN when good → ~2.98 V). 1 Hz. R102 **50 mΩ**, ±819.2 mA FS.                              |
+|INA228 #4 Antenna (0x45, U26)   |**Antenna supervisor**: open (low I) / short (high I) / OK; cross-checks UBX-MON-RF + PD4. 4 Hz. R89 **150 mΩ**, ±273.1 mA FS, 520.833 nA/LSB — the R77 foldback clamps at ≈182 mA (67 % FS) before the alert would fire, so use an *under*-current threshold for "open".|
+|INA228 #5 OCXO (0x46, U37)      |Warm-up vs steady; oven-fault detection; always reporting. 4 Hz during warm-up, 1 Hz steady. R126 **25 mΩ**, ±1.6384 A FS — sized for the OH300 warm-up surge, so the ~0.35 A steady draw uses only ~21 % of range.|
+|INA228 #6 Rb (0x47, U44)        |**Closed-loop verify** of the digipot-set Rb rail before trusting Rb; continuous Rb health. 4 Hz. ALERT (PG15) pull-up R265 10k→3V3_STM. R159 **7 mΩ** (2512/1 W), ±5.8514 A FS — sized for the low end of the 4.5–24.45 V programmable rail, not the 15 V nominal.|
 |SHT45 humidity (0x44, U72)      |Enclosure humidity/temp. **Owns 0x44** — this is why the GPS INA228 is at 0x4A. 1 Hz.                                                                                       |
-|INA228 #3 GPS (0x4A, U23)       |GPS load; acquisition-vs-tracking signature. **0x4A, not 0x44** (A0=A1=SDA strap; 0x44 is the SHT45). Do **not** re-strap. 1 Hz.                                            |
-|INA228 #9 panel 5V (0x4C, U54)  |Panel-LED string health; average over ≫ the PWM period, duty-normalize (I_true ≈ I_avg/duty). ALERT on **PF13**. 4 Hz. §6.4.                                                |
+|INA228 #3 GPS (0x4A, U23)       |GPS load; acquisition-vs-tracking signature. **0x4A, not 0x44** (A0=A1=SDA strap; 0x44 is the SHT45). Do **not** re-strap. 1 Hz. R72 **75 mΩ**, ±546.1 mA FS, 1.04167 µA/LSB — the acquisition-vs-tracking delta (~130 mA vs ~70 mA) is tens of thousands of counts.|
+|INA228 #9 panel 5V (0x4C, U54)  |Panel-LED string health; average over ≫ the PWM period, duty-normalize (I_true ≈ I_avg/duty). ALERT on **PF13**. 4 Hz. §6.4. R199 **150 mΩ**, ±273.1 mA FS, 520.833 nA/LSB (≈0.4 % of one LED's current — a single failed LED is unambiguous).|
 |TMP117 #1 oscillator (0x49, U57)|OCXO/Rb local temperature → aging compensation, thermal alarms. ADD0→3V3_STM. 1 Hz.                                                                                        |
 |TMP117 #2 ambient (0x48, U58)   |Enclosure temp → fan loop setpoint. ADD0→GND. 1 Hz.                                                                                                                        |
 |ATECC608B (0x60, U60)           |Device identity, TLS/NTS ECC P-256 private keys (non-exportable), ECDSA sign, ECDH, SHA-256/HMAC, AES-128, hardware TRNG, two monotonic counters, attestation. §9.         |
@@ -145,19 +145,19 @@ All HMI inputs, load-switch fault flags, rail power-goods, and INA228 ALERTs are
 dispatches changed bits. The rotary encoder is **not** scanned (hardware TIM1 mode). Authoritative
 bit maps live in `sts1000_firmware_hardware_interface.md` §5; summary:
 
-- **GPIOF[0:6]** = BUTTON_1..7 (active-low); **[7]** DISP_TOUCH_INT; **[8]** `V_ANT_EN_FAULT_N`,
-  **[9]** `V_DISP_EN_FAULT_N`, **[12]** `PANEL_LED_FAULT_N` (RT9742 open-drain nFLG, active-low);
+- **GPIOF[0:6]** = BUTTON_1..7 (active-low); **[7]** DISP_TOUCH_INT; **[8]** `V_ANT_EN_FAULT`,
+  **[9]** `V_DISP_EN_FAULT`, **[12]** `PANEL_LED_FAULT` (RT9742 open-drain nFLG, active-low);
   **[10]** PROX_WAKE (also EXTI10); **[11]** ENC_BUTTON; **[13]** `INA_ALERT_5V_PANEL` (INA228 #9
   panel 0x4C — the one INA alert **not** on GPIOG); **[14]** BKP_STM_PG, **[15]** BKP_GPS_PG.
 - **GPIOG[0:7]** = PG rails (active-high "good"): PG0 3V3_GPS_LDO_PG, PG1 OCXO_LDO_PG, PG2
-  3V0_RF_LDO_PG *(mask until the LT3045 open-collector pull-up is fitted)*, PG3 5V_PSU_PG,
-  PG4 3V3_PSU_PG *(~2.98 V)*, PG5 OCXO_PSU_PG (÷ divider), PG6 RB_PSU_PG, PG7 POE_PG
-  *(divided to 2.93 V)*.
+  3V0_RF_LDO_PG *(R266 10k→3V3_STM fitted)*, PG3 5V_PSU_PG, PG4 3V3_PSU_PG *(~2.98 V)*,
+  PG5 OCXO_PSU_PG (÷ divider), PG6 RB_PSU_PG, PG7 POE_PG *(divided to 2.97 V at a 54 V bus; 2.75–3.13 V over the PoE range)*.
 - **GPIOG[8:15]** = INA228 ALERTs (active-low): PG8 V_POE, PG9 3V3_STM, PG10 5V_DISP, PG11 3V3,
   PG12 3V3_GPS (0x4A), PG13 V_ANT, PG14 OCXO, PG15 VCC_RB *(pull-up R265 10k→3V3_STM)*.
 
-Firmware **MUST mask PG2** in the scan until the `3V0_RF_LDO_PG` pull-up is fitted. On any INA-alert
-bit asserting, read that INA228's diagnostic/flags register for the cause, then run alarm evaluation.
+**All eight PG bits are usable — no masking** (PG2's LT3045 open-collector PWRGD now has its R266
+pull-up). On any INA-alert bit asserting, read that INA228's `DIAG_ALRT` register for the cause, then
+run alarm evaluation.
 
 ### 2.5 SPI4 (PE12 SCK / PE13 MISO / PE14 MOSI / PE11 NSS)
 
@@ -173,8 +173,8 @@ bit asserting, read that INA228's diagnostic/flags register for the cause, then 
 |---------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 |`GPS_PWR_EN` (PC8)         |GPS VCC load switch — hard power-cycle path for the receiver (warm start preserved by V_BCKP).                                                                                                                |
 |`ANT_BIAS_EN` (PC9)        |Antenna bias-T high-side enable; part of the antenna fault response (disable on persistent short).                                                                                                            |
-|`DISP_EN` (PC11)           |5 V display rail (`5V_DISP`, RT9742 U33) + touch PCA9306 U63 enable — gates only display+touch (TMP117/ATECC608B/NOR/e-compass are on always-on 3V3_STM). Default-off at boot (R104 10k↓); cycle to cold-restart a wedged panel/touch. Mask `V_DISP_EN_FAULT_N` during soft-start. The display/touch/encoder are fed from the J17 panel-power pins (J17.16→5V_DISP, J17.28→3V3_STM); confirm both rails reach the panel before Stage-6 bring-up.|
-|`PANEL_LED_EN` (PC0), `PANEL_LED_PWM` (PE0)|Panel-LED 5 V RT9742 U55 enable (default-off, R198 10k↓) + brightness PWM. Both stages default OFF (PE0 Hi-Z = Q23 base pull-down). Health via INA228 #9 (0x4C) duty-normalized + `PANEL_LED_FAULT_N` (PF12). §6.4.|
+|`DISP_EN` (PC11)           |5 V display rail (`5V_DISP`, RT9742 U33) + touch PCA9306 U63 enable — gates only display+touch (TMP117/ATECC608B/NOR/e-compass are on always-on 3V3_STM). Default-off at boot (R104 10k↓); cycle to cold-restart a wedged panel/touch. Mask `V_DISP_EN_FAULT` during soft-start. The display/touch/encoder are fed from the J17 panel-power pins (J17.16→5V_DISP, J17.28→3V3_STM); confirm both rails reach the panel before Stage-6 bring-up.|
+|`PANEL_LED_EN` (PC0), `PANEL_LED_PWM` (PE0)|Panel-LED 5 V RT9742 U55 enable (default-off, R198 10k↓) + brightness PWM. Both stages default OFF (PE0 Hi-Z = Q23 base pull-down). Health via INA228 #9 (0x4C) duty-normalized + `PANEL_LED_FAULT` (PF12). §6.4.|
 |`RB_PWR_EN` (PB7)          |Rb-rail buck (U40) EN — default-off (R164 100k↓); see §2.1/§3.4/§10.3 sequencing and INA228 #6 verify.                                                                                                        |
 |`RB_VCC_GATE` (PB1)        |Rb VCC disconnect gate (Q25 SI7469DP) drive — default-off (R262 pd). Connects `VCC_RB_G` to the FE-5680A **only after** `VCC_RB` (INA228 0x47) verifies in-window. Gate clamp D25 (BZX84C12) bounds \|Vgs\|.|
 |`RB_OV_DET` (PE3, polled) / `RB_OV_RESET` (PD3)|Autonomous **26 V OV latch** status/reset. `RB_OV_DET` high = tripped (latch already killed U40 in hardware); pulse `RB_OV_RESET` HIGH to clear after the cause is gone. §3.4.|
@@ -188,7 +188,7 @@ bit asserting, read that INA228's diagnostic/flags register for the cause, then 
 |`WDT_KICK` (PB2)                          |Refresh the external **windowed** watchdog from a supervisor task that itself checks liveness of the timing, network, and housekeeping threads (kick only if all are healthy). Windowed → both stalls and runaway loops trip it. WDT timeout → POE_KILL in hardware.|
 |`PFI` (PE8, EXTI8)                        |Power-fail early warning (ahead of on-chip PVD). ISR commits volatile critical state (last Vc, leap, calibration deltas, log cursor) to NVS and parks the DAC; the supercap/PVD covers the write window.                                                            |
 |`RTC_TAMP` (PC13)                         |Tamper/intrusion → timestamped event in the audit log, optional secure-erase policy hook, SNMP trap. Handled by RTC/TAMP peripheral.                                                                                                                                |
-|`POE_NCL/NCM/LCF` (PC7/PC2/PC3, EXTI7/2/3)|NCP1095 PD status (class/event/fault). Track PoE state, detected class vs measured draw, and fault latches; gate `RB_PWR_EN` if the granted budget can’t cover the Rb. `POE_PG`/PG7 (divided to 2.93 V) and INA228 voltage/current corroborate these status lines.|
+|`POE_NCL/NCM/LCF` (PC7/PC2/PC3, EXTI7/2/3)|NCP1095 PD status (class/event/fault). Track PoE state, detected class vs measured draw, and fault latches; gate `RB_PWR_EN` if the granted budget can’t cover the Rb. `POE_PG`/PG7 (divided to 2.97 V at a 54 V bus) and INA228 voltage/current corroborate these status lines.|
 |`HOLDOVER_ALARM_RELAY` (PA6)              |Holdover alarm relay **K2** (G6K-2F-Y, Form-C → J16). **Normally-energized fail-safe:** drive PA6 HIGH (energize) only when service quality is met; any {fault, reset, power loss, boot} de-energizes → NC closes = **ALARM**. Default de-energized (R259 10k↓ = ALARM at boot). §3.6/§8-alarms.|
 
 ### 2.8 Local UI
@@ -329,7 +329,7 @@ On GNSS loss (no fix / PPS outliers / antenna fault):
 |**GNSS**        |Constellations, elevation mask, survey-in / fixed-position control + stored position, antenna supervisor, RTCM/NTRIP config, F9T firmware update.             |
 |**Network**     |Interfaces/VLAN/IP, NTP server + peers, NTS, PTP profile/domain, mDNS, ACLs.                                                                                  |
 |**Security**    |Users/roles, RADIUS/LDAP/TACACS+ (optional), TLS certs/keys, NTS keys + rotation, SNMPv3 users, firmware-signing trust, debug-auth, audit log, secure erase.  |
-|**Power/Health**|INA228 ×6 (V/I/P), TMP117 ×2, die temp, fan RPM + curve, supercaps, PoE class/draw, fault latches.                                                            |
+|**Power/Health**|INA228 ×9 (V/I/P per rail), TMP117 ×2, SHT45 humidity, die temp, fan RPM + curve, supercaps, PoE class/draw, fault latches.                                   |
 |**Logs**        |Live tail (WSS), filter by subsystem/level, download, syslog config.                                                                                          |
 |**Firmware**    |Running/standby versions, signed image upload, stage→verify→swap→confirm/revert, MCU + GNSS + (optional) Rb firmware.                                         |
 
@@ -379,7 +379,7 @@ Every real-time element on Dashboard/Timing/GNSS reads the §3.8 quality block v
 ### 6.5 Display driver
 
 - ST7796 over SPI4, write-only, dedicated baud/mode profile (20–40 MHz), DMA frame/region pushes, partial-region updates for changing fields to bound traffic (≈1.2 MB/s @ 4 Hz full-frame worst case). Render thread is lowest-priority and pre-emptible; never blocks timing.
-- **Power/reset sequencing:** assert `DISP_EN` (PC11) → RT9742 soft-starts `5V_DISP` and the PCA9306 enables; mask `V_DISP_EN_FAULT_N` (PF9, RT9742 U33 nFLG) during the soft-start window; release `DISP_RST` (PA10, held low at boot by R209 10k↓ → panel + touch reset) with the FT6336U reset-timing margin; init ST7796, then init FT6336U over the (now-translated) touch I²C. A `DISP_EN` low→high cycle fully cold-restarts a wedged panel/touch (module 74LVC245 has Ioff → no sneak path keeps it alive); drive DISP_CS/DC/BL to a defined state during the off window.
+- **Power/reset sequencing:** assert `DISP_EN` (PC11) → RT9742 soft-starts `5V_DISP` and the PCA9306 enables; mask `V_DISP_EN_FAULT` (PF9, RT9742 U33 nFLG) during the soft-start window; release `DISP_RST` (PA10, held low at boot by R209 10k↓ → panel + touch reset) with the FT6336U reset-timing margin; init ST7796, then init FT6336U over the (now-translated) touch I²C. A `DISP_EN` low→high cycle fully cold-restarts a wedged panel/touch (module 74LVC245 has Ioff → no sneak path keeps it alive); drive DISP_CS/DC/BL to a defined state during the off window.
 
 -----
 
@@ -500,13 +500,14 @@ PI loop on enclosure temp (TMP117 #2) with oscillator temp (TMP117 #1) and die t
 |Rb EFC trim                 |Optional fine-trim vs GPS over UART7                                                    |EFC value                        |
 |Holdover characterization   |Run controlled GNSS-denied intervals, record drift vs time & temp per oscillator        |drift model (feeds §3.6 estimate)|
 |E-compass hard/soft-iron    |In-enclosure rotation cal (once, fixed install)                                         |3×3 + offset                     |
-|Sensor offsets              |Per-INA228 shunt/zero, TMP117 trim                                                      |per-channel                      |
+|**INA228 shunt gain (×9)**  |Trim `SHUNT_CAL` per device against a reference load: `SHUNT_CAL = round(4096 · I_ref / I_reported)`. Removes the 1 % shunt tolerance, which dominates the uncalibrated budget. Bench procedure BM-1. |9 × uint16 (POR default **4096**)|
+|Sensor offsets              |Per-INA228 zero (no-load offset), TMP117 trim                                            |per-channel                      |
 
 All calibration constants live in NOR/NVS, are export/importable (signed), and are shown/edited on the Calibration page and `cal` console group. Changing one writes the audit log and re-evaluates affected telemetry.
 
 ### 10.5 Metrics catalog
 
-The canonical metric set (one definition, exposed everywhere): stratum; lock state; active reference; holdover flag + estimated time error + time-to-demotion; PPS offset (last/mean/σ); frequency error; OCXO Vc (cmd/sense) + tempco; ADEV(1/10/100 s); GNSS fix type, SVs visible/used per constellation, CNR stats, antenna state; NTP req/s + drops + KoD; NTS handshakes/cookies; PTP port state + offsetFromMaster + meanPathDelay + clockClass; per-rail V/I/P (×6); temps (×2 + die); fan RPM + duty; supercap voltages; PoE class + draw; fault flags; firmware versions (MCU/GNSS); uptime; audit/security counters. GUI, SNMP MIB, console `--json`, and the local display all bind to this set.
+The canonical metric set (one definition, exposed everywhere): stratum; lock state; active reference; holdover flag + estimated time error + time-to-demotion; PPS offset (last/mean/σ); frequency error; OCXO Vc (cmd/sense) + tempco; ADEV(1/10/100 s); GNSS fix type, SVs visible/used per constellation, CNR stats, antenna state; NTP req/s + drops + KoD; NTS handshakes/cookies; PTP port state + offsetFromMaster + meanPathDelay + clockClass; per-rail V/I/P (**×9**, one per INA228); temps (×2 + die) + humidity; fan RPM + duty; supercap voltages; PoE class + draw; fault flags; firmware versions (MCU/GNSS); uptime; audit/security counters. GUI, SNMP MIB, console `--json`, and the local display all bind to this set.
 
 -----
 
@@ -539,8 +540,8 @@ Each transition emits a log event + (where defined) an SNMP trap and a GUI/RGB s
 |Antenna open/short   |INA228 #4 + MON-RF + PD4       |Flag; on persistent short drop `ANT_BIAS_EN`; trap.                  |
 |Rb unlock / bad clock|RB_LOCK / EXTREF_MON           |Fail-safe revert to OCXO; trap.                                      |
 |Rb rail over-voltage |`RB_OV_DET (PE3)`; INA228 #6 (0x47)|Autonomous 26 V OV latch already killed U40; log/trap; clear via `RB_OV_RESET (PD3)` pulse after cause gone (§3.4).|
-|Panel-LED string open/short|INA228 #9 (0x4C) duty-normalized; `PANEL_LED_FAULT_N (PF12)`|Flag LED fault; UI-only, never blocks timing.                    |
-|Rail power-good drop |PG scan (PG0/1/3/4/6/7, PF14/15) high→low|Rail-fault alarm/trap. **PG2 masked** until its LDO-PWRGD pull-up is fitted.|
+|Panel-LED string open/short|INA228 #9 (0x4C) duty-normalized; `PANEL_LED_FAULT (PF12)`|Flag LED fault; UI-only, never blocks timing.                    |
+|Rail power-good drop |PG scan (PG0–PG7, PF14/15) high→low|Rail-fault alarm/trap. All eight PG bits usable (R266 fitted).|
 |Ext-ref front-end misconfig / no output|EXTREF_MON invalid after config|Re-apply stored profile once; if still invalid, hold on OCXO, do not select B, flag config fault + trap. Never trust an unverified front-end output.|
 |OCXO oven/DAC fault  |INA228 #5; Vc cmd≠sense (PA3)  |Mark OCXO unhealthy; prefer Rb if available; alarm.                  |
 |I²C bus wedge        |transaction timeout / SCL stuck|Software bus-recovery (9 SCL clocks / STOP) + re-init; LTC4311 EN is hardwired on. Housekeeping is on always-on 3V3_STM (no rail-cycle path); no I/O-expander reset (expanders deleted — direct GPIO).|
@@ -557,11 +558,12 @@ Principle: timing service degrades gracefully (holdover, reference fallback, pee
 **Firmware-relevant hardware notes** (full detail in `sts1000_firmware_hardware_interface.md`).
 **Standing firmware requirements:** SWD-only (PB4 = NJTRST → JTAG unavailable); `GPS_TXRDY` needs an
 F9T CFG-TXREADY re-map before PD5 is trusted; digipot code 0 = Terminal B safe-low (still
-pre-program the NV wiper + verify VCC_RB before `RB_PWR_EN`). **Open items:** add the
-`3V0_RF_LDO_PG`/PG2 pull-up (10k→3V3_STM) — mask PG2 until fitted; confirm the J17 panel-power pins
-(J17.16→5V_DISP, J17.28→3V3_STM) reach the panel; rate the Rb-buck output caps C125–C128 ≥50 V; grow
-VREF+ C37 to 100 nF. The power-good/telemetry signals `POE_PG`/PG7 (divided to 2.93 V), INA228 0x40
-current (R30 in series), `INA_ALERT_VCC_RB`/PG15, and PG4 (~2.98 V) are all usable as read.
+pre-program the NV wiper + verify VCC_RB before `RB_PWR_EN`); **write `SHUNT_CAL` (POR default 4096,
+plus the per-board trim) to all nine INA228s during bring-up and after any INA reset** — an
+uncalibrated monitor reads ~1 % off and raises no flag. **Open items:** confirm the J17 panel-power
+pins (J17.16→5V_DISP, J17.28→3V3_STM) reach the panel. The power-good/telemetry signals `POE_PG`/PG7
+(divided to 2.97 V at 54 V; 2.75–3.13 V over the PoE range), INA228 0x40 current (R30 25 mΩ in series), `INA_ALERT_VCC_RB`/PG15, PG4
+(~2.98 V), and **PG2 (R266 pull-up now fitted — no masking)** are all usable as read.
 
 -----
 

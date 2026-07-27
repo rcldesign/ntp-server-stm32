@@ -42,13 +42,13 @@ The loop holds FB = 0.600 V; VOUT follows the divider and the injected VCTRL.
 ### Output filter + FB network
 | Ref | Part | Value / spec | Function |
 |---|---|---|---|
-| L7 | inductor | 40 µH, Isat ≥3 A, low DCR | Output inductor, SW → VCC_RB |
+| L7 | inductor | **39 µH** Würth 7447709390 (4.1 A, 56 mΩ DCR) | Output inductor, SW → VCC_RB |
 | R147 | resistor | 20.0 kΩ 1% | R1: VCC_RB → FB (divider top) |
 | R148 | resistor | **604 Ω 1%** | R2: FB → GND (divider bottom; sets **24.45 V pedestal**) |
 | R144 | resistor | 10.7 kΩ 1% *(bench-trim)* | RINJ: SW → FB ripple injection |
 | C123 | capacitor | 0.1 µF, X7R, ≥100 V | CINJ: series with R144 (sees full SW swing) |
-| C125 | capacitor | 47 nF, C0G, ≥50 V | Cff: feed-forward across R147. Rating set by the VCC_RB node (≥50 V; see §6 sourcing item). |
-| C126, C127, C128 | capacitor | 47 µF, X7R, **≥63 V** each | COUT bulk (rating set by TVS clamp; derate for DC bias). ≥50 V minimum, ≥63 V target; see §6 sourcing item. |
+| C125 | capacitor | **47 nF X7R 50 V 0402** (GCM155R71H473KE02J) | Cff: feed-forward across R147. Meets the ≥50 V rule; a C0G part would hold its value under the 24 V DC bias (optional improvement). |
+| C126, C127, C128 | capacitor | **47 µF X7R 50 V** each (Murata KCM55WR71H476MH13L, stacked SMD 2 J-lead) | COUT bulk. 50 V = 2× derating on the 24.45 V pedestal / 26 V OV. Class-II: expect roughly half the nameplate C at 24 V bias — verify loop stability against the *derated* value (RB-2). |
 
 ### Protection + monitor
 | Ref | Part | Value / spec | Function |
@@ -56,7 +56,7 @@ The loop holds FB = 0.600 V; VOUT follows the divider and the injected VCTRL.
 | D7 | 1.5SMCJ28A | 28 V standoff, uni, SMC | transient/ESD clamp on **VCC_RB_G** at clock connector (J6, load side of Q25) |
 | D26 | **SMAJ15CA** | 15 V standoff, bidir, SMA | TVS on `RB_LOCK_IN` at the FE connector (D26.2 = RB_LOCK_IN, D26.1 = GND); surge-clamps the FE lock input like its RS-232 siblings (15 V standoff / 24.4 V clamp) |
 | U44 | INA228AQDGSRQ1 | I²C addr 0x47 | VCC_RB voltage + current monitor (VS/VDD on 3V3); ALERT open-drain has **R265 10 kΩ pull-up to 3V3_STM** (matches the sibling INA228 alerts) |
-| R_shunt (R159) | shunt | **20 mΩ** (ADCRANGE=1, ±2 A FS — see notes) | VCC_RB current-sense element (buck-out → R159 → VCC_RB) |
+| R_shunt (R159) | shunt | **7 mΩ 1 % 2512 / 1 W** (Vishay WSL25127L000FEA); ADCRANGE=1 → **±5.851 A FS**, 11.1607 µA/LSB | VCC_RB current-sense element (buck-out → R159 → VCC_RB) |
 | C131 | capacitor | 0.1 µF | U44 supply bypass (on 3V3) |
 
 ### Overvoltage latch (see §4)
@@ -127,7 +127,7 @@ critical — §6) when finalizing.
 ### Other active devices
 - **U42 OPA320:** V+ → **+5 V** (C122 bypass), V− → GND, +IN ← U43 W, −IN ↔ OUT (unity follower), OUT = VCTRL → R134.
 - **U45 MCP1502 (3.0 V):** VDD → +5 V, OUT = `VREF_3V0` (C182), **nSHDN gated by the Q19/Q20 pair off `RB_PWR_EN`** — the reference (and thus the digipot string) is dead until `RB_PWR_EN` is asserted, so pre-enable VCTRL = 0 forces the buck to its 24.45 V pedestal only if the buck itself is enabled (it is not; RB_PSU_PWR_EN is separately gated).
-- **U44 INA228 (0x47):** IN+/IN− across R159 (20 mΩ) — IN+ = buck-out, IN− = VCC_RB; VBUS senses VCC_RB; I²C_SCL/SDA; ALERT (open-drain) → INA_ALERT_VCC_RB (PG15, polled) with **R265 10 kΩ pull-up → 3V3_STM**; VS/VDD → **3V3** (always-on), C131 bypass.
+- **U44 INA228 (0x47):** IN+/IN− across R159 (**7 mΩ**) — IN+ = buck-out, IN− = VCC_RB; VBUS senses VCC_RB; I²C_SCL/SDA; ALERT (open-drain) → INA_ALERT_VCC_RB (PG15, polled) with **R265 10 kΩ pull-up → 3V3_STM**; VS/VDD → **3V3** (always-on), C131 bypass.
 
 ---
 
@@ -197,11 +197,13 @@ logs/recovers.
 
 ## 5. Control transfer function
 
-FB summing node, V_FB = 0.600 V, R1 = 20.0 k, R2 = **604 Ω**, Rctrl = **3.01 k**
-(R1/R2 = 33.11, R1/Rctrl = 6.645):
+FB summing node, V_FB = 0.600 V. Using the as-built designators (**R1/R2/Rctrl below are the
+*roles* in the divider, not board designators — the board's R1 and R2 are unrelated parts**):
+**R1 = R147 = 20.0 k (0.5 %)**, **R2 = R148 = 604 Ω**, **Rctrl = R134 = 3.01 k**
+(R147/R148 = 33.11, R147/R134 = 6.645):
 
 ```
-VOUT = 0.6·(1 + R1/R2 + R1/Rctrl) − (R1/Rctrl)·VCTRL
+VOUT = 0.6·(1 + R147/R148 + R147/R134) − (R147/R134)·VCTRL
      = 24.45 − 6.645·VCTRL          (VCTRL = 0…3.0 V)
 ```
 
@@ -275,21 +277,29 @@ Note the **§6a disconnect gate (Q25)** is a second, independent interlock: `VCC
 a slow open-FB runaway. The **§4 OV latch** (U41A, 26 V trip → clamps RB_PSU_PWR_EN,
 latched) is the DC-overvoltage guard; the TVS only handles the sub-µs surge/ESD window.
 
-**COUT rating — open BOM sourcing item.** The Rb buck **output** caps (`C125` feed-forward,
+**COUT rating — resolved as-built.** The Rb buck **output** caps (`C125` feed-forward,
 `C126/C127/C128` bulk) sit on `Net-(U44-IN+)` = the MIC28516 output = the **VCC_RB rail**,
-which the digipot steers to a **24.45 V pedestal** (26 V OV trip). They must be rated
-**≥50 V** (X7R/X7S bulk; C0G for the C125 feed-forward), ≥63 V preferred to match the input
-side (C133–C136 are 100 V X7T) and the TVS clamp (≈45 V). At 50 V + DC-bias derating, 47 µF
-will not fit 1210 → expect 1210/1812 and/or split caps. Verify total effective capacitance
-after DC-bias derating at 24 V still satisfies loop stability across the full 5–24 V range.
+which the digipot steers to a **24.45 V pedestal** (26 V OV trip). All four are now **50 V**:
+C126–C128 = Murata **KCM55WR71H476MH13L** (47 µF 50 V X7R, stacked SMD 2 J-lead — 47 µF/50 V does
+not fit 1210, hence the stacked package), C125 = **GCM155R71H473KE02J** (47 nF 50 V X7R 0402).
+Input side (C133–C136) remains 100 V X7T; the TVS clamps ≈45 V. **Remaining bench check:** these are
+class-II dielectrics — at 24 V bias expect roughly half the nameplate capacitance, so verify total
+*effective* COUT still satisfies loop stability across the full 4.5–24.45 V output range (RB-2).
 
 **Ripple injection.** R144 = 10.7 kΩ is a starting value. Adding Rctrl makes the FB
 AC load R2 ∥ Rctrl ≈ 505 Ω, which attenuates injected ripple. **Bench-trim R144** for
 20–100 mV pp at FB across the full 5–24 V output range (depends on VOUT_P / SW swing).
 
-**Current-sense shunt (R159 = 20 mΩ, as-built).** With ADCRANGE = 1 (±40.96 mV FS),
-20 mΩ gives ±2.0 A FS — a good fit for the 1.5 A nominal load and low self-heating
-(45 mW at 1.5 A). IN+ = buck-out, IN− = VCC_RB.
+**Current-sense shunt (R159 = 7 mΩ, final as-built).** Vishay **WSL25127L000FEA**, 1 %, **2512,
+1 W**. With ADCRANGE = 1 (±40.96 mV FS) this gives **±5.851 A FS** at **11.1607 µA/LSB**;
+`SHUNT_CAL` = 4096 like every other monitor on the board. IN+ = buck-out, IN− = VCC_RB.
+
+**Why 7 mΩ and not 20 mΩ.** VCC_RB is programmable over **4.51–24.45 V**. Sizing to the 15 V nominal
+(≈0.65 A steady, ≈2.1 A warm-up) would suggest ~20 mΩ, but the same FE power at the *low* end of the
+range is several times the current — 5.851 A FS covers ≈29 W at 5 V, which 20 mΩ (±2.05 A FS) would
+clip. The 2512/1 W package is required by that same worst case: 5.85 A × 5.85 A × 7 mΩ = **240 mW**,
+past a 1206's 0.25 W rating. At the 15 V nominal the shunt runs at 31 mW and 14.7 mV (36 % of FS),
+and drops only 0.1 % of the rail.
 
 ---
 

@@ -28,14 +28,21 @@ preamble, not a re-statement of those docs.
 Genuinely-open work; full evidence in `../docs/sts1000_schematic_design_review.md`. Everything else in
 the schematic is verified as-built.
 
-- [ ] **GPS RF_IN series DC-block.** Add a ~47 pF C0G series DC-block between the antenna/bias node and
-      U21.2 (the u-blox ZED-F9T reference antenna-bias design places one there so 5 V bias reaches the
-      antenna only), or confirm the ZED-F9T internal RF_IN block tolerates continuous 5 V.
-- [ ] **Rb buck output caps** C125/C126/C127/C128 → ≥ 50 V (they sit on VCC_RB, 24.45 V pedestal /
-      26 V OV); 47 µF 50 V won't fit 1210 → 1210/1812 or split; C0G for C125.
-- [ ] **Cap packages:** C98/C99/C101 (0.1 µF C0G → 1210 C0G / PPS film), C1/C42/C186 (4.7 nF 2 kV →
-      1808/1812 Y-cap).
-- [ ] **C37 VREF+ 1 nF → 100 nF** (optional ADC-ENOB improvement for OCXO steering).
+- [ ] **`fp-lib-table` is missing** — only `sym-lib-table` exists, so the custom footprints under
+      `libraries/` are unreachable from the board editor. **Blocks opening the PCB.**
+- [ ] **Library tables are fixed; footprint *assignment* is the remaining layout task.** `fp-lib-table` now exists (9 nicknames → `hardware/libraries/sts1000.pretty`, 54 footprints) and `sym-lib-table` is portable (`${KIPRJMOD}` relative, 38 entries, all resolving). Of 648 symbols, **41** now carry a resolvable `library:footprint`; **571** still hold a vendor package *description* in the Footprint property (`0402 (1005 Metric)`, `SOT-323`, …) and **36** are empty (J1, J2, J6–J10, J15–J17, K1, K2, L2–L7, U53, U71, Y1, Y2 + mounting holes H1–H14). Two `Library:` refs point at footprints that do not exist in the repo: **J3** `GCT_BG055-06A-1-0450-0530-0350-L-D` and **D5** `LED_IN-P55TATRGB`.
+- [ ] **0402 50 V element rating on the PoE dividers** — R20 (54 V and **292 mW** whenever NCP1095
+      PGO is low), R2 (52–55 V), R264 (51–54 V).
+- [ ] **R159 land pattern** — library footprint name reads `2515 (6332 Metric)`; 6332 metric **is**
+      2512 imperial and the part is a WSL2512. Confirm before placement.
+
+**Retracted:** the "GPS RF_IN needs a 47 pF DC-block per the u-blox reference" item was never
+supported by UBX-21040375 — u-blox injects bias directly on the RF trace and relies on the internal
+DC block. `C204` is **deleted**; do not re-open.
+
+**Closed as-built:** **R77** re-sized to **0.25 W**; all nine INA228 **shunt values** final; C98/C99/C101 + C37 → 0.1 µF **C0G 1210**;
+C1/C42/C186 → 4.7 nF 2 kV **1812**; C125–C128 → all **50 V**; R112/R113 → 13.0 k; **R266** fitted;
+L7 → **39 µH**; PHY straps → **4.99 k**.
 
 ---
 
@@ -47,10 +54,10 @@ the schematic is verified as-built.
 | OCXO + supply | checklist §2 | **Y3** OH300-61003CV-010.0M, **U39** TPS7A52 (LDO), **U38** AP3441 buck, **U36** OPA320 Vc buf, **R123 22 Ω** source term, **U37** INA228 #5 @0x46 |
 | Clock mux | `sts1000_clock_mux.md` | **U52** 74LVC1G157, **U53** 74LVC1G34, R187/R188/R189, C160, D16 <!-- TODO verify designators: C141→C160?, D16 --> |
 | RF front end | `ntp_server_rf_frontend.md` | **U49** TMUX1101, **U50** LTC6752xS5, **U51** LT3045, D18/D19/D20/D21, R184 33 Ω <!-- TODO verify clamp-diode designators: old D11/D12/D13/D14/D15 --> |
-| Rb buck (VCC_RB) | `sts1000_vcc_rb_supply.md` | **U40A** MIC28516, **U43** MCP41U83 digipot, **U42** OPA320, **U45** MCP1502-30E (3.0 V ref), **U41A** LMV393 OV latch, **U44** INA228 @0x47, 1.5SMCJ28A TVS; output caps C125–C128 ≥ 50 V (open item) |
+| Rb buck (VCC_RB) | `sts1000_vcc_rb_supply.md` | **U40A** MIC28516, **L7 39 µH**, **U43** MCP41U83 digipot, **U42** OPA320, **U45** MCP1502-30E (3.0 V ref), **U41A** LMV393 OV latch, **U44** INA228 @0x47 across **R159 7 mΩ (2512)**, 1.5SMCJ28A TVS; output caps C125–C128 are **50 V** as-built |
 | FE-5680A serial | `rb_rs232_interface.md` | **U46** SN65C3221E, **K1** G6K-2F-Y DC3 relay, **U48** APC-817C1 opto, **U47** PESD15VL2BT |
 | GNSS | checklist §6 | **U21** ZED-F9T-00B, **U22** LT3045 GPS LDO, **U23** INA228 #3 @0x4A (0x44=SHT45 U72) |
-| Antenna bias/supervisor | `gnss_antenna_bias_supervisor.md` | **U24** INA181A1, **U25** LMV393, Q11/Q12/Q14, L1 47 nH, R77 3.3 Ω, **U26** INA228 #4 @0x45 <!-- TODO verify transistor designators: old Q1/Q2/Q4/Q5 --> |
+| Antenna bias/supervisor | `gnss_antenna_bias_supervisor.md` | **U24** INA181A1, **U25** LMV393, Q11/Q12/Q13/Q14, L1 47 nH (no RF_IN DC-block — per u-blox reference), **R77 3.3 Ω / 0.25 W**, **U26** INA228 #4 @0x45 across **R89 150 mΩ** |
 | Ethernet/PTP | checklist §8 | **U11** LAN8742AI-CZ-TR + Y1 25 MHz xtal, magjack |
 | PoE + power tree | checklist §9 | **U7/U8** FDMQ8205A bridge, **U9** NCP1095 PD, **U28** MIC28516 / **U29** AP3441 bucks, INA228 **U10**/#1 **U31**/#2 **U30**/#8 |
 | Supercap backup | checklist §10 | **U34/U35** TPS61094 ×2, DSF305Q3R0 |
@@ -59,14 +66,17 @@ the schematic is verified as-built.
 | Panel-LED indicator | checklist §16 | **U54** INA228 #9 @0x4C (panel-LED 5 V), **U55** RT9742 load switch, Q22 PNP high-side, Q23 PWM |
 | Display/touch | `sts1000_3v3p_i2c_peripherals.md` | LCDwiki MSP4030, **U33** RT9742, **U63** PCA9306, **U17/U18** TPD4E05U06DQAR, **U32** INA228 #7 @0x42, R104/R210/R211 |
 
-### INA228 address map — 9 monitors, direct-scanned (GPS at 0x4A; panel at 0x4C)
-| # | Addr | Rail (designator) | # | Addr | Rail (designator) |
-|---|---|---|---|---|---|
-| 1 | 0x40 | PoE input (U10) | 6 | 0x47 | Rb / VCC_RB (U44) |
-| 2 | 0x41 | STM 3V3 (U31) | 7 | 0x42 | 5V_DISP (U32) |
-| 3 | **0x4A** | GPS VCC (U23) — **0x44 = SHT45 U72** | 8 | 0x43 | main/general 3V3 (U30) |
-| 4 | 0x45 | Antenna bias (U26) | 9 | **0x4C** | panel-LED 5 V (U54), ALERT→PF13 |
-| 5 | 0x46 | OCXO (U37) | | | |
+### INA228 address + shunt map — 9 monitors, direct-scanned (GPS at 0x4A; panel at 0x4C)
+All ADCRANGE=1 (±40.96 mV FS); Vishay **WSL** 1 % metal strip, 1206/0.25 W except R159 (2512/1 W).
+`SHUNT_CAL` = **4096** on all nine.
+
+| # | Addr | Rail (designator) | Shunt | # | Addr | Rail (designator) | Shunt |
+|---|---|---|---|---|---|---|---|
+| 1 | 0x40 | PoE input (U10) | **R30 25 mΩ** | 6 | 0x47 | Rb / VCC_RB (U44) | **R159 7 mΩ** |
+| 2 | 0x41 | STM 3V3 (U31) | **R106 100 mΩ** | 7 | 0x42 | 5V_DISP (U32) | R107 100 mΩ |
+| 3 | **0x4A** | GPS VCC (U23) — **0x44 = SHT45 U72** | **R72 75 mΩ** | 8 | 0x43 | main/general 3V3 (U30) | **R102 50 mΩ** |
+| 4 | 0x45 | Antenna bias (U26) | **R89 150 mΩ** | 9 | **0x4C** | panel-LED 5 V (U54), ALERT→PF13 | **R199 150 mΩ** |
+| 5 | 0x46 | OCXO (U37) | R126 25 mΩ | | | **R16 25 mΩ** = NCP1095 hot-swap RSNS | *not* an INA shunt |
 
 ---
 
@@ -134,8 +144,8 @@ the schematic is verified as-built.
   (U9.12 = GND), +72 V abs-max → safe direct to the 3.3 V GPIO but **float with no pull-up**. As-built
   POE_NCM/POE_NCL/POE_LCF have none: add 3× 10 kΩ → 3V3_STM (on-pattern) or use STM32 internal pull-ups.
   PD front end is non-isolated (RTN = board GND) → no digital isolator needed.
-- INA228 shunt values per expected per-rail current (incl. OCXO rail #5; display #7 = 0.1 Ω,
-  ADCRANGE=1).
+- INA228 per-board `SHUNT_CAL` trim (×9) against a reference load — removes the 1 % shunt tolerance.
+  Shunt **values** are final; sizing math in `../docs/sts1000_hardware_design_reference.md §2.1.1`.
 - OCXO loop-filter design: center Vc 1.65 V, scale DAC 0–3.3 V to ±0.4 ppm, set loop τ.
 - MCP41U83 (U43): code 0 = Terminal B = safe-low (VOUT min 4.51 V); POR = midscale ~14.5 V (within
   26 V OV); SPI Mode 0,0. Firmware pre-programs the NV wiper safe-low and verifies VCC_RB on INA228
@@ -160,6 +170,6 @@ the schematic is verified as-built.
 ## Conventions
 
 - **Editor: vi only** for CLI text editing — never pico/nano.
-- Review by **designator and pin** (R199, U54 GPB2, PA10), not node labels.
+- Review by **designator and pin** (R199, U54.3, PA10), not node labels.
 - When a part or value changes, update the owning subsystem doc **and** propagate the delta to
   the peripheral map / checklist in the same change; keep docs mutually consistent.

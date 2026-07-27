@@ -15,7 +15,7 @@ Reference parts by **designator + pin** (e.g. `U12 PG7`, `D25 K`).
 
 Per-IC pinout and signal-level verification against manufacturer datasheets: **PASS with a small
 open-items list**. The items still to close before fab are the J17 panel-power pins, the Rb-buck
-output-cap voltage rating, the `3V0_RF_LDO_PG` pull-up, the R264 MPN check, and two capacitor
+GPS RF DC-block placement, the R77/R20 derating checks, the R264 MPN check, and the layout-library
 packages.
 
 ### Open items before fab
@@ -23,17 +23,24 @@ packages.
 | # | Subsystem | Item |
 |---|---|---|
 | N-1 | HMI | **J17 panel-power pins.** J17.16 (display 5 V) → **5V_DISP** and J17.28 (logic 3 V3) → **3V3_STM** feed the display, cap-touch, and encoder Vcc — confirm both land on their rails. |
-| N-2 | Rb | **Rb-buck output caps C125/C126/C127/C128 rated ≥ 50 V** — they sit on `Net-(U44-IN+)` = VCC_RB (24.45 V pedestal / 26 V OV trip). X7S/X7T; C0G for C125. |
-| N-3 | Timing | **`3V0_RF_LDO_PG` (PG2) pull-up** — LT3045 U51 PWRGD is open-collector; add **10 k → 3V3_STM** (mirror R215 on the GPS LDO). |
-| N-4 | BOM | **R264 MPN** = `ERJ-2RKF1743X` (174 k) on the PG7 divider — re-verify the ordered PN before fab. |
-| N-5 | MCU | **VREF+ local cap C37 → 100 nF** (ST AN5711 wants 100 nF + 1 µF at the pin; C38 2.2 µF sits behind R48 50 Ω). |
+| N-8 | PoE | **0402 element-voltage / power margin on the PoE dividers.** R20 (292 mW and 54 V across a 0.1 W / 50 V part whenever PGO is low), R2 (52–55 V), R264 (51–54 V) — all ERJ-2RK/ERJ-U02 0402 rated 50 V. |
+| N-4 | BOM | **R264 MPN** = `ERJ-8ENF1623V` (162 k, 1206) on the PG7 divider — re-verify the ordered PN before fab. |
+| N-9 | Layout | **`fp-lib-table` missing**, and the Footprint property is **not a land-pattern link** on most parts — only 25 of 648 symbols carry a resolvable `library:footprint`, 587 hold vendor package text, 36 are empty. **Hard blocker for layout.** |
 
-### Capacitor packages to assign (dielectric correct, package pending)
+**Closed** (were N-2/N-3/N-5/N-7): Rb output caps C125–C128 are **50 V**; `3V0_RF_LDO_PG` pull-up
+**R266 fitted**; C37 is **0.1 µF C0G 1210**; **R77** re-sized to **0.25 W**. Also closed: OCXO Vc caps
+C98/C99/C101 → **C0G 1210**; Y-caps C1/C42/C186 → **1812**; all nine **INA228 shunt values final**.
+**Retracted (was N-6):** the "u-blox reference places a 47 pF DC-block before RF_IN" claim is not in
+UBX-21040375; `C204` is deleted and bias-on-RF_IN is the sanctioned topology.
 
-| Refs | Value/dielectric | Package | Note |
+### Capacitor packages — assigned as-built
+
+| Refs | Value/dielectric | Package | MPN |
 |---|---|---|---|
-| C98, C99, C101 | 0.1 µF C0G/film | 1210 C0G **or** PPS/PEN film | OCXO Vc loop / 1.65 V ref / Vcontrol — microphonics-critical, **no X7R substitution** |
-| C1, C42, C186 | 4.7 nF 2 kV | 1808/1812 2 kV Y-cap | 2 kV MLCC minimum case is 1808 |
+| C98, C99, C101, C37 | 0.1 µF 50 V **C0G** | **1210** | `C1210C104J5GACAUTO` — OCXO Vc loop / 1.65 V ref / Vcontrol / VREF+; microphonics-critical, **no X7R substitution** |
+| C1, C42, C186 | 4.7 nF **2 kV** X7R | **1812** | `C1812C472KGRACAUTO` — 2 kV MLCC minimum case is 1808 |
+| C126, C127, C128 | 47 µF **50 V** X7R | stacked SMD, 2 J-lead | `KCM55WR71H476MH13L` — VCC_RB bulk (47 µF/50 V does not fit 1210) |
+| C125 | 47 nF **50 V** X7R | 0402 | `GCM155R71H473KE02J` — VCC_RB feedforward |
 
 ### Design points confirmed against datasheet
 
@@ -59,12 +66,12 @@ Full pin→net map is authoritative in `u12_pinmap.txt`. Power/boot summary:
 | VDD ×10 (17,30,39,52,62,72,84,95,131,144), VDDIO2 (121) | 3V3_STM | PASS |
 | VDDUSB (106) | 3V3_STM_USB (C26+C28) | PASS |
 | VDDA (33) | dedicated LT3045 U13 (islanded for OCXO loop) | PASS |
-| VREF+ (32) | VREF_3V3 (MCP1502-33 U14); 1nF at pin | PASS pinout (grow C37 → 100nF, N-5) |
+| VREF+ (32) | VREF_3V3 (MCP1502-33 U14); **C37 0.1 µF C0G 1210** at pin | PASS |
 | VBAT (6) | STM_VBAT (supercap-backed) | PASS |
 | VCAP (70)/VCAP__1 (142) | C36/C34 2.2µF — LDO core mode | PASS |
 | BOOT0 (138) | R50 10k→GND single pull-down (boot user flash) | PASS |
 | NRST (25) | MCU_NRST + J3.5; no external cap | PASS (add ~100nF, §7) |
-| PG7 (92) | POE_PG (via R264 174k / R263 10k divider) | **PASS** — PG7 = 2.93 V; PG7 is 5V-tolerant (FT) |
+| PG7 (92) | POE_PG (via R20 10k + R264 162k / R263 10k chain) | **PASS** — PG7 = 2.97 V @54 V (2.75–3.13 V over the PoE range); PG7 is 5V-tolerant (FT) |
 
 ### 2.2 Power / PoE
 
@@ -72,11 +79,11 @@ Full pin→net map is authoritative in `u12_pinmap.txt`. Power/boot summary:
 |---|---|---|---|
 | U7/U8 | FDMQ8205A PoE bridge | PASS | Alt-A+Alt-B all-pairs |
 | U9 | NCP1095 PD | PASS pinout | PGO open-drain → POE_PG divided (R264/R263); NCM/NCL/LCF open-drain/RTN=GND/+72 V → **add pull-up** to 3V3_STM (§7); DET/R15 confirm |
-| U10 | INA228 0x40 PoE | **PASS** | loads on V_POE; R30 150 mΩ in the series feed → reads real current |
+| U10 | INA228 0x40 PoE | **PASS** | loads on V_POE; **R30 25 mΩ** in the series feed → reads real current; ±1.6384 A FS (1.2 A design max = 73 %) |
 | U28 | MIC28516 buck (5V) | PASS | 0.6·(1+15k/2.05k)=4.99V ✓; FREQ programming CONFIRM (§7) |
 | U29 | AP3441 buck (3V3) | PASS | 0.6·(1+10k/2.2k)=3.33V ✓; PG pulled to VIN when good → R94/R92 divider (no PU needed) |
-| U30 | INA228 0x43 (3V3) | PASS | shunt in series ✓ |
-| U31 | INA228 0x41 (3V3_STM) | PASS | R106 15mΩ Kelvin ✓ |
+| U30 | INA228 0x43 (3V3) | PASS | shunt **R102 50 mΩ** in series ✓ (±819.2 mA FS) |
+| U31 | INA228 0x41 (3V3_STM) | PASS | **R106 100 mΩ** Kelvin split ✓ (±409.6 mA FS; 30 mV at the 300 mA STM peak) |
 | U32 | INA228 0x42 (5V_DISP) | PASS | |
 | U33 | RT9742 (DISP 5V) | PASS | EN=DISP_EN R104 10k off; nFLG R105 PU ✓ |
 | U34/U35 | TPS61094 supercap | PASS | VBAT=3.0V, term 2.5V, 25mA (Tables 7-1/2/3) |
@@ -92,7 +99,7 @@ Full pin→net map is authoritative in `u12_pinmap.txt`. Power/boot summary:
 |---|---|---|
 | Y3 | OH300 VC-OCXO | PASS — 1 Vcontrol→OCXO_V, 3 VCC→3.33V, 4 OUT→R123, 7 GND |
 | U36 | OPA320 SOT23-5 | PASS |
-| U37 | INA228 0x46 OCXO | PASS — shunt IN+ upstream of R126 (correct polarity) |
+| U37 | INA228 0x46 OCXO | PASS — shunt **R126 25 mΩ**, IN+ on the U39-LDO side (correct high-side polarity); ±1.638 A FS for the warm-up surge |
 | U38 | AP3441 buck | PASS-plausible — R127/R128 → 3.70V pre-reg |
 | U39 | TPS7A5201 VQFN-20 | PASS — R129/R130 → 3.327V ✓ |
 | U49 | TMUX1101DCK SC70-5 | PASS (doc "SC70-6" nit) |
@@ -107,11 +114,11 @@ Full pin→net map is authoritative in `u12_pinmap.txt`. Power/boot summary:
 
 | IC | Part | Verdict |
 |---|---|---|
-| U40 | MIC28516 Rb buck | PASS — PVIN=VOUT_P; EN=RB_PSU_PWR_EN; PG=RB_PSU_PG. **Output caps C125–128 rate ≥50 V on the 24.45 V VCC_RB rail (N-2)** |
+| U40 | MIC28516 Rb buck | PASS — PVIN=VOUT_P; EN=RB_PSU_PWR_EN; PG=RB_PSU_PG; L7 39 µH. Output caps C125–C128 are **50 V** as-built ✓ (class-II derating at 24 V bias is a loop-stability bench item, RB-7) |
 | U41 | LMV393 OV comp | PASS — V+ from 5V (survives VCC_RB collapse); OD + R142 PU |
 | U42 | OPA320 wiper buffer | PASS — VCTRL→R134 FB inject; V+=5V |
 | U43 | MCP41U83 digipot | PASS — VDD1=3V3; SPI **Mode 0,0**; **code 0 = Terminal B (VREF_3V0) = safe-low** (VCTRL max → VOUT min 4.5 V), POR = midscale ~14.5 V (< 26 V OV envelope). FW pre-programs NV-wiper safe-low (§7) |
-| U44 | INA228 0x47 Rb | PASS — shunt R159 20mΩ, IN−=VCC_RB; ALERT PU R265 10k→3V3_STM |
+| U44 | INA228 0x47 Rb | PASS — shunt **R159 7 mΩ (2512, 1 W)**, IN+ = buck-out / IN− = VCC_RB; ±5.851 A FS; ALERT PU R265 10k→3V3_STM |
 | U45 | MCP1502T-30E ref | PASS — OUT=VREF_3V0 (3.0V); nSHDN gated Q19-C |
 | U46 | SN65C3221E RS-232 | PASS — charge pump C139/C140/C143/C144, C145 V+→GND ✓ |
 | U47 | PESD15VL2BT ESD | PASS — 1=TX_P, 2=RX_P, 3=GND |
@@ -130,7 +137,7 @@ Full pin→net map is authoritative in `u12_pinmap.txt`. Power/boot summary:
 | U23 | INA228 GPS | PASS wiring / **0x4A** (A0=A1=SDA strap; SHT45 owns 0x44) |
 | U24 | INA181A1 (presence) | PASS — gain 20, VCM≈5V in range |
 | U25 | LMV393 (DETECT/SHORT) | PASS — V+=5V via FB5 |
-| U26 | INA228 0x45 V_ANT | PASS — shunt R89 0.1Ω |
+| U26 | INA228 0x45 V_ANT | PASS — shunt **R89 150 mΩ**; ±273.1 mA FS (182 mA foldback = 67 % FS) |
 | U27 | RT9742VGJ5 ant switch | PASS — nFLG R200 PU; EN R88 pd off (symbol/MPN variant nit) |
 | Q11 | NSS40300 PNP | PASS |
 | Q12 | BC857W foldback | PASS |
@@ -165,7 +172,7 @@ Full pin→net map is authoritative in `u12_pinmap.txt`. Power/boot summary:
 | D5 | RGB LED (common-anode 5V) | PASS — Q8/Q9/Q10 low-side, active-high default-off |
 | K2 | G6K-2F-Y DC3 holdover relay | PASS — normally-energized fail-safe; D24 flyback ✓ (coil 91 Ω / 33 mA) |
 | Q22/Q23 | NSS40300 + BC847W panel-LED driver | PASS — double default-off |
-| U54 | INA228 0x4C panel | PASS — R199 220mΩ = 70.9% FS ≤75% ✓ |
+| U54 | INA228 0x4C panel | PASS — **R199 150 mΩ** → 132 mA all-on = 19.8 mV = **48.3 % FS** ✓ |
 
 ---
 
@@ -188,7 +195,7 @@ Every open-drain / OC / PG / ALERT / nFLG / reset net: required termination vs a
 | 5V_PSU_PG (PG3) | U28 PG (OD) | PU→5V | R95 10k→5V | PASS (PG3 is 5V-tolerant, §5) |
 | OCXO_LDO_PG (PG1) | U39 PG | PU | R215-class PU present | PASS |
 | 3V3_GPS_LDO_PG (PG0) | U22 LT3045 PG | PU→PG0 | R215 10k→3V3_STM | PASS |
-| **3V0_RF_LDO_PG (PG2)** | U51 LT3045 PG (**open-collector**) | PU→3V3_STM | **add 10k→3V3_STM** | **Open — N-3** (mirror R215) |
+| **3V0_RF_LDO_PG (PG2)** | U51 LT3045 PG (**open-collector**) | PU→3V3_STM | **R266 10k→3V3_STM** | **PASS** (mirrors R215 on the GPS LDO) |
 | RB_PSU_PG (PG6) | U40 PG | PU | R143→3V3 | PASS |
 | OCXO_PSU_PG (→PG5) | AP3441 U38 PG→R125 3.57k→node N (R124 10k **‖** R232+R233 → **2.98 V**) | 2nd divider | R232 1.21k / R233 10k → PG5 ≈ **2.66 V** | PASS (node loaded by both legs; >VIH; bench-confirm PG drive-Z) |
 | WDO_N | U64 WDO (OD) | PU→3V3 | R23 10k→3V3 | PASS (WDO-only, not 3-way wire-OR) |
@@ -218,7 +225,7 @@ Every open-drain / OC / PG / ALERT / nFLG / reset net: required termination vs a
 | NOR_RST_N (PE10) | — | PD (held-reset) | R205 10k→GND | PASS (FW release early) |
 | LAN_RST_N (PD10) | — | PD (held-reset) | R35 10k→GND | PASS (atypical, confirm intent) |
 
-**Open pull item: N-3 (`3V0_RF_LDO_PG` PG2 — add 10k→3V3_STM).** FAN_TACH uses the MCU internal
+**All open-drain / open-collector nets are terminated** (R266 closed the last one). FAN_TACH uses the MCU internal
 pull-up (standard for an OC tach). All other open-drain/PG/ALERT nets carry their required termination.
 
 ---
@@ -231,7 +238,7 @@ Every divider feeding an MCU pin or comparator; computed node voltage vs in-rang
 |---|---|---|---|---|
 | **USB_VBUS_SENSE** (PE2) | USB_VBUS–R68 100k–node–R67 121k–GND | k=0.547 → **2.87 V** @5.25V | ≤3.3V | PASS |
 | **RB_OV_DET** (PE3) | 5·33/51 | **3.24 V** | ≤3.3V | PASS |
-| **POE_PG → PG7** | R264 174k / R263 10k off POE_PG (54 V) | **2.93 V** (3.10 V @57 V) | ≤3.6V abs-max, VIH>2.0V | **PASS** |
+| **POE_PG → PG7** | R20 10k + R264 162k / R263 10k chain off VOUT_P (54 V) | **2.97 V** (3.10 V @57 V) | ≤3.6V abs-max, VIH>2.0V | **PASS** |
 | PG5 / OCXO_PSU_PG | AP3441 U38 PG (5V) → R125 → node N (R124 **‖** R232+R233) = **2.98 V**, then R232/R233 | **≈2.66 V** | ≤3.3V (PG5 not FT), >VIH 2.31 V | PASS (bench-confirm) |
 | 3V3_PSU_PG → PG4 | AP3441 U29 PG (5V) → R94 6.81k / R92 10k | **2.98 V** | ≤3.6V abs-max | PASS (PG pulls to VIN when good) |
 | RB OV latch sense | 0.0769·VCC_RB vs 2.001V | trip @ **VCC_RB > 26.0 V** | 1.55V guard vs 24.45V pedestal | PASS |
@@ -244,8 +251,8 @@ Every divider feeding an MCU pin or comparator; computed node voltage vs in-rang
 | Ant DETECT ref | R85 100k / R86 11k | **0.327 V** → ≈5mA thr | comparator | PASS |
 | Ant node-A divider | R80/R81 100k/100k | **÷2** | — | PASS |
 | Ant SHORT ref | R82 100k / R83 30k | **0.762 V** → node A <1.52V | comparator | PASS |
-| INA228 V_ANT FS | R89 0.1Ω | 1.638 A FS (180mA in range) | ≤75% FS | PASS |
-| Panel-LED INA228 FS | R199 220mΩ, 29.0mV | **70.9% of ±40.96mV FS** | ≤75% | PASS |
+| INA228 V_ANT FS | **R89 150 mΩ** | ±273.1 mA FS; 182 mA foldback = 27.3 mV = **66.7 %** | 50–75 % FS | PASS |
+| Panel-LED INA228 FS | **R199 150 mΩ**, 19.8 mV | **48.3 % of ±40.96 mV FS** | 50–75 % | PASS (below band by design — headroom for a brighter ballast respin) |
 | MIC28516 5V FB | R97 15k / R98 2.05k | **4.99 V** | 5V | PASS |
 | AP3441 3V3 FB | R99 10k / R100 2.2k | **3.33 V** | 3V3 | PASS |
 | GPS LT3045 | 100µA × R71 33.2k | **3.32 V** | — | PASS |
@@ -264,15 +271,15 @@ Which MCU/PHY pins see 5V and how they are protected.
 
 | Pin(s) | 5V source | Protection | Verdict |
 |---|---|---|---|
-| PA8/PA9 (ENC_A/B) | 5V encoder (J12.6) | **U68 74LVC2G17 buffer** — 5V-tolerant inputs, 3.3V outputs to MCU | SAFE — PA8/PA9 need not be FT |
+| PA8/PA9 (ENC_A/B) | 5 V encoder (**J17.11 / J17.27**, encoder Vcc on J17.28) | **U68 74LVC2G17 buffer** — 5V-tolerant inputs, 3.3 V outputs to MCU | SAFE — PA8/PA9 need not be FT |
 | Display I2C/SPI (PE9/PB0/PA10/PE6, MOSI/SCK) | 5V_DISP module | **PCA9306 U63** level-shift (I2C) + 5V_DISP domain isolated; SPI re-buffered R210/R211 22Ω | SAFE (5V-side PU on the display module) |
 | **PG3 (5V_PSU_PG)** | R95 10k→5V (OD released → 5V on pin) | PG3 is 5V-tolerant (FT) | SAFE — PG3 sits at 5 V on an FT pin |
-| PG7 (POE_PG) | 54V VOUT_P, **divided to 2.93 V** (R264/R263) | resistive divider + FT | SAFE — PG7 is 5V-tolerant (FT) |
+| PG7 (POE_PG) | 54V VOUT_P, **divided to 2.97 V** (R20/R264/R263) | resistive divider + FT | SAFE — PG7 is 5V-tolerant (FT) |
 | RB_TX (PE7) | RS-232/CMOS relay path | D12 BAT54S clamp; R168 10k limit in mis-set CMOS | SAFE |
 | GPS/Rb/I2C1/RMII | all 3.3V both ends | n/a | SAFE — no 5V exposure |
 | USB_VBUS (PE2) | 5.25V VBUS | divider to 2.87V (§4) | SAFE |
 
-PG3 (5V_PSU_PG, sits at 5 V) and PG7 (POE_PG divider node, 2.93 V) are both on 5 V-tolerant (FT)
+PG3 (5V_PSU_PG, sits at 5 V) and PG7 (POE_PG divider node, 2.75–3.13 V) are both on 5 V-tolerant (FT)
 Port-G digital pins per STM32H563 DS14258.
 
 ---
@@ -309,14 +316,14 @@ still need a human datasheet read or a bench measurement (carried into `bench_tu
 
 | # | Part / net | Datasheet fact | Check |
 |---|---|---|---|
-| V-1 | U12 PG3 / PG7 | Port-G PG3/PG7 are 5V-tolerant (FT) per DS14258 (Port-G is general digital FT; only TT/analog/VBAT pins are 3.3 V-only). PG3 sits at 5 V; PG7 is the 2.93 V divider node. | — |
+| V-1 | U12 PG3 / PG7 | Port-G PG3/PG7 are 5V-tolerant (FT) per DS14258 (Port-G is general digital FT; only TT/analog/VBAT pins are 3.3 V-only). PG3 sits at 5 V; PG7 is the 2.75–3.13 V divider node (2.97 V at 54 V). | — |
 | V-2 | U12 PG5 / OCXO_PSU_PG | Node N (OCXO_PSU_PG) off U38 PG (5 V-pulled) via R125 3.57k is loaded by **both** R124 10k and the R232+R233 leg → **2.98 V** (not 3.68 V); R232/R233 gives **PG5 ≈ 2.66 V** (≤3.3 V ✓, > VIH 2.31 V). Node N ≥ U39 EN VIH 1.1 V ✓. DS39754 specs no PG drive-Z → **bench-confirm**. | — |
-| V-3 | U9 NCP1095 | All 4 status pins (PGO/NCM/NCL/LCF) are **open-drain, referenced to RTN = GND** (U9.12), +72 V abs-max. PGO's pull-up sits on VOUT_P via R20 → POE_PG divided to 2.93 V (needs the divider). NCM/NCL/LCF→PC2/PC7/PC3 are **GND-referenced → safe direct to 3.3 V GPIO, but float without a pull-up** — add 10k→3V3_STM or STM32 internal PU. DET/R15 COSC↔DET still to read. | **ACTION** add NCM/NCL/LCF pull-up; confirm DET/R15 |
+| V-3 | U9 NCP1095 | All 4 status pins (PGO/NCM/NCL/LCF) are **open-drain, referenced to RTN = GND** (U9.12), +72 V abs-max. PGO's pull-up sits on VOUT_P via R20 → POE_PG divided to 2.97 V (needs the divider). NCM/NCL/LCF→PC2/PC7/PC3 are **GND-referenced → safe direct to 3.3 V GPIO, but float without a pull-up** — add 10k→3V3_STM or STM32 internal PU. DET/R15 COSC↔DET still to read. | **ACTION** add NCM/NCL/LCF pull-up; confirm DET/R15 |
 | V-4/5 | U28 MIC28516 | **FREQ = resistor-divider-from-PVIN** (R90/R91 ratiometric). **EN "do not exceed PVIN"** → EN=POE_PG≈PVIN is at the allowed limit. **EXTVDD=GND** = internal-HV-LDO strap. | **CONFIRM** fSW value |
 | V-6 | U43 MCP41U83 | **Code 0x000 = Terminal B (zero-scale) = safe-low** (VCTRL max → VOUT min 4.5 V). POR = **midscale** (~14.5 V, < 26 V OV envelope) then loads NV-Wiper0. **SPI = Mode 0,0.** FW pre-programs NV-wiper safe-low + verifies VCC_RB on U44 (0x47). | — (FW note) |
-| V-7/8 | K1 / K2 G6K-2F-Y | **3 VDC coil = 91 Ω, 33 mA** (~100 mW) — within Q24 BC847W 100 mA. Contacts **2 Form C (DPDT)**; de-energized COM→NC → RS-232 default (K1) / alarm (K2) on the NC contacts. | **CONFIRM** NC-side wiring |
+| V-7/8 | K1 / K2 G6K-2F-Y | **3 VDC coil = 91 Ω, 33 mA** (~100 mW) — at the Q24 BC847W 100 mA limit, and the coils run from **3V3** (≈111 % of the 3 V rated coil voltage — inside the G6K continuous-duty allowance, but confirm coil dissipation at Tmax). Contacts **2 Form C (DPDT)**; de-energized COM→NC → RS-232 default (K1) / alarm (K2) on the NC contacts. | **CONFIRM** NC-side wiring |
 | V-9 | U21 ZED-F9T pin19 | **Pin 19 = GEOFENCE_STAT** (default). Firmware remaps to TX_READY via **CFG-TXREADY**. | — (FW) |
-| V-10 | U21 RF_IN | ~5 V antenna bias sits on RF_IN (L1 bias-T, no series DC-block). u-blox reference places a 47 pF C0G series DC-block; the internal block "may not tolerate > VCC." | **ACTION** — add a ~47 pF C0G series DC-block, drop bias ≤3.3 V, or get u-blox written OK |
+| V-10 | U21 RF_IN | ~5 V antenna bias is injected by L1 directly onto `GPS_RF_IN` = {J7.1, U21.2, L10.1}, with **no series DC-block** — which is what the u-blox active-antenna reference circuits do (bias on the RF trace, receiver's internal DC block handles it), including with an external bias supply above VCC. `C204`, briefly fitted on a mis-attributed claim, is deleted. | **PASS** |
 | V-11 | J1 magjack | 4-pair PoE center-tap wiring is standard. Orderable PN (HS-F vs GH-F) + CT current rating for Type-2/3 is a sourcing item. | **CONFIRM** PN/CT rating |
 | V-12 | U50 LTC6752 | VCC ~2.85 V > **2.45 V single-supply min** → ~0.4 V margin; in spec. | verify over temp |
 | V-13 | Proximity sensor | Passive **magnetic reed** on J17.18 (dry contact, no Vcc); R254 pull-up + close-to-GND. | — |
@@ -324,8 +331,8 @@ still need a human datasheet read or a bench measurement (carried into `bench_tu
 | V-15 | FE-5680A (J6) | J6.8/J6.9 Tx/Rx **variant-dependent** (typ. J6.8=RX-into-Rb, J6.9=TX-from-Rb). The 24.45 V full-scale pedestal over-volts a 15 V-class FE (OV latch trips at 26 V). | **CONFIRM per-unit** — variant pinout + Vmax; set digipot/OV bound |
 
 **Also cross-listed in** `sts1000_layout_readiness_review.md` (footprint/library items) and the
-`peripheral_map §14` / `software_spec §15` open-item lists. The open items N-1…N-5 (§1) and the
-cap-package assignments are the remaining items before fab.
+`peripheral_map §14` / `software_spec §15` open-item lists. The open items N-1, N-4, N-6…N-9 (§1) and the
+component-derating checks (§`schematic_design_review` 1.2) are the remaining items before fab.
 
 ---
 

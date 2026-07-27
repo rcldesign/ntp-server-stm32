@@ -1,13 +1,31 @@
 # STS1000 "Meridian" — Schematic-to-Layout Readiness Review
 
-> ⚠️ **HISTORICAL SNAPSHOT (2026-06-21) — partly superseded.** This review predates the
-> **STM32H563VIT6/LQFP100 → STM32H563ZIT6/LQFP144** migration and the 2026-07-05 overhaul.
-> References here to U12 as VIT6/LQFP100, the MCP23017 expanders, GPS INA228 @0x44, and the
-> board-wide INA228 SDA/SCL swap describe the **June state** and are retained as a point-in-time
-> record. Several blockers are now RESOLVED in the working tree (SDA/SCL swap, U37/U44 address
-> collision). For the current defect list see **`sts1000_schematic_design_review.md`**; for the
-> current pin/net facts see **`ntp_server_peripheral_map.md`** and
-> **`sts1000_firmware_hardware_interface.md`**. Do not "fix docs" against this file.
+> ⚠️ **HISTORICAL SNAPSHOT (2026-06-21) — largely superseded.** This review predates the
+> **STM32H563VIT6/LQFP100 → STM32H563ZIT6/LQFP144** migration, the 2026-07-05 overhaul, and the
+> 2026-07-26 BOM/value pass. References here to U12 as VIT6/LQFP100, the MCP23017 expanders, GPS
+> INA228 @0x44, 8× INA228, the board-wide INA228 SDA/SCL swap, and the BOOT0 1:1 divider describe
+> the **June state** and are retained as a point-in-time record. **Do not "fix docs" against this
+> file.**
+>
+> **Status of the 68 original blockers as of 2026-07-26:**
+> - **RESOLVED:** board-wide INA228 SDA/SCL swap; U37/U44 address collision; BOOT0 (now a single
+>   R50 10 k pull-down, no divider); GPS INA228 re-strapped to 0x4A; MCP23017 expanders deleted
+>   (all aggregated inputs on direct GPIO); the ninth INA228 (U54, panel-LED @0x4C) added; **all
+>   nine INA228 shunt values finalized**; every BOM line now carries an orderable manufacturer PN
+>   *and* a DigiKey PN; capacitor package/dielectric selects closed (C98/C99/C101/C37 → C0G 1210,
+>   C1/C42/C186 → 1812 2 kV, C125–C128 → 50 V); `3V0_RF_LDO_PG` pull-up R266 fitted; **footprints
+>   *fields* populated board-wide — but with vendor package text, not land-pattern links (see below)**.
+> - **STILL OPEN:** **`fp-lib-table` is missing** from the KiCad project (custom footprints in
+>   `hardware/libraries/` are unreachable from the board editor — this still blocks opening the
+>   PCB); and the **Footprint property is not a land-pattern link on most parts** — only 25 of 648
+>   symbols carry a resolvable `library:footprint`, 587 hold vendor package text, 36 are empty.
+> - **NEW since this review:** GPS RF DC-block **C204 is on the wrong side** (bias leg instead of
+>   receiver leg); **R77** 0402/0.1 W dissipates 109 mW at the antenna foldback clamp; **R20/R2/R264**
+>   0402 parts see 51–55 V against a 50 V element rating.
+>
+> For the current defect list see **`sts1000_schematic_design_review.md §1`**; for the current
+> pin/net facts see **`ntp_server_peripheral_map.md`** and **`sts1000_firmware_hardware_interface.md`**;
+> for shunt sizing and firmware constants see **`sts1000_hardware_design_reference.md §2.1`**.
 
 _Multi-agent review. Goal: readiness for PCB layout handoff — NOT fabrication. Verify findings against datasheets/files before acting._
 

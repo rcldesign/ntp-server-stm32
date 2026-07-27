@@ -329,7 +329,7 @@
 					)
 				)
 			)
-			(property "Footprint" "SOT-6_SC_LIT"
+			(property "Footprint" "sts1000:SOT-6_SC_LIT"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -1976,7 +1976,7 @@
 				)
 			)
 		)
-		(property "Footprint" "SOT-6_SC_LIT"
+		(property "Footprint" "sts1000:SOT-6_SC_LIT"
 			(at 186.69 115.57 0)
 			(hide yes)
 			(show_name no)

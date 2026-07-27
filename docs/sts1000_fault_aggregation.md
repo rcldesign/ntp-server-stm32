@@ -72,11 +72,11 @@ on PG8–PG14, **R265 on `INA_ALERT_VCC_RB` (PG15)**, and R227 on the panel ALER
 |---------|-----|--------|--------------|
 | PF0–PF6 (10–18) | `BUTTON_1`…`BUTTON_7` | J17 keypad | R190–R196 10 kΩ→3V3_STM + C161–C167 0.1 µF; TVS U19/U20 |
 | PF7 (19) | `DISP_TOUCH_INT` | FT-series touch INT (J17.33) | R208 10 kΩ→3V3_STM, no cap; TVS U17 |
-| PF8 (20) | `V_ANT_EN_FAULT_N` | U27 RT9742 nFLG (antenna) | R200 10 kΩ→3V3_STM |
-| PF9 (21) | `V_DISP_EN_FAULT_N` | U33 RT9742 nFLG (display 5 V) | R105 10 kΩ→3V3_STM |
+| PF8 (20) | `V_ANT_EN_FAULT` | U27 RT9742 nFLG (antenna) | R200 10 kΩ→3V3_STM |
+| PF9 (21) | `V_DISP_EN_FAULT` | U33 RT9742 nFLG (display 5 V) | R105 10 kΩ→3V3_STM |
 | PF10 (22) | `PROX_WAKE` | magnetic reed switch (J17.18) | R254 10 kΩ→3V3_STM + C202; TVS U16; passive dry contact, active-low on magnet |
 | PF11 (49) | `ENC_BUTTON` | encoder switch (J17.9) | R236 10 kΩ→3V3_STM + C187; TVS U69 |
-| PF12 (50) | `PANEL_LED_FAULT_N` | U55 RT9742 nFLG (panel LED) | R201 10 kΩ→3V3_STM |
+| PF12 (50) | `PANEL_LED_FAULT` | U55 RT9742 nFLG (panel LED) | R201 10 kΩ→3V3_STM |
 | PF13 (53) | `INA_ALERT_5V_PANEL` | U54 INA228 @0x4C | R227 pull-up (see §3) |
 | PF14 (54) | `BKP_STM_PG` | U67 backup-PG comparator | R246 |
 | PF15 (55) | `BKP_GPS_PG` | U67 backup-PG comparator | R241 |

@@ -54,28 +54,28 @@ SHT45, LTC4311) sit on **always-on 3V3_STM** to avoid back-powering through I²C
 
 | Rail | Source (ref) | Setpoint | Derivation | Monitor (INA228) | PG net |
 |---|---|---|---|---|---|
-| VOUT_P (VPP) | Bridge U7/U8 → NCP1095 U9 | ~54 V (50–57 V) | PoE bus, PSE-set; SELV ceiling 60 V | U10 **0x40**, shunt R30 150 mΩ¹ | POE_PG (PGO, U9.14)² |
+| VOUT_P (VPP) | Bridge U7/U8 → NCP1095 U9 | ~54 V (50–57 V) | PoE bus, PSE-set; SELV ceiling 60 V | U10 **0x40**, shunt R30 **25 mΩ**¹ | POE_PG (PGO, U9.14)² |
 | 5V | U28 MIC28516 | **4.99 V** | V_FB 0.6 V; 0.6·(1+R97 15k / R98 2.05k) | (upstream of gated 5V loads) | 5V_PSU_PG (R95→5V) |
-| 5V_DISP | U33 RT9742 (from 5V) | 4.99 V (switched) | load switch, EN=DISP_EN | U32 **0x42**, shunt R107 100 mΩ | V_DISP_EN_FAULT (nFLG) |
-| 3V3 | U29 AP3441 | **3.33 V** | 0.6·(1+R99 10k / R100 2.2k) | U30 **0x43**, shunt R102 75 mΩ | 3V3_PSU_PG (R92)³ |
-| 3V3_STM | = 3V3 (Kelvin split R106 15 mΩ) | 3.33 V | same buck; R106 splits STM branch for U31 telemetry | U31 **0x41**, shunt R106 15 mΩ | (shares 3V3) |
+| 5V_DISP | U33 RT9742 (from 5V) | 4.99 V (switched) | load switch, EN=DISP_EN | U32 **0x42**, shunt R107 **100 mΩ** | V_DISP_EN_FAULT (nFLG) |
+| 3V3 | U29 AP3441 | **3.33 V** | 0.6·(1+R99 10k / R100 2.2k) | U30 **0x43**, shunt R102 **50 mΩ** | 3V3_PSU_PG (R92)³ |
+| 3V3_STM | = 3V3 (Kelvin split R106 **100 mΩ**) | 3.33 V | same buck; R106 splits STM branch for U31 telemetry | U31 **0x41**, shunt R106 **100 mΩ** | (shares 3V3) |
 | 3V3_LAN | 3V3 via FB1 600 Ω | 3.33 V | ferrite-isolated PHY analog rail | (via 3V3) | — |
 | 3V3_CLK | 3V3 via FB10 600 Ω | 3.33 V | ferrite-isolated mux rail (VDD-domain, ≤VDD for PH0) | — | — |
 | VDDA | U13 LT3045 (from 3V3) | 3.3 V | LT3045 SET; MCU analog island for OCXO loop | — | — |
-| 3V3_GPS | U22 LT3045 (from 5V) | **3.32 V** | 100 µA × R71 33.2k = 3.32 V | U23 **0x4A**⁴, shunt R72 500 mΩ | 3V3_GPS_LDO_PG (R215→PG0) |
-| OCXO rail | U38 AP3441 → U39 TPS7A5201 | **3.327 V** | LDO: 0.8 V·(1+R129 12.1k / R130 3.83k); buck pre-reg 3.70 V (R127 12.4k/R128 2.4k, Vref 0.6) | U37 **0x46**, shunt R126 25 mΩ | OCXO_LDO_PG, OCXO_PSU_PG (R232→PG5) |
-| 3V0_RF | U51 LT3045 (from 5V via FB9) | **3.01 V** | 100 µA × R186 30.1k = 3.01 V; I_LIM R185 1.5k → ~100 mA | — | 3V0_RF_LDO_PG (→PG2)⁵ |
-| V_ANT | U27 RT9742 (from 5V) | ~5 V (switched, foldback ~182 mA) | load switch, EN=ANT_BIAS_EN; foldback set by R77 (§3.8) | U26 **0x45**, shunt R89 100 mΩ | V_ANT_EN_FAULT (nFLG) |
-| VCC_RB | U40 MIC28516 | **24.45−6.645·VCTRL** (5–24 V) | digipot-injected FB; pedestal 24.45 V (§3.9) | U44 **0x47**, shunt R159 20 mΩ | RB_PSU_PG (R143→3V3) |
+| 3V3_GPS | U22 LT3045 (from 5V) | **3.32 V** | 100 µA × R71 33.2k = 3.32 V | U23 **0x4A**⁴, shunt R72 **75 mΩ** | 3V3_GPS_LDO_PG (R215→PG0) |
+| OCXO rail | U38 AP3441 → U39 TPS7A5201 | **3.327 V** | LDO: 0.8 V·(1+R129 12.1k / R130 3.83k); buck pre-reg 3.70 V (R127 12.4k/R128 2.4k, Vref 0.6) | U37 **0x46**, shunt R126 **25 mΩ** | OCXO_LDO_PG, OCXO_PSU_PG (R232→PG5) |
+| 3V0_RF | U51 LT3045 (from 5V via FB9) | **3.01 V** | 100 µA × R186 30.1k = 3.01 V; I_LIM R185 1.5k → ~100 mA | — | 3V0_RF_LDO_PG (R266→PG2)⁵ |
+| V_ANT | U27 RT9742 (from 5V) | ~5 V (switched, foldback ~182 mA) | load switch, EN=ANT_BIAS_EN; foldback set by R77 (§3.8) | U26 **0x45**, shunt R89 **150 mΩ** | V_ANT_EN_FAULT (nFLG) |
+| VCC_RB | U40 MIC28516 | **24.45−6.645·VCTRL** (5–24 V) | digipot-injected FB; pedestal 24.45 V (§3.9) | U44 **0x47**, shunt R159 **7 mΩ** (2512) | RB_PSU_PG (R143→3V3) |
 | VCC_RB_G | Q25 SI7469DP P-FET gate (from VCC_RB) | = VCC_RB (gated) | disconnect gate, RB_VCC_GATE=PB1 | (via U44) | — |
 | STM_VBAT / GPS_VBAT | U34 TPS61094 | **3.0 V** (VBAT) | OSEL R116/R117 3.09k → Table 7-1 | — | BKP_STM_PG (PF14), BKP_GPS_PG (PF15) |
 | supercap term | U34/U35 charge control | **2.7 V** / 25 mA | VCHG R112/R113 **13.0k 1%** (Tbl 7-2 → 2.7 V); ICHG R114/R115 9.53k (Tbl 7-3) | — | (U67 PG comparator) |
 
-¹ All PoE loads draw from `V_POE`, so R30 150 mΩ sits in the series feed and U10 reads real load current.
-² POE_PG reaches PG7 through the R264 174 k / R263 10 k divider (→ **2.93 V**), keeping the MCU input off the ~54 V node.
+¹ All PoE loads draw from `V_POE`, so R30 25 mΩ sits in the series feed and U10 reads real load current. Shunt values for all nine INA228 rails are **final as-built** — sizing math in §2.1.1.
+² POE_PG reaches PG7 through the R264 162 k / R263 10 k divider → **2.75 V at a 50 V bus / 2.97 V at 54 V / 3.13 V at 57 V** (chain R20 10 k + R264 162 k + R263 10 k = 182 k; the R20 pull-up is in series and must be included), keeping the MCU input off the ~54 V node. All three corners clear VIH (2.31 V) by ≥0.44 V and sit under 3.6 V.
 ³ AP3441 PG **pulls up to VIN (5 V) when good** (Diodes DS39754); the R94 6.81k / R92 10k divider scales it to PG4 ≈ 2.98 V — no external pull-up needed.
 ⁴ GPS INA228 is strapped **0x4A** (A0=A1=SDA) because SHT45 (U72) owns 0x44 on the same I²C1 bus. Do NOT re-strap.
-⁵ LT3045 U51 PWRGD is open-collector; `3V0_RF_LDO_PG` (PG2) carries **R266 10 k → 3V3_STM** (mirrors R215 on the GPS LDO) to present a valid HIGH in regulation.
+⁵ LT3045 U51 PWRGD is open-collector; `3V0_RF_LDO_PG` (PG2) carries **R266 10 k → 3V3_STM** (mirrors R215 on the GPS LDO) to present a valid HIGH in regulation. **R266 is fitted as-built** — PG2 is a normal power-good input, no firmware masking required.
 
 ### 1.3 PoE power budget
 
@@ -96,24 +96,115 @@ SHT45, LTC4311) sit on **always-on 3V3_STM** to avoid back-powering through I²C
 
 ### 2.1 INA228 map (9 monitors, all I²C1 @ PB8/PB9)
 
-Address = 0x40 + 4·f(A1) + f(A0), pin tie GND=0/VS=1/SDA=2/SCL=3.
+Address = 0x40 + 4·f(A1) + f(A0), pin tie GND=0/VS=1/SDA=2/SCL=3. Straps read back from the
+netlist (U*.1 = A1, U*.2 = A0) and confirmed against the address table.
 
-| # | Ref | Addr | Rail | Shunt | Full-scale¹ | ALERT net → MCU pin |
+**All nine shunt values are final as-built** — Vishay Dale **WSL** metal-strip, **1 %**, AEC-Q200,
+1206 (0.25 W) except R159 (2512, 1 W). Sizing math and the per-rail derivation are in §2.1.1;
+firmware register constants in §2.1.2.
+
+| # | Ref | Addr | A1/A0 strap | Rail | Shunt (MPN) | FS current¹ | ALERT net → MCU pin |
+|---|---|---|---|---|---|---|---|
+| 1 | U10 | 0x40 | GND / GND | PoE input (V_POE) | R30 **25 mΩ** (WSL1206R0250FEA) | ±1.638 A² | INA_ALERT_V_POE → PG8 |
+| 2 | U31 | 0x41 | GND / VS | STM 3V3 (Kelvin split) | R106 **100 mΩ** (WSL1206R1000FEA) | ±409.6 mA | INA_ALERT_3V3_STM → PG9 |
+| 3 | U32 | 0x42 | GND / SDA | 5V_DISP | R107 **100 mΩ** (WSL1206R1000FEA) | ±409.6 mA | INA_ALERT_5V_DISP → PG10 |
+| 4 | U30 | 0x43 | GND / SCL | main 3V3 | R102 **50 mΩ** (WSL1206R0500FEA) | ±819.2 mA | INA_ALERT_3V3 → PG11 |
+| 5 | U26 | 0x45 | VS / VS | Antenna bias (V_ANT) | R89 **150 mΩ** (WSL1206R1500FEA) | ±273.1 mA | INA_ALERT_V_ANT → PG13 |
+| 6 | U37 | 0x46 | VS / SDA | OCXO 3.327 V | R126 **25 mΩ** (WSL1206R0250FEA) | ±1.638 A | INA_ALERT_OCXO → PG14 |
+| 7 | U44 | 0x47 | VS / SCL | Rb (VCC_RB) | R159 **7 mΩ** (WSL25127L000FEA, 2512 1 W) | ±5.851 A | INA_ALERT_VCC_RB → PG15³ |
+| 8 | U23 | 0x4A | SDA / SDA | GPS VCC (3V3_GPS) | R72 **75 mΩ** (WSL1206R0750FEA) | ±546.1 mA | INA_ALERT_3V3_GPS → PG12 |
+| 9 | U54 | 0x4C | SCL / GND | Panel-LED 5 V | R199 **150 mΩ** (WSL1206R1500FEA) | ±273.1 mA | INA_ALERT_5V_PANEL → PF13 |
+
+¹ **All nine run ADCRANGE=1** (±40.96 mV shunt FS); FS current = 40.96 mV / R_shunt. No rail needs
+the ±163.84 mV range — see the headroom column in §2.1.1.
+² All PoE loads draw from `V_POE`; R30 is in the series `VOUT_P`→`V_POE` feed → U10 reads real load current.
+³ INA_ALERT_VCC_RB (PG15) pull-up is R265 10 k → 3V3_STM, matching the other eight ALERT lines.
+
+A tenth milliohm resistor, **R16 25 mΩ** (Ohmite MCS1632R025DER, 1206, 1 W), is the **NCP1095
+hot-swap sense (RSNS)** in the PD return — *not* an INA228 shunt and not firmware-readable (§3.1).
+
+#### 2.1.1 Shunt sizing — rules and per-rail derivation
+
+**Selection rules applied to every rail:**
+
+1. **Fit the worst-case rail current inside ADCRANGE=1 (±40.96 mV) with margin.** Target
+   **50–75 % of FS at the design maximum** — enough headroom that a transient does not clip the
+   reading, while keeping resolution. Using the ±40.96 mV range rather than ±163.84 mV buys a **4×
+   finer shunt LSB (78.125 nV vs 312.5 nV)** for the same shunt.
+2. **Keep the insertion drop negligible against the rail.** ≤ ~1 % of the rail voltage at maximum
+   load, and — for the LDO-fed rails — small enough that the delivered voltage stays inside the load's
+   supply window.
+3. **Keep dissipation ≪ the package rating** (1206 WSL = 0.25 W, 2512 WSL = 1 W); ≤ ~25 % of rating
+   at the design maximum so self-heating does not add TCR error.
+4. **Prefer 1 % metal-strip (WSL) with low TCR** over thin-film; the 1 % tolerance is removed by the
+   per-board `SHUNT_CAL` trim (§2.1.2, `bench_tuning` BM-1), the TCR is not.
+
+| Rail (INA) | Shunt | Design-max current (basis) | V_shunt @ max | % of FS | P_shunt @ max | Insertion drop | % of rail |
+|---|---|---|---|---|---|---|---|
+| V_POE (U10) | 25 mΩ | **1.20 A** — Class-6 51 W at the 42.5 V Type-3 PD floor | 30.0 mV | 73 % | 36 mW | 30 mV | 0.06 % |
+| 3V3_STM (U31) | 100 mΩ | **0.30 A** — MCU @250 MHz + NOR + I²C cluster, peak | 30.0 mV | 73 % | 9.0 mW | 30 mV | 0.90 % |
+| 5V_DISP (U32) | 100 mΩ | **0.25 A** — TFT logic + backlight at full duty | 25.0 mV | 61 % | 6.2 mW | 25 mV | 0.50 % |
+| 3V3 main (U30) | 50 mΩ | **0.45 A** — 3V3_STM + 3V3_LAN + 3V3_CLK + VDDA + relay + supercap charge | 22.5 mV | 55 % | 10.1 mW | 22.5 mV | 0.68 % |
+| V_ANT (U26) | 150 mΩ | **0.182 A** — the R77 foldback limit itself (hard ceiling) | 27.3 mV | 67 % | 5.0 mW | 27.3 mV | 0.55 % |
+| OCXO (U37) | 25 mΩ | **1.20 A** — OH300 warm-up surge (bench item OS-2) | 30.0 mV | 73 % | 36 mW | 30 mV | 0.90 % |
+| VCC_RB (U44) | 7 mΩ | **2.10 A** — FE-5680A warm-up at 15 V (≈30 W) | 14.7 mV | 36 % | 31 mW | 14.7 mV | 0.10 % |
+| 3V3_GPS (U23) | 75 mΩ | **0.13 A** — ZED-F9T acquisition peak | 9.75 mV | 24 % | 1.3 mW | 9.75 mV | 0.29 % |
+| Panel-LED (U54) | 150 mΩ | **0.132 A** — all 7 LEDs on (6×91 Ω + 1×150 Ω ballast) | 19.8 mV | 48 % | 2.6 mW | 19.8 mV | 0.42 % |
+
+**Why the two rails with the loosest fit are deliberate:**
+- **VCC_RB at 7 mΩ / 36 % FS.** VCC_RB is programmable 4.51–24.45 V. At the *low* end of that range
+  the same Rb power draw is several times the current, so the shunt is sized for the low-voltage
+  worst case (5.85 A FS ≈ 29 W at 5 V), not for the 15 V nominal. 2512/1 W is required: at 5.85 A the
+  shunt dissipates 240 mW, which a 1206 (0.25 W) would not carry.
+- **3V3_GPS at 75 mΩ / 24 % FS.** Sized by rule 2, not rule 1 — the LT3045 delivers 3.32 V and the
+  ZED-F9T floor is 2.7 V, but the shunt is the only series element and its drop is subtracted at the
+  module pins. 75 mΩ keeps the drop under 10 mV at peak (≈3.31 V delivered). Resolution is still
+  1.04 µA/LSB, ~30 000 counts at the F9T's ~30 mA idle — resolution is not the constraint here.
+
+**Superseded values** (documented so stale numbers are recognizable): R30 150 mΩ → 25 mΩ (150 mΩ
+would have put 180 mV across the shunt at 1.2 A — past even the ±163.84 mV range); R106 15 mΩ →
+100 mΩ (15 mΩ wasted 85 % of the range); R102 75 mΩ → 50 mΩ; R72 500 mΩ → 75 mΩ (500 mΩ dropped
+65 mV of a 3.32 V rail); R89 100 mΩ → 150 mΩ; R159 20 mΩ → 7 mΩ; R199 220 mΩ → 150 mΩ.
+
+#### 2.1.2 Firmware register constants (identical form for all nine)
+
+With **ADCRANGE=1** and `Max_Expected_Current` set to the device's own full-scale, the INA228
+calibration collapses to one constant for every monitor on the board:
+
+```
+CURRENT_LSB   = FS_current / 2^19 = (40.96 mV / R_SHUNT) / 524288 = 78.125 nV / R_SHUNT
+SHUNT_CAL     = 4 · 13107.2e6 · CURRENT_LSB · R_SHUNT
+              = 4 · 13107.2e6 · 78.125e-9            (R cancels)
+              = 4096   ← same for all nine devices
+```
+(The ×4 is the ADCRANGE=1 term from the INA228 datasheet; SHUNT_CAL is 15-bit, 4096 ≪ 32767.)
+
+| INA | Addr | R_SHUNT | CURRENT_LSB | POWER_LSB (=3.2·I_LSB) | FS current | FS power at rail |
 |---|---|---|---|---|---|---|
-| 1 | U10 | 0x40 | PoE input (V_POE) | R30 150 mΩ | ±273 mA² | INA_ALERT_V_POE → PG8 |
-| 2 | U31 | 0x41 | STM 3V3 | R106 15 mΩ | ±2.73 A | INA_ALERT_3V3_STM → PG9 |
-| 3 | U32 | 0x42 | 5V_DISP | R107 100 mΩ | ±410 mA | INA_ALERT_5V_DISP → PG10 |
-| 4 | U30 | 0x43 | main 3V3 | R102 75 mΩ | ±546 mA | INA_ALERT_3V3 → PG11 |
-| 5 | U26 | 0x45 | Antenna bias | R89 100 mΩ | ±410 mA³ | INA_ALERT_V_ANT → PG13 |
-| 6 | U37 | 0x46 | OCXO | R126 25 mΩ | ±1.64 A | INA_ALERT_OCXO → PG14 |
-| 7 | U44 | 0x47 | Rb (VCC_RB) | R159 20 mΩ | ±2.05 A | INA_ALERT_VCC_RB → PG15⁴ |
-| 8 | U23 | 0x4A | GPS VCC | R72 500 mΩ | ±82 mA³ | INA_ALERT_3V3_GPS → PG12 |
-| 9 | U54 | 0x4C | Panel-LED 5V | R199 220 mΩ | ±186 mA³ | INA_ALERT_5V_PANEL → PF13 |
+| U10 | 0x40 | 25 mΩ | **3.125 µA** | 10.0 µW | 1.6384 A | 88.5 W @54 V |
+| U31 | 0x41 | 100 mΩ | **781.25 nA** | 2.5 µW | 0.4096 A | 1.36 W @3.33 V |
+| U32 | 0x42 | 100 mΩ | **781.25 nA** | 2.5 µW | 0.4096 A | 2.04 W @4.99 V |
+| U30 | 0x43 | 50 mΩ | **1.5625 µA** | 5.0 µW | 0.8192 A | 2.73 W @3.33 V |
+| U26 | 0x45 | 150 mΩ | **520.833 nA** | 1.667 µW | 0.2731 A | 1.37 W @5 V |
+| U37 | 0x46 | 25 mΩ | **3.125 µA** | 10.0 µW | 1.6384 A | 5.45 W @3.327 V |
+| U44 | 0x47 | 7 mΩ | **11.1607 µA** | 35.71 µW | 5.8514 A | 87.8 W @15 V |
+| U23 | 0x4A | 75 mΩ | **1.04167 µA** | 3.333 µW | 0.5461 A | 1.81 W @3.32 V |
+| U54 | 0x4C | 150 mΩ | **520.833 nA** | 1.667 µW | 0.2731 A | 1.28 W @4.7 V |
 
-¹ INA228 with ADCRANGE=1 → ±40.96 mV FS; FS current = 40.96 mV / R_shunt. All shunts are as-built placeholders flagged **SHUNT-REVIEW** — confirm value vs. chosen per-rail full-scale (`bom_notes`).
-² All PoE loads draw from `V_POE`; R30 150 mΩ is in the series feed → U10 reads real load current.
-³ Verified in range: V_ANT 180 mA ≪ 410 mA FS; GPS peak ≪ 82 mA; panel all-on 29.0 mV = 70.9% of FS ≤ 75%.
-⁴ INA_ALERT_VCC_RB (PG15) pull-up is R265 10 k → 3V3_STM, matching the other eight ALERT lines.
+Range-independent constants (same silicon on all nine): VBUS LSB **195.3125 µV** (0–85 V, so every
+rail including the 54 V PoE bus and the 24 V VCC_RB reads directly, no divider); DIETEMP LSB
+**7.8125 m°C**; ENERGY LSB = 16·POWER_LSB; CHARGE LSB = CURRENT_LSB. The `SOVL`/`SUVL` over/under
+shunt-voltage alert registers use a **1.25 µV LSB** at ADCRANGE=1 (16-bit signed, FS 40.96 mV) —
+threshold codes per rail are in `firmware_hardware_interface §4.2`.
+
+**Accuracy.** Before calibration the **1 % shunt tolerance dominates** the error budget (the INA228's
+own gain error is an order of magnitude smaller). The per-board trim is a single multiply on
+SHUNT_CAL:
+```
+SHUNT_CAL_trimmed = round( 4096 · I_reference / I_reported )
+```
+measured at a steady mid-range load per rail (`bench_tuning` BM-1). Store the nine trimmed values in
+NOR with the calibration record; they are per-board, not per-design.
 
 Full I²C1 map (15 devices, no collisions): 0x19 LIS2DH12 (U59), 0x1E IIS2MDC (U61),
 0x40–0x47/0x4A/0x4C INA228 (above), 0x44 SHT45 (U72), 0x48 TMP117 (U58), 0x49 TMP117 (U57),
@@ -136,7 +227,7 @@ expander in the path and no open-drain wire-OR; firmware polls/EXTIs each alert 
 | OCXO_LDO_PG / OCXO_PSU_PG | U39 PG / U38 AP3441 PG → R125 3.57k → node N (→R124 10k→GND) | — / PG5 | See ⁷ — node N ≈ **2.98 V** drives **U39 EN**; further R232 1.21k/R233 10k → PG5 ≈ **2.66 V** |
 | 3V0_RF_LDO_PG | U51 LT3045 PG (**open-collector**) | PG2 | R266 10 k → 3V3_STM pull-up (mirrors R215 on the GPS LDO) |
 | BKP_STM_PG / BKP_GPS_PG | U67 LMV393 comparators | PF14 / PF15 | backup-rail good; threshold ≈2.0 V rising / 1.83 falling (Vref 3.3·150k/260k) |
-| POE_PG | NCP1095 PGO → R264 174k / R263 10k divider | PG7 | PG7 = 2.93 V (confirm PG7 FT) |
+| POE_PG | NCP1095 PGO → R264 162k / R263 10k divider | PG7 | PG7 = **2.75 / 2.97 / 3.13 V** at 50 / 54 / 57 V (R20 10 k is in series — total chain 182 k); PG7 is FT |
 
 ⁶ Confirm STM32 PG3/PG7 are 5V-tolerant (FT) — 5V_PSU_PG pulls PG3 to 5 V; both Port-G, expected FT.
 ⁷ **OCXO PG divider — loaded, corrected.** U38 PG pulls to VIN = **5 V** when good (AP3441 buck runs off the 5 V rail, not VOUT_P). Node N (`OCXO_PSU_PG`) is loaded by **two parallel legs** — R124 10k→GND *and* the series R232 1.21k+R233 10k→GND — so the earlier per-divider figures (3.68 V / 3.28 V) were computed in isolation and are wrong. Actual: node N = 5·(R124‖(R232+R233))/(R125+…) = **2.98 V** (not 3.68 V); PG5 = node N·R233/(R232+R233) = **2.66 V** (not 3.28 V). Both remain valid: U39 (TPS7A52) EN VIH(max) = 1.1 V, abs-max 7 V → 2.98 V reliably enables the OCXO LDO; PG5 2.66 V > STM32 VIH 2.31 V (margin 0.35 V) and < 3.6 V. **Caveat:** AP3441 DS39754 does **not** spec the PG pull-up impedance, so both absolute levels are contingent on that internal pull-up under the ~0.57 mA divider load — **bench-confirm** node N and PG5 with the 5 V rail up (§5). If PG5 sags near VIH, raise R233 (e.g. 22k) to pull PG5 toward node N. The 3V3 divider (R94 6.81k/R92 10k → PG4 = 2.98 V) has PG4 as its only load and is unaffected.
@@ -187,9 +278,11 @@ controller with external pass FET Q2 (FDMC8622, 100 V / 40 mΩ) and RSNS R16 25 
 - **TVS CR1 SMCJ58A:** Vwm 58 V clears 57 V PoE max; VBR(min) 64.4 V > 60 V SELV; Vc ~93 V
   < 100 V FET/cap rating.
 - **PGO → buck EN:** NCP1095 PGO (open-drain, VPP-referenced pull-up) gates the buck enables
-  for cold-start. The MCU tap (PG7) is divided — R264 174 k / R263 10 k drop POE_PG (54 V) to
-  **2.93 V** on PG7, keeping the MCU input off the VPP-referenced node. U28 EN + R20 pull-up sit
-  on the undivided POE_PG.
+  for cold-start. The MCU tap (PG7) is divided — R264 162 k / R263 10 k drop POE_PG to **2.97 V** at a
+  54 V bus (2.75 V at 50 V, 3.13 V at 57 V), keeping the MCU input off the VPP-referenced node.
+  **R20 10 k is the POE_PG pull-up to VOUT_P and is in series with that divider**, so the real chain is
+  10 k + 162 k + 10 k = 182 k — computing PG7 from R264/R263 alone overstates it by ~5 %. U28 EN also
+  sits on the undivided POE_PG.
 - **NCM/NCL/LCF → MCU (resolved).** All four NCP1095 status pins (LCF 13, PGO 14, NCM 15, NCL 16)
   are **open-drain, referenced to RTN** (U9.12 → **GND**, the PD-return / hot-swap drain node = board
   ground), abs-max **+72 V** to RTN. NCM/NCL (Class result MSB/LSB) → **PC2/PC7**, LCF (long-class
@@ -219,8 +312,9 @@ V_OUT = 0.6 · (1 + R97/R98) = 0.6 · (1 + 15k/2.05k) = 4.99 V ✓
 ```
 V_OUT = 0.6 · (1 + R99/R100) = 0.6 · (1 + 10k/2.2k) = 3.33 V ✓
 ```
-- L3 2.2 µH; 3V3 = 3V3_STM is a *single* rail (not independent) — R106 15 mΩ Kelvin split
-  isolates the STM branch so U31 (0x41) reads STM-only current while U30 (0x43) reads total.
+- L3 2.2 µH; 3V3 = 3V3_STM is a *single* rail (not independent) — the **R106 100 mΩ** Kelvin split
+  isolates the STM branch so U31 (0x41) reads STM-only current while U30 (0x43) reads total. The
+  split costs 30 mV at the 300 mA STM peak (3.33 V → 3.30 V at the MCU), far above the H5 VDD floor.
 - U13 LT3045 hangs off 3V3 → VDDA (MCU analog island for the OCXO DAC/ADC loop).
 
 ### 3.3 Battery / supercap backup (U34, U35 TPS61094)
@@ -275,9 +369,9 @@ PA4 (DAC1_OUT1, OCXO_VC) ─R120 100k─┬─ U36 OPA320 (+IN) ── unity buf
 
 **DIELECTRIC RULE (critical):** C98, C101 (and C99 on the ref) sit on the Vc steering path
 and are specified **C0G/NP0 or film** — X7R is piezoelectric; microphonics FM-modulate the
-10 MHz carrier. The open item is the **package**: 0.1 µF C0G does not exist below case 1210, so
-the 0402 footprint cannot hold it → **1210 C0G or PPS/PEN film** (package/layout selection in
-BOM). No class-II (X7R) substitution. C109/C117 22 µF are bulk (not on the Vc path) → X7R OK.
+10 MHz carrier. **Resolved as-built:** all three are **KEMET C1210C104J5GACAUTO, 0.1 µF 50 V C0G,
+1210** (0.1 µF C0G does not exist below case 1210, so the footprint is 1210, not 0402). No class-II
+(X7R) substitution. C109/C117 22 µF are bulk (not on the Vc path) → X7R OK.
 
 **Bench-tuning:** OH300 EFC pull range vs the 1.65 V center (op-amp span 0–3.3 V VDDA); DAC
 → Hz slope is a per-board calibration against GPS/Rb. See `findings_timing` §8.
@@ -346,8 +440,9 @@ control. See `gnss_antenna_bias_supervisor` for the antenna front end (§3.8).
 
 **Key connections / derivations:**
 - **3V3_GPS LDO (U22 LT3045):** V_OUT = 100 µA × R71 33.2k = **3.32 V**; I_LIM R70 374 Ω;
-  series R72 0.5 Ω is the U23 INA228 (0x4A) shunt (drops ~60–75 mV at peak → ~3.25 V
-  delivered; N4: consider 0.1 Ω). EN=GPS_PWR_EN (PC8, R69 100k pull-down → default off).
+  series **R72 75 mΩ** is the U23 INA228 (0x4A) shunt — drops **9.75 mV at the 130 mA acquisition
+  peak** → **≈3.31 V delivered** at U21.33/34, well above the F9T 2.7 V floor. (Was 500 mΩ, which cost
+  65 mV; resized per §2.1.1 rule 2.) EN=GPS_PWR_EN (PC8, R69 100k pull-down → default off).
 - **V_BCKP:** GPS_VBAT sourced from U34 TPS61094 (supercap-backed) → warm-start preserved
   across VCC cycles; PG → BKP_GPS_PG (PF15).
 - **TIMEPULSE → PA0 (TIM2_CH1); TIMEPULSE2 → PC6 (TIM3_CH1).** RXD/TXD → PD9/PD8 (USART3);
@@ -360,30 +455,35 @@ control. See `gnss_antenna_bias_supervisor` for the antenna front end (§3.8).
 **Purpose:** deliver switched 5 V bias to an active antenna over the coax, hard-foldback
 current-limit it, and report open/normal/short to both the F9T and the MCU.
 
-**Topology:** 5 V → U27 RT9742 → R89 0.1 Ω (U26 INA228 shunt) → V_ANT → FB4 120 Ω → R77
-3.3 Ω (foldback sense / U24 INA181 shunt) → Q11 NSS40300 PNP pass → node A → L1 → antenna.
-RF returns through L1 to GPS_RF_IN.
+**Topology:** 5 V → U27 RT9742 → **R89 150 mΩ** (U26 INA228 shunt) → FB6 → V_ANT → FB4 120 Ω → **R77
+3.3 Ω / 0.25 W** (foldback sense / U24 INA181 shunt) → Q11 NSS40300 PNP pass → node A (`Net-(Q11-C)`)
+→ L1 47 nH → `GPS_RF_IN` (J7 SMA + U21.2 RF_IN + L10 ESD). **No series DC-block** — see below.
 
 **Derivations:**
 - **Foldback limit ~182 mA:** Q12 (BC857W) V_BE across R77: I = 0.6 V / 3.3 Ω ≈ 182 mA
   (~20% over the 150 mA antenna max). Limit set *solely* by R77.
 - **INA181 DETECT transfer:** gain 20 × R77 3.3 Ω = **66 V/A**. DETECT ref R85/R86
-  100k/11k → 0.327 V → threshold 0.327/66 ≈ **5 mA** (present vs open). INA181A1 (gain 20)
-  rails at ~45 mA — coarse presence only; precise current from U26 INA228 (0x45).
+  100k/11k off 3V3_GPS → 0.329 V → threshold 0.329/66 ≈ **5 mA** (present vs open). The INA181A1
+  output saturates near its 3.32 V rail → **≈50 mA** ceiling; it is coarse presence detection only.
+  Precise current comes from U26 INA228 (0x45) across **R89 150 mΩ** (520.833 nA/LSB, ±273 mA FS).
 - **SHORT leg:** node A ÷2 (R80/R81 100k/100k) vs SHORT ref R82/R83 100k/30k → 0.762 V →
   assert when **node A < 1.52 V** (normal 4.3–5 V, short ~0 V).
 - **Bias-T choke:** L1 = 47 nH is **intentional** (Z ≈ 465 Ω at 1.575 GHz; u-blox's own reference
   is 120 nH). It passes the DC bias (300 mA-rated > 182 mA foldback); the board relies on active
   foldback rather than a series R. Accepted lower-isolation RF deviation, **not** an error.
+- **Series drop to the antenna:** R89 150 mΩ + R77 3.3 Ω + FB4 DCR + Q11 V_CE(sat). At the 30 mA
+  nominal antenna draw the resistive drop is ~104 mV; at the 182 mA foldback ceiling, ~628 mV. An
+  active antenna spec'd 3–5 V still sees ≥4.2 V at the foldback point. Raising R89 from 100 mΩ to
+  150 mΩ added only 9 mV at full foldback.
 - Comparators U25 LMV393 on **5 V** (CMR 0–3.5 V spans all inputs); OD outputs pull to
   3V3_GPS (R84/R87) — fail-safe level shift.
 - ANT_OFF disable stage (Q14 NPN → Q13 PNP): Q13 (BC857W) is high-side — E(2)=V_ANT,
   C(3)=Q11-B — so its collector sources into the Q11 base to disable bias on ANT_OFF.
-- **RF_IN series DC-block (open item):** the ~5 V antenna bias sits directly on `GPS_RF_IN`
-  (= J7, L10, U21.2) with no series DC-block. The u-blox ZED-F9T reference antenna-bias design
-  places a **47 pF C0G series DC-block** between the bias-T node and RF_IN; recommend adding it
-  (so 5 V bias reaches the antenna only), or confirm the ZED-F9T internal RF_IN block tolerates
-  continuous 5 V.
+- **No series DC-block on RF_IN (settled).** The ~5 V bias is injected by L1 directly onto
+  `GPS_RF_IN` = {J7.1, U21.2, L10.1}; the ZED-F9T's **internal DC block** handles it, which is what
+  the u-blox active-antenna reference circuits do (UBX-21040375), including with an external bias
+  supply above VCC. A 47 pF part (`C204`) was briefly fitted and has been **removed** — see
+  `gnss_antenna_bias_supervisor §3.1` for why the "u-blox places a 47 pF block" claim was retracted.
 
 ### 3.9 Rb supply (U40 MIC28516, digipot-trimmed VCC_RB)
 
@@ -391,8 +491,9 @@ RF returns through L1 to GPS_RF_IN.
 exit the safe envelope, with an autonomous 26 V OV latch and a disconnect gate. See
 `sts1000_vcc_rb_supply`.
 
-**Reference & FB network:** VREF = **MCP1502-30E (3.0 V, VREF_3V0)**; FB network R147 20.0k,
-R148 **604 Ω**, R134 **3.01k**, R136 **4.99k**, R159 20 mΩ. Digipot U43 MCP41U83 VDD1 = **3V3**.
+**Reference & FB network:** VREF = **MCP1502-30E (3.0 V, VREF_3V0)**; FB network R147 20.0k **0.5 %**,
+R148 **604 Ω**, R134 **3.01k**, R136 **4.99k**. Power inductor **L7 39 µH** (Würth 7447709390, 4.1 A,
+56 mΩ). Series sense **R159 7 mΩ** (WSL2512, 1 W — §2.1.1). Digipot U43 MCP41U83 VDD1 = **3V3**.
 
 **Transfer function:**
 ```
@@ -418,9 +519,12 @@ via R257 100k gate→source + R262 pull-down. D25 (BZX84C12) is oriented K(1)=VC
 it reverse-blocks in the OFF/normal region and Zener-clamps |Vgs| to ~12 V, so Q25 enhances and
 powers VCC_RB_G.
 
-**Output-cap voltage (open item):** C125 (47 nF feedforward) + C126/C127/C128 (47 µF bulk) on
-`Net-(U44-IN+)` = VCC_RB must be **≥ 50 V** — the rail reaches the 24.45 V pedestal (26 V OV).
-Source ≥ 50 V parts (X7S/X7T; C0G for C125); the input caps C133–C136 are already 100 V.
+**Output-cap voltage (resolved as-built):** the buck output node `Net-(U44-IN+)` (upstream of R159)
+carries C125 **47 nF 50 V X7R 0402** (GCM155R71H473KE02J, feedforward) + C126/C127/C128 **47 µF 50 V
+X7R** (Murata KCM55WR71H476MH13L, stacked SMD 2 J-lead). All ≥ 50 V against the 24.45 V pedestal /
+26 V OV trip — **2× voltage derating**. Input caps C133–C136 remain 100 V. Note the bulk caps are
+class-II: at 24 V bias, expect roughly half the nameplate capacitance — the loop compensation and
+ripple numbers must be checked against the *derated* value on the bench (RB-2).
 
 **SAFETY-CRITICAL bench item:** confirm MCP41U83 wiper code-0 parks at terminal B
 (VREF_3V0) = safe-low; if it parks at A (GND), VCTRL=0 → 24.45 V pedestal. Never assert
@@ -468,14 +572,17 @@ the 5 V display touch controller.
 **Purpose:** drive 6 white + 1 red panel indicator, current-monitored, high-side PWM,
 default-off. See `findings_hmi` §1.
 
-**Topology:** 5V → U55 RT9742 → R199 220 mΩ (U54 INA228 0x4C shunt) → FB12 600 Ω →
+**Topology:** 5V → U55 RT9742 → **R199 150 mΩ** (U54 INA228 0x4C shunt) → FB12 600 Ω →
 V_PANEL_LED → Q22 NSS40300 PNP (E→C=PANEL_LEDS_P common anode) → J17 → panel; cathodes →
 ballast → GND. (Panel connectors J4/J11/J12/J13/J14 are consolidated into the single 36-pin J17.)
 
 **Derivations:**
 - **Ballast:** rail ≈ 4.7 V. White R247–R252 = **91 Ω** → (4.7 − ~2.9 V Vf)/91 ≈ 17–18 mA
   each; red R253 = **150 Ω** → ~18 mA. All-on ≈ 126–132 mA.
-- **Shunt R199 = 220 mΩ:** all-on 132 mA × 0.22 = 29.0 mV = 70.9% of ±40.96 mV FS (≤75% ✓).
+- **Shunt R199 = 150 mΩ:** all-on 132 mA × 0.15 = **19.8 mV = 48.3 % of ±40.96 mV FS** — comfortably
+  inside the 50–75 % target band with room for a brighter ballast respin, at 520.833 nA/LSB
+  (≈0.4 % of one LED's current per LSB, so a single dead LED is unambiguous). Shunt drop 19.8 mV,
+  dissipation 2.6 mW. (Was 220 mΩ / 29.0 mV / 70.9 % FS.)
 - **High-side PWM:** PANEL_LED_PWM (PE0) → R216 4.7k → Q23 (R235 10k pull-down) → R217 820 Ω
   → Q22 base (R234 4.7k off-hold). Non-inverting active-high; PE0 Hi-Z at reset →
   double-default OFF. EN=PANEL_LED_EN (PC0, R198 10k pull-down → RT9742 default-off).
@@ -506,8 +613,9 @@ supplies the 5 V encoder/panel-logic rail.
 - **VBUS sense:** USB_VBUS → R68 100k → USB_VBUS_SENSE → R67 121k → GND → k = 0.547 →
   V(PE2) = 2.87 V at 5.25 V (≤ 3.3 V ✓). (Verify R67's grounded end lands on USB_VBUS_SENSE,
   not USB_VBUS.)
-- DP=PA12 / DM=PA11 (USB-FS), no series R; shield R65 1M + C42 4.7nF **2 kV** Y-cap
-  (2 kV MLCC uses an 1808/1812 package — same as C1/C186). ESD U18 (DP/DM/VBUS) + U65 (CC).
+- DP=PA12 / DM=PA11 (USB-FS), no series R; shield R65 1M + C42 4.7 nF **2 kV** Y-cap. **Resolved
+  as-built:** C1/C42/C186 are **KEMET C1812C472KGRACAUTO, 4.7 nF 2 kV X7R, 1812** (a 2 kV MLCC has no
+  package below 1808/1812). ESD U18 (DP/DM/VBUS) + U65 (CC).
 
 ### 3.17 Ethernet PHY (U11 LAN8742AI, RMII)
 
@@ -519,9 +627,11 @@ supplies the 5 V encoder/panel-logic rail.
 - **REF_CLK direction:** 25 MHz xtal Y1 → PHY PLL ×2 → 50 MHz REFCLKO (pin14) → PA1.
   nINTSEL = 0 (R41 4.75k pull-down) forces pin14 = REFCLKO out (not nINT). Matches STM32
   RMII master-clock-from-PHY topology.
-- **Straps:** MODE[2:0] = 111 (R49/R228/R229 5k pull-ups) = all-capable, auto-neg on;
-  PHYAD0 = 0 (R230 5k pull-down) → PHY address 0; REGOFF = 0 (R40 pull-down) → internal
-  1.2 V regulator on (C17 470 pF + C18 1 µF on VDDCR).
+- **Straps:** MODE[2:0] = 111 (R49/R228/R229 **4.99 k** pull-ups) = all-capable, auto-neg on;
+  PHYAD0 = 0 (R230 **4.99 k** pull-down) → PHY address 0; REGOFF = 0 (R40 4.75k pull-down) →
+  internal 1.2 V regulator on (C17 470 pF + C18 1 µF on VDDCR). The strap resistors were moved
+  from the non-standard 5 kΩ to the **E96 4.99 kΩ** (ERJ-2RKF4991X) — same LAN8742A strap window,
+  orderable 1 % part, and it merges with the existing 4.99 k line in the BOM.
 - **MDI termination:** R42–R45 49.9 Ω 1% each TRD line → 3V3_LAN, with PHY-side center taps
   at 3V3_LAN → 100 Ω differential.
 - **nRST:** LAN_RST_N (PD10) with R35 10k pull-down → PHY held in reset until firmware
@@ -556,17 +666,23 @@ supplies the 5 V encoder/panel-logic rail.
 
 | Item | Action | §ref |
 |---|---|---|
-| GPS RF_IN series DC-block | The ~5 V antenna bias sits directly on `GPS_RF_IN`; the u-blox ZED-F9T reference places a **47 pF C0G series DC-block** between the bias-T node and RF_IN. Add it, or confirm the ZED-F9T internal RF_IN block tolerates continuous 5 V. | §3.8 |
-| Rb buck output caps C125/C126/C127/C128 | Source **≥ 50 V** parts (VCC_RB reaches the 24.45 V pedestal / 26 V OV): X7S/X7T, C0G for C125. | §3.9 |
-| OCXO Vc caps C98/C99/C101 | 0.1 µF C0G has no 0402 part → **1210 C0G or PPS/PEN film**. | §3.4 |
-| Y-caps C1/C42/C186 | 4.7 nF 2 kV needs an **1808/1812** package. | §3.16 |
-| VREF+ cap C37 | 1 nF → **100 nF** (optional ADC-ENOB improvement for the OCXO steering path). | §3.4 |
-| R264 MPN | Confirm the 174 kΩ part (`ERJ-2RKF1743X`) on the PG7 divider before ordering — a 1.21 kΩ value would drive PG7 board-lethal. | §3.1 |
+| **`fp-lib-table` missing** | The KiCad project has `sym-lib-table` but **no `fp-lib-table`**; custom footprints in `hardware/libraries/` are unreachable from the board editor. Create it before opening the PCB. | layout |
+| **Footprint fields are not land-pattern links** | Only **25** of 648 symbols carry a resolvable `library:footprint`; **587** hold vendor package text (`0402 (1005 Metric)`, `SOT-323`, …) that KiCad cannot resolve; **36** are empty (J1, J2, J6–J10, J15–J17, K1, K2, L2–L7, U53, U71, Y1, Y2, H1–H14). 31 valid links were lost during the BOM passes and are recoverable from `78853e8`. | layout |
+| C125 dielectric | As-built 47 nF **X7R** 50 V (feedforward on a 24 V node). Meets the ≥50 V rule; a C0G part would hold its value under DC bias. Optional improvement, not a blocker. | §3.9 |
+| R264 MPN | Confirm the 162 kΩ part (`ERJ-8ENF1623V`, 1206) on the PG7 divider before ordering — a 1.21 kΩ value would drive PG7 board-lethal. | §3.1 |
+
+**Resolved since the last revision** (kept so stale references are recognizable):
+**shunt values** — all nine INA228 shunts finalized and sized (§2.1.1); **C98/C99/C101** — 0.1 µF C0G
+1210 (C1210C104J5GACAUTO); **C1/C42/C186** — 4.7 nF 2 kV 1812 (C1812C472KGRACAUTO); **C37** — 1 nF →
+0.1 µF C0G 1210; **C125–C128** — all 50 V; **R112/R113** — 13.0 k (VCHG 2.7 V); **R266** — 3V0_RF PG
+pull-up fitted, PG2 no longer needs masking; **L7** — 39 µH orderable part (7447709390); **PHY straps**
+— 4.99 k E96.
 
 **Bench-tuning unknowns** (finalize on a board): MIC28516 U28 FREQ programming + fSW; FE-5680A Vmax
 vs the 24.45 V pedestal (per-unit); ZED-F9T RF_IN 5 V-bias tolerance; V_BCKP current at Tmax; OCXO
-DAC→Hz slope + EFC pull range; per-rail INA228 shunt values (SHUNT-REVIEW). Full lists in
-`sts1000_bench_tuning_procedures.md`, `peripheral_map §14`, `software_spec §15`.
+DAC→Hz slope + EFC pull range; OH300 warm-up current vs the 1.638 A U37 full-scale; per-board
+INA228 `SHUNT_CAL` trim (BM-1). Full lists in `sts1000_bench_tuning_procedures.md`,
+`peripheral_map §14`, `software_spec §15`.
 
 **MCP41U83 wiper safety (§3.9):** code 0 parks at Terminal B (VREF_3V0 = safe-low), POR is
 mid-scale, Mode (0,0). Never assert RB_PWR_EN before a safe code is written; verify VCC_RB on
@@ -585,10 +701,20 @@ Rationale for the non-obvious choices, keyed to the sections that implement them
 - **GPS INA228 at 0x4A (§2.1).** SHT45 (U72) occupies 0x44 on the same I²C1 bus, so the GPS monitor
   is strapped 0x4A to avoid the collision.
 - **PG7 telemetry divider R264/R263 (§3.1).** NCP1095 PGO releases to the ~54 V VPP rail when
-  power-good; the divider brings that level into the MCU input range (2.93 V) so a single GPIO reads
+  power-good; the divider brings that level into the MCU input range (2.75–3.13 V over the PoE range) so a single GPIO reads
   PoE power-good without rail exposure.
 - **U10 shunt in the series feed / V_POE (§3.1).** The PoE-input INA228 shunt (R30) must carry the
   full load current to measure input power, so every buck draws from `V_POE` downstream of R30.
+- **All nine INA228 monitors on ADCRANGE=1 with per-rail shunts sized to 50–75 % of FS (§2.1.1).**
+  The ±40.96 mV range gives a 4× finer shunt LSB than ±163.84 mV, and no rail on this board needs
+  the wide range. Sizing each shunt so the *design maximum* lands in the 50–75 % band leaves transient
+  headroom without wasting resolution — and because `Max_Expected_Current` is then the device's own
+  full-scale, **SHUNT_CAL is 4096 for all nine**, independent of R (§2.1.2). Two rails sit outside
+  the band on purpose: VCC_RB (7 mΩ, 36 %) is sized for the *low-voltage* end of its 4.5–24.45 V
+  programmable range, and 3V3_GPS (75 mΩ, 24 %) is sized by insertion drop rather than resolution.
+- **Metal-strip 1 % shunts, calibrated in firmware (§2.1.2).** Vishay WSL rather than a tighter
+  thin-film part: tolerance is removed once per board by trimming SHUNT_CAL against a reference, but
+  TCR and pulse-withstand are not, and metal strip wins on both.
 - **Q3 / Q13 PNP high-side orientation (§2.4, §3.8).** Each sustain/disable PNP has its emitter on
   the high rail and collector driving the load node, so the drive turns the device on and sources
   into the load.

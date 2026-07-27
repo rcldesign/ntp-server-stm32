@@ -12,7 +12,7 @@ rails (KiCad **power-symbol Value**). Net names in firmware/devicetree and in ev
 |---|---|---|
 | **Supply rails** | Voltage-first, **no `+`**, **no decimal point** (`3V3`, `3V0`, `5V`). Optional `_<domain>` suffix. | `3V3`, `3V3_STM`, `3V0_RF`, `5V`, `5V_DISP` |
 | **Functional rails** | Keep the functional name where the rail is a distinct domain, not a generic logic supply. | `VCC_RB`, `V_ANT`, `V_POE`, `VDDA`, `VAUX`, `VREF_3V0`, `VREF_3V3`, `GPS_VBAT`, `STM_VBAT`, `OCXO_V`, `OCXO_VC`, `VOUT_P/N`, `GND` |
-| **Active-low** | `_N` **suffix** (never `n`-prefix, never `~{}`), applied where the part datasheet defines the pin active-low. STM32 core reset keeps the ST name `MCU_NRST`. | `GPS_RST_N`, `LAN_RST_N`, `NOR_RST_N`, `GPS_SAFEBOOT_N`, `WDO_N`, `KILL_N`, `V_ANT_EN_FAULT_N`, `V_DISP_EN_FAULT_N`, `PANEL_LED_FAULT_N`, `MCU_NRST` |
+| **Active-low** | `_N` **suffix** (never `n`-prefix, never `~{}`), applied where the part datasheet defines the pin active-low. STM32 core reset keeps the ST name `MCU_NRST`. | `GPS_RST_N`, `LAN_RST_N`, `NOR_RST_N`, `GPS_SAFEBOOT_N`, `WDO_N`, `MCU_NRST` — **but see the RT9742 nFLG deviation below** |
 | **Reset** | `RST`, not `RESET`. | `GPS_RST_N`, `LAN_RST_N`, `NOR_RST_N` |
 | **Power-good** | `<rail>[_<stage>]_PG`. Keep the `_PSU_` (switcher) / `_LDO_` (linear) stage qualifier **only** where a rail has two distinct PG nets. | `3V3_PSU_PG`, `5V_PSU_PG`, `OCXO_PSU_PG`, `OCXO_LDO_PG`, `3V3_GPS_LDO_PG`, `3V0_RF_LDO_PG`, `RB_PSU_PG`, `POE_PG` |
 | **INA228 alert** | `INA_ALERT_<rail>` using the unified rail name; **no `_N` suffix** (deliberate). Each INA228 alert lands on its own MCU GPIO — there is **no** wire-OR aggregate net. | `INA_ALERT_3V3`, `INA_ALERT_3V3_STM`, `INA_ALERT_5V_DISP`, `INA_ALERT_5V_PANEL`, `INA_ALERT_OCXO`, `INA_ALERT_VCC_RB`, `INA_ALERT_V_ANT`, `INA_ALERT_V_POE`, `INA_ALERT_3V3_GPS` |
@@ -41,8 +41,15 @@ and must be preserved:
 - **`_IN` suffix for conditioned connector signals.** A raw connector-side signal conditioned
   to an internal net keeps the `_IN` form on the connector side (`ENC_A_IN`→`ENC_A`,
   `ENC_B_IN`→`ENC_B`, `RB_LOCK_IN`→`RB_LOCK`).
-- **RT9742 fault flags are `_N`.** `V_ANT_EN_FAULT_N` (U27.3), `V_DISP_EN_FAULT_N` (U33.3),
-  `PANEL_LED_FAULT_N` (U55.3) — each is an open-drain `nFLG` (active-low) with a pull-up.
+- **RT9742 fault flags — open deviation, not yet renamed in KiCad.** The three RT9742 `nFLG`
+  outputs are open-drain **active-low** with a pull-up, so by the `_N` rule they *should* be
+  `V_ANT_EN_FAULT_N` (U27.3), `V_DISP_EN_FAULT_N` (U33.3), `PANEL_LED_FAULT_N` (U55.3). **As-built
+  the netlist carries them without the suffix** — `V_ANT_EN_FAULT` (PF8), `V_DISP_EN_FAULT` (PF9),
+  `PANEL_LED_FAULT` (PF12). All other docs use the **as-built** names so they match the netlist.
+  **Standing KiCad action:** rename the three nets to `_N`, then update the docs in the same change.
+  Until then the polarity is documented per-signal (active-low = fault) rather than carried in the
+  name. A parallel case is `RB_LOCK` (opto U48 inverts — polarity is a firmware config bit, so no
+  suffix is asserted).
 - **No aggregate ALERT/interrupt nets.** Each INA228 ALERT and each button/PG lands on its own
   MCU GPIO; there is no wire-OR aggregate net.
 

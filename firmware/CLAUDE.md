@@ -38,7 +38,9 @@ path. The behavior-level spec is platform-neutral.
 
 ## Board bring-up
 
-- **MCU:** STM32H563ZIT6, **LQFP144** (PE1/PB11 bonded but unrouted). All aggregated inputs are
+- **MCU:** STM32H563ZIT6, **LQFP144** — **no spare GPIO** (PE1/PB11 are not bonded on this package;
+  ST uses those positions for the two VCAP pins). The only free pin is **PH1/OSC_OUT (pin 24)**,
+  usable as GPIO because PH0 runs in HSE-bypass. All aggregated inputs are
   direct GPIO on GPIOF/GPIOG — no I/O expander. **Authoritative pin contract:
   `docs/sts1000_firmware_hardware_interface.md`.**
 - A **custom board definition** is required (`boards/.../sts1000_meridian/`): `.dts`, board
@@ -113,8 +115,8 @@ read a lock-free, double-buffered telemetry snapshot that `discipline` publishes
 - **Fan fail-safe to cooling:** 4-wire fan runs full speed on float/100 % PWM. Keep
   `FAN_PWM` (PE5/TIM15_CH1) resting state = max airflow so a hung MCU can't cook the box.
 - **Faults are read by a direct-GPIO scan, not expander interrupts** (no I/O expander). A ~1 kHz
-  timer scans `GPIOF` (buttons PF0-6, touch PF7, `V_ANT_EN_FAULT_N`/`V_DISP_EN_FAULT_N` PF8/9,
-  `PROX_WAKE` PF10, `ENC_BUTTON` PF11, `PANEL_LED_FAULT_N` PF12, `INA_ALERT_5V_PANEL` PF13,
+  timer scans `GPIOF` (buttons PF0-6, touch PF7, `V_ANT_EN_FAULT`/`V_DISP_EN_FAULT` PF8/9,
+  `PROX_WAKE` PF10, `ENC_BUTTON` PF11, `PANEL_LED_FAULT` PF12, `INA_ALERT_5V_PANEL` PF13,
   `BKP_STM_PG`/`BKP_GPS_PG` PF14/15) and `GPIOG` (PG rails PG0-7, INA228 ALERTs PG8-15), diffs vs
   the last sample, and on an INA alert reads that INA228 for cause. See the scan model + bit masks
   in `sts1000_firmware_hardware_interface.md`.

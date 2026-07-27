@@ -2,7 +2,7 @@
 
 Consolidated register of every electrical item on the STS1000 that is **unknown**, **must be
 measured**, or **should be tuned** before/at first bring-up. Sourced from the as-built netlist
-verification (subsystem fact-sheets) + BOM SELECT/SHUNT-REVIEW items + `CLAUDE.md` standing open
+verification (subsystem fact-sheets) + the remaining `sts1000_bom.md` sourcing items + `CLAUDE.md` standing open
 items. Netlist is source of truth for designators.
 
 **Scope:** first-article bring-up and per-board calibration. This is a procedures doc, not a
@@ -12,9 +12,21 @@ design reference — for *why* a circuit exists see the subsystem docs cited per
 current-limited bench supply with the load disconnected, **before** any rail is allowed to
 reach its target voltage or before enabling the Rb.
 
-**Open PCB items to land before fab:** J17 panel-power (N-1, `PW-7`), Rb buck output-cap ≥50 V
-rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4), and C37 VREF+
-(N-5). Design-review context is in `sts1000_schematic_design_review.md`.
+**Open PCB items to land before fab:** J17 panel-power (N-1, `PW-7`), R264 MPN check (N-4), and the
+**0402 50 V element-voltage margin** on R2 / R20 / R264 (N-8). The KiCad project is also missing
+`fp-lib-table` and 36 parts have no footprint (N-9). Design-review context and the full derating
+table are in `sts1000_schematic_design_review.md §1.2/§1.5`.
+
+**Retracted:** the "GPS RF_IN needs a 47 pF series DC-block per the u-blox reference" item
+(ex-`GN-8`/`N-6`) was **not supported by UBX-21040375**; `C204` is deleted and the as-built
+`node A → L1 → GPS_RF_IN` matches the u-blox reference. Do not re-open.
+
+**Closed since the last revision** (no longer bench items): **R77** re-sized to a **0.25 W** part
+(109 mW at the foldback clamp = 44 % of rating); all nine INA228 **shunt values** are final (BM-1 is
+now a per-board gain trim, not a value selection); Rb buck output caps C125–C128 are **50 V**; OCXO
+Vc caps C98/C99/C101 are **0.1 µF C0G 1210**; Y-caps C1/C42/C186 are **1812**; C37 is **0.1 µF C0G
+1210**; the `3V0_RF_LDO_PG` pull-up **R266 is fitted** (PG2 needs no masking); L7 is **39 µH**
+(7447709390); PHY straps are **4.99 k**.
 
 ---
 
@@ -47,13 +59,13 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 |---|---|---|---|---|---|
 | **RB-1** | **P0** | Rb | MCP41U83 (U43) wiper **code-0 parks safe-low** | — | Code 0 → wiper at terminal B (VREF_3V0), VCTRL→24.45 V **NOT** reached; verify BEFORE `RB_PWR_EN` |
 | **RB-3** | **P0** | Rb | 26 V OV-latch trip + latch + clear | — | Fires at VCC_RB = 26.0 ±0.3 V, latches EN low, `RB_OV_RESET` HIGH clears |
-| **PW-2** | **P0** | Power | STM32 **PG7** on POE_PG — verify R264/R263 divider | — | PG7 = 2.93 V at power-good (≤3.6 V); PG3/PG7 are FT |
+| **PW-2** | **P0** | Power | STM32 **PG7** on POE_PG — verify R264/R263 divider | — | PG7 = 2.75–3.13 V at power-good over a 50–57 V bus (≤3.6 V); PG3/PG7 are FT |
 | **PW-7** | **P0** | Power/HMI | **J17 panel power — 5 V (J17.16) + 3 V3 (J17.28)** (N-1) | **PCB item** | Rails present on J17 before plugging the panel |
 | **RB-2** | **P1** | Rb | VCC_RB setpoint sweep vs `24.45 − 6.645·VCTRL` | RB-1/RB-3 | INA228 0x47 matches curve ±3 %; trim R134/R148 |
 | **RB-4** | P1 | Rb | Q25 disconnect-gate enhancement + inrush | RB-1..3 | Vgs clamps ≤ −12 V; VCC_RB_G inrush non-destructive |
-| **RB-7** | **P1** | Rb | **Rb buck output caps C125–128 ≥ 50 V** (N-2) | **PCB item** | Caps rated ≥50 V on the 24.45 V VCC_RB rail |
+| **RB-7** | **P1** | Rb | Rb output-cap **effective C under 24 V DC bias** (rating closed: 50 V fitted) | E16 w/ DC bias | Ripple + load step inside MIC28516 budget with derated bulk |
 | **GN-4** | P1 | GNSS | ANT_OFF disable (Q13) | — | On `ANT_OFF` assert node-A → ~0 V |
-| **OX-4** | **P1** | OCXO/RF | **`3V0_RF_LDO_PG` pull-up** 10k→3V3_STM (N-3) | **PCB item** | PG2 reads good when U51 LT3045 is in regulation |
+| **OX-4** | P2 | OCXO/RF | `3V0_RF_LDO_PG` functional check (R266 pull-up **fitted**) | — | PG2 reads good when U51 LT3045 is in regulation |
 | **PW-4** | P1 | Power | Supercap C90/C91 Vmax vs 2.7 V VCHG term @ Tmax 51.7 °C | — | Cell V ≤ 3.0 V (≤65 °C); ~2.7 V term (R112/R113 13.0k) |
 | **RB-5** | P2 | Rb | Ref-gate VREF_3V0 settle vs buck soft-start | — | VREF_3V0 stable before U40 SS ramp |
 | **RB-6** | P2 | Rb | FE-5680A serial dir/baud/lock + Vmax vs pedestal | — | Telemetry decodes; FE Vmax ≥ 24.45 V or EN-interlocked |
@@ -63,7 +75,7 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 | **RF-1** | P2 | Ref FE | LTC6752 (U50) hysteresis/chatter | — | No chatter on lowest-level source |
 | **GN-1** | P2 | GNSS | Antenna DETECT ~5 mA threshold | — | Asserts ≈5 mA; holds 10–30 mA; trim R86 |
 | **GN-2** | P2 | GNSS | Antenna SHORT (node-A < 1.52 V) | — | `GPS_ANT_SHORT` asserts; INA228 0x45 ≈ clamp |
-| **GN-3** | P2 | GNSS | Foldback clamp ~182 mA | — | Hard short → ≈182 mA; R77/Q11 within power |
+| **GN-3** | P2 | GNSS | Foldback clamp ~182 mA | — | Hard short → ≈182 mA; Q11 within power; **R77 0402/0.1 W sees 109 mW — see N-7** |
 | **GN-5** | P2 | GNSS | V_BCKP current @ max enclosure temp | — | U34+supercap holds ~4 h ephemeris; `BKP_GPS_PG` trips |
 | **PW-1** | P2 | Power | U28 FREQ program + actual fSW | — | fSW at target; FREQ pin within abs-max |
 | **PW-3** | P2 | Power | NCP1095 NCM/NCL/LCF pull-ups + DET/R15 (structure resolved: OD/RTN/72 V) | — | Pull-up present (10k or int-PU); clean HIGH + valid LOW |
@@ -74,12 +86,11 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 | **MC-4** | P2 | MCU | VREF+ decoupling vs ENOB | — | DAC/ADC noise floor meets timing-loop budget |
 | **HM-1** | P2 | HMI | Panel-LED ballast final I vs Vf bins | — | I ≤ 75 % INA228 FS; rail sag acceptable |
 | **HM-3** | P2 | HMI | Encoder quadrature + TIM1 filter (push-pull, no PU) | PW-7 (Vcc) | Clean quadrature at PA8/PA9; set TIM1 ICxF |
-| **BM-1** | P2 | BOM | Sense-shunt values per INA228 full-scale | — | Each shunt Vfs ≤ 40.96 mV (≤75 %), 0.5 % part |
-| **BM-2** | P2 | BOM | OCXO Vc caps dielectric/package (C98/99/101) | — | C0G/NP0 or film; package assigned |
+| **BM-1** | P2 | CAL | INA228 per-board `SHUNT_CAL` trim (×9) | reference load / DMM | Each rail within ±0.2 % of the reference after trim |
+| **BM-2** | P3 | OCXO | OCXO Vc caps microphonic proof (C0G 1210 **fitted**) | E15, E16 | No FM sidebands under tap test |
 | **RB-3b** | P2 | Rb | (see RB-3) RB_OV_DET level | — | ≈3.24 V (PE3-safe) |
 | **GN-6** | P3 | GNSS | LT3045 I_LIM (R70=374 Ω) | — | Limit > F9T peak; no cold-start foldback |
 | **GN-7** | P3 | GNSS | L1 47 nH bias-T RF (VNA) — 47 nH intentional | — | Insertion loss/isolation acceptable at 47 nH |
-| **GN-8** | P2 | GNSS | ZED-F9T RF_IN 5 V-bias tolerance / DC-block | — | RF_IN DC level within u-blox rating, or DC-block/≤3.3 V bias |
 | **PW-5** | P3 | Power | PFI hold-up cap (C_port) | — | Hold-up ≥ POE_KILL/save window |
 | **MC-5** | P3 | MCU | ATECC608B provisioned I²C address | — | Confirm 0x60 as shipped/provisioned |
 | **HM-2** | P3 | HMI | RGB D5 Vf-bin trim + blue derating | — | Per-color I at target; blue within derate |
@@ -98,16 +109,21 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 - **D25** gate clamp K→VCC_RB, A→gate — Q25 enhances. Confirm orientation before RB-2/RB-4/RB-6.
 - **Q3** high-side sustain PNP: E=V_KBIAS, C=HOLD — POE_KILL latches.
 - **Q13** high-side PNP: E=V_ANT, C=Q11-B — ANT_OFF disable. Confirm before GN-4.
-- **POE_PG→PG7** divider R264 174k / R263 10k → 2.93 V — safe MCU tap. Confirm at PW-2.
+- **POE_PG→PG7** chain R20 10k + R264 162k / R263 10k → **2.97 V @54 V** (2.75 V @50 V, 3.13 V @57 V) — safe MCU tap. Confirm at PW-2.
 - **INA_ALERT_VCC_RB** pull-up R265 10k→3V3_STM.
-- **U10 PoE shunt** — loads on V_POE; R30 150 mΩ in the series feed.
+- **U10 PoE shunt** — loads on V_POE; **R30 25 mΩ** in the series feed.
 
-**Open PCB items to land before fab (N-1…N-5):**
+**Open PCB items to land before fab:**
 - **N-1 (CRITICAL)** — J17 panel power: J17.16→`5V_DISP`, J17.28→`3V3_STM`, encoder Vcc. Gates PW-7.
-- **N-2 (HIGH)** — Rb buck output caps C125/C126/C127/C128 rated ≥50 V. Gates RB-7.
-- **N-3 (MED)** — 10k pull-up `3V0_RF_LDO_PG`→3V3_STM (LT3045 U51 PG open-collector). Gates OX-4.
-- **N-4 (BOM)** — R264 MPN `ERJ-2RKF1743X` (174k) — re-verify before ordering.
-- **N-5 (LOW)** — C37 VREF+ 1nF → 100nF. Gates MC-4.
+- **N-8 (MED)** — **0402 element-voltage / power margin on the PoE dividers**: R20 (292 mW and 54 V
+  across a 0.1 W / 50 V part whenever PGO is low), R2 (52–55 V), R264 (51–54 V). Gates PW-2.
+- **N-4 (BOM)** — R264 MPN `ERJ-8ENF1623V` (162k, 1206) — re-verify before ordering.
+- **N-9 (LAYOUT)** — KiCad project has no `fp-lib-table`, and 36 parts have no footprint
+  (H1–H14, J1, J2, J6–J10, J15–J17, K1, K2, L2–L7, U53, U71, Y1, Y2).
+
+**Closed PCB items** (were N-2/N-3/N-5): Rb output caps C125–C128 are **50 V**; `3V0_RF_LDO_PG`
+pull-up **R266 is fitted**; C37 is **0.1 µF C0G 1210**. OCXO Vc caps C98/C99/C101 are **C0G 1210**
+and Y-caps C1/C42/C186 are **1812**.
 
 ---
 
@@ -141,7 +157,7 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 ### RB-2 — VCC_RB setpoint sweep + FB trim  *(P1; after RB-1/RB-3)*
 - **What/why:** Verify the real rail follows `24.45 − 6.645·VCTRL` (VCTRL 0…3.0 V) and land the
   operating setpoint (15 V @ VCTRL≈1.42 for a 15 V FE; ~top for a 24 V FE). FB network is
-  R147=20.0k, R148=604 Ω, R134=3.01k, R136=4.99k, R159=20 mΩ.
+  R147=20.0k, R148=604 Ω, R134=3.01k, R136=4.99k, **R159=7 mΩ (2512, 1 W)**, L7=39 µH.
 - **Procedure:** With D25 orientation confirmed and RB-1 passed, enable U40 into an **electronic load** (not
   the FE). Sweep wiper code, log VCC_RB on DMM and INA228 0x47 in parallel; fit measured vs
   `24.45 − 6.645·VCTRL`. Trim R134 (slope) / R148 (pedestal) if the curve is off. Confirm INA228
@@ -203,19 +219,22 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
   firmware; setpoint ≤ FE Vmax with margin; K1 map correct.
 - **Interlock:** Rail proven safe (RB-2) and OV latch proven (RB-3) before FE is powered.
 
-### RB-7 — Rb buck output-cap voltage rating ≥ 50 V  *(P1; PCB item, N-2)*
-- **What/why:** `C125` (47 nF feedforward) and `C126/C127/C128` (47 µF X6S bulk) sit on
-  `Net-(U44-IN+)` = the MIC28516 (U40) output = **VCC_RB**, which the digipot steers to the
-  **24.45 V** pedestal (26 V OV trip). They must be rated **≥ 50 V** (X6S also loses most of its C
-  at ~24 V DC bias). The **input** caps C133–C136 are 100 V X7T.
-- **Procedure:** Confirm the fitted output caps are **≥ 50 V** (X7S/X7T; C0G for C125). At 50 V +
-  DC-bias derating a 47 µF will not fit 1210 → verify the footprint is 1210/1812 and/or the
-  bulk is split to preserve effective capacitance. Measure VCC_RB ripple at the operating setpoint
-  to confirm bulk is adequate.
+### RB-7 — Rb buck output-cap effective capacitance under DC bias  *(P1)*
+- **Status:** the **voltage-rating item is closed** — C126/C127/C128 are `KCM55WR71H476MH13L`
+  (47 µF **50 V** X7R, stacked SMD 2 J-lead) and C125 is `GCM155R71H473KE02J` (47 nF **50 V** X7R
+  0402), all on `Net-(U44-IN+)` = the MIC28516 (U40) output = **VCC_RB** (24.45 V pedestal, 26 V OV
+  trip). Input caps C133–C136 remain 100 V X7T.
+- **What/why (remaining):** these are class-II dielectrics. At ~24 V bias a 50 V X7R typically holds
+  **roughly half** its nameplate capacitance, so the loop compensation and ripple must be checked
+  against the *derated* bulk, not 3×47 µF.
+- **Procedure:** Measure effective C at the operating bias (E16 with DC bias, or infer from ripple).
+  Sweep VCC_RB across the 4.5–24.45 V range and measure ripple + load-step response at each end;
+  confirm the MIC28516 stays inside its stability/PSRR budget with the derated bulk. Consider C0G
+  for C125 if the feedforward zero moves materially.
 - **Equipment:** E16, E4, E10.
-- **Acceptance:** All C125–C128 rated ≥ 50 V; ripple within MIC28516 stability/PSRR budget at
-  setpoint.
-- **Interlock:** the ≥50 V parts must be on the fabricated board; do before RB-2 sweeps the rail toward the pedestal.
+- **Acceptance:** ripple and transient response within the MIC28516 budget across the full output
+  range with measured (derated) capacitance.
+- **Interlock:** do as part of RB-2 while sweeping the rail toward the pedestal.
 
 ---
 
@@ -280,23 +299,24 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
   meets spec.
 - **Interlock:** none.
 
-### OX-4 — `3V0_RF_LDO_PG` pull-up (PG2)  *(P1; PCB item, N-3)*
-- **What/why:** The LT3045 (U51) PWRGD pin is **open-collector**; net `3V0_RF_LDO_PG` = {U12.87
-  (PG2), U51.4} needs a **pull-up** for PG2 to read power-good HIGH. The sibling GPS LDO (U22) has
-  R215 10k. Add ~10k `3V0_RF_LDO_PG`→3V3_STM.
-- **Procedure:** With the pull-up fitted and the 3V0_RF island in regulation, scope PG2 → confirm it
-  reads HIGH (~3.3 V) when good and LOW when U51 is out of regulation. Confirm the 10k lands
-  on 3V3_STM (not 3V0_RF).
+### OX-4 — `3V0_RF_LDO_PG` (PG2) functional check  *(P2)*
+- **Status:** the pull-up item is **closed** — **R266 10 k → 3V3_STM** is fitted on
+  `3V0_RF_LDO_PG` = {U12.87 (PG2), U51.4, R266.2}, mirroring R215 on the GPS LDO. **Firmware no
+  longer masks PG2.**
+- **What/why (remaining):** confirm the open-collector LT3045 PWRGD actually swings correctly with
+  the fitted pull-up.
+- **Procedure:** With the 3V0_RF island in regulation, scope PG2 → confirm HIGH (≈3.3 V) when good
+  and LOW when U51 is forced out of regulation. Confirm R266 lands on 3V3_STM (not 3V0_RF).
 - **Equipment:** E3, E4, E13.
 - **Acceptance:** PG2 = HIGH when 3V0_RF is good, LOW on fault; firmware LDO-good telemetry tracks.
-- **Interlock:** the pull-up must be on the board (open-collector cannot self-pull); firmware masks PG2 until then.
+- **Interlock:** none.
 
 ---
 
 ## 5. GNSS + active antenna — `gnss_antenna_bias_supervisor.md`
 
 > `GPS_ANT_DETECT`/`GPS_ANT_SHORT` = LMV393 U25; **presence via INA181 U24 across R77 (3.3 Ω)**,
-> precise current via **INA228 U26 across R89 (0.1 Ω)** — do not swap these in test scripts.
+> precise current via **INA228 U26 across R89 (150 mΩ, 520.833 nA/LSB)** — do not swap these in test scripts.
 
 ### GN-1 — Antenna DETECT threshold (~5 mA)  *(P2)*
 - **What/why:** DETECT ref R85/R86 (100k/11k) → 0.327 V → ≈5 mA assert. Must assert for a
@@ -321,19 +341,20 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 
 ### GN-3 — Foldback clamp (~182 mA)  *(P2)*
 - **What/why:** R77 3.3 Ω + Q12 VBE foldback limits antenna current to ≈182 mA (~20 % over
-  150 mA). Verify clamp value and that R77 (~0.11 W ≤ 0.25 W) and Q11 (~0.9 W ≪ 2 W) stay within
-  rating into a dead short.
+  150 mA). Verify the clamp value and the sustained-short dissipation. R77 is now a **0.25 W** part,
+  so the 0.182² × 3.3 = **109 mW** clamp dissipation is 44 % of rating even when a shorted cable
+  holds it there indefinitely. Q11 (~0.9 W ≪ 2 W) is fine.
 - **Procedure:** Short the bias output through E10 in CC; measure clamped current on E3; verify
   R77/Q11 temperature with E11 T/C during sustained short.
 - **Equipment:** E10, E3, E11.
-- **Acceptance:** Clamp ≈182 mA; R77 ≤ 0.25 W, Q11 ≤ 2 W, no thermal runaway.
+- **Acceptance:** Clamp ≈182 mA; R77 ≤ 0.25 W and Q11 ≤ 2 W under a sustained short, no thermal runaway.
 - **Interlock:** none.
 
 ### GN-4 — ANT_OFF disable (Q13)  *(P1)*
 - **What/why:** Q13 (BC857W) is the high-side PNP (E=V_ANT, C=Q11-B) that lets the F9T `ANT_OFF`
   command shut the bias LNA. The firmware hard-cut via `ANT_BIAS_EN`→U27 is the independent
   short-protection path; this item verifies the F9T-commanded LNA-off route.
-- **Procedure:** Assert `GPS_ANT_OFF` (F9T pin5); scope node-A → must collapse to ~0 V. Also
+- **Procedure:** Assert the F9T `ANT_OFF` output (U21 pin 5, net `GPS_ANT_OFF_MON`); scope node-A → must collapse to ~0 V. Also
   confirm firmware gate of SHORT/OPEN alarms while commanded-off.
 - **Equipment:** E4, E13.
 - **Acceptance:** Node-A → ~0 V on `ANT_OFF` assert; bias fully disabled.
@@ -356,8 +377,8 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 - **Procedure:** Load 3V3_GPS with E10 up to the current limit; confirm limit > F9T peak draw
   and that 3V3_GPS does not foldback during F9T cold-start inrush.
 - **Equipment:** E10, E4, E3.
-- **Acceptance:** I_LIM > F9T peak with margin; no cold-start foldback. (N4: R72 0.5 Ω drops
-  ~60–75 mV — consider 0.1 Ω if delivered voltage marginal.)
+- **Acceptance:** I_LIM > F9T peak with margin; no cold-start foldback. **R72 is now 75 mΩ** — drop
+  is 9.75 mV at the 130 mA acquisition peak (≈3.31 V delivered); confirm on the bench.
 - **Interlock:** none.
 
 ### GN-7 — L1 47 nH bias-T RF verify (VNA)  *(P3)*
@@ -371,19 +392,12 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 - **Acceptance:** Insertion loss/isolation acceptable at 47 nH.
 - **Interlock:** none.
 
-### GN-8 — ZED-F9T RF_IN 5 V-bias tolerance / DC-block  *(P2)*
-- **What/why:** The ~5 V active-antenna bias is injected by L1 directly onto `GPS_RF_IN` =
-  {J7 SMA, L10 ESD, U21.2 RF_IN}. The u-blox reference antenna-bias design places a **47 pF C0G
-  series DC-block** between the bias-T node and RF_IN; u-blox notes the internal RF_IN DC-block
-  "may not have a working voltage higher than VCC" (3.3 V). Supervisor/current-sense (U24/U26)
-  are on the V_ANT side and unaffected.
-- **Procedure:** Either (a) add a ~47 pF C0G series DC-block between the bias node and U21.2 so only
-  the antenna sees 5 V, (b) obtain u-blox written confirmation the internal block tolerates
-  continuous 5 V, or (c) drop the antenna bias to ≤3.3 V. Bench-scope the DC level at U21.2.
-- **Equipment:** E5, E4, E3, datasheet.
-- **Acceptance:** RF_IN DC level within u-blox rating (or bias ≤3.3 V / DC-blocked); no LNA
-  degradation over soak.
-- **Interlock:** none.
+### GN-8 — *(retracted — no longer an item)*
+The "GPS RF_IN needs a 47 pF series DC-block" premise came from this repo's own `CLAUDE.md`
+open-items list and was **not supported by UBX-21040375**: the u-blox active-antenna reference
+circuits inject the bias directly on the RF trace and rely on the receiver's internal DC block.
+`C204`, added on that premise, is **deleted**; the as-built `node A → L1 47 nH → GPS_RF_IN
+{J7.1, U21.2, L10.1}` matches the reference. Normal antenna bring-up applies (GN-1/GN-2/GN-3).
 
 ---
 
@@ -393,7 +407,7 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 
 ### PW-2 — Verify POE_PG→PG7 divider + PG3/PG7 5V-tolerance  *(P0)*
 - **What/why:** NCP1095 PGO is open-drain pulled to VOUT_P (54–57 V) via R20. The divider
-  **R264 174 k / R263 10 k → PG7 = 54 V·10/184 = 2.93 V** (3.10 V @57 V), safe on a 3.6 V
+  **R20 10 k + R264 162 k / R263 10 k → PG7 = 54 V·10/182 = 2.97 V** (2.75 V @50 V, 3.13 V @57 V), safe on a 3.6 V
   GPIO and a valid HIGH (>2.0 V); on fault PGO sinks → PG7 ≈ 0 V. Separately 5V_PSU_PG pulls PG3 to
   5 V; PG3 and PG7 are 5V-tolerant (FT).
 - **Procedure:** At PoE power-good, scope PG7 = **2.9–3.1 V** (not 54 V) and confirm it tracks the
@@ -524,13 +538,15 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 - **Acceptance:** PG5 ≤ 3.3 V under all conditions.
 - **Interlock:** none.
 
-### MC-4 — VREF+ decoupling vs ENOB  *(P2)*
-- **What/why:** VREF_3V3 has only C37 1 nF at U12.32; C38 2.2 µF is AC-isolated behind R48 50 Ω.
-  VREF+ feeds the OCXO DAC/ADC → thin local decoupling may cost ENOB / add loop noise.
-- **Procedure:** Measure ADC/DAC noise floor / ENOB on the OCXO loop (histogram a static Vc read).
-  If degraded, add ~100 nF at the VREF+ pin and re-measure.
+### MC-4 — VREF+ decoupling vs ENOB  *(P3)*
+- **Status:** the cap item is **closed** — C37 is now **0.1 µF C0G 1210**
+  (`C1210C104J5GACAUTO`) at U12.32, with C38 2.2 µF behind R48 50 Ω as the reference-noise filter.
+- **What/why (remaining):** confirm the achieved ADC/DAC noise floor actually meets the OCXO
+  steering-loop budget.
+- **Procedure:** Histogram a static Vc read on PA3 and measure the DAC output noise on PA4; compare
+  against the loop budget.
 - **Equipment:** E13, E4, E15 (optional).
-- **Acceptance:** DAC/ADC noise meets timing-loop budget; add 100 nF if not.
+- **Acceptance:** DAC/ADC noise meets the timing-loop budget.
 - **Interlock:** none.
 
 ### MC-5 — ATECC608B provisioned I²C address  *(P3)*
@@ -547,10 +563,11 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 
 ### HM-1 — Panel-LED ballast final current vs Vf bins  *(P2)*
 - **What/why:** 6× white R247–R252 = 91 Ω, 1× red R253 = 150 Ω on V_PANEL_LED ≈ 4.7 V →
-  ~17–18 mA each, all-on ≈126–132 mA. INA228 U54 shunt R199 = 220 mΩ (29.0 mV = 70.9 % FS).
+  ~17–18 mA each, all-on ≈126–132 mA. INA228 U54 shunt **R199 = 150 mΩ** (19.8 mV = **48.3 % FS**).
   Final current depends on LED Vf bin and rail sag — must stay ≤ 75 % of INA228 FS.
 - **Procedure:** With final LED bins fitted, measure per-string current and total on INA228 0x4C;
-  measure V_PANEL_LED sag all-on. Confirm total ≤ 75 % of ±40.96 mV FS across R199. Adjust ballast
+  measure V_PANEL_LED sag all-on. Confirm total ≤ 75 % of ±40.96 mV FS across R199 (48 % as-built, so a
+  brighter ballast has room). Adjust ballast
   if a bin shifts current out of range.
 - **Equipment:** E3, E13.
 - **Acceptance:** Per-LED current at target brightness; INA228 shunt drop ≤ 75 % FS; no visible
@@ -628,46 +645,80 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 
 ---
 
-## 10. BOM SELECT / SHUNT-REVIEW — `sts1000_bom.md`, `scratchpad/bom_notes.md`
+## 10. Current-monitor calibration & remaining BOM selects — `sts1000_bom.md`
 
-> These are "**select + verify**" items: bench measurement informs the sourcing choice. Frame
-> each as measure-then-commit.
+> Shunt **values are final** (see the table below). What remains is a per-board gain trim and a
+> handful of measure-then-commit sourcing checks.
 
-### BM-1 — Sense-shunt final values per INA228 full-scale  *(P2)*
-- **What/why:** 10 milliohm shunts are as-built placeholders (SHUNT-REVIEW). Each must be picked
-  so the rail's max current gives ≤ 40.96 mV (≤75 % of INA228 ±40.96 mV FS) at adequate
-  resolution, in a 0.5 % (or 4-terminal Kelvin) part.
+### BM-1 — INA228 per-board `SHUNT_CAL` trim (×9)  *(P2, per board)*
+- **What/why:** all nine shunts are 1 % parts, and that 1 % dominates the uncalibrated current
+  error (the INA228's own gain error is an order of magnitude smaller). One multiply per device
+  removes it. Values, packages and full-scale figures are **final as-built**:
 
-  | Ref | Value | Rail / INA228 |
-  |---|---|---|
-  | R30 | 150 m | U10 PoE-input (0x40) — in the series `VOUT_P`→`V_POE` feed |
-  | R106 | 15 m | U31 STM 3V3 (0x41) |
-  | R107 | 100 m | U32 5V_DISP (0x42) |
-  | R102 | 75 m | U30 main 3V3 (0x43) |
-  | R89 | 100 m | U26 antenna-bias (0x45) |
-  | R126 | 25 m | U37 OCXO (0x46) |
-  | R159 | 20 m | U44 Rb/VCC_RB (0x47) |
-  | R72 | 500 m | U23 GPS-VCC (0x4A) — N4: consider 0.1 Ω (drops ~60–75 mV) |
-  | R199 | 220 m | U54 panel-LED (0x4C) — verified 70.9 % FS ✓ |
-  | R16 | 25 m | PD hot-swap (Q2/NCP1095) — **not** an INA228 shunt |
+  | Ref | Value | Package / rating | Rail / INA228 | FS current | CURRENT_LSB |
+  |---|---|---|---|---|---|
+  | R30 | **25 m** | 1206 / 0.25 W | U10 PoE-input (0x40) — in the series `VOUT_P`→`V_POE` feed | ±1.6384 A | 3.125 µA |
+  | R106 | **100 m** | 1206 / 0.25 W | U31 STM 3V3 (0x41) Kelvin split | ±409.6 mA | 781.25 nA |
+  | R107 | **100 m** | 1206 / 0.25 W | U32 5V_DISP (0x42) | ±409.6 mA | 781.25 nA |
+  | R102 | **50 m** | 1206 / 0.25 W | U30 main 3V3 (0x43) | ±819.2 mA | 1.5625 µA |
+  | R89 | **150 m** | 1206 / 0.25 W | U26 antenna-bias (0x45) | ±273.1 mA | 520.833 nA |
+  | R126 | **25 m** | 1206 / 0.25 W | U37 OCXO (0x46) | ±1.6384 A | 3.125 µA |
+  | R159 | **7 m** | **2512 / 1 W** | U44 Rb/VCC_RB (0x47) | ±5.8514 A | 11.1607 µA |
+  | R72 | **75 m** | 1206 / 0.25 W | U23 GPS-VCC (0x4A) | ±546.1 mA | 1.04167 µA |
+  | R199 | **150 m** | 1206 / 0.25 W | U54 panel-LED (0x4C) | ±273.1 mA | 520.833 nA |
+  | R16 | 25 m | 1206 / **1 W** (Ohmite MCS1632) | PD hot-swap RSNS (Q2/NCP1095) | — | **not** an INA228 shunt |
 
-- **Procedure:** For each rail, establish the true max operating current (measure under worst-case
-  load); compute shunt Vfs = Imax·R; confirm ≤ 40.96 mV (≤75 % FS) with usable resolution at
-  min current. Commit a 0.5 %/Kelvin part at that value.
-- **Equipment:** E10, E3, E13.
-- **Acceptance:** Every shunt Vfs ≤ 75 % INA228 FS at rail Imax; resolution adequate at idle;
-  R30 sits in the series feed.
-- **Interlock:** none.
+  All nine run **ADCRANGE=1** and start from **`SHUNT_CAL` = 4096** (see
+  `sts1000_firmware_hardware_interface.md §4.2`).
 
-### BM-2 — OCXO Vc caps dielectric/package (C98/C99/C101)  *(P2)*
-- **What/why:** These sit on the OCXO steering/loop-filter path; currently 0.1 µF X7R 0402 →
-  **must be C0G/NP0 or film** (X7R microphonics FM-modulate the carrier). 0.1 µF C0G doesn't
-  exist in 0402 → film or 1210 C0G (package/layout change).
-- **Procedure:** Select film or 1210 C0G 0.1 µF; verify dielectric with E16. **Optional carrier
-  proof:** compare OCXO close-in phase noise / spurs with X7R vs C0G fitted (E15), tapping the
-  board (microphonic test) to confirm no FM sidebands.
-- **Equipment:** E16, E15 (optional).
-- **Acceptance:** C0G/NP0 or film fitted; no microphonic FM sidebands under tap test.
+- **Procedure (per rail, per board):**
+  1. Bring the rail up and settle it at a **steady mid-range load** — ideally 40–60 % of that
+     monitor's full scale, so neither offset nor clipping dominates. Where the natural load is too
+     light (3V3_GPS, V_ANT), substitute a bench electronic load in place of the normal one.
+  2. Measure the true current with a calibrated DMM in series (or a calibrated shunt + 6½-digit
+     meter). Record `I_ref`.
+  3. Read the INA228 `CURRENT` register with `SHUNT_CAL` = 4096 and convert with that rail's
+     CURRENT_LSB. Record `I_reported`.
+  4. Compute `SHUNT_CAL_trim = round(4096 × I_ref / I_reported)`, clamp to 15 bits, write it, and
+     re-read to confirm the rail now agrees with the DMM.
+  5. Store the nine trims in NOR with the calibration record. **Firmware must re-apply them after
+     any INA228 reset** — the part reverts to its POR calibration silently.
+  6. Also record the **no-load offset** on each rail (rail up, load removed): it is the floor for
+     any under-current / open-load threshold.
+- **Equipment:** E10 (DMM), E3 (bench supply), E13 (electronic load).
+- **Acceptance:** each rail reads within **±0.2 %** of the DMM after trim; no-load offset recorded;
+  the nine trims persisted and re-applied across a power cycle.
+- **Interlock:** run **after** the rail is verified safe by its own P0/P1 item; the VCC_RB trim
+  (0x47) comes after RB-1/RB-2, not before.
+
+### BM-1a — Alert-threshold commissioning  *(P3)*
+- **What/why:** `SOVL`/`SUVL` are shunt-voltage registers (**1.25 µV/LSB** at ADCRANGE=1, 16-bit
+  signed, FS code 32767 = 40.96 mV) and are **not** scaled by `SHUNT_CAL`. Defaults at 125 % of each
+  rail's design maximum are tabulated in `sts1000_firmware_hardware_interface.md §4.2`.
+- **Procedure:** after BM-1, load each rail to its real worst case (measured, not assumed), confirm
+  the alert does **not** fire, then force an over-load and confirm the ALERT GPIO asserts and
+  `DIAG_ALRT` names the right cause. Commit the final codes to the calibration record.
+- **Special cases:**
+  - **U26 (V_ANT, 0x45):** the R77 foldback clamps at ≈182 mA autonomously, so the 227 mA `SOVL`
+    can never fire in normal operation — it is a foldback-failure backstop. Use `SUVL` against the
+    BM-1 no-load offset to detect a **disconnected** antenna.
+  - **U32 (5V_DISP, 0x42):** the RT9742 current limit may sit **above** the ±409.6 mA full scale, so
+    a display short clips the `CURRENT` reading. Verify the *pair* (INA alert PG10 +
+    `V_DISP_EN_FAULT` PF9) annunciates, and do not rely on the magnitude.
+  - **U54 (panel, 0x4C):** set `AVG` so the averaging window is ≫ the 1 ms PWM period before
+    commissioning the threshold, then duty-normalize.
+- **Acceptance:** every alert fires on a real over-load and stays quiet at worst-case normal load.
+- **Interlock:** after BM-1.
+
+### BM-2 — OCXO Vc caps microphonic proof (C98/C99/C101)  *(P3)*
+- **Status:** the dielectric/package item is **closed** — all three are
+  `C1210C104J5GACAUTO`, **0.1 µF 50 V C0G in 1210** (0.1 µF C0G is unbuildable below 1210).
+- **What/why (remaining):** confirm on a real board that the C0G parts leave no microphonic
+  signature on the carrier.
+- **Procedure:** Verify the fitted dielectric with E16. Tap/vibrate the board while watching OCXO
+  close-in phase noise and spurs (E15); confirm no FM sidebands appear.
+- **Equipment:** E16, E15.
+- **Acceptance:** no microphonic FM sidebands under tap test.
 - **Interlock:** do before OX-2/OX-3 phase-noise-sensitive tuning.
 
 ### BM-3 — C1/C42/C186 2 kV Y-cap package  *(P3)*
@@ -690,7 +741,7 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 
 ### BM-5 — Power inductors L2–L7  *(P3)*
 - **What/why:** L2 6.8 µH ≥12 A (5 V buck), L3/L6 2.2 µH ~4 A (3V3/OCXO bucks), L4/L5 2.2 µH
-  (TPS61094 backup — size Isat for boost peak), L7 40 µH (Rb high-Vout buck). Specific PN is a
+  (TPS61094 backup — size Isat for boost peak), **L7 39 µH (Würth 7447709390, 4.1 A, 56 mΩ)** (Rb high-Vout buck). Specific PN is a
   layout/thermal call.
 - **Procedure:** Confirm each buck's peak inductor current under worst-case load; select Isat >
   peak with margin, acceptable DCR/thermal at the layout footprint. Verify with E16 + thermal
@@ -700,14 +751,15 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 - **Interlock:** none.
 
 ### BM-6 — Connector / zener PNs  *(P3)*
-- **What/why:** SELECT list: D16/D20/D21 3.3 V zeners (package blank — BZX84C3V3 suggested);
-  headers J2/J4/J10/J11/J13 (2.54 mm); J6 DE-9 socket; J7/J8/J9/J15 SMA; U50 LTC6752 speed grade
-  (H vs I); RT9742 U27 symbol/MPN variant (GGJ5/1A vs VGJ5/2A, pin-identical). Also J1 magjack PN
-  (NW-4).
-- **Procedure:** Assign orderable PNs; for the LTC6752 confirm the required speed grade against
-  RF-1 chatter result; standardize RT9742 MPN.
+- **Status:** **closed** — every BOM line now carries a manufacturer PN and a DigiKey PN.
+  D16/D20/D21 = `BZX84C3V3LT1G`; J2/J10/J16 = On Shore `OSTVN0*A150`; J6 = EDAC `622-009-260-033`;
+  J7/J8/J9/J15 = Samtec `SMA-J-P-H-RA-TH1`; J17 = Phoenix `1787179`; J1 = Bel/Stewart
+  `0826-1X1T-HS-F`; U50 = `LTC6752IS5#TRMPBF` (**I** grade); U27/U33/U55 = `RT9742VGJ5` (standardized).
+- **What/why (remaining):** confirm the LTC6752 **I** grade is fast enough against the RF-1 chatter
+  result, and re-verify **R264** = `ERJ-8ENF1623V` (162 k, 1206) before ordering — a 1.21 k part there
+  would put ~48 V on PG7.
 - **Equipment:** datasheets.
-- **Acceptance:** Every SELECT connector/zener/variant has a verified orderable PN.
+- **Acceptance:** LTC6752 grade confirmed against RF-1; R264 PN re-verified.
 - **Interlock:** none.
 
 ---
@@ -718,12 +770,12 @@ rating (N-2, `RB-7`), `3V0_RF_LDO_PG` pull-up (N-3, `OX-4`), R264 MPN check (N-4
 |---|---|
 | `findings_rb` §8 / `sts1000_vcc_rb_supply.md` | RB-1…RB-6 |
 | `findings_timing` §8 / `sts1000_clock_mux.md` | OX-1…OX-3, RF-1, RF-2, BM-2 |
-| `findings_gnss` §8 / `gnss_antenna_bias_supervisor.md` | GN-1…GN-7 |
+| `findings_gnss` §8 / `gnss_antenna_bias_supervisor.md` | GN-1…GN-8 |
 | `findings_power` / `sts1000_poe_kill.md`, `sts1000_power_fail_input.md` | PW-1…PW-6 |
 | `findings_mcu` §9 | MC-1…MC-5 |
 | `findings_hmi` §9 / `sts1000_panel_controls.md`, `sts1000_rgb_indicator.md` | HM-1…HM-4 |
 | `findings_ethernet` §8 | NW-1…NW-4 |
-| `bom_notes.md` (SELECT/SHUNT-REVIEW) | BM-1…BM-6 |
+| `sts1000_bom.md` (sourcing + shunt table) | BM-1, BM-1a, BM-2…BM-6 |
 | `CLAUDE.md` standing open items | RB-1, MC-5, GN-5, PW-4, RB-6, GN-6, HM-1 |
 
 **Total items: 48** (P0: 5 · P1: 7 · P2: 21 · P3: 15) across 9 subsystems. The five open PCB items

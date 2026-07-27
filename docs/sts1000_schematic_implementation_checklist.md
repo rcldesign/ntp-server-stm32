@@ -3,11 +3,16 @@
 High-level IC / circuit inventory for verifying schematic completeness. One line per active part or distinct circuit block; key support passives folded in. The authoritative pin↔net contract is `sts1000_firmware_hardware_interface.md`; the design detail is `sts1000_hardware_design_reference.md`; the netlist-driven consistency review is `sts1000_schematic_design_review.md`.
 
 > **Open items before layout / fab** (genuinely-open work; everything else in this checklist is the current design):
-> - [ ] **GPS RF_IN series DC-block.** The u-blox ZED-F9T reference antenna-bias design (Integration Manual UBX-21040375) places a 47 pF C0G series DC-block between the bias-T node and RF_IN. As-built `GPS_RF_IN` ties the 5 V-biased node directly to U21.2. Add a ~47 pF C0G series DC-block (so the 5 V bias reaches the antenna only), or confirm the ZED-F9T internal block tolerates continuous 5 V. Supervisor/current-sense sit on the V_ANT side and are unaffected.
-> - [ ] **Rb buck output caps C125/C126/C127/C128 ≥ 50 V.** They sit on VCC_RB (24.45 V pedestal / 26 V OV); source ≥ 50 V parts (47 µF 50 V won't fit 1210 → 1210/1812 or split; C0G for feedforward C125).
-> - [ ] **Cap packages:** C98/C99/C101 0.1 µF C0G → **1210 C0G / PPS film** (0.1 µF C0G is unbuildable in 0402); C1/C42/C186 4.7 nF 2 kV → **1808/1812** Y-cap.
-> - [ ] **C37 (VREF+) 1 nF → 100 nF** (optional ADC-ENOB improvement for the OCXO steering path; ST AN5711 wants 100 nF + 1 µF at VREF+, keep the R48/C38 filter).
-> - [ ] **Bench-verify:** AP3441 PG active-drive to VIN (confirm the PG-divider nodes reach ~2.98 V when good — node N 2.98 V / PG5 2.66 V, both loaded, both > VIH; the OCXO LDO enable depends on it); ZED-F9T V_BCKP current at enclosure Tmax; FE-5680A J6.8/J6.9 Tx/Rx direction per surplus variant; **NCP1095 NCM/NCL/LCF** resolved (open-drain/RTN=GND/+72 V — add 10k→3V3_STM or STM32 internal pull-up); per-rail INA228 shunt final values.
+> - [ ] **`fp-lib-table` is missing** from the KiCad project (only `sym-lib-table` exists) — custom footprints in `hardware/libraries/` are unreachable from the board editor. **Blocks opening the PCB.**
+> - [ ] **Footprint fields are not land-pattern links** — only **25** of 648 symbols carry a resolvable `library:footprint`; **587** hold vendor package text (`0402 (1005 Metric)`, `SOT-323`, …); **36** are empty. 31 valid links were lost during the BOM passes and are recoverable from `78853e8`. **Hard blocker.**
+> - [ ] **0402 element-voltage margin on the PoE dividers** (ERJ-2RK/ERJ-U02 0402 are 50 V parts): **R20** carries 54 V and **292 mW** whenever NCP1095 PGO is low; **R2** sees 52–55 V; **R264** sees 51–54 V. Power is negligible on R2/R264 (2.5 mW / 15 mW) — the working-voltage rating is the binding spec.
+> - [ ] **R264 MPN** — re-verify `ERJ-8ENF1623V` (162 k, 1206) before ordering; a 1.21 k part there would put ~48 V on PG7.
+> 
+> **Retracted:** the "GPS RF_IN needs a 47 pF C0G series DC-block per the u-blox reference" item was **not supported by UBX-21040375** — u-blox injects the antenna bias directly on the RF trace and relies on the receiver's internal DC block. `C204`, added for it, is **deleted**.
+> 
+> **Closed:** **R77** re-sized to a **0.25 W** part (109 mW at the antenna foldback clamp = 44 % of rating); Rb buck output caps C125–C128 are **50 V**; C98/C99/C101 + C37 are **0.1 µF C0G 1210**; C1/C42/C186 are **1812** 2 kV; all nine **INA228 shunt values final**; `3V0_RF_LDO_PG` pull-up **R266 fitted**.
+> 
+> - [ ] **Bench-verify:** AP3441 PG active-drive to VIN (confirm the PG-divider nodes reach ~2.98 V when good — node N 2.98 V / PG5 2.66 V, both loaded, both > VIH; the OCXO LDO enable depends on it); ZED-F9T V_BCKP current at enclosure Tmax; FE-5680A J6.8/J6.9 Tx/Rx direction per surplus variant; **NCP1095 NCM/NCL/LCF** resolved (open-drain/RTN=GND/+72 V — add 10k→3V3_STM or STM32 internal pull-up); per-board INA228 `SHUNT_CAL` trim (×9).
 
 ---
 
@@ -15,7 +20,7 @@ High-level IC / circuit inventory for verifying schematic completeness. One line
 - [ ] **U12 STM32H563ZIT6** (LQFP144) — MCU. **SWD-only** (PB4/NJTRST reused as `RB_RX`)
 - [ ] HSE **bypass** on PH0 ← clock-mux `CLK_OUT`; PH1/OSC_OUT = NC
 - [ ] **LSE Y2 32.768 kHz** crystal on PC14/PC15 (RTC) + load caps
-- [ ] VDD/VDDA decoupling, VREF+ (**C37 → 100 nF**, see open items), VBAT backup-domain feed
+- [ ] VDD/VDDA decoupling, VREF+ (**C37 = 0.1 µF C0G 1210** at the pin, C38 2.2 µF behind R48 50 Ω), VBAT backup-domain feed
 - [ ] Boot/SWD, MCU_NRST, WDT_KICK (PB2), PFI (PE8); **U64 TPS3430** window WDT
 - [ ] **U13 LT3045** VDDA LDO; **U14 MCP1502-33** 3.3 V STM ref
 
@@ -49,7 +54,7 @@ High-level IC / circuit inventory for verifying schematic completeness. One line
 - [ ] **R184 33 Ω** source term at U50 Q (→ mux I1, EXTREF_MON PB14)
 
 ## 5. Rb variable supply (`sts1000_vcc_rb_supply.md`)
-- [ ] **U40A MIC28516** adaptive-on-time buck (VCC_RB 5–24 V) + **L7 40 µH** + COUT bank — **output caps C125/C126/C127/C128 ≥ 50 V** (VCC_RB pedestal 24.45 V; see open items)
+- [ ] **U40A MIC28516** adaptive-on-time buck (VCC_RB 5–24 V) + **L7 39 µH** (Würth 7447709390) + COUT bank — output caps **C125–C128 are 50 V as-built** (VCC_RB pedestal 24.45 V); series sense **R159 7 mΩ (2512, 1 W)**
 - [ ] **U43 MCP41U83T-503E/ST** SPI digipot (FB trim; SPI2C→DGND; CS=PD2)
 - [ ] **U42 OPA320** wiper buffer; **U45 MCP1502-30E** **3.0 V** reference (`VREF_3V0`, gated by RB_PWR_EN via Q19/Q20)
 - [ ] FB network R147/R148/R134 → **`VCC_RB = 24.45 − 6.645·VCTRL`** (VCTRL 0…3.0 V); pedestal 24.45 V fixed, digipot pulls **down** only
@@ -104,15 +109,15 @@ High-level IC / circuit inventory for verifying schematic completeness. One line
 - [ ] **9× INA228** also share this bus (see §5/§9/§12/§13); **all INA ALERTs / PG / buttons are direct GPIO — no I/O expander (§12)**
 
 ## 12. Fault / UI aggregation — **direct GPIO** (no I/O expander)
-- [ ] **GPIOF scan (1 kHz):** PF0–6 `BUTTON_1..7` (10k↑ +0.1µF), PF7 `DISP_TOUCH_INT`, PF8 `V_ANT_EN_FAULT_N`, PF9 `V_DISP_EN_FAULT_N`, PF10 `PROX_WAKE` (EXTI10), PF11 `ENC_BUTTON`, PF12 `PANEL_LED_FAULT_N`, PF13 `INA_ALERT_5V_PANEL` (INA228 #9 0x4C), PF14 `BKP_STM_PG`, PF15 `BKP_GPS_PG`
-- [ ] **GPIOG scan (1 kHz):** PG0–7 PG rails (3V3_GPS_LDO_PG, OCXO_LDO_PG, **3V0_RF_LDO_PG (PG2 — LT3045 U51 PG open-collector, R266 10k→3V3_STM)**, 5V_PSU_PG, 3V3_PSU_PG (PG4, AP3441 PG→VIN, R94/R92 → 2.98 V), OCXO_PSU_PG(÷), RB_PSU_PG, **POE_PG (PG7 — divider R264 174k/R263 10k → 2.93 V)**); PG8–15 INA228 ALERTs (V_POE, 3V3_STM, 5V_DISP, 3V3, 3V3_GPS/0x4A, V_ANT, OCXO, **VCC_RB (PG15 — R265 10k pull-up)**)
+- [ ] **GPIOF scan (1 kHz):** PF0–6 `BUTTON_1..7` (10k↑ +0.1µF), PF7 `DISP_TOUCH_INT`, PF8 `V_ANT_EN_FAULT`, PF9 `V_DISP_EN_FAULT`, PF10 `PROX_WAKE` (EXTI10), PF11 `ENC_BUTTON`, PF12 `PANEL_LED_FAULT`, PF13 `INA_ALERT_5V_PANEL` (INA228 #9 0x4C), PF14 `BKP_STM_PG`, PF15 `BKP_GPS_PG`
+- [ ] **GPIOG scan (1 kHz):** PG0–7 PG rails (3V3_GPS_LDO_PG, OCXO_LDO_PG, **3V0_RF_LDO_PG (PG2 — LT3045 U51 PG open-collector, R266 10k→3V3_STM)**, 5V_PSU_PG, 3V3_PSU_PG (PG4, AP3441 PG→VIN, R94/R92 → 2.98 V), OCXO_PSU_PG(÷), RB_PSU_PG, **POE_PG (PG7 — R20 10k + R264 162k/R263 10k → 2.97 V @54 V)**); PG8–15 INA228 ALERTs (V_POE, 3V3_STM, 5V_DISP, 3V3, 3V3_GPS/0x4A, V_ANT, OCXO, **VCC_RB (PG15 — R265 10k pull-up)**)
 - [ ] **Encoder** `ENC_A/ENC_B` (PA8/PA9, TIM1 hardware quadrature) via **U68 74LVC2G17** Schmitt buffer — encoder output is **push-pull (driven), no pull-up needed**; encoder/panel logic Vcc = J17.28 (5 V)
 - [ ] **7-button keypad** (PF0–6, ESD arrays U19/U20 at J17)
 - [ ] **Magnetic reed** presence sensor = discrete GPIO `PROX_WAKE` PF10 (**J17.18**) — passive dry contact, R254 10k pull-up + close-to-GND (active-low); no Vcc pin needed
 
 ## 13. Display / touch (`sts1000_3v3p_i2c_peripherals.md`)
 - [ ] **LCDwiki MSP4030 module:** ST7796S driver + FT6336U touch (**0x38**) + onboard 74LVC245 level-shift + BSS138 backlight
-- [ ] **U33 RT9742** load switch — gates 5V_DISP only; nFLG→`V_DISP_EN_FAULT_N` (PF9, R105 10k↑); **DISP_EN (PC11) + R104 pull-down**
+- [ ] **U33 RT9742** load switch — gates 5V_DISP only; nFLG→`V_DISP_EN_FAULT` (PF9, R105 10k↑); **DISP_EN (PC11) + R104 pull-down**
 - [ ] **U63 PCA9306** touch I²C level translator (gated 5 V side; one low-side pull-up pair to 3V3_STM)
 - [ ] **U17/U18 TPD4E05U06DQAR** ESD (5 V touch lines); **TPD4E02B04** (3.3 V lines) <!-- TODO verify designators: 3.3 V-line ESD arrays U15/U16/U19/U20 -->
 - [ ] **R210/R211 22 Ω** series in display branch only
@@ -137,23 +142,28 @@ High-level IC / circuit inventory for verifying schematic completeness. One line
 - [ ] **USB FS device** connector + ESD (console / SMP recovery); HSI48 + CRS; PE2 VBUS-sense divider
 - [ ] **RGB LED** (PD12–PD14, common-anode low-side NPN) — status indication
 - [ ] **Fan** + tach (driven off TMP117 #2 loop) — `FAN_PWM` PE5, `FAN_TACH` PA15
-- [ ] **Panel-LED string** (6 white + 1 red): **U55 RT9742** 5V load switch → R199 shunt (**INA228 #9 U54 @0x4C**) → FB12 → Q22 (NSS40300 PNP) high-side + Q23 (BC847W) PWM; `PANEL_LED_EN` PC0 (R198↓), `PANEL_LED_PWM` PE0, `PANEL_LED_FAULT_N` PF12
+- [ ] **Panel-LED string** (6 white + 1 red): **U55 RT9742** 5V load switch → **R199 150 mΩ** shunt (**INA228 #9 U54 @0x4C**, 19.8 mV = 48 % FS all-on) → FB12 → Q22 (NSS40300 PNP) high-side + Q23 (BC847W) PWM; `PANEL_LED_EN` PC0 (R198↓), `PANEL_LED_PWM` PE0, `PANEL_LED_FAULT` PF12
 - [ ] **Holdover alarm relay K2** (G6K-2F-Y, Form-C → J16) — `HOLDOVER_ALARM_RELAY` PA6 → Q24 driver + D24 flyback; **normally-energized fail-safe** (de-energized = ALARM)
 - [ ] Bench-fanout **SMA** output (`10MHz_RF_OUT`) — see §3
 
 ---
 
 ### INA228 map (sanity) — 9 monitors, as-built
-| # | Addr | Rail | Designator | Shunt | ALERT (U12) |
-|---|------|------|------|------|------|
-| 1 | 0x40 | PoE input | U10 | R30 150m (in series V_POE feed) | PG8 |
-| 2 | 0x41 | STM 3V3 | U31 | R106 15m | PG9 |
-| 3 | **0x4A** | GPS VCC | U23 | R72 500m | PG12 |
-| 4 | 0x45 | Antenna bias | U26 | R89 100m | PG13 |
-| 5 | 0x46 | OCXO | U37 | R126 25m | PG14 |
-| 6 | 0x47 | Rb (VCC_RB) | U44 | R159 20m | PG15 (R265 pull-up) |
-| 7 | 0x42 | 5V_DISP | U32 | R107 100m | PG10 |
-| 8 | 0x43 | main/general 3V3 | U30 | R102 75m | PG11 |
-| 9 | **0x4C** | panel-LED 5V | U54 | R199 220m | **PF13** |
+All nine run **ADCRANGE=1** (±40.96 mV shunt FS); `SHUNT_CAL` = **4096** on every device. Shunts are
+Vishay Dale **WSL** metal-strip 1 %, 1206/0.25 W except R159 (2512/1 W).
+
+| # | Addr | Rail | Designator | Shunt (final) | FS current | ALERT (U12) |
+|---|------|------|------|------|------|------|
+| 1 | 0x40 | PoE input | U10 | **R30 25m** (in series V_POE feed) | ±1.6384 A | PG8 |
+| 2 | 0x41 | STM 3V3 | U31 | **R106 100m** (Kelvin split) | ±409.6 mA | PG9 |
+| 3 | **0x4A** | GPS VCC | U23 | **R72 75m** | ±546.1 mA | PG12 |
+| 4 | 0x45 | Antenna bias | U26 | **R89 150m** | ±273.1 mA | PG13 |
+| 5 | 0x46 | OCXO | U37 | **R126 25m** | ±1.6384 A | PG14 |
+| 6 | 0x47 | Rb (VCC_RB) | U44 | **R159 7m** (2512, 1 W) | ±5.8514 A | PG15 (R265 pull-up) |
+| 7 | 0x42 | 5V_DISP | U32 | **R107 100m** | ±409.6 mA | PG10 |
+| 8 | 0x43 | main/general 3V3 | U30 | **R102 50m** | ±819.2 mA | PG11 |
+| 9 | **0x4C** | panel-LED 5V | U54 | **R199 150m** | ±273.1 mA | **PF13** |
+
+(**R16 25m**, Ohmite MCS1632 1206/1 W, is the NCP1095 hot-swap RSNS — not an INA228 shunt.)
 
 Non-INA228 addresses on the same I²C1 bus: 0x44 SHT45 (U72), 0x48/0x49 TMP117 (U58/U57), 0x19 LIS2DH12 (U59), 0x1E IIS2MDC (U61), 0x60 ATECC608B (U60), 0x38 FT6336U touch. **15 devices, no collisions.**

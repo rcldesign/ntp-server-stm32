@@ -21,20 +21,21 @@ pull/circuit forces). MUST/SHOULD/MAY are prescriptive.
 These items are tracked for the next board spin or bench verification; none blocks writing
 firmware against this contract:
 
-- **`3V0_RF_LDO_PG` (PG2).** The LT3045 (U51) PWRGD is open-collector and needs a 10 kΩ pull-up
-  to 3V3_STM (mirror R215 on the GPS LDO). Until fitted, firmware **masks PG2** and derives the
-  3V0_RF LDO health from its INA/rail telemetry.
 - **J17 panel power.** The panel harness carries display-5 V (**J17.16 → 5V_DISP**) and logic-3 V3
   (**J17.28 → 3V3_STM**) to the display, cap-touch, and rotary encoder. Confirm both supply pins
   land on their rails before relying on panel bring-up (Stage 6). The panel-LED string has its own
   Q22-switched anode and is independent.
-- **VREF+ decoupling (C37).** Grow C37 to 100 nF at U12.32 for ADC ENOB on the OCXO steering path
-  (a 2.2 µF bulk C38 sits behind R48 50 Ω).
-- **Rb-buck output caps C125–C128.** Rate ≥ 50 V; they sit on the 24.45 V VCC_RB rail.
 - **Bench verify:** AP3441 PG active-drive to VIN (the OCXO LDO enable depends on the PG-divider
   nodes reaching ~2.98 V when good — node N ≈ 2.98 V / PG5 ≈ 2.66 V, both loaded, both > VIH; DS39754
   specs no PG drive-Z); ZED-F9T V_BCKP current at enclosure Tmax; FE-5680A J6.8/J6.9 Tx/Rx direction
-  per surplus variant.
+  per surplus variant; per-board `SHUNT_CAL` trim for the nine INA228 monitors (§4.2).
+
+**Resolved since the last revision** — these no longer require firmware workarounds:
+`3V0_RF_LDO_PG` (PG2) now has its **R266 10 k → 3V3_STM pull-up fitted**; PG2 is a normal
+power-good input and **must no longer be masked**. **C37** is 0.1 µF C0G 1210 at U12.32. Rb-buck
+output caps **C125–C128 are all 50 V**. All nine **INA228 shunt values are final** (§4.2). The GPS
+antenna bias is injected directly onto `GPS_RF_IN` with **no series DC-block** (matching the u-blox
+reference) — the briefly-fitted `C204` is deleted, so Stage-5 antenna bring-up behaves normally.
 
 ## Firmware requirements
 
@@ -81,7 +82,7 @@ assignments follow the STM32H563 AF table.
 | 21 | V_DISP_EN_FAULT | IN | GPIO (PF9) | Display-5V RT9742 nFLG | high (R105 10k↑) | **low**=fault | Open-drain fault. Scanned. |
 | 22 | PROX_WAKE | IN | GPIO/EXTI10 (PF10) | Presence/proximity wake — passive magnetic **reed** switch (J17.18) | high (R254 10k↑) | **low**=magnet present | **EXTI wake** + scan. Dry reed contact (no Vcc); pull-up + close-to-GND is correct → active-low on magnet. |
 | 23 | CLK_OUT | AIN | HSE bypass (PH0) | Disciplined 10 MHz into HSE (from clock mux) | — | — | System reference clock input. R187 22Ω damper. |
-| 24 | (unconnected) | — | PH1 | — | Hi-Z | — | Not bonded/used. |
+| 24 | (unconnected) | — | PH1-OSC_OUT | — | Hi-Z | — | Bonded but unused — PH0 runs in **HSE-bypass**, so PH1 is free and is the board's **only** uncommitted pin (usable as GPIO). |
 | 25 | MCU_NRST | I/O | NRST | Reset (J3.5 SWD) | internal PU | low=reset | No ext cap (SHOULD add 100 nF). |
 | 26 | PANEL_LED_EN | OUT | GPIO (PC0) | Panel-LED 5V RT9742 enable | **low = off** (R198 10k↓) | high=on | Default OFF. |
 | 27 | RMII_MDC | OUT | ETH AF11 (PC1) | RMII management clock | Hi-Z | — | PHY addr 0. |
@@ -129,12 +130,12 @@ assignments follow the STM32H563 AF table.
 | 82 | LED_G | OUT | TIM4 PWM (PD13) | Status RGB — green | low (base pd) | high=on | Green = locked stratum-1. |
 | 85 | LED_B | OUT | TIM4 PWM (PD14) | Status RGB — blue | low (base pd) | high=on | Blue pulse = activity/identify. |
 | 86 | GPS_SAFEBOOT_N | OUT | GPIO (PD15) | F9T SAFEBOOT_N | high (F9T PU) | low=safeboot | FW-recovery path w/ RESET. |
-| 87 | 3V0_RF_LDO_PG | IN | GPIO (PG2) | Ext-ref 3V0 RF LDO U51 power-good | driven | high=good | LT3045 PWRGD open-collector; **needs a 10k→3V3_STM pull-up** (open item) — mask PG2 until fitted. |
+| 87 | 3V0_RF_LDO_PG | IN | GPIO (PG2) | Ext-ref 3V0 RF LDO U51 power-good | high (R266 10k↑) | high=good | LT3045 PWRGD open-collector; **R266 10k→3V3_STM is fitted** — treat as a normal PG input, no masking. Scanned. |
 | 88 | 5V_PSU_PG | IN | GPIO (PG3) | 5 V buck power-good | high (R95↑ to 5V) | high=good | PG3 is 5 V-tolerant (FT) — pulled to 5 V. Scanned. |
 | 89 | 3V3_PSU_PG | IN | GPIO (PG4) | 3V3 (AP3441) power-good | high ≈2.98 V when good | high=good | AP3441 PG drives to VIN(5V); R94/R92 divide → ~2.98 V. Usable power-good input. |
 | 90 | Net-(U12B-PG5) | AIN/IN | GPIO (PG5) | OCXO PSU/EN monitor (÷ from OCXO_PSU_PG) | ≈0.89·OCXO_PSU_PG | high=good | Not spare. **Verify OCXO_PSU_PG ≤3.3 V** — PG5 not 5V-tolerant. |
 | 91 | RB_PSU_PG | IN | GPIO (PG6) | Rb buck U40 power-good | driven | high=good | Scanned. |
-| 92 | POE_PG | IN | GPIO (PG7) | PoE (NCP1095 PGO) power-good | high ≈2.93 V when good | high=good | R264 174k/R263 10k divider → 2.93 V (safe on a 5 V-tolerant pin). Usable power-good input. |
+| 92 | POE_PG | IN | GPIO (PG7) | PoE (NCP1095 PGO) power-good | high ≈2.97 V when good | high=good | R20 10k + R264 162k/R263 10k chain → 2.97 V @54 V, 2.75–3.13 V over the PoE range (safe on a 5 V-tolerant pin). Usable power-good input. |
 | 93 | INA_ALERT_V_POE | IN | GPIO (PG8) | INA228 U10 (PoE 0x40) ALERT | high (R221↑) | **low**=alert | Scanned. U10 reads real current (R30 in the series feed). |
 | 96 | GPS_TP2 | IN | **TIM3_CH1** (PC6) | GNSS TIMEPULSE2 | driven by F9T | rising | Secondary PPS; cross-check vs PA0. |
 | 97 | POE_NCL | IN | GPIO/EXTI7 (PC7) | NCP1095 status (class LSB) | pull-up | high=idle | Open-drain/RTN=GND. **Enable internal pull-up** (unless 10k ext fitted); EXTI7. |
@@ -183,7 +184,7 @@ assignments follow the STM32H563 AF table.
 | 121 | 3V3_STM | VDDIO2 |
 | 106 | 3V3_STM_USB | VDDUSB (C26/C28) |
 | 33 | VDDA | Analog supply — **dedicated LT3045 U13**, islanded for OCXO loop |
-| 32 | VREF_3V3 | ADC/DAC reference (MCP1502-33 U14). **SHOULD add 100 nF at pin** (feeds OCXO DAC/ADC). |
+| 32 | VREF_3V3 | ADC/DAC reference (MCP1502-33 U14). **C37 = 0.1 µF C0G 1210 at the pin**; 2.2 µF bulk C38 behind R48 50 Ω. |
 | 6 | STM_VBAT | Backup domain (supercap-backed) |
 | 70, 142 | VCAP / VCAP__1 | Core LDO caps (2.2 µF each) — H5 LDO mode |
 | 16, 31(VSSA), 38, 51, 61, 71, 83, 94, 107, 120, 130, 143 | GND | Grounds |
@@ -215,9 +216,11 @@ resettable device IN RESET, MUX_SEL=OCXO, RB_PWR_EN=off, HOLDOVER_ALARM_RELAY=de
 
 **Stage 3 — verify main rails via telemetry + PG lines.**
 - Confirm 3V3 via **INA228 0x43** (corroborated by PG4, ~2.98 V), 3V3_STM via 0x41.
-- Read **POE_PG/PG7** (~2.93 V divided) and **INA228 0x40** (current + voltage both valid).
-- Read the usable PG lines (PG0/1/3/4/6/7, PF14/PF15) and INA228 rails for a health baseline.
-  **Mask PG2** until the `3V0_RF_LDO_PG` pull-up is fitted.
+- Read **POE_PG/PG7** (~2.97 V divided; 2.75–3.13 V over the PoE range) and **INA228 0x40** (current + voltage both valid).
+- Read all PG lines (PG0–PG7, PF14/PF15) and the nine INA228 rails for a health baseline.
+- Apply the stored per-board `shunt_cal[]` trim to all nine INA228s (§4.2) **before** any current
+  reading is used for a budget or alarm decision; a freshly-reset INA228 silently reverts to POR
+  calibration.
 
 **Stage 4 — bring up PHY (network).**
 4. After rails stable and the 25 MHz PHY clock is up, **`LAN_RST_N` (PD10) → HIGH** (reset width
@@ -248,10 +251,11 @@ charged:
 14. **`RB_VCC_GATE` (PB1) → HIGH** to connect `VCC_RB_G` to the FE-5680A.
 15. Wait for `RB_LOCK` (PB13, polarity bit) + `EXTREF_MON` (PB14/TIM12) in-band before allowing
     the reference state machine to consider Rb.
-> **Stage-8 caveats.** Rate the Rb-buck output caps C125–C128 ≥ 50 V (they sit on the 24 V VCC_RB
-> rail). For a 15 V-class FE, set the digipot bound / OV per the unit — the 24.45 V full-scale
-> pedestal over-volts a 15 V unit and the OV latch only trips at 26 V. Confirm FE J6-8/J6-9 Tx/Rx
-> direction per surplus variant before trusting the serial link.
+> **Stage-8 caveats.** The Rb-buck output caps C125–C128 are 50 V as-built. For a 15 V-class FE, set
+> the digipot bound / OV per the unit — the 24.45 V full-scale pedestal over-volts a 15 V unit and the
+> OV latch only trips at 26 V. Confirm FE J6-8/J6-9 Tx/Rx direction per surplus variant before
+> trusting the serial link. The 0x47 monitor resolves 11.16 µA across R159 7 mΩ, so the ~0.65 A
+> steady / ~2.1 A warm-up FE current is read with four digits of margin below the 5.85 A full scale.
 
 **Stage 9 — arm watchdog & alarms.**
 16. Start the supervisor; once timing/network/housekeeping liveness all pass, **`WDT_EN` (PC12) →
@@ -279,8 +283,8 @@ buffer → R122 1k → `OCXO_V` → OCXO Y3.1 + C101 + PA3 ADC. R121 (10 M) forc
 1.65 V center if PA4 ever goes Hi-Z — **Vc never floats**. Loop-filter poles: R120·C98 ≈ 15.9 Hz,
 R122·C101 ≈ 1.6 kHz; the slow PI/FLL loop lives in firmware. On holdover the last good DAC value is
 frozen; when Rb is the active reference the DAC holds OCXO at its last disciplined value (keeps the
-fallback warm). C98/C99/C101 are **C0G/film** on the Vc path (X7R would FM-modulate the carrier); a
-0.1 µF C0G needs a 1210/film package — a BOM/layout item, not a firmware constraint.
+fallback warm). C98/C99/C101 are **0.1 µF C0G, 1210** on the Vc path (X7R would FM-modulate the
+carrier) — settled as-built; no firmware constraint.
 
 **PPS handling.** Cross-check PA0 vs PC6; reject outliers with a median/MAD gate before the edge
 enters the loop. Full-scale DAC = OCXO ±0.4 ppm pull; 1 LSB ≪ holdover spec.
@@ -307,12 +311,12 @@ clamps). Bus is 400 kHz.
 | 0x18 | (LIS2DH12 alt) | — | not used; U59 strapped 0x19 |
 | **0x19** | LIS2DH12 accel | U59 | SA0→3V3_STM. e-compass. INT unconnected → **poll**. |
 | **0x1E** | IIS2MDC magnetometer | U61 | Fixed addr. e-compass. Poll. |
-| **0x40** | INA228 PoE | U10 | R30 in the series feed → voltage + current both usable. |
+| **0x40** | INA228 PoE | U10 | R30 **25 mΩ** in the series feed → voltage + current both usable; VBUS reads the 54 V bus directly. |
 | **0x41** | INA228 3V3_STM | U31 | Kelvin split of 3V3 for STM telemetry. |
 | **0x42** | INA228 5V_DISP | U32 | Display rail. |
 | **0x43** | INA228 3V3 (main) | U30 | 3V3-good telemetry; corroborates PG4. |
 | **0x44** | **SHT45 humidity** | U72 | **Owns 0x44** — this is why GPS INA is 0x4A. |
-| **0x45** | INA228 antenna bias | U26 | Precise antenna current (R89 0.1Ω, 1.638 A FS). |
+| **0x45** | INA228 antenna bias | U26 | Precise antenna current (R89 **150 mΩ**, ±273 mA FS). |
 | **0x46** | INA228 OCXO | U37 | OCXO rail. |
 | **0x47** | INA228 VCC_RB | U44 | **Rb rail verify before/after enable.** |
 | **0x48** | TMP117 | U58 | ADD0→GND. Enclosure temp (thermal loop). |
@@ -324,17 +328,91 @@ clamps). Bus is 400 kHz.
 > **Firmware I²C map MUST adopt:** GPS INA = **0x4A**, SHT45 = **0x44**, LIS2DH12 = **0x19**,
 > TMP117 U57=**0x49** / U58=**0x48**. Do **not** attempt to "correct" U23 to 0x44 (SHT45 collision).
 
-**INA228 configuration.** Program shunt cal per each device's R_shunt; enable the ALERT on the
-**averaged** conversion result with a suitable averaging window (`AVG`). Alerts are open-drain →
-active-low on the GPIO listed in §1. On any INA alert, **read that
-INA's diagnostic/flags register for the cause** (over/under current, bus over/under voltage,
-conversion-ready), then run alarm evaluation.
+**INA228 configuration.** Enable the ALERT on the **averaged** conversion result with a suitable
+averaging window (`AVG`). Alerts are open-drain → active-low on the GPIO listed in §1. On any INA
+alert, **read that INA's `DIAG_ALRT` register for the cause** (shunt over/under-voltage, bus
+over/under-voltage, over-power, conversion-ready), then run alarm evaluation. Shunt values and
+register constants are in §4.2.
 
 ### 4.1 Panel-LED current averaging
 The panel LEDs are PWM-dimmed (`PANEL_LED_PWM`, PE0). INA228 U54 (0x4C) must average over a
 window **≫ the 1 ms PWM period** so the ALERT fires on the averaged (not instantaneous) current.
 Firmware **duty-normalizes**: I_true ≈ I_avg / duty. Health check = duty-normalized current within
 the expected all-on band (≈126–132 mA at full duty), corroborated by `PANEL_LED_FAULT` (PF12).
+At R199 = 150 mΩ one CURRENT LSB is 520.833 nA — about 0.4 % of a single LED's ~17 mA, so a dead or
+shorted LED is unambiguous well before the duty-normalization error matters.
+
+### 4.2 INA228 shunt constants — all nine monitors
+
+Shunt values are **final as-built**. Every device is configured **ADCRANGE = 1** (±40.96 mV shunt
+full-scale). Because `Max_Expected_Current` is set to each device's own full-scale, the shunt
+calibration is the **same constant on all nine**:
+
+```c
+/* INA228, ADCRANGE=1 for every monitor on this board.
+ * CURRENT_LSB = 78.125e-9 / R_SHUNT            (amps per LSB)
+ * SHUNT_CAL   = 4 * 13107.2e6 * CURRENT_LSB * R_SHUNT
+ *             = 4 * 13107.2e6 * 78.125e-9  ->  R cancels
+ *             = 4096  for all nine devices    (15-bit field, max 32767)
+ */
+#define INA228_SHUNT_CAL_DEFAULT   4096u
+```
+
+| INA | Addr | Rail | R_SHUNT | CURRENT_LSB | POWER_LSB | FS current | ALERT pin |
+|---|---|---|---|---|---|---|---|
+| U10 | 0x40 | PoE input V_POE | 25 mΩ | **3.125 µA** | 10.0 µW | ±1.6384 A | PG8 |
+| U31 | 0x41 | 3V3_STM | 100 mΩ | **781.25 nA** | 2.5 µW | ±0.4096 A | PG9 |
+| U32 | 0x42 | 5V_DISP | 100 mΩ | **781.25 nA** | 2.5 µW | ±0.4096 A | PG10 |
+| U30 | 0x43 | 3V3 main | 50 mΩ | **1.5625 µA** | 5.0 µW | ±0.8192 A | PG11 |
+| U26 | 0x45 | V_ANT bias | 150 mΩ | **520.833 nA** | 1.667 µW | ±0.2731 A | PG13 |
+| U37 | 0x46 | OCXO 3.327 V | 25 mΩ | **3.125 µA** | 10.0 µW | ±1.6384 A | PG14 |
+| U44 | 0x47 | VCC_RB | 7 mΩ | **11.1607 µA** | 35.71 µW | ±5.8514 A | PG15 |
+| U23 | 0x4A | 3V3_GPS | 75 mΩ | **1.04167 µA** | 3.333 µW | ±0.5461 A | PG12 |
+| U54 | 0x4C | Panel-LED 5 V | 150 mΩ | **520.833 nA** | 1.667 µW | ±0.2731 A | PF13 |
+
+Common to all nine: `VBUS` LSB **195.3125 µV** over 0–85 V (the 54 V PoE bus and the 24 V VCC_RB read
+directly — **no divider, no scaling in firmware**); `DIETEMP` LSB **7.8125 m°C**; `ENERGY` LSB =
+16·POWER_LSB; `CHARGE` LSB = CURRENT_LSB. Bus voltage and die temperature need no per-rail constants.
+
+**Alert thresholds.** `SOVL`/`SUVL` are **shunt-voltage** registers with a **1.25 µV LSB** at
+ADCRANGE=1 (16-bit signed; full-scale code 32767 = 40.96 mV). They are *not* scaled by SHUNT_CAL, so
+the code is `round(I_trip · R_SHUNT / 1.25 µV)`. Recommended defaults at **125 % of each rail's
+design maximum** (final values are a bench item, `bench_tuning` BM-1):
+
+| INA | Rail | Design max | Trip (125 %) | V_shunt at trip | `SOVL` code |
+|---|---|---|---|---|---|
+| U10 0x40 | V_POE | 1.20 A | 1.50 A | 37.50 mV | 30000 (0x7530) |
+| U31 0x41 | 3V3_STM | 0.30 A | 375 mA | 37.50 mV | 30000 (0x7530) |
+| U32 0x42 | 5V_DISP | 0.25 A | 312 mA | 31.25 mV | 25000 (0x61A8) |
+| U30 0x43 | 3V3 main | 0.45 A | 562 mA | 28.12 mV | 22500 (0x57E4) |
+| U26 0x45 | V_ANT | 0.182 A | 227 mA | 34.12 mV | 27300 (0x6AA4) |
+| U37 0x46 | OCXO | 1.20 A | 1.50 A | 37.50 mV | 30000 (0x7530) |
+| U44 0x47 | VCC_RB | 2.10 A | 2.63 A | 18.38 mV | 14700 (0x396C) |
+| U23 0x4A | 3V3_GPS | 0.13 A | 162 mA | 12.19 mV | 9750 (0x2616) |
+| U54 0x4C | Panel-LED | 0.132 A | 165 mA | 24.75 mV | 19800 (0x4D58) |
+
+Note U26 (V_ANT): the R77 foldback limiter clamps at ≈182 mA **autonomously**, so the 227 mA SOVL
+never fires in normal operation — it is a backstop for a foldback failure. Use a `SUVL`
+(under-current) threshold instead to detect a *disconnected* antenna, or the coarse `GPS_ANT_DETECT`
+comparator (§7).
+
+**Per-board calibration.** The 1 % shunt tolerance dominates the uncalibrated error budget. Trim it
+once per board with a single multiply and store the nine results in NOR alongside the rest of the
+calibration record:
+
+```c
+shunt_cal[i] = lroundf(4096.0f * i_reference_amps / i_reported_amps);   /* clamp to 15 bits */
+```
+
+measured at a steady mid-range load on each rail. Re-apply `shunt_cal[i]` after any INA228 reset —
+the device reverts to its POR calibration, and a silently-uncalibrated monitor reads ~1 % off with no
+error flag.
+
+**Saturation behavior.** If a rail exceeds its FS current the `CURRENT`/`POWER` registers clip at
+full scale while `SOVL` still asserts, so an over-range condition is always *annunciated* even when
+it cannot be *quantified*. This matters most on U32 (5V_DISP, ±409.6 mA): the RT9742 current limit
+may sit above the INA228 full scale, so on a display-rail short expect a clipped current reading plus
+both the INA alert (PG10) and `V_DISP_EN_FAULT` (PF9) — diagnose from the pair, not the magnitude.
 
 ---
 
@@ -365,18 +443,19 @@ mode on PA8/PA9); its button (PF11) is.
 ### 5.2 GPIOG bit masks (`IDR`)
 | Bits | Mask | Group | Signals (bit order) |
 |------|------|-------|---------------------|
-| 0–7 | `0x00FF` | **PG rails** | PG0 3V3_GPS_LDO_PG, PG1 OCXO_LDO_PG, PG2 3V0_RF_LDO_PG *(mask until pull-up fitted)*, PG3 5V_PSU_PG, PG4 3V3_PSU_PG, PG5 OCXO_PSU_PG(÷), PG6 RB_PSU_PG, PG7 POE_PG |
+| 0–7 | `0x00FF` | **PG rails** | PG0 3V3_GPS_LDO_PG, PG1 OCXO_LDO_PG, PG2 3V0_RF_LDO_PG, PG3 5V_PSU_PG, PG4 3V3_PSU_PG, PG5 OCXO_PSU_PG(÷), PG6 RB_PSU_PG, PG7 POE_PG |
 | 8–15 | `0xFF00` | **INA alerts** | PG8 V_POE, PG9 3V3_STM, PG10 5V_DISP, PG11 3V3, PG12 3V3_GPS(0x4A), PG13 V_ANT, PG14 OCXO, PG15 VCC_RB |
 
-PG-rail bits are active-high "good"; INA-alert bits are active-low. **Mask off PG2 (0x0004)** in
-firmware until the `3V0_RF_LDO_PG` pull-up is fitted (open-drain LDO PWRGD reads low without it).
+PG-rail bits are active-high "good"; INA-alert bits are active-low. **All eight PG bits are usable —
+no masking.** (PG2 previously required masking; R266 10 k → 3V3_STM is now fitted, so the
+open-collector LT3045 PWRGD presents a valid HIGH in regulation.)
 
 ### 5.3 Dispatch
 - **Button/UI bits (PF0–7, PF11):** debounce ~20–30 ms; emit press/long-press/repeat to the nav
   state machine. DISP_TOUCH_INT (PF7) → service the touch controller over I²C (no debounce).
 - **EN-fault bits (PF8, PF9, PF12):** any low → log + alarm the corresponding RT9742 load.
-- **PG-rail bits (PG0/1/3/4/6/7, PF14/PF15; **not** PG2 while masked):** any high→low transition → rail-fault alarm.
-- **INA-alert bits (PG8–15 + PF13):** on assert, **read that INA228's flags** for cause (§4).
+- **PG-rail bits (PG0–PG7, PF14/PF15):** any high→low transition → rail-fault alarm.
+- **INA-alert bits (PG8–15 + PF13):** on assert, **read that INA228's `DIAG_ALRT`** for cause (§4).
 
 ---
 
@@ -408,13 +487,13 @@ the 1 kHz scan is fast enough and avoids EXTI-line contention.
 | Subsystem | Read | Expected | Fault action |
 |-----------|------|----------|--------------|
 | **OCXO discipline** | PPS offset (PA0/PC6), Vc sense (PA3), INA228 0x46, TMP117 0x49 | Vc ≈ center, offset in gate | Outlier reject; on GNSS loss → holdover (freeze DAC). |
-| **Rb rail** | INA228 **0x47** *before trusting rail*; `RB_LOCK` (PB13); `EXTREF_MON` (PB14) | VCC_RB in 24.45−6.645·VCTRL envelope; lock asserted | Never set RB_PWR_EN before a safe digipot code. Rail out of band → don't gate VCC_RB. Rate C125–C128 ≥50 V; set OV/digipot per FE Vmax. |
+| **Rb rail** | INA228 **0x47** *before trusting rail*; `RB_LOCK` (PB13); `EXTREF_MON` (PB14) | VCC_RB in 24.45−6.645·VCTRL envelope; lock asserted | Never set RB_PWR_EN before a safe digipot code. Rail out of band → don't gate VCC_RB. Set OV/digipot per FE Vmax (C125–C128 are 50 V as-built). |
 | **Rb OV latch** | `RB_OV_DET` (PE3, polled) | low (idle) | On trip: latch already killed U40 autonomously; log, then pulse `RB_OV_RESET` (PD3) HIGH to clear after cause cleared. |
 | **PoE** | INA228 0x40 *(current + voltage)*; `POE_PG`/PG7; `POE_NCM/LCF/NCL` (PC2/3/7); PFI (PE8) | class covers load | If budget can't cover Rb → defer/deny RB_PWR_EN. `PFI`→persist+park. `POE_KILL` latches via Q3 sustain. |
 | **Watchdog** | supervisor liveness (timing+network+housekeeping) | all healthy | Kick `WDT_KICK` (PB2) **only** if all pass; windowed WDT catches both stall and runaway. `WDT_EN` (PC12) HIGH after init. Timeout → HW `POE_KILL`. |
-| **Antenna** | `GPS_ANT_DETECT`, `GPS_ANT_SHORT` (via F9T + comparators U25), INA228 0x45 (R89), `V_ANT_EN_FAULT` (PF8) | ~15–30 mA present, no short | Foldback ≈182 mA autonomous; on short/open alarm + optionally hard-cut `ANT_BIAS_EN` (PC9). |
-| **Panel LED** | INA228 0x4C duty-normalized; `PANEL_LED_FAULT` (PF12) | I_avg/duty ≈ nominal | Deviation → LED-string fault (open/short). |
-| **Rails (general)** | INA228 0x41/0x42/0x43/0x46; PG lines (PG0/1/3/4/6/7, PF14/15) | good | Rail drop → alarm; **PG2 masked** — 3V0_RF LDO health via INA/other until pull-up added. |
+| **Antenna** | `GPS_ANT_DETECT`, `GPS_ANT_SHORT` (via F9T + comparators U25), INA228 0x45 (R89 150 mΩ, 520.833 nA/LSB), `V_ANT_EN_FAULT` (PF8) | ~15–30 mA present, no short | Foldback ≈182 mA autonomous; on short/open alarm + optionally hard-cut `ANT_BIAS_EN` (PC9). |
+| **Panel LED** | INA228 0x4C duty-normalized (R199 150 mΩ); `PANEL_LED_FAULT` (PF12) | I_avg/duty ≈ 126–132 mA all-on | Deviation → LED-string fault (open/short). |
+| **Rails (general)** | INA228 0x41/0x42/0x43/0x46; PG lines (PG0–PG7, PF14/15) | good | Rail drop → alarm. All eight PG bits usable (R266 fitted). |
 | **Thermal** | TMP117 0x48 (enclosure) + 0x49 (osc) + die temp | in band | PI fan loop on PE5; over-temp → alarm; loop stall → fan full-speed (fail-safe). |
 | **Supercaps** | BKP_STM_PG (PF14), BKP_GPS_PG (PF15) digital PG only | charged | On VIN loss, managers boost from supercap (autonomous); firmware watches PG + ephemeris window (~4 h). |
 
@@ -487,24 +566,29 @@ Driverless CDC-ACM console with full command/control parity to the web API; trac
 6. **J17 panel power.** The display, cap-touch, and rotary encoder are fed from J17.16 (5V_DISP) and
    J17.28 (3V3_STM); confirm both rails reach the panel before relying on Stage-6 bring-up. The
    panel-LED string is independent (Q22-switched anode).
-7. **Mask PG2** until the `3V0_RF_LDO_PG` 10k→3V3_STM pull-up is fitted (open-drain LDO PWRGD reads
-   low without it). Derive that rail's health from its INA/rail telemetry meanwhile.
-8. **Use the power-good/telemetry signals normally:** POE_PG/PG7 (~2.93 V divided), INA228 0x40
-   current, PG4 (~2.98 V), INA_ALERT_VCC_RB/PG15, GPS ANT_OFF. AP3441 PG drives to VIN when good
-   (bench-confirm).
-9. **Rb bring-up caveats.** Rate the Rb-buck output caps C125–C128 ≥50 V (they sit on the 24.45 V
-   VCC_RB rail). For a 15 V-class FE, set the digipot bound / OV per the unit (the 24.45 V full-scale
-   pedestal over-volts a 15 V unit; the OV latch only trips at 26 V). Confirm FE J6-8/J6-9 Tx/Rx
-   direction per surplus variant.
-10. **OCXO Vc dielectric.** C98/C99/C101 are C0G/film (never X7R — microphonics FM-modulate the
-    carrier); a 0.1 µF C0G needs a 1210/film package — a BOM/layout item, not a loop constraint.
+7. **INA228 calibration is not optional.** `SHUNT_CAL` = **4096** on all nine (§4.2); apply the stored
+   per-board trim before using any current reading for a PoE-budget or alarm decision, and re-apply it
+   after any INA228 reset — the part reverts to POR calibration and reads ~1 % off with no error flag.
+   Never hard-code a per-rail CURRENT_LSB from an older revision: **seven of the nine shunts changed**
+   (R30, R72, R89, R102, R106, R159, R199).
+8. **Use the power-good/telemetry signals normally:** POE_PG/PG7 (~2.97 V divided), INA228 0x40
+   current, PG4 (~2.98 V), PG2 (R266 fitted), INA_ALERT_VCC_RB/PG15, GPS ANT_OFF. AP3441 PG drives to
+   VIN when good (bench-confirm).
+9. **Rb bring-up caveats.** The Rb-buck output caps C125–C128 are 50 V as-built (rail pedestal
+   24.45 V). For a 15 V-class FE, set the digipot bound / OV per the unit (the 24.45 V full-scale
+   pedestal over-volts a 15 V unit; the OV latch only trips at 26 V). VCC_RB current resolution is
+   11.16 µA/LSB across R159 7 mΩ with a **5.85 A** full scale — sized for the low end of the
+   4.5–24.45 V programmable range, so a 15 V-class FE uses only ~36 % of it. Confirm FE J6-8/J6-9
+   Tx/Rx direction per surplus variant.
+10. **OCXO Vc dielectric.** C98/C99/C101 are **0.1 µF C0G 1210** as-built (never X7R — microphonics
+    FM-modulate the carrier). Settled; no firmware or BOM action.
 11. **`MUX_SEL` handoff.** Never write PB6 outside the reference state machine; always use the
     HSI-bridge + CSS glitchless sequence and the dual guard (EXTREF_MON + RB_LOCK).
 12. **`OCXO_VC` (PA4) single-writer.** Only the `discipline` thread writes the DAC; it must never
     float (R121 holds 1.65 V, but firmware must not tri-state it during normal operation).
-13. **5V-tolerance.** PG3 (pulled to 5 V) and PG7 (2.93 V divider node) are on 5 V-tolerant Port-G
-    pins; the PG5 divider keeps its node ≈2.66 V from node N ≈2.98 V (loaded OCXO_PSU_PG; PG5 not FT — in range, > VIH).
-    Grow VREF+ C37 to 100 nF at the pin (ADC ENOB for OCXO steering).
+13. **5V-tolerance.** PG3 (pulled to 5 V) and PG7 (2.75–3.13 V divider node) are on 5 V-tolerant Port-G
+    pins; the PG5 divider keeps its node ≈2.66 V from node N ≈2.98 V (loaded OCXO_PSU_PG; PG5 not FT
+    — in range, > VIH).
 
 ---
 

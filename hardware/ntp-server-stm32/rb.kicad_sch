@@ -1318,7 +1318,7 @@
 					)
 				)
 			)
-			(property "Footprint" "VSSOP10_DGS_TEX"
+			(property "Footprint" "sts1000:VSSOP10_DGS_TEX"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -15516,7 +15516,7 @@
 				)
 			)
 		)
-		(property "Footprint" "VSSOP10_DGS_TEX"
+		(property "Footprint" "sts1000:VSSOP10_DGS_TEX"
 			(at 151.13 91.44 0)
 			(hide yes)
 			(show_name no)
@@ -21051,7 +21051,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "2515 (6332 Metric)"
+		(property "Footprint" "2512 (6332 Metric)"
 			(at 200.66 52.832 90)
 			(hide yes)
 			(show_name no)

@@ -329,7 +329,7 @@
 					)
 				)
 			)
-			(property "Footprint" "DCT8"
+			(property "Footprint" "sts1000:DCT8"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -4438,7 +4438,7 @@
 				)
 			)
 		)
-		(property "Footprint" "DCT8"
+		(property "Footprint" "sts1000:DCT8"
 			(at 154.94 207.01 0)
 			(hide yes)
 			(show_name no)

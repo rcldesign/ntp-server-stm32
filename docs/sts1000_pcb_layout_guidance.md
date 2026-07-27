@@ -34,11 +34,11 @@ Widths are IPC-2221 external, 1 oz, 20 °C rise (see §1.2 for the calc), rounde
 
 | Power net | Voltage | Steady I | Peak / inrush | IPC min width (20 °C) | **Recommended (with margin)** | Notes |
 |---|---|---|---|---|---|---|
-| **VOUT_P** (PD primary bus, bridge U7/U8 → NCP1095 U9 → bucks U28/U40) | ~48–57 V | ~0.5 A | ~1.1 A (Class-6 51 W); Rb+OCXO cold-start peak draws through here | 0.22 mm @1.1 A | **≥0.75 mm (30 mil) pour** | HV — see §1.3. Route as a short wide pour bridge→bulk→buck PVINs. The **R30 150 mΩ INA228 shunt sits in the series feed** so U10 reads current. |
+| **VOUT_P** (PD primary bus, bridge U7/U8 → NCP1095 U9 → bucks U28/U40) | ~48–57 V | ~0.5 A | ~1.1 A (Class-6 51 W); Rb+OCXO cold-start peak draws through here | 0.22 mm @1.1 A | **≥0.75 mm (30 mil) pour** | HV — see §1.3. Route as a short wide pour bridge→bulk→buck PVINs. The **R30 25 mΩ INA228 shunt sits in the series feed** so U10 reads current (§4.4). |
 | **VOUT_N** (PD primary return) | 0 V (primary) | = VOUT_P | = VOUT_P | — | **wide pour, one node** | This is the *primary* return, **not** chassis/SELV GND. Keep it a distinct pour tied to GND only at the single designed point; HV clearance to everything SELV. |
 | **5V bus** (U28 MIC28516 out, 8 A device) | 5.0 V | ~2–3 A | ~4 A (OCXO warm-up + 3V3-buck input + display) | 0.9 mm @3 A | **≥1.5 mm (60 mil) pour** | Main secondary distribution. Feeds U29 (3V3), U38 (OCXO pre-reg), U33/U55 (disp/panel), U22 (GPS LDO), ref front-end. |
 | **3V3** (U29 AP3441 out, 3 A device) | 3.3 V | ~1 A | ~2 A | 0.51 mm @2 A | **≥0.6 mm (24 mil)** | General digital + PHY (3V3_LAN via FB1) + INA228 VS pins. |
-| **3V3_STM** (= 3V3 through R106 15 mΩ Kelvin split) | 3.3 V | ~0.5–0.8 A | ~1 A | 0.30 mm @1 A | **≥0.5 mm (20 mil)** | Always-on housekeeping rail (all I²C peripherals, MCU I/O). R106 is a **Kelvin telemetry split, not a real separate rail** — keep the two Kelvin taps to U31 short & symmetric (§4.4). |
+| **3V3_STM** (= 3V3 through R106 **100 mΩ** Kelvin split) | 3.3 V | ~0.2 A | ~0.3 A | 0.30 mm @1 A | **≥0.5 mm (20 mil)** | Always-on housekeeping rail (all I²C peripherals, MCU I/O). R106 is a **Kelvin telemetry split, not a real separate rail** — keep the two Kelvin taps to U31 short & symmetric (§4.4). At 100 mΩ it drops 30 mV at the 0.3 A peak, so trace resistance in series with it is not negligible: keep the run short. |
 | **VCC_RB** (U40 MIC28516 out, digipot-trimmed) | up to **24.45 V** (26 V OV trip) | ~0.4–1.3 A (Rb 6–20 W @ 15–24 V) | inrush > steady (no dv/dt limit on Q25 gate — see §4.7) | 0.26 mm @1.3 A | **≥0.6 mm (24 mil)** | HV — see §1.3. Gated to VCC_RB_G by SI7469DP **Q25** (gate clamp D25). Provide for inrush: widen to ~1 mm near J6. |
 | **V_ANT** (antenna bias, U27 RT9742 out) | 5.0 V | 15–30 mA | 182 mA foldback (hard short) | — | **≥0.3 mm (12 mil)** | Small; but the bias-T injection into the RF path is layout-critical (§5.1). |
 | **OCXO rail** (U39 TPS7A5201 LDO out, 3.327 V) | 3.327 V | ~0.4 A | ~1.14 A (3.8 W oven warm-up, ~5 min) | 0.28 mm @1.14 A | **≥0.5 mm (20 mil)** | Star-feed the oven from the LDO with a short wide trace; oven current is the dominant OCXO load. Do **not** neck this down near Y3. |
@@ -46,7 +46,7 @@ Widths are IPC-2221 external, 1 oz, 20 °C rise (see §1.2 for the calc), rounde
 | **Supercap charge/discharge** (U34/U35 TPS61094 SW ↔ L4/L5 ↔ SUP C90/C91) | 3.0 V nom / 2.5 V cap | 25 mA charge | boost SW peak ~0.3–0.5 A | — | **≥0.5 mm SW/SUP, tight loop** | This is the "TPS61094 high-current" path — **minimize the SW–L–SUP–IC loop area**, not width-limited. EP thermal vias. Supercap thermal keep-out §4.8. |
 | **GPS_VBAT** (V_BCKP, U34 boost out) | ~3.0 V | ~mA charge | µA backup | — | **≥0.3 mm** | Backup only; low current but keep leakage low (guard the node). |
 | **STM_VBAT** (U35 → U12 VBAT pin 6) | ~3.0 V | µA | µA | — | **≥0.25 mm** | RTC/backup domain, µA. |
-| **3V3_GPS** (U22 LT3045 out, 3.32 V) | 3.32 V | ~0.2 A | higher on acq | — | **≥0.4 mm** | Low-noise LDO for F9T; series R72 (**0.5 Ω** — consider 0.1 Ω, N4) is the U23 INA228 shunt. |
+| **3V3_GPS** (U22 LT3045 out, 3.32 V) | 3.32 V | ~0.07 A | ~0.13 A on acq | — | **≥0.4 mm** | Low-noise LDO for F9T; series **R72 75 mΩ** is the U23 INA228 shunt (9.75 mV at the acquisition peak → ≈3.31 V delivered). Keep the LDO→shunt→U21 run short; every mΩ of copper adds to that budget. |
 | **3V0_RF** (U51 LT3045 out, 3.01 V) | 3.01 V | ~100 mA (ILIM R185) | — | — | **≥0.4 mm** | RF-island rail for U50 slicer — keep on the island (§5.2). |
 | **VDDA** (U13 LT3045, MCU analog) | 3.3 V | ~mA | — | — | **≥0.4 mm, islanded** | Feeds the 1.65 V OCXO Vc reference divider — keep quiet (§4.1). |
 
@@ -87,7 +87,7 @@ under an impedance-controlled net is a defect.
 | **RMII_REF_CLK** (U11 pin14 REFCLKO → U12 PA1, 50 MHz) | 50 Ω single-ended | solid GND | **Most timing-critical RMII net** — shortest, no stubs, no vias if avoidable; it clocks the whole MAC. Length-match to the data group (§3). |
 | **USB2.0** USB_DP/USB_DM (U12 PA12/PA11 ↔ J5 USB-C, via U18 TVS) | **90 Ω differential** | solid GND | Tight-coupled pair, TVS U18 stub minimized (§6). Both connector orientations are paralleled at the header — keep the paralleled fan-out symmetric and short. |
 | **MDI pairs** TRD0_N/P, TRD1_N/P (U11 pins 20–23 ↔ R42–R45 term ↔ U1 ESD ↔ J1) | **100 Ω differential** | solid GND, clear-out into magnetics | Route PHY→term→ESD→magjack tight and short; ½-plane clear-out into the magjack; **no GND under the RJ45/line side** of the isolation barrier. Only TRD0/TRD1 used (10/100 PHY on 4-pair jack). |
-| **GPS RF** GPS_RF_IN (J7 SMA → L10 ESD → L1 bias-T → U21 pin2, 1.2–1.6 GHz) | **50 Ω** CPWG or microstrip | continuous GND, via-fenced | See §5.1. Short, guarded, ground-via fence both sides; L10 shunt at connector, bias-T injection near U21. |
+| **GPS RF** GPS_RF_IN (J7 SMA → L10 ESD → L1 bias-T → U21 pin2, 1.2–1.6 GHz) | **50 Ω** CPWG or microstrip | continuous GND, via-fenced | See §5.1. Short, guarded, ground-via fence both sides; L10 shunt at connector, bias-T injection near U21. No series DC-block in the RF path. |
 | **10 MHz coax feeds** 10MHz_RF_IN (J8→U50), 10MHz_RF_OUT (U53→J9), 1PPS_OUT (U71→J15) | **50 Ω** | continuous GND | Match the SMA launch to 50 Ω (§5.4). Source terms already at drivers (R184 slicer, R189 fanout, R255/R256 PPS). |
 | **PH0 clock** CLK_OUT (U52 mux Y → R187 22 Ω → U12 PH0/pin23) | keep short, ~50 Ω | continuous GND | §3/§4.1. R187 is the *only* series damper — at the mux, short run to PH0. |
 | INA228 ALERT / I²C / SPI control | DEFAULT (no Z control) | — | Standard; keep I²C1 (PB8/PB9) short with the R202/R203 pull-ups near the MCU end. |
@@ -131,17 +131,31 @@ under an impedance-controlled net is a defect.
 Every INA228 must Kelvin-sense its shunt: IN+ and IN− tap **at the shunt pads**, routed as
 a tight differential pair back to the IC, symmetric, not tapping the power pour.
 
-| INA228 | Shunt | Rail | Placement note |
-|---|---|---|---|
-| U10 (0x40) | R30 150 mΩ | PoE / VOUT_P | R30 sits in the series VOUT_P→V_POE feed; Kelvin-sense at the shunt pads. |
-| U31 (0x41) | R106 15 mΩ | 3V3↔3V3_STM | Kelvin split is *also* the rail feed — symmetric taps critical. |
-| U32 (0x42) | R107 100 mΩ | 5V_DISP | senses RT9742 output side. |
-| U30 (0x43) | R102 75 mΩ | 3V3 | |
-| U23 (0x4A) | R72 0.5 Ω | 3V3_GPS | 0.5 Ω is also the LDO series R (consider 0.1 Ω, N4). |
-| U26 (0x45) | R89 **0.15 Ω** | V_ANT | value-field says 100 m; part is 150 mΩ — resolve before setting SHUNT_CAL. |
-| U37 (0x46) | R126 25 mΩ | OCXO | IN+ upstream of R126 (polarity correct). |
-| U44 (0x47) | R159 20 mΩ | VCC_RB | HV side — keep sense pair inside HV clearance. |
-| U54 (0x4C) | R199 220 mΩ | panel-LED 5V | 29 mV = 70.9 % FS ✓. |
+**Why this matters more than usual here.** All nine run **ADCRANGE=1** (±40.96 mV full scale) with
+a **78.125 nV** shunt-ADC LSB. At that resolution a few mΩ of asymmetric copper between the shunt
+pad and the sense tap is a *gain* error that the per-board `SHUNT_CAL` trim will silently absorb —
+and then drift with temperature. Concretely: on **R159 (7 mΩ)** just **70 µΩ** of tap asymmetry is
+1 % of the shunt; on **R30 / R126 (25 mΩ)** it is 250 µΩ. A 0.5 mm length mismatch in 1 oz
+0.2 mm-wide copper is already ~1.3 mΩ. Tap **inside the pad**, symmetrically, and let the high
+current enter/leave the pad *outside* the sense taps.
+
+Shunt values are **final** (see `sts1000_hardware_design_reference.md §2.1.1`):
+
+| INA228 | Shunt | Package | Rail | Placement note |
+|---|---|---|---|---|
+| U10 (0x40) | R30 **25 mΩ** | 1206 | PoE / VOUT_P | R30 sits in the series VOUT_P→V_POE feed and carries the **whole board current** (up to ~1.2 A). Widest copper of any shunt; Kelvin-sense at the pads. HV clearance applies (54 V node). |
+| U31 (0x41) | R106 **100 mΩ** | 1206 | 3V3↔3V3_STM | Kelvin split is *also* the rail feed — symmetric taps critical; carries the full MCU + housekeeping current. |
+| U32 (0x42) | R107 **100 mΩ** | 1206 | 5V_DISP | senses the RT9742 output side. |
+| U30 (0x43) | R102 **50 mΩ** | 1206 | 3V3 | carries every 3V3 branch (~0.45 A) — size the pad copper accordingly. |
+| U23 (0x4A) | R72 **75 mΩ** | 1206 | 3V3_GPS | in the LDO output path; keep the copper short so the 9.75 mV peak drop is not made worse by trace R. |
+| U26 (0x45) | R89 **150 mΩ** | 1206 | V_ANT | value settled at 150 mΩ. |
+| U37 (0x46) | R126 **25 mΩ** | 1206 | OCXO | IN+ on the U39-LDO side (polarity correct); carries the OCXO warm-up surge (~1.2 A). |
+| U44 (0x47) | R159 **7 mΩ** | **2512 / 1 W** | VCC_RB | HV side — keep the sense pair inside HV clearance. **Largest body and lowest value: the most Kelvin-sensitive shunt on the board** (70 µΩ = 1 %). Verify the land pattern is a true 2512 (library name reads "2515"). |
+| U54 (0x4C) | R199 **150 mΩ** | 1206 | panel-LED 5V | 19.8 mV = 48 % FS at all-on. |
+
+**Thermal:** worst-case shunt dissipation is 36 mW (R30, R126) and 31 mW (R159 at the 15 V Rb
+operating point, up to 240 mW at the 5 V end of the VCC_RB range). None needs a thermal relief, but
+keep R159's pads on solid copper — its TCR is the residual error after `SHUNT_CAL`.
 
 I²C1 addressing is final (15 devices, no collisions): **GPS INA U23 = 0x4A, SHT45 U72 =
 0x44 — do NOT re-strap U23.**
@@ -175,10 +189,11 @@ I²C1 addressing is final (15 devices, no collisions): **GPS INA U23 = 0x4A, SHT
 - L10 (PGB1010603MR polymer ESD, Cj≈0.05 pF) **shunt at the SMA connector**, ahead of any stub.
 - Bias-T: L1 (47 nH) choke + series current-limit inject the 5 V antenna bias **near U21**, not at
   the connector (Z ≈ 465 Ω; the board relies on active foldback rather than a series R).
+- **No series DC-block in the RF path** — the 5 V bias sits on `GPS_RF_IN` and the ZED-F9T's internal
+  DC block handles it, matching the u-blox reference. (A 47 pF part, `C204`, was briefly added on a
+  mis-attributed claim and has been deleted — do not reserve a pad for it.)
 - **Shield can** over the GPS RF front end (J7/L10/L1/U21 RF corner) recommended for the
   Observatory RF environment. Reserve the can keep-out and ground-ring fence now.
-- The u-blox reference places a **47 pF C0G series DC-block** between the bias-T node and RF_IN
-  (open item) — reserve the pad in the injection path so only the antenna sees the 5 V bias.
 
 ### 5.2 10 MHz slicer / ext-ref island (U50 LTC6752 + U51 LDO)
 - Partition U50/U51 and the front-end (D8/R174–R186) onto a **3V0_RF island** with its own
@@ -272,11 +287,15 @@ where it breaks their reference plane. HV classes get their own keep-in region.
 
 - **Footprint/library package** (NOR U62, SMA/DE-9 connectors, U71, L8/L9, the C90/C91 can,
   `fp-lib-table`): see `sts1000_layout_readiness_review.md` before placement.
-- **GPS RF_IN 47 pF C0G series DC-block** (§5.1) — reserve the pad in the injection path.
-- **R89 value** 100 m vs 150 mΩ part — settle before INA228 SHUNT_CAL and before placing the shunt.
-- **C1/C42/C186 2 kV Y-caps** → 1808/1812 package.
-- **Rb-buck output caps C125–C128** → ≥50 V (reserve the larger body).
 - **Stackup + Cu weight commit** → re-run every Z and width here in a field solver / IPC-2152.
-- Vc caps C98/C101/C99 → C0G/NP0 (may force 1210 body; reserve pad area).
+- **`fp-lib-table` is missing** and **36 parts have no footprint** (H1–H14, J1, J2, J6–J10, J15–J17,
+  K1, K2, L2–L7, U53, U71, Y1, Y2) — blocks opening the board editor.
+- **R159 land pattern** — library name reads `2515 (6332 Metric)`; 6332 metric is 2512 imperial and
+  the part is a WSL2512. Confirm before placement.
+- **Body sizes now committed** (reserve area accordingly): C98/C99/C101 and C37 are **1210** C0G;
+  C1/C42/C186 are **1812** 2 kV; C126–C128 are 47 µF 50 V **stacked SMD 2 J-lead**; R159 is **2512**;
+  C10 is a 100 V J-lead bulk cap.
+- **R89/R72/R30/R102/R106/R126/R159/R199 values are final** — SHUNT_CAL is 4096 for all nine; no
+  layout decision is waiting on a shunt value.
 - Confirm PoE PD isolated vs non-isolated front end → sets the final magjack barrier + creepage.
 ```

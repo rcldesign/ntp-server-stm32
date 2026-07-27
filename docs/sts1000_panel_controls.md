@@ -216,7 +216,7 @@ Separate from the RGB status LED (D5, see `sts1000_rgb_indicator.md`): a dimmabl
 rail. High-side PNP pass with a discrete PWM level-shifter.
 
 **Power/monitor chain:** `5V` → **U55 RT9742** (IN, EN = `PANEL_LED_EN`/PC0) → OUT → **R199
-0.22 Ω** shunt (INA228 **U54 @0x4C** IN+/IN−) → **FB12** (600 Ω) → `V_PANEL_LED` → **Q22
+150 mΩ** shunt (INA228 **U54 @0x4C** IN+/IN−) → **FB12** (600 Ω) → `V_PANEL_LED` → **Q22
 NSS40300 PNP** emitter → collector = `PANEL_LEDS_P` (common anode) → **J17.26** → panel; cathodes
 `PANEL_LED_WHITE_N_1..6` (J17.5/6/7/23/24/25) / `PANEL_LED_RED_N_1` (J17.8) return via J17 → ballast
 → sink → GND. (The LED string is on the consolidated J17.)
@@ -224,9 +224,11 @@ NSS40300 PNP** emitter → collector = `PANEL_LEDS_P` (common anode) → **J17.2
 | Function | Net / ref | Detail |
 |----------|-----------|--------|
 | Rail enable | `PANEL_LED_EN` = PC0 | R198 10 kΩ pull-**down** → RT9742 U55 EN active-high ⇒ default OFF |
-| Fault flag | `PANEL_LED_FAULT_N` = PF12 | U55 nFLG open-drain, R201 10 kΩ → 3V3_STM (renamed `_N`) |
-| Current monitor | INA228 **U54 @0x4C** | shunt R199 0.22 Ω on the 5 V panel rail (`INA_ALERT_5V_PANEL` → PF13) |
+| Fault flag | `PANEL_LED_FAULT` = PF12 | U55 nFLG open-drain, R201 10 kΩ → 3V3_STM (renamed `_N`) |
+| Current monitor | INA228 **U54 @0x4C** | shunt **R199 150 mΩ** on the 5 V panel rail (±273.1 mA FS, 520.833 nA/LSB; `INA_ALERT_5V_PANEL` → PF13) |
 | Brightness PWM | `PANEL_LED_PWM` = PE0 (LPTIM2) | PE0 → R216 4.7 kΩ → **Q23 BC847W** base (R235 10 kΩ pull-down); Q23 collector → R217 820 Ω → Q22 base (R234 4.7 kΩ off-hold). Non-inverting: PE0 high → Q23 sat → Q22 on. Hi-Z reset ⇒ double default-OFF |
 | Ballast | white R247–R252 = **91 Ω** (×6); red R253 = **150 Ω** | rail ≈4.7 V ⇒ ~17–18 mA/LED, all-on ≈130 mA |
 
-Shunt check: ~29 mV at all-on ≈ 71 % of the INA228 ±40.96 mV FS (≤75 %) — OK.
+Shunt check: **19.8 mV at all-on ≈ 48 % of the INA228 ±40.96 mV FS** — inside the 50–75 % sizing band with
+headroom for a brighter ballast respin. One CURRENT LSB (520.833 nA) is ~0.4 % of a single LED's
+~17 mA, so a dead or shorted LED is unambiguous. (Was 220 mΩ / 29 mV / 71 % FS.)

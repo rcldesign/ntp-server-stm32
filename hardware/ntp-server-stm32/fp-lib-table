@@ -1,0 +1,12 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "sts1000") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "STS1000 project footprints (vendor/Ultra Librarian imports)"))
+	(lib (name "Library") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "Legacy nickname used by J3 and D5 footprint refs"))
+	(lib (name "LAN8742AI-CZ-TR") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "Legacy per-part nickname (U11)"))
+	(lib (name "OPA320AIDBVT") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "Legacy per-part nickname (U36, U42)"))
+	(lib (name "SN65C3221EPWR") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "Legacy per-part nickname (U46)"))
+	(lib (name "STM32H563ZIT6") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "Legacy per-part nickname (U12)"))
+	(lib (name "TPS61094DSSR") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "Legacy per-part nickname (U34, U35)"))
+	(lib (name "USB4120-03-C_REVA6") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "Legacy per-part nickname (J5)"))
+	(lib (name "ZED-F9T-00B") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "Legacy per-part nickname (U21)"))
+)

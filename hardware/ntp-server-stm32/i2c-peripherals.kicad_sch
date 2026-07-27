@@ -189,7 +189,7 @@
 					)
 				)
 			)
-			(property "Footprint" "LGA-12_2X2X0P7_STM"
+			(property "Footprint" "sts1000:LGA-12_2X2X0P7_STM"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -553,7 +553,7 @@
 					)
 				)
 			)
-			(property "Footprint" "LGA-12_STM"
+			(property "Footprint" "sts1000:LGA-12_STM"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -5058,7 +5058,7 @@
 				)
 			)
 		)
-		(property "Footprint" "LGA-12_STM"
+		(property "Footprint" "sts1000:LGA-12_STM"
 			(at 152.4 101.6 0)
 			(hide yes)
 			(show_name no)
@@ -5640,7 +5640,7 @@
 				)
 			)
 		)
-		(property "Footprint" "LGA-12_2X2X0P7_STM"
+		(property "Footprint" "sts1000:LGA-12_2X2X0P7_STM"
 			(at 285.75 99.06 0)
 			(hide yes)
 			(show_name no)

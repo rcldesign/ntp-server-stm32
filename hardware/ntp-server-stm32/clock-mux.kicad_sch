@@ -34,7 +34,7 @@
 					)
 				)
 			)
-			(property "Footprint" "SC-74_TSOP6_SOT457_NEX"
+			(property "Footprint" "sts1000:SC-74_TSOP6_SOT457_NEX"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -2759,7 +2759,7 @@
 				)
 			)
 		)
-		(property "Footprint" "SC-74_TSOP6_SOT457_NEX"
+		(property "Footprint" "sts1000:SC-74_TSOP6_SOT457_NEX"
 			(at 147.32 113.03 0)
 			(hide yes)
 			(show_name no)

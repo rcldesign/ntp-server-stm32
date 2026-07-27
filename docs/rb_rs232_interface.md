@@ -39,8 +39,8 @@ host's:
 |---|---|---|
 | `RB_RS232_TX` | the **FE's transmit** (its serial output) | FE → board |
 | `RB_RS232_RX` | the **FE's receive** (its serial input) | board → FE |
-| `RB_UART_TX` (PB4) | the **MCU's transmit** | MCU → board |
-| `RB_UART_RX` (PE7) | the **MCU's receive** | board → MCU |
+| `RB_RX` (PB4, UART7_TX) | the **MCU's transmit**, named from the FE's point of view (it is the FE's RX) | MCU → board |
+| `RB_TX` (PE7, UART7_RX) | the **MCU's receive**, named from the FE's point of view (it is the FE's TX) | board → MCU |
 
 `_P` suffix (`RB_RS232_TX_P`, `RB_RS232_RX_P`) = the **protected** node, i.e. the same
 signal after the DB9 front-end ESD/filter stage.

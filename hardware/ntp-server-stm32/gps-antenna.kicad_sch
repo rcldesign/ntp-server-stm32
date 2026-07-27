@@ -1390,7 +1390,7 @@
 					)
 				)
 			)
-			(property "Footprint" "VSSOP10_DGS_TEX"
+			(property "Footprint" "sts1000:VSSOP10_DGS_TEX"
 				(at 0 0 0)
 				(show_name no)
 				(do_not_autoplace no)
@@ -2995,16 +2995,6 @@
 	)
 	(wire
 		(pts
-			(xy 87.63 76.2) (xy 91.44 76.2)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "1ac286ba-98f9-4b3b-9f0d-43ce9a9d386e")
-	)
-	(wire
-		(pts
 			(xy 82.55 113.03) (xy 82.55 116.84)
 		)
 		(stroke
@@ -3545,7 +3535,7 @@
 	)
 	(wire
 		(pts
-			(xy 73.66 76.2) (xy 80.01 76.2)
+			(xy 73.66 76.2) (xy 91.44 76.2)
 		)
 		(stroke
 			(width 0)
@@ -4619,7 +4609,7 @@
 				)
 			)
 		)
-		(property "Footprint" "VSSOP10_DGS_TEX"
+		(property "Footprint" "sts1000:VSSOP10_DGS_TEX"
 			(at 295.91 190.5 0)
 			(hide yes)
 			(show_name no)
@@ -5978,152 +5968,6 @@
 			(project "ntp-server-stm32"
 				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/c4e88dde-49ac-40b9-90f6-1d5d3c2b8d55"
 					(reference "R89")
-					(unit 1)
-				)
-			)
-		)
-	)
-	(symbol
-		(lib_id "Device:C")
-		(at 83.82 76.2 90)
-		(mirror x)
-		(unit 1)
-		(body_style 1)
-		(exclude_from_sim no)
-		(in_bom yes)
-		(on_board yes)
-		(in_pos_files yes)
-		(dnp no)
-		(uuid "23165ab2-f28b-40eb-b762-b3995945da97")
-		(property "Reference" "C204"
-			(at 83.82 83.82 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Value" "47pF"
-			(at 83.82 81.28 90)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Footprint" "0402 (1005 Metric)"
-			(at 87.63 77.1652 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Datasheet" "https://pim.murata.com/asset/pim4/ceramicCapacitorSMD/GCM1555C1HR50BA16-01A-EN_PDF_CERAMICCAPACITORSMD"
-			(at 83.82 76.2 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "Description" "CAP CER 47PF 50V C0G/NP0 0402"
-			(at 83.82 76.2 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "DIELECTRIC" "X7R"
-			(at -39.37 -27.94 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "TOLERANCE" "10%"
-			(at -39.37 -27.94 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "VOLTAGE" "16V"
-			(at -39.37 -27.94 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "MANUFACTURER" "Murata Electronics"
-			(at -39.37 -27.94 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "MANUFACTURER_PART_NUMBER" "GCM1555C1H470FA16D"
-			(at -39.37 -27.94 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(property "DIGIKEY_PART_NUMBER" "490-16445-1-ND"
-			(at -39.37 -27.94 0)
-			(hide yes)
-			(show_name no)
-			(do_not_autoplace no)
-			(effects
-				(font
-					(size 1.27 1.27)
-				)
-			)
-		)
-		(pin "2"
-			(uuid "71b9c978-585c-4096-b312-b76292844eeb")
-		)
-		(pin "1"
-			(uuid "95d8be36-5a6a-439c-b4ea-4e144b34a4ff")
-		)
-		(instances
-			(project "ntp-server-stm32"
-				(path "/4c8fa883-5b85-4079-9006-ac22e5786016/c4e88dde-49ac-40b9-90f6-1d5d3c2b8d55"
-					(reference "C204")
 					(unit 1)
 				)
 			)
@@ -7512,7 +7356,7 @@
 				)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "1206 (3216 Metric)"
 			(at 72.39 117.602 90)
 			(hide yes)
 			(show_name no)
@@ -7523,7 +7367,7 @@
 				)
 			)
 		)
-		(property "Datasheet" "https://www.koaspeer.com/pdfs/RK73H.pdf"
+		(property "Datasheet" "https://www.seielect.com/catalog/SEI-RMCF_RMCP.pdf"
 			(at 72.39 119.38 0)
 			(hide yes)
 			(show_name no)
@@ -7534,7 +7378,7 @@
 				)
 			)
 		)
-		(property "Description" "RES 3.3 OHM 1% 1/10W 0402"
+		(property "Description" "RES 3.3 OHM 1% 1/4W 1206"
 			(at 72.39 119.38 0)
 			(hide yes)
 			(show_name no)
@@ -7578,7 +7422,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER_PART_NUMBER" "RK73H1ETTP3R30F"
+		(property "MANUFACTURER_PART_NUMBER" "RMCF1206FT3R30"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -7589,7 +7433,7 @@
 				)
 			)
 		)
-		(property "MANUFACTURER" "KOA Speer Electronics, Inc."
+		(property "MANUFACTURER" "Stackpole Electronics Inc"
 			(at 0 0 0)
 			(hide yes)
 			(show_name no)
@@ -7600,7 +7444,7 @@
 				)
 			)
 		)
-		(property "DIGIKEY_PART_NUMBER" "2019-RK73H1ETTP3R30FCT-ND"
+		(property "DIGIKEY_PART_NUMBER" "738-RMCF1206FT3R30CT-ND"
 			(at 72.39 119.38 90)
 			(hide yes)
 			(show_name no)

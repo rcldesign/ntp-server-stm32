@@ -30,12 +30,12 @@ The supervisor uses **two independent fault paths** for defense in depth: the an
 ## 2. System Block Diagram
 
 ```
-                          GPS_RF_IN  ──►  ZED-F9T RF_IN
+                          GPS_RF_IN  ──►  ZED-F9T RF_IN (U21.2) + L10 ESD + J7 SMA
                               ▲
                               │  (RF received signal)
                              L1  47 nH  ← bias-T choke (DC pass / RF block); 47 nH intentional
                               │
-   V_ANT ──FB4──┬──[ Q11 ]────┴───────────────►  node A  ──► antenna (RF + 5 V DC)
+   V_ANT ──FB4──┬──[ Q11 ]────┴───────────────►  node A ──► antenna (RF + 5 V DC)
    (5 V)        │   PNP pass        (antenna DC feed point / Q11 collector)
                 ├──[ R77 ]───┐
                 │   3.3 Ω    │  current-limit foldback:  Q12 (PNP) + R76
@@ -50,7 +50,7 @@ The supervisor uses **two independent fault paths** for defense in depth: the an
                                                   └──► observed by STM32 PD4 (EXTI4)
 ```
 
-Two physical domains coexist on the line: a **DC path** (V_ANT → current limiter → L1 → antenna) and an **RF path** (antenna → L1 node → GPS_RF_IN). L1 and C52 separate them.
+Two physical domains coexist on the line: a **DC path** (V_ANT → current limiter → node A → L1 → antenna) and an **RF path** (antenna → GPS_RF_IN → receiver). L1 and C52 separate them. There is **no series DC-block** between the bias node and `RF_IN` — see §3.1.
 
 **RF-input ESD:** `GPS_RF_IN` at the SMA (J7) is protected by **L10 = PGB1010603MR** (PulseGuard polymer suppressor, Cj ≈ 0.05 pF, standoff ~20–24 V) to GND — the correct low-Cj / high-standoff class for a line carrying both 1.5 GHz RF (Cj ≤ ~0.3 pF) and 5 V DC bias (V_RWM ≥ ~6.5 V). Outdoor cable runs still need an external inline coaxial gas-discharge arrestor.
 
@@ -78,16 +78,29 @@ Z(47 nH) = 2πfL ≈ 2π × 1.575e9 × 47e-9 ≈ 465 Ω   (as-built, intentional
 
 The choke's saturation rating must exceed the ~180 mA current limit, and its DCR adds only a fraction of a volt of drop at the limit current (this drop is downstream of node A, so it affects the voltage delivered to the antenna but not the supervisor thresholds).
 
-> **Open item — 5 V bias on RF_IN.** The ~5 V antenna bias is injected by L1 onto
-> `GPS_RF_IN`, the same node as the ZED-F9T `RF_IN` (U21.2), with no series DC-block cap
-> between them. The u-blox reference active-antenna bias circuits (ZED-F9T Integration
-> Manual UBX-21040375, §4.4.1, Figs 36–38) inject bias directly on RF_IN and rely on the
-> receiver's **internal DC block**, but u-blox notes that internal block "may not have a
-> working voltage higher than VCC" (3.3 V), and the bias here is ~5 V. **Action:** add a
-> ~47 pF C0G series DC-block (u-blox reference value; 33–100 pF acceptable) between the
-> bias-T node and U21.2 so only the antenna sees the 5 V bias, **or** confirm the ZED-F9T
-> internal block tolerates continuous 5 V. Supervisor/current-sense (U24/U26) are on the
-> V_ANT side and are unaffected either way.
+### 3.1 No series DC-block on RF_IN — bias is injected directly, per the u-blox reference
+
+The ~5 V antenna bias is injected by L1 straight onto `GPS_RF_IN`, which is the same node as the
+ZED-F9T `RF_IN` (U21.2), the SMA centre (J7.1), and the L10 ESD suppressor. **There is no series
+DC-block capacitor between the bias node and RF_IN, and none is required** — the u-blox ZED-F9T
+active-antenna reference circuits (Integration Manual UBX-21040375) inject the bias on the RF trace
+and rely on the receiver's **internal DC block**, including where the bias comes from an external
+supply above VCC.
+
+```
+as-built:   node A ── L1 47 nH ──┬── J7 SMA (antenna, biased)
+                                 ├── U21.2 RF_IN   (internal DC block)
+                                 └── L10 ESD
+```
+
+> **History — a 47 pF part (`C204`) was briefly fitted here and has been removed.** It had been
+> added on the strength of a claim, carried in this repo's own `CLAUDE.md` open-items list, that the
+> u-blox reference "places a 47 pF C0G series DC-block between the bias-T node and RF_IN". **That
+> attribution was wrong** — UBX-21040375 shows no such block, and this same section originally said
+> the opposite (that u-blox injects directly and relies on the internal block). Worse, as drawn the
+> part landed in the **bias** leg (`node A → L1 → C204 → GPS_RF_IN`), which would have DC-blocked the
+> antenna itself and left the open/short supervisor reading permanent *open*. The part is deleted and
+> the claim is retracted; do not re-introduce it.
 
 ---
 
@@ -267,11 +280,12 @@ Tolerance: the dividers are 1 % resistors feeding an LMV393 (few-mV offset) and 
 | PC9 | ANT_BIAS_EN | Antenna-bias enable (→ U27 RT9742 EN); dropped on persistent short. |
 | PC8 | GPS_PWR_EN | Gates F9T VCC (→ U22 LT3045 EN). |
 | PF15 | BKP_GPS_PG | Power-good of the GPS backup rail `GPS_VBAT` (U34 TPS61094 + supercap, feeds F9T V_BCKP). |
-| I²C1 (PB8/PB9) | — | Antenna-rail INA228 **U26 @0x45** (precision V/I/P across R89 0.1 Ω). |
+| I²C1 (PB8/PB9) | — | Antenna-rail INA228 **U26 @0x45** (precision V/I/P across **R89 150 mΩ**; ±273.1 mA FS, 520.833 nA/LSB). |
 
 > **INA228 addresses:** the *antenna-bias* rail is monitored by **U26 @0x45** (precise
-> antenna current, R89 0.1 Ω shunt). The *GPS VCC* rail (3V3_GPS) is a **separate** INA228,
-> **U23 @0x4A** (shunt across R72 0.5 Ω). U23 is strapped 0x4A because **0x44 is owned by the
+> antenna current, **R89 150 mΩ** shunt — the 182 mA foldback ceiling lands at 27.3 mV = 67 % of the
+> ±40.96 mV ADCRANGE=1 full scale). The *GPS VCC* rail (3V3_GPS) is a **separate** INA228,
+> **U23 @0x4A** (shunt across **R72 75 mΩ**). U23 is strapped 0x4A because **0x44 is owned by the
 > SHT45 humidity sensor (U72)** on the same I²C1 bus; 0x4A avoids that collision.
 
 ### 9.2 Antenna-state fusion
@@ -280,7 +294,7 @@ Firmware determines antenna state by fusing three independent sources:
 
 1. **UBX-MON-RF** from the F9T (driven by the analog supervisor in this document).
 2. **GPS_ANT_OFF_MON (PD4)** — whether the antenna is currently commanded off.
-3. **Antenna-rail INA228 U26 (0x45)** over I²C — precise current (R89 0.1 Ω) → OK / open / short.
+3. **Antenna-rail INA228 U26 (0x45)** over I²C — precise current (**R89 150 mΩ**, 520.833 nA/LSB → ~0.3 % resolution at the 182 mA ceiling) → OK / open / short. Because the R77 foldback clamps at ≈182 mA *before* an over-current alert would be meaningful, use an INA228 **under**-current (`SUVL`) threshold to detect "open" and reserve `SOVL` (227 mA) as a foldback-failure backstop.
 
 On a **persistent** short, firmware drops `ANT_BIAS_EN (PC9)` and raises an alarm (SNMP trap, log entry, GUI indication). The redundancy ensures a single-source transient does not by itself trigger a shutdown, and gives the operator a precise current reading for diagnostics.
 
@@ -334,6 +348,7 @@ occupies 0x44 on the same I²C1 bus; 0x4A keeps the GPS-VCC monitor collision-fr
 | C61 | capacitor | 0.1 µF |
 | L10 | PGB1010603MR | PulseGuard polymer ESD suppressor on `GPS_RF_IN` at J7 (low-Cj, high-standoff) |
 
+
 **Antenna supply & current limit**
 
 | Ref | Part | Value |
@@ -362,8 +377,8 @@ occupies 0x44 on the same I²C1 bus; 0x4A keeps the GPS-VCC monitor collision-fr
 | Ref | Part | Value / note |
 |-----|------|-------|
 | U26 | INA228 | Antenna-bias current/voltage monitor, **I²C1 @0x45**; shunt = R89. |
-| R89 | resistor | 0.1 Ω antenna-current shunt (U26 IN+/IN−; 1.638 A FS). |
-| U23 | INA228 | GPS-VCC (3V3_GPS) monitor, **I²C1 @0x4A** (not 0x44 — SHT45 U72 owns 0x44); shunt = R72 0.5 Ω. |
+| R89 | resistor | **150 mΩ** antenna-current shunt, Vishay WSL1206R1500FEA 1 % 1206 (U26 IN+/IN−; **±273.1 mA FS**, 520.833 nA/LSB, 5.0 mW at foldback). |
+| U23 | INA228 | GPS-VCC (3V3_GPS) monitor, **I²C1 @0x4A** (not 0x44 — SHT45 U72 owns 0x44); shunt = **R72 75 mΩ** (WSL1206R0750FEA), ±546.1 mA FS. |
 
 **ANT_OFF disable stage**
 
