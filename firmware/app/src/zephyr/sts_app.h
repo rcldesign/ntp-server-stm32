@@ -54,6 +54,20 @@ void sts_time_register_source(sts_tai_source_fn fn, void *ctx);
  * i.e. the returned time is not traceable and must not be served. */
 bool sts_time_is_fallback(void);
 
+/* True when the served timescale has a valid ABSOLUTE EPOCH — the PTP hardware
+ * clock has been set from GNSS and its servo reports synchronised.
+ *
+ * Distinct from PPS lock, and from sts_time_is_fallback(). A disciplined
+ * oscillator tracking a 1 Hz edge proves *rate*; it says nothing about which
+ * second it is, and a registered time source is not the same as a correct one.
+ * core/disc serves stratum UNSYNC while this is false, because a confidently
+ * wrong timestamp at stratum 1 is worse than serving none.
+ *
+ * Defaults FALSE. The net area calls sts_time_set_traceable() when its servo
+ * reaches (and when it leaves) the synchronised state. */
+bool sts_time_is_traceable(void);
+void sts_time_set_traceable(bool traceable);
+
 /* Monotonic milliseconds since boot; the timebase every core module's
  * mono_ms argument expects. */
 uint64_t sts_mono_ms(void);

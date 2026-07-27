@@ -275,6 +275,9 @@ static const port_image_t g_img = {
 
 #define LOG_CAP 16U
 
+/** Room for the config groups one commit can touch, in the glue fake below. */
+#define STS_TEST_APPLY_MAX 16U
+
 static mcp_ctx_t  g_mcp;
 static cfg_ctx_t  g_cfg;
 static logr_t     g_log;
@@ -2181,6 +2184,344 @@ static void test_engine_events_reach_the_log(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Glue hooks: the cfg critical section and the commit delegate               */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * A miniature of the Zephyr glue: a recursive-capable "mutex" counter, and a
+ * commit wrapper that takes it, commits, releases, and only then dispatches
+ * per-group appliers — i.e. sts_cfg_commit()'s shape.
+ */
+static int      g_lock_depth;
+static int      g_lock_max_depth;
+static uint32_t g_lock_calls;
+static uint32_t g_commit_calls;
+static int      g_commit_depth_seen;   /* lock depth when the delegate ran */
+static uint32_t g_applied_groups[STS_TEST_APPLY_MAX];
+static size_t   g_applied_n;
+static int      g_validate_depth_seen; /* lock depth inside cfg_commit() */
+static uint32_t g_validate_calls;
+
+static void glue_lock(void *user)
+{
+	(void)user;
+	g_lock_calls++;
+	g_lock_depth++;
+	if (g_lock_depth > g_lock_max_depth) {
+		g_lock_max_depth = g_lock_depth;
+	}
+}
+
+static void glue_unlock(void *user)
+{
+	(void)user;
+	g_lock_depth--;
+	TEST_ASSERT_TRUE_MESSAGE(g_lock_depth >= 0,
+				 "cfg critical section unlocked more than locked");
+}
+
+/* Stands in for the per-group config appliers the glue dispatches. */
+static void glue_note_group(uint8_t group)
+{
+	if (g_applied_n < STS_TEST_APPLY_MAX) {
+		g_applied_groups[g_applied_n++] = group;
+	}
+}
+
+/*
+ * cfg_commit()'s cross-field hook, used here purely as a probe: it runs INSIDE
+ * cfg_commit(), so the lock depth it observes is the depth the tree was actually
+ * mutated at.
+ */
+static int glue_validate(const cfg_ctx_t *c, void *user)
+{
+	(void)c;
+	(void)user;
+	g_validate_calls++;
+	g_validate_depth_seen = g_lock_depth;
+	return 0;
+}
+
+static int glue_commit(void *user, cfg_commit_res_t *res)
+{
+	uint8_t touched[STS_TEST_APPLY_MAX];
+	size_t n_touched = 0U;
+	int rc;
+
+	(void)user;
+	g_commit_calls++;
+	g_commit_depth_seen = g_lock_depth;
+
+	/* Exactly sts_cfg_commit(): collect the groups BEFORE committing (the
+	 * commit clears the staged bitmap), commit under the lock, release, then
+	 * dispatch. */
+	glue_lock(NULL);
+
+	for (size_t i = 0; i < cfg_key_count(); i++) {
+		const cfg_key_t *k = cfg_key_at(i);
+		uint8_t group;
+		bool seen = false;
+
+		if (k == NULL || !cfg_is_staged(&g_cfg, k->id)) {
+			continue;
+		}
+		group = (uint8_t)(k->id >> 8);
+		for (size_t j = 0; j < n_touched; j++) {
+			if (touched[j] == group) {
+				seen = true;
+				break;
+			}
+		}
+		if (!seen && n_touched < STS_TEST_APPLY_MAX) {
+			touched[n_touched++] = group;
+		}
+	}
+
+	rc = cfg_commit(&g_cfg, res);
+
+	glue_unlock(NULL);
+
+	/* -EIO is "live tree changed, some keys not persisted": the appliers
+	 * still run (LOW-7). */
+	if (rc != 0 && rc != -EIO) {
+		return rc;
+	}
+
+	for (size_t j = 0; j < n_touched; j++) {
+		glue_note_group(touched[j]);
+	}
+	return rc;
+}
+
+/* Re-wire the engine with the glue hooks installed. */
+static void wire_up_with_glue(void)
+{
+	mcp_wiring_t w;
+
+	wire_up(true, true, true);
+
+	g_lock_depth = 0;
+	g_lock_max_depth = 0;
+	g_lock_calls = 0U;
+	g_commit_calls = 0U;
+	g_commit_depth_seen = -1;
+	g_applied_n = 0U;
+	g_validate_calls = 0U;
+	g_validate_depth_seen = -1;
+
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_set_validate_hook(&g_cfg, glue_validate, NULL));
+
+	memset(&w, 0, sizeof(w));
+	w.clock = &g_clock;
+	w.crypto = host_crypto();
+	w.img = &g_img;
+	w.cfg = &g_cfg;
+	w.cfg_lock = glue_lock;
+	w.cfg_unlock = glue_unlock;
+	w.cfg_commit_cb = glue_commit;
+	w.log = &g_log;
+	w.status_cb = status_cb;
+	w.diag_cb = diag_cb;
+	w.tx = tx_cb;
+	memcpy(w.ident.model, "STS1000", 7);
+
+	TEST_ASSERT_EQUAL_INT(0, mcp_init(&g_mcp, &w));
+	policy_no_auth();
+
+	/* policy_no_auth() commits directly, outside the engine. */
+	g_applied_n = 0U;
+	g_commit_calls = 0U;
+	g_lock_depth = 0;
+	g_lock_max_depth = 0;
+}
+
+static bool applied_contains(uint8_t group)
+{
+	for (size_t i = 0; i < g_applied_n; i++) {
+		if (g_applied_groups[i] == group) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Stage tim.tau.s over the wire. */
+static void wire_set_tau(uint16_t v)
+{
+	uint8_t req[8];
+
+	bytes_put_le16(req, CFG_ID_TIM_TAU_S);
+	req[2] = (uint8_t)CFG_T_U16;
+	bytes_put_le16(&req[3], 2U);
+	bytes_put_le16(&req[5], v);
+	(void)feed_req(MCP_CMD_CFG_SET, req, 7U);
+	expect_status(MCP_CMD_CFG_SET, g_seq, (uint8_t)MCP_OK);
+}
+
+/*
+ * HIGH-1: CFG_SET + CFG_COMMIT over the wire must reach the glue's commit path,
+ * so the per-group appliers actually run.
+ *
+ * It used to call core cfg_commit() directly. The live tree and NVS were written
+ * and the response said "applied=1, reboot_keys=0, reboot_groups=0" — a positive
+ * assertion that no reboot was needed — while nothing in the running system was
+ * reconfigured. The same keys set over the ACM0 shell behaved differently,
+ * because only the shell went through sts_cfg_commit().
+ */
+static void test_cfg_commit_runs_the_glue_appliers(void)
+{
+	uint64_t u = 0U;
+	const uint8_t *p;
+
+	wire_up_with_glue();
+
+	wire_set_tau(815U);
+	TEST_ASSERT_EQUAL_UINT32(0U, g_commit_calls); /* staging does not commit */
+	TEST_ASSERT_EQUAL_size_t(0U, g_applied_n);
+
+	(void)feed_req(MCP_CMD_CFG_COMMIT, NULL, 0U);
+	expect_status(MCP_CMD_CFG_COMMIT, g_seq, (uint8_t)MCP_OK);
+
+	/* The delegate ran, exactly once, and the timing group's applier with it. */
+	TEST_ASSERT_EQUAL_UINT32(1U, g_commit_calls);
+	TEST_ASSERT_EQUAL_size_t(1U, g_applied_n);
+	TEST_ASSERT_TRUE(applied_contains(CFG_G_TIMING));
+
+	/* And it really committed: the live value changed and the response
+	 * reports it. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_TIM_TAU_S, &u));
+	TEST_ASSERT_EQUAL_UINT64(815U, u);
+	p = tx_pay(last_tx());
+	TEST_ASSERT_EQUAL_UINT16(1U, bytes_get_le16(&p[1])); /* applied */
+}
+
+/* HIGH-1, second half: the final CFG_IMPORT chunk commits through the same path,
+ * so an imported tree runs the same appliers as an individually-set key. */
+static void test_cfg_import_runs_the_glue_appliers(void)
+{
+	static uint8_t blob[8192];
+	static uint8_t req[MCP_MAX_PAYLOAD];
+	size_t total = 0U;
+	size_t half = 100U;
+	uint64_t u = 0U;
+
+	memset(req, 0, sizeof(req));
+	wire_up_with_glue();
+
+	TEST_ASSERT_EQUAL_INT(0, cfg_set_u64(&g_cfg, CFG_ID_TIM_TAU_S, 815U));
+	TEST_ASSERT_EQUAL_INT(0, cfg_commit(&g_cfg, NULL));
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_export_all(&g_cfg, blob, sizeof(blob), false, &total));
+	TEST_ASSERT_TRUE(total > (half + 8U));
+
+	/* Back to defaults, so importing the blob is a real change. */
+	TEST_ASSERT_EQUAL_INT(0, cfg_init(&g_cfg, &g_store_port));
+	TEST_ASSERT_EQUAL_INT(0,
+		cfg_set_validate_hook(&g_cfg, glue_validate, NULL));
+	policy_no_auth();
+	g_commit_calls = 0U;
+	g_applied_n = 0U;
+
+	bytes_put_le32(req, 0U);
+	req[4] = 0U;
+	memcpy(&req[5], blob, half);
+	(void)feed_req(MCP_CMD_CFG_IMPORT, req, (uint16_t)(5U + half));
+	expect_status(MCP_CMD_CFG_IMPORT, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_UINT32(0U, g_commit_calls); /* mid-stream: no commit */
+
+	bytes_put_le32(req, (uint32_t)half);
+	req[4] = 0x02U; /* final */
+	memcpy(&req[5], &blob[half], total - half);
+	(void)feed_req(MCP_CMD_CFG_IMPORT, req,
+		       (uint16_t)(5U + (total - half)));
+	expect_status(MCP_CMD_CFG_IMPORT, g_seq, (uint8_t)MCP_OK);
+
+	TEST_ASSERT_EQUAL_UINT32(1U, g_commit_calls);
+	TEST_ASSERT_TRUE(applied_contains(CFG_G_TIMING));
+	TEST_ASSERT_EQUAL_INT(0, cfg_get_u64(&g_cfg, CFG_ID_TIM_TAU_S, &u));
+	TEST_ASSERT_EQUAL_UINT64(815U, u);
+}
+
+/*
+ * MEDIUM-6: every config-touching request runs inside the glue's critical
+ * section, and the commit delegate runs OUTSIDE it.
+ *
+ * The engine, the Zephyr shell backend (same priority, preemptible) and ui_local
+ * all mutate one cfg_ctx_t that cfg.h states is not internally locked. The
+ * delegate has to be called with the section released because it re-takes the
+ * mutex itself and then dispatches appliers that may block on sockets.
+ */
+static void test_cfg_requests_hold_the_glue_lock(void)
+{
+	uint8_t req[8];
+
+	wire_up_with_glue();
+
+	/* A non-cfg command must not touch the section at all: FW_DATA and
+	 * telemetry must never block the shell on the config mutex. */
+	req[0] = (uint8_t)MCP_GRP_SUMMARY;
+	(void)feed_req(MCP_CMD_STATUS_GET, req, 1U);
+	expect_status(MCP_CMD_STATUS_GET, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_UINT32(0U, g_lock_calls);
+	TEST_ASSERT_EQUAL_INT(0, g_lock_depth);
+
+	/* A cfg command does, and leaves it balanced. */
+	wire_set_tau(700U);
+	TEST_ASSERT_TRUE(g_lock_calls > 0U);
+	TEST_ASSERT_EQUAL_INT(0, g_lock_depth);
+	TEST_ASSERT_EQUAL_INT(1, g_lock_max_depth); /* never nested by the engine */
+
+	/* The tree really was mutated with the section held: the validate hook
+	 * runs inside cfg_commit(), and the delegate re-took the lock around it. */
+	g_lock_max_depth = 0;
+	(void)feed_req(MCP_CMD_CFG_COMMIT, NULL, 0U);
+	expect_status(MCP_CMD_CFG_COMMIT, g_seq, (uint8_t)MCP_OK);
+	TEST_ASSERT_EQUAL_UINT32(1U, g_validate_calls);
+	TEST_ASSERT_EQUAL_INT(1, g_validate_depth_seen);
+	TEST_ASSERT_EQUAL_INT(0, g_commit_depth_seen); /* delegate: section down */
+	TEST_ASSERT_EQUAL_INT(1, g_lock_max_depth);    /* so never nested */
+	TEST_ASSERT_EQUAL_INT(0, g_lock_depth);
+
+	/* AUTH reads the credential and the policy out of the same tree. */
+	g_lock_calls = 0U;
+	(void)feed_req(MCP_CMD_AUTH, (const uint8_t *)"nope", 4U);
+	TEST_ASSERT_TRUE(g_lock_calls > 0U);
+	TEST_ASSERT_EQUAL_INT(0, g_lock_depth);
+
+	/* A session drop reverts staging, which is also a mutation. */
+	wire_set_tau(701U);
+	g_lock_calls = 0U;
+	mcp_reset_session(&g_mcp);
+	TEST_ASSERT_TRUE(g_lock_calls > 0U);
+	TEST_ASSERT_EQUAL_INT(0, g_lock_depth);
+	TEST_ASSERT_EQUAL_UINT16(0U, cfg_staged_count(&g_cfg));
+}
+
+/* Half a critical section is worse than none: it would look guarded and then
+ * deadlock or never release. */
+static void test_init_rejects_a_half_wired_cfg_lock(void)
+{
+	mcp_wiring_t w;
+
+	memset(&w, 0, sizeof(w));
+	w.tx = tx_cb;
+	w.cfg = &g_cfg;
+
+	w.cfg_lock = glue_lock;
+	w.cfg_unlock = NULL;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, mcp_init(&g_mcp, &w));
+
+	w.cfg_lock = NULL;
+	w.cfg_unlock = glue_unlock;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, mcp_init(&g_mcp, &w));
+
+	w.cfg_lock = glue_lock;
+	w.cfg_unlock = glue_unlock;
+	TEST_ASSERT_EQUAL_INT(0, mcp_init(&g_mcp, &w));
+}
+
+/* ------------------------------------------------------------------------- */
 
 int main(void)
 {
@@ -2229,8 +2570,14 @@ int main(void)
 	RUN_TEST(test_cfg_import_rejects_bad_streams);
 	RUN_TEST(test_cfg_commit_reports_persist_errors);
 	RUN_TEST(test_cfg_export_re_emits_a_repeated_chunk);
+	RUN_TEST(test_cfg_export_re_emits_the_final_chunk);
 	RUN_TEST(test_cfg_import_absorbs_a_repeated_chunk);
 	RUN_TEST(test_factory_reset_needs_the_magic);
+
+	RUN_TEST(test_cfg_commit_runs_the_glue_appliers);
+	RUN_TEST(test_cfg_import_runs_the_glue_appliers);
+	RUN_TEST(test_cfg_requests_hold_the_glue_lock);
+	RUN_TEST(test_init_rejects_a_half_wired_cfg_lock);
 
 	RUN_TEST(test_status_get_is_versioned_and_group_tagged);
 	RUN_TEST(test_telemetry_cadence_and_unsubscribe);

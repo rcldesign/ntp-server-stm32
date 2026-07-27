@@ -121,6 +121,35 @@ bool sts_time_is_fallback(void)
 	return atomic_get(&sts_tai_registered) == 0;
 }
 
+/*
+ * Absolute-epoch traceability, kept separate from source registration on purpose.
+ * A registered PTP-clock source answers immediately; whether the epoch it answers
+ * with is right depends on GNSS having set it and the servo having converged, and
+ * only the net area knows that. Defaults to 0 = not traceable, so an area that
+ * never reports leaves the clock advertising UNSYNC rather than claiming stratum 1
+ * off an unset hardware clock.
+ */
+static atomic_t sts_time_traceable = ATOMIC_INIT(0);
+
+bool sts_time_is_traceable(void)
+{
+	return atomic_get(&sts_time_traceable) != 0;
+}
+
+void sts_time_set_traceable(bool traceable)
+{
+	atomic_val_t was = atomic_set(&sts_time_traceable, traceable ? 1 : 0);
+
+	if ((was != 0) == traceable) {
+		return;
+	}
+
+	sts_log(LOGR_SUB_TIMING, traceable ? LOGR_NOTICE : LOGR_WARN,
+		"served timescale %s",
+		traceable ? "traceable (absolute epoch set)"
+			  : "NOT traceable (no absolute epoch)");
+}
+
 /* ========================================================================= */
 /* log ring                                                                  */
 /* ========================================================================= */

@@ -478,19 +478,86 @@ static void disc_handle_park(void)
 {
 	uint16_t code = 0;
 
-	if (atomic_set(&disc_park_req, 0) == 0) {
+	if (atomic_set(&disc_park_req, 0) != 0) {
+		if (disc_park(&disc, &code) == 0) {
+			/* The DAC already holds this value — disc_park() freezes
+			 * rather than moves — so the write is a confirmation, not a
+			 * change, and it is skipped by disc_write_dac()'s dedup. */
+			disc_write_dac(code);
+		}
+
+		sts_log(LOGR_SUB_TIMING, LOGR_CRIT,
+			"PFI: discipline parked, Vc frozen");
+		(void)sts_alarm_set(FAULT_ALARM_PFI, true);
+	}
+
+	/*
+	 * The recovery half. sts_pfi_service() sets this once PE8 has read
+	 * de-asserted for its dwell; without it a single spurious PFI edge froze
+	 * the DAC and pinned the stratum at UNSYNC until the next reboot. The
+	 * prediction is dropped because the actuator was frozen across the gap, so
+	 * the accumulator no longer describes the timebase.
+	 */
+	if (atomic_set(&disc_unpark_req, 0) != 0) {
+		if (disc_unpark(&disc) == 0) {
+			dt_state.have_expected = false;
+			sts_log(LOGR_SUB_TIMING, LOGR_NOTICE,
+				"PFI cleared: discipline resumed (recovering, "
+				"retained error %.0f ns)",
+				(double)disc_retained_error_ns(&disc));
+		}
+	}
+}
+
+/*
+ * Pair the UBX-TIM-TP sawtooth with the edge just captured, by GPS time of week.
+ *
+ * Spec §3.2 makes this correction mandatory — uncorrected qErr dominates the
+ * short-term error budget — but a correction applied to the wrong second *adds*
+ * sawtooth. gnssmgr normalises target_tow_ms to GPS ToW and clears qerr_valid
+ * when the leap offset needed for that conversion is unknown, so the only thing
+ * left for the glue is to work out which ToW it just captured and insist on an
+ * exact match.
+ */
+static void disc_apply_qerr(disc_pps_t *pps, const sts_gnss_snap_t *g,
+			    uint64_t cap_mono_ms)
+{
+	disc_qerr_match_t m;
+	uint32_t pulse_tow = 0;
+
+	pps->qerr_ps = 0;
+	pps->qerr_valid = false;
+
+	if (!g->qerr.valid) {
+		qerr_stats.no_record++;
 		return;
 	}
 
-	if (disc_park(&disc, &code) == 0) {
-		/* The DAC already holds this value — disc_park() freezes
-		 * rather than moves — so the write is a confirmation, not a
-		 * change, and it is skipped by disc_write_dac()'s dedup. */
-		disc_write_dac(code);
+	memset(&m, 0, sizeof(m));
+	m.record_valid = g->qerr.valid;
+	m.qerr_valid = g->qerr.qerr_valid;
+	m.qerr_ps = g->qerr.qerr_ps;
+	m.target_tow_ms = g->qerr.target_tow_ms;
+	m.record_rx_mono_ms = g->qerr.rx_mono_ms;
+	m.capture_mono_ms = cap_mono_ms;
+
+	/* Two navigation epochs of slack: the capture may land either side of the
+	 * NAV-PVT that names its own second. */
+	if (g->have_status &&
+	    disc_pulse_tow_ms(g->pvt_itow_ms, g->pvt_rx_mono_ms, cap_mono_ms, 2000U,
+			      &pulse_tow) == 0) {
+		m.pulse_tow_ms = pulse_tow;
+		m.pulse_tow_valid = true;
 	}
 
-	sts_log(LOGR_SUB_TIMING, LOGR_CRIT, "PFI: discipline parked, Vc frozen");
-	(void)sts_alarm_set(FAULT_ALARM_PFI, true);
+	if (!disc_qerr_matches_pulse(&m)) {
+		qerr_stats.unpaired++;
+		return;
+	}
+
+	pps->qerr_ps = m.qerr_ps;
+	pps->qerr_valid = true;
+	qerr_stats.applied++;
 }
 
 static void disc_entry(void *p1, void *p2, void *p3)
@@ -501,6 +568,7 @@ static void disc_entry(void *p1, void *p2, void *p3)
 
 	for (;;) {
 		sts_pps_capture_t cap;
+		sts_gnss_snap_t gnss;
 		disc_env_t env;
 		disc_out_t out;
 		uint64_t mono_ms;
@@ -528,28 +596,14 @@ static void disc_entry(void *p1, void *p2, void *p3)
 			dt_state.have_expected = false;
 		}
 
-		disc_fill_env(&env, mono_ms);
+		disc_fill_env(&env, &gnss, mono_ms);
 
 		if (have_pps) {
 			disc_in_t in;
 			disc_pps_t pps;
-			gnssmgr_qerr_t qerr;
 
-			if (disc_build_pps(&cap, &pps)) {
-				/*
-				 * Sawtooth correction is mandatory (spec §3.2):
-				 * uncorrected qErr dominates the short-term
-				 * error budget. gnssmgr pairs TIM-TP with the
-				 * pulse by time-of-week, so the value fetched
-				 * here belongs to the edge just captured.
-				 * TODO(wave-3b): source `g` from the gnss
-				 * thread; until then qErr is absent and disc
-				 * runs uncorrected, which is correct-but-noisy
-				 * rather than wrong.
-				 */
-				memset(&qerr, 0, sizeof(qerr));
-				pps.qerr_ps = qerr.qerr_ps;
-				pps.qerr_valid = qerr.qerr_valid;
+			if (disc_build_pps(&cap, &pps, cap.mono_ms)) {
+				disc_apply_qerr(&pps, &gnss, cap.mono_ms);
 
 				in.env = env;
 				in.pps = pps;
@@ -565,17 +619,19 @@ static void disc_entry(void *p1, void *p2, void *p3)
 		}
 
 		disc_write_dac(out.dac_code);
-		disc_advance_expected();
+		/* Anchored on the capture instant when there was one, so the grid
+		 * follows the reference rather than this thread's wake-up. */
+		disc_advance_expected(have_pps ? cap.mono_ms : mono_ms);
 
 		/*
 		 * Record the leap state for the PFI fast-save. It rides in the
 		 * ancillary block the discipline loop copies into the published
-		 * quality (env.anc), sourced from gnssmgr; until the gnss thread
-		 * populates it this notes the "no leap known" default, which is
-		 * the correct pre-fix value. Cheap no-op with no storage backend.
+		 * quality (env.anc), sourced from gnssmgr. Cheap no-op with no
+		 * storage backend.
 		 */
 		sts_store_note_leap(env.anc.leap_current_s,
-				    (int16_t)env.anc.leap_pending, env.anc.utc_valid);
+				    (int16_t)env.anc.leap_pending,
+				    gnss.leap_valid);
 
 		disc_step_refsel(mono_ms, css);
 

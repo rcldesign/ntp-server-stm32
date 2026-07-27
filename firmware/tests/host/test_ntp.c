@@ -1400,9 +1400,14 @@ static void test_mac_rejects_unsupported(void)
 						    sizeof(out), &res));
 	TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
 
-	/* A genuine 36-octet extension field (an NTS Unique Identifier is
-	 * exactly this size) must NOT be mistaken for a MAC — it parses as an
-	 * EF, so with no MAC present the request is served. */
+	/*
+	 * A 36-octet tail is ambiguous: an NTS Unique Identifier is exactly that
+	 * size, and so is a key id + SHA-256 digest. It is resolved as a MAC and
+	 * rejected — see the walk in ntp.c. This assertion is the reverse of what
+	 * it was before F6: reading it as an extension field is what let a chosen
+	 * key id buy an unauthenticated answer, and a lone Unique Identifier with
+	 * no cookie and no authenticator is not a usable NTS request in any case.
+	 */
 	len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U, 0U);
 	bytes_put_be16(&req[len], 0x0104U);
 	bytes_put_be16(&req[len + 2U], 36U);
@@ -1410,8 +1415,8 @@ static void test_mac_rejects_unsupported(void)
 	fill_rx(&rx, req, len + 36U, 1U, 0);
 	TEST_ASSERT_EQUAL_INT(0, ntp_handle_request(&g_ctx, &rx, &q, out,
 						    sizeof(out), &res));
-	TEST_ASSERT_EQUAL_INT(NTP_ACT_RESPOND, res.action);
-	TEST_ASSERT_FALSE(res.authenticated);
+	TEST_ASSERT_EQUAL_INT(NTP_ACT_IGNORE, res.action);
+	TEST_ASSERT_EQUAL_INT(NTP_DROP_AUTH, res.drop);
 }
 
 /*
@@ -1821,10 +1826,11 @@ static void test_response_never_exceeds_request(void)
 		size_t len = make_request(req, 4U, (uint8_t)NTP_MODE_CLIENT, 6U, 1U,
 					  0U);
 
-		/* 4, 20 and 24 octets of tail are MAC fields by RFC 7822's
-		 * disambiguation rule, not extension fields; test_symmetric_mac
-		 * covers those. */
-		if (extra == 4U || extra == 20U || extra == 24U) {
+		/* 4, 20, 24, 36, 52 and 68 octets of tail are MAC fields by
+		 * RFC 7822's disambiguation rule, not extension fields; the
+		 * symmetric-MAC tests cover those. */
+		if (extra == 4U || extra == 20U || extra == 24U ||
+		    extra == 36U || extra == 52U || extra == 68U) {
 			continue;
 		}
 		if (extra >= 4U) {

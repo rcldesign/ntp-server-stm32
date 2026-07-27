@@ -159,6 +159,29 @@ config STS1000_DIGIPOT_SPI_HZ
 	  rated well above this; the conservative default keeps the edge rates
 	  down on a bus shared with a 40 MHz NOR and a display ribbon.
 
+config STS1000_INA228_SETTLE_MS
+	int "INA228 settle time after configuration (ms)"
+	default 20
+	range 1 500
+	help
+	  How long stage 3 waits after writing CONFIG/ADC_CONFIG/SHUNT_CAL before
+	  reading a monitor back. The board defaults put every INA228 in
+	  continuous bus+shunt+temperature mode with averaging, so the first
+	  conversion after a configuration write is not ready immediately and a
+	  read taken too early returns the POR register contents. Must exceed one
+	  full averaged conversion cycle.
+
+config STS1000_GNSS_UART_RX_RING
+	int "GNSS UART receive ring size (bytes)"
+	default 1024
+	range 256 8192
+	help
+	  Bytes buffered between the USART3 receive ISR and the gnss thread. One
+	  second of the configured UBX message set at 1 Hz is a few hundred bytes
+	  (NAV-PVT 92 + NAV-SAT up to ~600 + NAV-SIG + NAV-TIMELS + TIM-TP +
+	  MON-RF/MON-HW), so the default holds roughly one full epoch — enough
+	  that a thread delayed by a whole second loses nothing.
+
 config STS1000_RB_LOCK_ACTIVE_LOW
 	bool "RB_LOCK (PB13) is asserted low"
 	default y

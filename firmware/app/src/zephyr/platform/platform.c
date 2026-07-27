@@ -221,9 +221,22 @@ static int stage3_verify_rails(void)
 		(void)sts_alarm_set(FAULT_ALARM_I2C_WEDGE, true);
 	}
 
-	/* One sweep so the cache has real values to check. */
+	/*
+	 * Read synchronously, on this thread. sts_hk_request_ina() queues the read
+	 * for the housekeeping thread, which does not exist yet at this point in
+	 * bring-up — so every reading came back valid == false and this function
+	 * logged three errors and returned -EIO on every single boot, which main()
+	 * reported as "running degraded". The rails were fine; the check was asking
+	 * an empty cache.
+	 *
+	 * A settle wait first: the INA228s were configured a few microseconds ago
+	 * and their averaged continuous conversions need a cycle to produce a real
+	 * value rather than the POR register contents.
+	 */
+	k_msleep(CONFIG_STS1000_INA228_SETTLE_MS);
+
 	for (size_t i = 0; i < ARRAY_SIZE(stage3_rails); i++) {
-		sts_hk_request_ina((uint8_t)stage3_rails[i].rail);
+		(void)sts_hk_read_ina_now((uint8_t)stage3_rails[i].rail);
 	}
 
 	if (sts_hk_read(&hk) != 0) {
@@ -331,7 +344,24 @@ int sts_platform_init(void)
 	STEP("io_scan", sts_io_scan_start());
 	STEP("housekeeping", sts_hk_start());
 
+	/*
+	 * The watchdog kicker before pwrseq, because pwrseq's stage 9 asserts
+	 * WDT_EN and sts_supervisor_arm() refuses to do that with no kicker
+	 * running — arming a windowed watchdog nothing is feeding is a guaranteed
+	 * cold cycle 1.4 s later.
+	 */
+	STEP("WDT kicker", sts_supervisor_wdt_start());
+
 	STEP("stage 7", stage7_timing());
+
+	/*
+	 * The GNSS link. Started here rather than from stage 5 because the thread
+	 * only parses whatever arrives on USART3; the *configuration walk* is
+	 * stage 5.5's PWRSEQ_ACT_GNSS_CONFIG_REQUEST, which runs after GPS_PWR_EN
+	 * and the reset release, so the F9T is powered and listening before any
+	 * VALSET is sent and its ACK timeout is not spent on a dark receiver.
+	 */
+	STEP("gnss", sts_gnss_start());
 
 	/*
 	 * Stage 5 onward (GPS, display, guarded Rb, watchdog, relay) plus the
