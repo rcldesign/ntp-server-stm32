@@ -244,6 +244,7 @@ void sts_supervisor_step(uint32_t now_ms)
 	}
 	super.last_stale_mask = stale;
 
+relay_rgb:
 	(void)sts_quality_snapshot(&q);
 
 	sts_fault_lock();

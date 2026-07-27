@@ -115,12 +115,13 @@ static void pwrseq_load_cfg(pwrseq_cfg_t *cfg)
 	if (cfg_get_u64(sts_cfg(), CFG_KEY_PWR_RB_VMAX_MV, &v) == 0) {
 		cfg->rb_vmax_mv = (uint32_t)v;
 	}
-	if (cfg_get_u64(sts_cfg(), CFG_KEY_PWR_POE_BUDGET_MW, &v) == 0) {
-		cfg->poe_granted_defaulted_from_cfg = false; /* documented below */
-	}
-	/* rb_ramp_ms and digipot_operating_code keep their pwrseq defaults
-	 * (100 ms, code 500) — the schema has no key for either yet. */
-	ARG_UNUSED(v);
+	/*
+	 * The PoE budget is a per-tick input (pwrseq_in_t.poe_granted_mw), not
+	 * a cfg field on pwrseq_cfg_t; it is read from CFG_KEY_PWR_POE_BUDGET_MW
+	 * in pwrseq_build_input(). rb_ramp_ms and digipot_operating_code keep
+	 * their pwrseq defaults (100 ms, code 500) — the schema has no key for
+	 * either yet.
+	 */
 }
 
 /* ------------------------------------------------------------- inputs ----- */
@@ -178,7 +179,9 @@ static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms)
 	in->i2c_probe_ok = true;
 	in->cal_loaded = sts_cfg_is_persistent();
 	in->shunt_trims_applied = hk.ina[INA228_RAIL_3V3_MAIN].cal_ok;
-	in->disc_started = true;
+	/* disc_started is tracked by pwrseq internally, not an input; the
+	 * DISC_START action maps to sts_discipline_start() which is idempotent
+	 * against platform.c having already started the loop. */
 	/*
 	 * The LAN8742 runs in REFCLKO mode and links autonomously once its
 	 * reset is released (platform.c early hook); the net area owns the MDIO
