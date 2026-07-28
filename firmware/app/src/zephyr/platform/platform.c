@@ -336,6 +336,23 @@ int sts_platform_init(void)
 
 	STEP("stage 2", stage2_release_resets());
 	STEP("SPI4 init", sts_spi4_init());
+
+	/*
+	 * UART7 and the Rb's two control lines. MCU-side setup only — the
+	 * transceiver and the FE-5680A itself are powered later by pwrseq's
+	 * guarded Rb stage — so this belongs here beside SPI4 rather than in the
+	 * stage machine: it configures RB_RS232_CMOS_SW to its documented
+	 * RS-232 reset default and RB_LOCK as an input, neither of which should
+	 * wait on a rail.
+	 *
+	 * It had NO CALLER until now, which made the whole Rb serial layer
+	 * inert: every entry point guards on rb.ready and answered -ENODEV, so
+	 * Rb telemetry, the channel 0x08 maintenance tunnel and core/fwupd's
+	 * FE-5680A target were all fail-closed and permanently unavailable. The
+	 * failure was quiet precisely because the guards are correct.
+	 */
+	STEP("Rb serial (UART7)",
+	     rb_serial_init(IS_ENABLED(CONFIG_STS1000_RB_LOCK_ACTIVE_LOW)));
 	STEP("stage 3", stage3_verify_rails());
 
 	STEP("PFI init", sts_pfi_init());
