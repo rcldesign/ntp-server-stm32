@@ -444,10 +444,39 @@ never bypass them:
 
 1. **Application running:** `fw.begin/data/end` (or MCP `FW_*`, or SMP over channel 6)
    streams the signed image into slot 1. Chunks are idempotent and resumable; non-final
-   chunks are write-block aligned (16 B on this part); the image is SHA-256 verified **by
-   reading it back out of flash** before the slot is marked pending; the trailer region is
-   reserved so `staging_size` never collides with the swap metadata. Then reboot → test
-   boot → firmware self-confirms after its health gate, else MCUboot reverts.
+   chunks are write-block aligned (16 B on this part); the trailer region is reserved so
+   `staging_size` never collides with the swap metadata. Then reboot → test boot →
+   firmware self-confirms after its health gate, else MCUboot reverts.
+
+   **Two hashes, and they answer different questions.** A *streaming* SHA-256 over the
+   octets as they arrive proves the transport delivered the operator's image. It says
+   nothing about whether flash kept them — a write that returns success onto a worn
+   sector produces a perfect streaming digest over an image that is not there. So the
+   staged image is **also read back out of flash** into a second SHA-256, compared
+   against the same declared digest, and that comparison happens **before the slot is
+   marked pending**: an image the flash did not take is never armed. Without it the
+   failure surfaces one boot cycle later as MCUboot silently declining the image, in a
+   bootloader built with `CONFIG_MCUBOOT_LOG_LEVEL_OFF`.
+
+   The read-back is **incremental, not a sweep at the end**: each `fw.data` chunk is read
+   straight back out of slot 1 before it is acknowledged, so `next_off` means "the device
+   holds everything below this". Two reasons it is paced that way rather than by a
+   background phase. Cost — hashing ~900 KB in one pass inside `fw.end` would hold the
+   maintenance engine lock long enough to threaten the override dead-man's revert
+   deadline (§5.4); spread across the ~900 chunks that carried the image it is invisible.
+   And *reachability of the verdict* — there is no `fw.status` method to poll (§3.2 lists
+   six `fw.*` methods, all of which act), so a check that outlived `fw.end` would have no
+   way to report itself. The verdict is therefore in the `fw.end` reply, as it always was.
+
+   Failures are distinguished, because the remedies are: `hash-mismatch` means the
+   transport delivered something other than what was hashed — re-upload, suspect the file
+   or the link. `readback-mismatch` means the transport was clean and the device did not
+   keep the image — retry once, then suspect the flash. A read that *fails* rather than
+   disagrees is a plain target error and ends the session at the chunk it happened on.
+
+   Only the STM32 image is checked this way. The GNSS loader and the FE-5680A expose no
+   read path at all, so §9.3 and §9.4 have the streaming hash and nothing else — an
+   absence that is designed, not missing.
 2. **Application unbootable:** MCUboot serial recovery — hold **BUTTON_1 (PF0)** through
    reset for ≥1 s; the device enumerates as recovery (PID 0x1001); `mcumgr image upload`.
 3. **Factory unbrick:** BOOT0/DFU via the ROM bootloader, gated by debug-authentication

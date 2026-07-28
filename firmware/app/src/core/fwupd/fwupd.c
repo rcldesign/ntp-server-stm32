@@ -209,6 +209,8 @@ const char *fwupd_end_name(uint8_t reason)
 		return "target-error";
 	case (uint8_t)FWUPD_END_VERIFY:
 		return "version-not-confirmed";
+	case (uint8_t)FWUPD_END_READBACK:
+		return "readback-mismatch";
 	default:
 		return "?";
 	}
@@ -320,6 +322,78 @@ static void copy_str(char *dst, size_t cap, const char *src)
 }
 
 /*
+ * ---------------------------------------------------------------------------
+ * The read-back check
+ * ---------------------------------------------------------------------------
+ *
+ * Pull everything written but not yet read back out of the component and fold
+ * it into the second SHA-256. A no-op for a target with no readback callback,
+ * which is how the GNSS receiver and the rubidium keep their previous
+ * behaviour exactly (fwupd.h).
+ *
+ * COST, since this runs on the console RX thread inside the Maintenance
+ * Protocol's engine lock, which sts_console.c's dead-man BUILD_ASSERT budgets:
+ *
+ *   per fwupd_data() call, at most FWUPD_CHUNK_MAX (1024) octets are read and
+ *   hashed, in ceil(1024 / FWUPD_READBACK_CHUNK) = 4 reads. On the STM32 target
+ *   a read is a memory-mapped flash_area_read() behind sts_dfu.c's `dfu_lock`,
+ *   and the hash is mbedTLS SHA-256 — order 1e5 cycles at 250 MHz, i.e. tens of
+ *   microseconds, against a call that already programs the same 1024 octets
+ *   into flash. Four extra `dfu_lock` acquisitions per chunk, each held for a
+ *   memcpy;
+ *
+ *   over a full 896 KB slot that totals ~3.6k reads and one SHA-256 pass over
+ *   the image — a few hundred milliseconds of CPU on this part — but spread
+ *   across the ~900 fw.data calls that carried it, never held in one place.
+ *   That is the whole reason it is here and not in a single sweep at
+ *   fwupd_end(): a sweep would hold the engine lock for that entire figure at
+ *   once, and STS_MP_TICK_LOCK_MS/STS_MP_TICK_MISS_MAX give the override
+ *   dead-man only ~1.5 s of lock hold before its revert deadline is at risk.
+ *
+ * Returns 0, or the component's errno — which ends the session as a target
+ * error, NOT as a mismatch: "the flash would not answer" and "the flash
+ * answered wrong" are different faults.
+ */
+static int readback_advance(fwupd_ctx_t *c, uint32_t upto)
+{
+	const fwupd_target_ops_t *t = target(c, c->comp);
+	int rc;
+
+	if (!c->rb_active) {
+		return 0;
+	}
+	if ((t == NULL) || (t->readback == NULL)) {
+		/*
+		 * Unreachable while a session is open — rb_active is only set
+		 * for a target that had the callback, and fwupd_set_target()
+		 * refuses to replace one mid-session. Refusing rather than
+		 * silently skipping, because the alternative is a session that
+		 * reports a read-back it did not perform.
+		 */
+		return -ENODEV;
+	}
+
+	while (c->rb_off < upto) {
+		uint32_t n = upto - c->rb_off;
+
+		if (n > (uint32_t)sizeof(c->rb_buf)) {
+			n = (uint32_t)sizeof(c->rb_buf);
+		}
+		rc = t->readback(t->user, c->rb_off, c->rb_buf, (size_t)n);
+		if (rc != 0) {
+			return rc;
+		}
+		rc = c->sha.update(c->sha.ctx, c->rb_sha_state, c->rb_buf,
+				   (size_t)n);
+		if (rc != 0) {
+			return rc;
+		}
+		c->rb_off += n;
+	}
+	return 0;
+}
+
+/*
  * The single exit. Runs RESTORE if it is owed, clears the degraded flag, and
  * enters DONE or FAILED.
  *
@@ -361,6 +435,7 @@ static void finish(fwupd_ctx_t *c, fwupd_end_t reason, int rc, uint64_t now_ms)
 	c->prepared = false;
 	set_degraded(c, false);
 	c->sha_active = false;
+	c->rb_active = false;
 
 	c->reason = (uint8_t)reason;
 	c->last_rc = rc;
@@ -554,6 +629,8 @@ int fwupd_begin(fwupd_ctx_t *c, uint8_t comp, const fwupd_req_t *req,
 	c->done = 0U;
 	c->prepared = false;
 	c->degraded = false;
+	c->rb_off = 0U;
+	c->rb_active = false;
 	c->chunks_duplicate = c->chunks_duplicate; /* lifetime, not per-session */
 	(void)memcpy(c->want_sha, req->sha256, sizeof(c->want_sha));
 	copy_str(c->expect_version, sizeof(c->expect_version),
@@ -599,6 +676,22 @@ int fwupd_begin(fwupd_ctx_t *c, uint8_t comp, const fwupd_req_t *req,
 		return rc;
 	}
 	c->sha_active = true;
+
+	/*
+	 * The second hash, over what the component actually keeps. Armed only
+	 * when the target can be read back; everything downstream tests
+	 * c->rb_active, so a target without the callback takes no new path at
+	 * all.
+	 */
+	if (t->readback != NULL) {
+		rc = c->sha.init(c->sha.ctx, c->rb_sha_state);
+		if (rc != 0) {
+			audit(c, "sha-init-readback", rc);
+			finish(c, FWUPD_END_TARGET_ERROR, rc, now_ms);
+			return rc;
+		}
+		c->rb_active = true;
+	}
 
 	if (t->poll != NULL) {
 		/* Stay in PREPARE; fwupd_step() advances when poll() says done. */
@@ -691,6 +784,20 @@ int fwupd_data(fwupd_ctx_t *c, uint32_t off, const uint8_t *data, size_t len,
 	}
 
 	c->done += (uint32_t)len;
+
+	/*
+	 * Read the octets straight back out of the component before this chunk
+	 * is acknowledged, so `next_off` means "the component holds everything
+	 * below this" and not just "we handed it over". Bounded by the chunk
+	 * that was written; see readback_advance()'s cost note.
+	 */
+	rc = readback_advance(c, c->done);
+	if (rc != 0) {
+		audit(c, "readback", rc);
+		finish(c, FWUPD_END_TARGET_ERROR, rc, now_ms);
+		return rc;
+	}
+
 	c->last_chunk_ms = now_ms;
 	if (next_off != NULL) {
 		*next_off = c->done;
@@ -771,6 +878,56 @@ int fwupd_end(fwupd_ctx_t *c, uint64_t now_ms)
 		audit(c, "hash-mismatch", -EBADMSG);
 		finish(c, FWUPD_END_HASH, -EBADMSG, now_ms);
 		return -EBADMSG;
+	}
+
+	/*
+	 * The transport is proven. Now prove the component kept it — before
+	 * verify(), which is what arms the image (mark_pending() on the STM32
+	 * target). Getting this order wrong would stage a slot the flash did
+	 * not take and leave the operator to discover it at the next boot, in a
+	 * bootloader that logs nothing.
+	 */
+	if (c->rb_active) {
+		uint8_t rb[32];
+
+		/*
+		 * Normally nothing left to do: fwupd_data() closes the gap on
+		 * every chunk, so rb_off is already `total`. Kept because the
+		 * loop, not the bookkeeping, is what makes "every octet was read
+		 * back" true — and because a target whose chunks are acked some
+		 * other way must still be covered end to end.
+		 */
+		rc = readback_advance(c, c->total);
+		if (rc != 0) {
+			audit(c, "readback", rc);
+			finish(c, FWUPD_END_TARGET_ERROR, rc, now_ms);
+			return rc;
+		}
+
+		rc = c->sha.final(c->sha.ctx, c->rb_sha_state, rb);
+		c->rb_active = false;
+		if (rc != 0) {
+			audit(c, "readback-final", rc);
+			finish(c, FWUPD_END_TARGET_ERROR, rc, now_ms);
+			return rc;
+		}
+
+		/*
+		 * Against want_sha, the same digest the streaming hash was
+		 * checked against, and not against the streaming digest: one
+		 * question, one answer. Comparing the two hashes with each other
+		 * would let a common-mode failure — a sha port that returns a
+		 * constant, say — agree with itself.
+		 *
+		 * Not constant-time, for the reason given above: an integrity
+		 * check on an operator-supplied image, not an authentication
+		 * decision.
+		 */
+		if (memcmp(rb, c->want_sha, sizeof(rb)) != 0) {
+			audit(c, "readback-mismatch", -EBADMSG);
+			finish(c, FWUPD_END_READBACK, -EBADMSG, now_ms);
+			return -EBADMSG;
+		}
 	}
 
 	set_state(c, FWUPD_ST_VERIFY, now_ms);

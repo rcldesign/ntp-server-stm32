@@ -10,7 +10,9 @@
  *
  *   STM32_APP        -> sts_dfu_port() (flash_map + MCUboot), i.e. exactly the
  *                       engine the MCP FW_* commands already use. Not
- *                       reimplemented.
+ *                       reimplemented. It is also the only target that can be
+ *                       read back, so it is the only one that carries
+ *                       fwupd_target_ops_t::readback — see stm_readback().
  *   RB_FE5680A       -> core/fwupd/rb_fwupd over rb_serial_ops() (UART7).
  *   GNSS_ZED_F9T     -> core/fwupd/ubx_fwupd over USART3. **See the seam note
  *                       below: the transport is wired, the opcodes are not
@@ -288,6 +290,33 @@ static int stm_transfer(void *user, uint32_t off, const uint8_t *data, size_t le
 		return -ENODEV;
 	}
 	return img->staging_write(img->ctx, off, data, len, last);
+}
+
+/**
+ * The read-back half of core/fwupd's integrity check (fwupd.h, "Two hashes").
+ *
+ * The SAME port call core/mcp's verify_hash() uses on the SAME slot — not a
+ * second reader written for this path. sts_dfu.c's dfu_staging_read() takes
+ * dfu_lock for the transfer and overlays any sub-block tail its write aligner
+ * is still holding, so a chunk that is not a multiple of the 16-octet write
+ * block reads back correct rather than erased; the final chunk is flushed by
+ * transfer(..., last=true) before core asks for it, so the end of the image is
+ * always compared against committed flash.
+ *
+ * This is the only target that has it. The GNSS loader and the FE-5680A expose
+ * no read path, so their ops tables leave `readback` NULL and core skips the
+ * whole check for them — which is the designed answer, not a gap (fwupd.h).
+ */
+static int stm_readback(void *user, uint32_t off, uint8_t *out, size_t len)
+{
+	const port_image_t *img = sts_dfu_port();
+
+	ARG_UNUSED(user);
+
+	if ((img == NULL) || (img->staging_read == NULL)) {
+		return -ENODEV;
+	}
+	return img->staging_read(img->ctx, off, out, len);
 }
 
 static int stm_verify(void *user, char *out, size_t cap)
@@ -862,6 +891,7 @@ int sts_fwupd_init(void)
 			.query_version = stm_query,
 			.prepare = stm_prepare,
 			.transfer = stm_transfer,
+			.readback = stm_readback,
 			.verify = stm_verify,
 			.restore = stm_restore,
 			.chunk_max = stm_chunk_max,

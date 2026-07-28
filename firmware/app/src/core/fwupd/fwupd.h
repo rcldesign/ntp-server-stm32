@@ -60,6 +60,45 @@
  *      disappear. RESTORE clears it — and RESTORE runs on *every* exit path,
  *      including abort and timeout.
  *   5. Every transition emits an audit event.
+ *
+ * ---------------------------------------------------------------------------
+ * Two hashes, because "we sent it" and "it stuck" are different claims
+ * ---------------------------------------------------------------------------
+ *
+ * The streaming SHA-256 over the arriving octets proves the TRANSPORT. It says
+ * nothing about whether the component kept them: a write that returned success
+ * onto a worn sector, or a slot that was not erased, produces a perfect
+ * streaming hash over an image that is not in flash. On the STM32 target that
+ * failure surfaces one boot cycle later, as MCUboot silently declining the
+ * image in a bootloader built with CONFIG_MCUBOOT_LOG_LEVEL_OFF — the same
+ * "verified, pending, then nothing happened and nothing said why" that
+ * fwupd_glue.c's anti-rollback check exists to avoid.
+ *
+ * So a target that can be read back is read back, into a second SHA-256 that is
+ * compared with the same fwupd_req_t::sha256, before verify() arms anything.
+ *
+ * WHY IT IS PACED BY THE TRANSFER AND NOT BY fwupd_step(). The obvious shape —
+ * a read-back phase between TRANSFER and VERIFY that fwupd_step() advances a
+ * slice per pass — cannot deliver a verdict on this device. The Maintenance
+ * Protocol has exactly six `fw.*` methods (mp_rpc.c) and none of them reports
+ * progress without also acting: there is no `fw.status` to poll. The verdict
+ * has to be in the `fw.end` reply, which is precisely why no target on this
+ * board defines poll() (see below) and why that is called the intended state.
+ * A phase that outlived fwupd_end() would answer `ok:false` for a good image,
+ * and then mark the slot pending tens of seconds after the tool had been told
+ * the update failed.
+ *
+ * Pacing it by fwupd_data() gets the same bounded work with none of that: each
+ * call reads back only what it just wrote (at most FWUPD_CHUNK_MAX octets, in
+ * FWUPD_READBACK_CHUNK reads), so no single call is long, and by the time
+ * fwupd_end() runs the cursor is already at the end of the image.
+ *
+ * WHAT THAT COSTS, stated so it can be argued with: verifying each region just
+ * after it is written cannot catch a LATER write corrupting an EARLIER one.
+ * On this port it cannot happen — fwupd_data() refuses any offset that is not
+ * the frontier, and sts_dfu.c's staging_write() refuses the same thing again
+ * from its own side, so within a session nothing may re-write behind the
+ * cursor; a rewind needs a new session, which re-runs prepare().
  */
 
 #ifndef STS1000_CORE_FWUPD_FWUPD_H_
@@ -87,6 +126,18 @@ extern "C" {
 
 /** Largest chunk the orchestrator accepts in one fwupd_data() call. */
 #define FWUPD_CHUNK_MAX 1024U
+
+/**
+ * Octets pulled through fwupd_target_ops_t::readback in one call.
+ *
+ * The same 256 as core/mcp's MCP_DFU_VERIFY_CHUNK, deliberately: that path
+ * reads the identical slot through the identical port_image_t::staging_read(),
+ * and a second number here would be a second thing to size. It bounds the
+ * read-back buffer in fwupd_ctx_t and, on the STM32 target, the number of times
+ * one fwupd_data() call takes sts_dfu.c's `dfu_lock` — see the accounting in
+ * fwupd.c's read-back block.
+ */
+#define FWUPD_READBACK_CHUNK 256U
 
 /** Bound on an image, so a bad size cannot make the progress maths overflow. */
 #define FWUPD_IMAGE_MAX (16U * 1024U * 1024U)
@@ -204,6 +255,31 @@ typedef struct {
 	/** Write one chunk. @p last is true for the final chunk of the image. */
 	int (*transfer)(void *user, uint32_t off, const uint8_t *data, size_t len,
 			bool last);
+	/**
+	 * Read @p len octets of the *staged image* back at @p off — the same
+	 * shape, and on the STM32 target literally the same function, as
+	 * port_image_t::staging_read().
+	 *
+	 * **Optional, and its absence is a supported answer.** With it NULL the
+	 * orchestrator behaves exactly as it did before this callback existed:
+	 * the streaming SHA-256 over the octets as they arrive is the only
+	 * integrity check. That is the right answer for the GNSS receiver and
+	 * the rubidium, whose loaders offer no read path at all — asking them
+	 * for one would mean inventing a protocol.
+	 *
+	 * With it non-NULL the orchestrator ALSO hashes the image back out of
+	 * the component as it is written and compares that digest with the same
+	 * fwupd_req_t::sha256 the streaming hash was checked against, before
+	 * verify() runs. The two answer different questions: the streaming hash
+	 * proves the transport delivered the right octets, this one proves the
+	 * component kept them. A silently failed write or a bad sector is
+	 * invisible to the first and fatal to the second.
+	 *
+	 * Called from fwupd_data() (for the octets that call just wrote) and
+	 * once more from fwupd_end(), so it must be cheap: FWUPD_READBACK_CHUNK
+	 * octets per call, at most FWUPD_CHUNK_MAX octets per fwupd_data().
+	 */
+	int (*readback)(void *user, uint32_t off, uint8_t *out, size_t len);
 	/** Finish programming and read back the new version into @p out. */
 	int (*verify)(void *user, char *out, size_t cap);
 	/**
@@ -268,6 +344,19 @@ typedef enum {
 	FWUPD_END_SHORT,       /**< fwupd_end() with fewer bytes than declared */
 	FWUPD_END_TARGET_ERROR,/**< a target callback failed */
 	FWUPD_END_VERIFY,      /**< the component reports a version we did not expect */
+	/**
+	 * The octets read back out of the component are not the image.
+	 *
+	 * Distinct from FWUPD_END_HASH on purpose. HASH means the transport
+	 * delivered something other than what the operator hashed — retry the
+	 * upload, suspect the cable or the file. This one means the transport
+	 * was fine and the component did not keep what it was given — retry
+	 * once, then suspect the flash. The two have nothing in common except
+	 * that the image is not usable, and telling an operator "hash mismatch"
+	 * for a worn sector sends them to re-download a file that was never
+	 * wrong.
+	 */
+	FWUPD_END_READBACK,
 	FWUPD_END__COUNT,
 } fwupd_end_t;
 
@@ -371,7 +460,22 @@ typedef struct {
 
 	uint8_t want_sha[32];
 	uint8_t sha_state[PORT_SHA256_CTX_SIZE];
+	/*
+	 * The read-back check's own SHA-256 state (fwupd_target_ops_t::readback).
+	 *
+	 * A second, independent context, because the streaming one is still open
+	 * over the wire octets while this one is being fed out of flash.
+	 * Immediately after sha_state rather than further down: a port may cast
+	 * these buffers to its own context type (tests/host does; the Zephyr port
+	 * memcpys instead), and PORT_SHA256_CTX_SIZE is a multiple of 8, so
+	 * adjacency is what keeps the two on the same alignment.
+	 */
+	uint8_t rb_sha_state[PORT_SHA256_CTX_SIZE];
+	uint8_t rb_buf[FWUPD_READBACK_CHUNK];
 	bool sha_active;
+	bool rb_active;
+	/** How far the component has been read back. */
+	uint32_t rb_off;
 
 	/** Lifetime counters, for telemetry. */
 	uint32_t sessions;
@@ -474,6 +578,11 @@ int fwupd_begin(fwupd_ctx_t *c, uint8_t comp, const fwupd_req_t *req,
  * trimmed — accepting the tail would leave the streaming hash covering bytes
  * that were never written.
  *
+ * A target that offers @ref fwupd_target_ops_t::readback also has the octets
+ * this call just wrote read straight back out of it and folded into a second
+ * SHA-256 before the call returns, so the acknowledgement the tool receives
+ * means "the component holds these" and not merely "we handed them over".
+ *
  * @param next_off  Always set to the next offset the orchestrator wants, on
  *                  success and on refusal alike. May be NULL.
  *
@@ -483,22 +592,29 @@ int fwupd_begin(fwupd_ctx_t *c, uint8_t comp, const fwupd_req_t *req,
  * @retval -EPERM   No session, or the session is not in TRANSFER.
  * @retval -ENOSPC  The chunk would run past the declared image size.
  * @retval -EPROTO  Out-of-order offset; @p next_off says where to resume.
- * @retval other    The target's transfer() failed; the session is FAILED and
- *                  RESTORE has run.
+ * @retval other    The target's transfer() or readback() failed; the session is
+ *                  FAILED and RESTORE has run.
  */
 int fwupd_data(fwupd_ctx_t *c, uint32_t off, const uint8_t *data, size_t len,
 	       uint32_t *next_off, uint64_t now_ms);
 
 /**
- * Declare the transfer complete: checks the length and the SHA-256, then runs
- * VERIFY and RESTORE.
+ * Declare the transfer complete: checks the length, the streaming SHA-256 and —
+ * on a target that offers one — the SHA-256 of the image read back out of the
+ * component, then runs VERIFY and RESTORE.
+ *
+ * All three checks happen BEFORE verify(), which is the callback that arms the
+ * component (mark_pending() on the STM32 target). An image the flash did not
+ * keep is therefore never staged.
  *
  * @retval 0        The session has entered VERIFY (poll with fwupd_step()).
  * @retval -EPERM   Not in TRANSFER.
  * @retval -EINVAL  @p c is NULL.
- * @retval -EBADMSG Fewer octets than declared (FWUPD_END_SHORT), or the
- *                  SHA-256 does not match (FWUPD_END_HASH). In both cases the
- *                  session is FAILED, nothing was verified, and RESTORE has run.
+ * @retval -EBADMSG Fewer octets than declared (FWUPD_END_SHORT), the streaming
+ *                  SHA-256 does not match (FWUPD_END_HASH), or the image read
+ *                  back out of the component does not match
+ *                  (FWUPD_END_READBACK). In all three the session is FAILED,
+ *                  nothing was verified, and RESTORE has run.
  */
 int fwupd_end(fwupd_ctx_t *c, uint64_t now_ms);
 

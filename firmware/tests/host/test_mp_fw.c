@@ -20,7 +20,7 @@
  * restores == successful prepares, and test_the_restore_ledger_balances_on_every_exit()
  * walks every exit the two modules have between them.
  *
- * The other four things it pins, all of which fail silently:
+ * The other five things it pins, all of which fail silently:
  *
  *   THE ALLOW-LIST. fwupd_cfg_t::allow permits only FWUPD_COMP_STM32_APP out of
  *   the box (fwupd_glue.c), and that is a commissioning decision, not a
@@ -45,6 +45,13 @@
  *
  *   THE PAGED INVENTORY. Eleven components, four to a page, so the last page is
  *   partial; and the board is probed once per walk rather than once per page.
+ *
+ *   THE READ-BACK. FMT §9.2 says the STM32 image is verified by reading it back
+ *   out of flash before the slot is marked pending. The streaming hash cannot
+ *   say that — it covers what ARRIVED — so a target that can be read back is,
+ *   into a second SHA-256 against the same declared digest. Section 9 drives it
+ *   with a target whose store is damaged as the chunk lands, which is the only
+ *   arrangement where the wire is clean and the component is not.
  *
  * Every reply is parsed back as JSON and asserted on the wire contract, exactly
  * as test_mp_rpc.c does — nothing reaches into mp_ctx_t or fwupd_ctx_t to
@@ -92,6 +99,8 @@ typedef struct {
 	unsigned int prepare_n;
 	unsigned int prepare_ok_n;
 	unsigned int transfer_n;
+	unsigned int readback_n;
+	uint32_t readback_bytes;
 	unsigned int verify_n;
 	unsigned int restore_n;
 	bool last_restore_after_failure;
@@ -102,7 +111,21 @@ typedef struct {
 	int verify_rc;
 	int restore_rc;
 	int transfer_rc;
+	int readback_rc;
 	unsigned int transfer_fail_at; /* 1-based; 0 = never fail */
+
+	/*
+	 * "The wire was fine and the flash was not."
+	 *
+	 * >= 0 flips one bit of `image[]` as the chunk containing it is
+	 * written, so the octets the orchestrator hashed on the way in are
+	 * still the operator's image — the streaming SHA-256 passes — and the
+	 * octets sitting in the component are not. That is the whole failure
+	 * this feature exists for, and it is unreachable by corrupting the
+	 * payload instead: that trips the streaming hash first and never gets
+	 * as far as the read-back.
+	 */
+	int corrupt_at;
 
 	/* 0 = no opinion, so the orchestrator's FWUPD_CHUNK_MAX applies. */
 	uint32_t chunk_max_val;
@@ -163,7 +186,37 @@ static int t_transfer(void *user, uint32_t off, const uint8_t *data, size_t len,
 	}
 	TEST_ASSERT_TRUE(((size_t)off + len) <= IMG_CAP);
 	(void)memcpy(&t->image[off], data, len);
+	if ((t->corrupt_at >= 0) && ((uint32_t)t->corrupt_at >= off) &&
+	    ((uint32_t)t->corrupt_at < (off + (uint32_t)len))) {
+		/* The cell did not take. Nothing upstream can tell. */
+		t->image[t->corrupt_at] ^= 0x01U;
+	}
 	t->written = off + (uint32_t)len;
+	return 0;
+}
+
+/**
+ * fwupd_target_ops_t::readback — what the component actually holds.
+ *
+ * Reads `image[]`, i.e. the array t_transfer() wrote, so it agrees with the
+ * wire unless `corrupt_at` says otherwise. Deliberately NOT a second copy of
+ * the payload: a read-back that echoed its input would pass this suite and
+ * catch nothing on the board.
+ */
+static int t_readback(void *user, uint32_t off, uint8_t *out, size_t len)
+{
+	fake_t *t = (fake_t *)user;
+
+	t->readback_n++;
+	if (t->readback_rc != 0) {
+		return t->readback_rc;
+	}
+	TEST_ASSERT_TRUE(((size_t)off + len) <= IMG_CAP);
+	TEST_ASSERT_TRUE_MESSAGE((off + (uint32_t)len) <= t->written,
+				 "the orchestrator read back octets the target "
+				 "was never given");
+	(void)memcpy(out, &t->image[off], len);
+	t->readback_bytes += (uint32_t)len;
 	return 0;
 }
 
@@ -216,6 +269,23 @@ static fwupd_target_ops_t ops_full(fake_t *t)
 	o.poll = NULL; /* synchronous, like the MCUboot slot */
 	o.chunk_max = t_chunk_max;
 	o.user = t;
+	return o;
+}
+
+/**
+ * The same, plus the read-back the STM32 target carries (fwupd_glue.c).
+ *
+ * A separate constructor rather than a field on ops_full(), so every test that
+ * does not name it runs against a target with `readback` NULL — which is the
+ * GNSS and Rb wiring, and is what makes "a target without the callback behaves
+ * exactly as before" a property this whole file demonstrates rather than one
+ * test's claim.
+ */
+static fwupd_target_ops_t ops_full_readback(fake_t *t)
+{
+	fwupd_target_ops_t o = ops_full(t);
+
+	o.readback = t_readback;
 	return o;
 }
 
@@ -543,6 +613,8 @@ static void arm_targets(void)
 
 	for (i = 0U; i < (size_t)FWUPD_COMP__COUNT; i++) {
 		g_tgt[i].comp = (uint8_t)i;
+		/* setUp() zeroes the array, and 0 is a valid offset. */
+		g_tgt[i].corrupt_at = -1;
 	}
 	(void)snprintf(g_tgt[FWUPD_COMP_STM32_APP].version,
 		       sizeof(g_tgt[0].version), "1.2.3");
@@ -580,6 +652,17 @@ static void arm_targets(void)
 			      fwupd_set_target(&g_fw,
 					       (uint8_t)FWUPD_COMP_PHY_LAN8742,
 					       &o));
+}
+
+/**
+ * Re-arm @p comp with the read-back callback, i.e. as fwupd_glue.c wires the
+ * STM32 image. Section 10 calls this; nothing else does.
+ */
+static void arm_readback(uint8_t comp)
+{
+	fwupd_target_ops_t o = ops_full_readback(&g_tgt[comp]);
+
+	TEST_ASSERT_EQUAL_INT(0, fwupd_set_target(&g_fw, comp, &o));
 }
 
 /**
@@ -2541,17 +2624,37 @@ static void test_the_restore_ledger_balances_on_every_exit(void)
 	assert_ledger("7 takeover");
 	TEST_ASSERT_EQUAL_UINT(expect, g_restores);
 
-	/* 8. leaving MP mode mid-transfer */
+	/*
+	 * 8. the read-back exit — the newest one, and the reason it is here:
+	 * finish() is reached from a place none of the seven above go through,
+	 * and an exit that skipped restore() would leave a component in
+	 * whatever state prepare() put it in.
+	 */
+	fw_revert(sid, (int)FWUPD_COMP_STM32_APP);
+	arm_readback((uint8_t)FWUPD_COMP_STM32_APP);
+	g_tgt[FWUPD_COMP_STM32_APP].corrupt_at = (int)(IMG_LEN / 3U);
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_whole_image(sid);
+	fw_end(sid);
+	TEST_ASSERT_EQUAL_STRING("readback-mismatch", err_reason());
+	expect++;
+	assert_ledger("8 read-back mismatch");
+	TEST_ASSERT_EQUAL_UINT(expect, g_restores);
+	g_tgt[FWUPD_COMP_STM32_APP].corrupt_at = -1;
+	g_tgt[FWUPD_COMP_STM32_APP].readback_rc = 0;
+
+	/* 9. leaving MP mode mid-transfer */
+	fw_revert(sid, (int)FWUPD_COMP_STM32_APP);
 	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
 	send_chunk(sid, 0U, 512U);
 	TEST_ASSERT_EQUAL_INT(0, mp_mode_exit(&g_c));
 	expect++;
-	assert_ledger("8 mode exit");
+	assert_ledger("9 mode exit");
 	TEST_ASSERT_EQUAL_UINT(expect, g_restores);
 
-	/* Every one of the eight was a real session, not a no-op. */
+	/* Every one of the nine was a real session, not a no-op. */
 	TEST_ASSERT_EQUAL_UINT(expect, g_prepares_ok);
-	TEST_ASSERT_TRUE(expect >= 6U);
+	TEST_ASSERT_TRUE(expect >= 7U);
 }
 
 /* ========================================================================= */
@@ -2625,7 +2728,209 @@ static void test_a_wired_port_never_answers_notsup(void)
 }
 
 /* ========================================================================= */
-/* 9. the shipped port conforms to the contract the shims above describe      */
+/* 9. the read-back check                                                     */
+/* ========================================================================= */
+
+/*
+ * FMT §9.2 promises the STM32 image is "SHA-256 verified by reading it back out
+ * of flash before the slot is marked pending". The streaming hash cannot make
+ * that promise: it covers the octets that ARRIVED, so a write that returned
+ * success onto a worn sector — or onto a slot that was never erased — produces a
+ * perfect streaming digest over an image that is not in flash, and the operator
+ * discovers it one boot cycle later, in a bootloader built with
+ * CONFIG_MCUBOOT_LOG_LEVEL_OFF.
+ *
+ * fwupd_target_ops_t::readback is what closes that, and every test below turns
+ * on the one distinction that matters: `corrupt_at` damages the target's own
+ * store as the chunk lands, so the wire stays clean and only a reader that goes
+ * back to the component can tell.
+ */
+
+/** Read-back agrees: the session completes exactly as it did without one. */
+static void test_the_staged_image_is_read_back_out_of_the_component(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+
+	arm_readback((uint8_t)FWUPD_COMP_STM32_APP);
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_whole_image(sid);
+	fw_end(sid);
+
+	TEST_ASSERT_TRUE(res_b("ok"));
+	TEST_ASSERT_TRUE(prog_streq("state", "DONE"));
+	TEST_ASSERT_TRUE(prog_streq("reason", "ok"));
+	TEST_ASSERT_TRUE_MESSAGE(t->readback_n > 0U,
+				 "the orchestrator never asked the component "
+				 "what it was holding");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		IMG_LEN, t->readback_bytes,
+		"the read-back has to cover EVERY octet of the image — a check "
+		"over a prefix would pass a flash failure in the tail, which is "
+		"where an under-erased slot fails first");
+	TEST_ASSERT_EQUAL_UINT(1U, t->verify_n);
+	TEST_ASSERT_EQUAL_UINT(1U, t->restore_n);
+	TEST_ASSERT_FALSE(t->last_restore_after_failure);
+	assert_ledger("read-back agrees");
+}
+
+/**
+ * The whole point: the wire was clean and the component is not holding the
+ * image.
+ *
+ * Every `fw.data` succeeds — the transport really was fine — and the streaming
+ * SHA-256 really does match at `fw.end`, so the ONLY thing that can fail this
+ * session is the digest taken back out of the component.
+ */
+static void test_flash_that_took_different_bytes_than_the_wire_fails(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+
+	arm_readback((uint8_t)FWUPD_COMP_STM32_APP);
+	t->corrupt_at = (int)(IMG_LEN / 2U);
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_whole_image(sid); /* asserts next_off after every chunk */
+	fw_end(sid);
+
+	TEST_ASSERT_EQUAL_INT64(MP_E_INTERNAL, err_code());
+	TEST_ASSERT_EQUAL_STRING_MESSAGE(
+		"readback-mismatch", err_reason(),
+		"a flash failure must not be reported as `hash-mismatch`: that "
+		"sends the operator to re-download a file that was never wrong");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, t->verify_n,
+		"verify() is what marks the slot pending — it must not run on "
+		"an image the component did not keep");
+	TEST_ASSERT_EQUAL_UINT(1U, t->restore_n);
+	TEST_ASSERT_TRUE(t->last_restore_after_failure);
+	assert_ledger("read-back mismatch");
+}
+
+/**
+ * The same corruption, on a target with no read-back op: undetected, and the
+ * session completes.
+ *
+ * Two things at once. It pins that a NULL `readback` leaves the orchestrator on
+ * exactly the path it took before the callback existed — which is the GNSS and
+ * Rb wiring, and every other test in this file. And it is the control for the
+ * test above: the mismatch there is produced by the check, not by the
+ * corruption, because the identical corruption here changes nothing.
+ */
+static void test_a_target_without_a_read_back_op_is_unchanged(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+
+	/* setUp() arms ops_full(), which has no readback. Not re-armed here. */
+	t->corrupt_at = (int)(IMG_LEN / 2U);
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_whole_image(sid);
+	fw_end(sid);
+
+	TEST_ASSERT_TRUE_MESSAGE(res_b("ok"),
+				 "a target with no read path must behave as it "
+				 "did before this callback existed");
+	TEST_ASSERT_TRUE(prog_streq("state", "DONE"));
+	TEST_ASSERT_TRUE(prog_streq("reason", "ok"));
+	TEST_ASSERT_EQUAL_UINT(0U, t->readback_n);
+	TEST_ASSERT_EQUAL_UINT32(0U, t->readback_bytes);
+	TEST_ASSERT_EQUAL_UINT(1U, t->verify_n);
+	TEST_ASSERT_EQUAL_UINT(1U, t->restore_n);
+	assert_ledger("no read-back op");
+}
+
+/**
+ * "The flash would not answer" is a target error, not a mismatch.
+ *
+ * Different fault, different remedy: a read that fails is a bus or a driver,
+ * a read that disagrees is the storage. Collapsing them would tell an operator
+ * to replace a part over a transient.
+ */
+static void test_a_component_that_will_not_read_back_is_a_target_error(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+
+	arm_readback((uint8_t)FWUPD_COMP_STM32_APP);
+	t->readback_rc = -EIO;
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_chunk(sid, 0U, 512U);
+
+	/*
+	 * It fails at the FIRST CHUNK, not at fw.end: the read-back rides the
+	 * transfer, so a component that cannot be read is found immediately —
+	 * and that is also what makes this unmistakable from a mismatch, which
+	 * can only ever surface at fw.end as MP_E_INTERNAL/"readback-mismatch".
+	 */
+	TEST_ASSERT_EQUAL_INT64(MP_E_IO, err_code());
+	TEST_ASSERT_EQUAL_STRING("chunk", err_reason());
+	TEST_ASSERT_TRUE_MESSAGE(
+		err_data_streq("state", "FAILED"),
+		"a component that will not answer must end the session, not "
+		"leave the transfer open on a check that cannot run");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, t->transfer_n,
+		"the write itself succeeded, so the failure is attributable to "
+		"the read-back and to nothing else");
+	TEST_ASSERT_EQUAL_UINT(1U, t->readback_n);
+	TEST_ASSERT_EQUAL_UINT(0U, t->verify_n);
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, t->restore_n,
+		"prepare() succeeded, so restore() is owed on this exit too");
+	TEST_ASSERT_TRUE(t->last_restore_after_failure);
+	assert_ledger("read-back refused");
+}
+
+/**
+ * The read-back never lags the acknowledgement, and that is load-bearing.
+ *
+ * `fw.data`'s `next_off` is what a tool trusts to mean "everything below this
+ * is on the device". If the read-back were a phase that ran after `fw.end`, the
+ * verdict would arrive after the reply that reported it — and MP has no
+ * `fw.status` to poll for it later, which is exactly why the check is paced by
+ * the transfer instead. Asserting the cursor after EVERY chunk is what pins
+ * that: a version that batched the read-back to the end would fail here rather
+ * than silently move the verdict out of reach.
+ */
+static void test_the_read_back_keeps_up_with_the_transfer(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+	uint32_t off = 0U;
+
+	arm_readback((uint8_t)FWUPD_COMP_STM32_APP);
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+
+	while (off < IMG_LEN) {
+		size_t n = chunk_len(off, 512U);
+		char msg[96];
+
+		data_at(sid, off, &g_image[off], n);
+		off += (uint32_t)n;
+
+		(void)snprintf(msg, sizeof(msg),
+			       "read-back is %u octets behind the "
+			       "acknowledged %u",
+			       (unsigned int)(off - t->readback_bytes),
+			       (unsigned int)off);
+		TEST_ASSERT_EQUAL_INT64((int64_t)off, res_i("next_off"));
+		TEST_ASSERT_EQUAL_UINT32_MESSAGE(off, t->readback_bytes, msg);
+	}
+
+	/* Nothing was left for fw.end to catch up on. */
+	fw_end(sid);
+	TEST_ASSERT_TRUE(res_b("ok"));
+	TEST_ASSERT_EQUAL_UINT32(IMG_LEN, t->readback_bytes);
+	assert_ledger("read-back keeps up");
+}
+
+/* ========================================================================= */
+/* 10. the shipped port conforms to the contract the shims above describe     */
 /* ========================================================================= */
 
 #define GLUE_SRC "zephyr/console/fwupd_glue.c"
@@ -2890,6 +3195,48 @@ static void test_the_glue_clamps_chunk_max_to_the_narrower_target(void)
 		"match, then fix this scan");
 }
 
+/**
+ * The shipped glue still gives the read-back to the STM32 image, and only to it.
+ *
+ * Section 9 arms `t_readback` on a fake, which proves core/fwupd does the check
+ * when a target offers one — it cannot see whether any target on the board
+ * actually does. An ops table that lost `.readback` would leave this file green
+ * and FMT §9.2 describing a check the device no longer performs, which is the
+ * exact defect that motivated the callback.
+ *
+ * The second half is as load-bearing as the first. The GNSS loader and the
+ * FE-5680A expose no read path; wiring a `readback` to either would mean
+ * inventing one, and core would then fail every peripheral session on a
+ * callback that cannot succeed. `.readback` appearing exactly once inside
+ * sts_fwupd_init() is what says all four vtables still agree with that.
+ */
+static void test_the_glue_gives_the_read_back_to_the_stm32_image_alone(void)
+{
+	glue_span_t init = glue_fn_body("int sts_fwupd_init(");
+	glue_span_t rb = glue_fn_body("static int stm_readback(");
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&init, ".readback = stm_readback,"),
+		"fwupd_glue.c's STM32 vtable no longer carries "
+		"`.readback = stm_readback`, so the board has stopped reading "
+		"the staged image back out of flash — while FMT §9.2 and "
+		"section 9 of this file both say it does. Restore the wiring, "
+		"do not delete this scan");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&init, ".readback ="),
+		"exactly one target in fwupd_glue.c may carry a `readback`: the "
+		"STM32 image is the only component on this board with a read "
+		"path. A GNSS or Rb vtable that gained one would fail every "
+		"session on that component with a target error");
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&rb, "img->staging_read(img->ctx, off, out, len)"),
+		"stm_readback() no longer reads through "
+		"port_image_t::staging_read — the same call core/mcp's "
+		"verify_hash() makes on the same slot. A second reader written "
+		"for this path is a second thing to get wrong");
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -2948,9 +3295,16 @@ int main(void)
 	RUN_TEST(test_an_unwired_port_answers_notsup_on_every_method);
 	RUN_TEST(test_a_wired_port_never_answers_notsup);
 
+	RUN_TEST(test_the_staged_image_is_read_back_out_of_the_component);
+	RUN_TEST(test_flash_that_took_different_bytes_than_the_wire_fails);
+	RUN_TEST(test_a_target_without_a_read_back_op_is_unchanged);
+	RUN_TEST(test_a_component_that_will_not_read_back_is_a_target_error);
+	RUN_TEST(test_the_read_back_keeps_up_with_the_transfer);
+
 	RUN_TEST(test_the_glue_probes_the_board_once_per_walk_too);
 	RUN_TEST(test_the_glue_reads_done_before_the_write_it_compares_it_with);
 	RUN_TEST(test_the_glue_clamps_chunk_max_to_the_narrower_target);
+	RUN_TEST(test_the_glue_gives_the_read_back_to_the_stm32_image_alone);
 
 	return UNITY_END();
 }
