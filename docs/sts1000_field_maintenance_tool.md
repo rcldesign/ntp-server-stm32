@@ -448,6 +448,23 @@ never bypass them:
    `staging_size` never collides with the swap metadata. Then reboot → test boot →
    firmware self-confirms after its health gate, else MCUboot reverts.
 
+   **The erase is incremental, and it is the device's job.** Programming internal flash
+   does not blank it, so slot 1 has to be erased before an image can be written into it —
+   and a slot that already holds the previously staged image is the normal case, not the
+   exception. The device therefore pushes an erase window **one 8 KiB sector ahead of the
+   write frontier** as chunks arrive: `fw.begin` blanks the first sector so the first chunk
+   does not wait for one, and every later chunk costs at most one further sector erase. The
+   tool sends nothing extra and sees nothing extra — this is stated because the *cost* is
+   visible in the pacing, and because both of the alternatives are wrong. Blanking the
+   whole 880 KiB slot inside `fw.begin` would hold the maintenance engine for a hundred-odd
+   sector erases in one uninterruptible stretch, against the ~1.5 s the override dead-man
+   (§5.4) has to spare; blanking nothing makes every `fw.data` after the first update
+   attempt fail at the flash controller, which refuses to program a quad-word that is not
+   blank. The window is hard-clamped to `staging_size` for the same reason that ceiling
+   exists at all: immediately above it are the MCUboot trailer and the swap-using-move free
+   sector, and blanking either produces an image that uploads, verifies, marks pending, and
+   is then silently declined on every subsequent boot.
+
    **Two hashes, and they answer different questions.** A *streaming* SHA-256 over the
    octets as they arrive proves the transport delivered the operator's image. It says
    nothing about whether flash kept them — a write that returns success onto a worn

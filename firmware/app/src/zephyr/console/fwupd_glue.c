@@ -194,8 +194,18 @@ static struct {
 	rb_ctx_t rb;
 	ubx_fwupd_t ubx;
 	struct k_mutex lock;
-	/* STM32 staging cursor, so transfer() can be offset-driven. */
+	/*
+	 * The STM32 staging erase window. See stm_ensure_erased().
+	 *
+	 * `stm_erased_to` is the cursor: slot 1 is blank below it and unknown
+	 * above. `stm_erase_gran` and `stm_erase_ceiling` are sampled once, by
+	 * stm_prepare(), so a chunk costs one comparison rather than two port
+	 * calls. All three belong to g.lock like everything else in here, and
+	 * are only ever touched from the STM32 target's ops.
+	 */
 	uint32_t stm_erased_to;
+	uint32_t stm_erase_gran;
+	uint32_t stm_erase_ceiling;
 	/*
 	 * The inventory snapshot the paged MP reply walks.
 	 *
@@ -257,9 +267,71 @@ static int stm_query(void *user, char *out, size_t cap)
 	return 0;
 }
 
+/**
+ * Blank slot 1 up to one granule past @p need_end, and no further.
+ *
+ * NOTHING under port_image_t::staging_write() erases. sts_dfu.c's write path is
+ * a write-block aligner over flash_area_write(); its only erases are the
+ * trailer page that mark_pending()/request_revert() blank. So the staging erase
+ * is this seam's job, and core/mcp's FW_* path has always done it here too
+ * (mcp_dfu.c ensure_erased(), same port, same window, same look-ahead). Skipping
+ * it does not corrupt anything — the STM32H5 flash controller raises a
+ * programming error on a non-blank quad-word, so the write fails at the first
+ * chunk — but it makes the MP `fw.*` path work exactly once per board, on a slot
+ * that has never been staged.
+ *
+ * WINDOW SIZE, since this runs on the console RX thread inside the Maintenance
+ * Protocol's engine lock, which sts_console.c's dead-man BUILD_ASSERT budgets —
+ * the same call path as the read-back in fwupd.c, and the same budget:
+ *
+ *   one granule of look-ahead means AT MOST ONE 8 KiB sector erase per
+ *   fwupd_data(), because stm_chunk_max() caps a chunk at 1024 octets — an
+ *   eighth of a sector — and the cursor already stands a granule beyond the
+ *   previous chunk. sts_fwupd_erase_target() carries the general bound;
+ *
+ *   an H5 sector erase is a few milliseconds, so a `fw.data` call costs that
+ *   plus the 1024-octet program and the 1024-octet read-back it already had.
+ *   Against STS_MP_TICK_LOCK_MS/STS_MP_TICK_MISS_MAX, which give the override
+ *   dead-man roughly 1.5 s of engine-lock hold before its revert deadline is at
+ *   risk, that is two orders of magnitude of margin;
+ *
+ *   the alternative — blanking the whole 896 KiB slot at prepare() — is 110
+ *   sector erases inside a single `fw.begin`, i.e. hundreds of milliseconds to
+ *   seconds in one uninterruptible hold. That is what this window exists to
+ *   avoid, and stm_prepare() pays only the FIRST sector so the first chunk does
+ *   not have to.
+ *
+ * The cursor is also what makes a rewind cheap and safe: a retransmit, or a
+ * session restarted at the same size, computes a target at or below where the
+ * cursor already stands and erases nothing, so accepted data is never blanked
+ * out from under the tool.
+ *
+ * Caller holds g.lock (every entry point in this file does).
+ */
+static int stm_ensure_erased(const port_image_t *img, uint32_t need_end)
+{
+	uint32_t target = sts_fwupd_erase_target(need_end, g.stm_erase_gran,
+						 g.stm_erase_ceiling);
+	int rc;
+
+	if (target <= g.stm_erased_to) {
+		return 0;
+	}
+	rc = img->staging_erase(img->ctx, g.stm_erased_to,
+				target - g.stm_erased_to);
+	if (rc != 0) {
+		LOG_ERR("stm fw: staging erase [0x%x, 0x%x) failed: %d",
+			(unsigned int)g.stm_erased_to, (unsigned int)target, rc);
+		return rc;
+	}
+	g.stm_erased_to = target;
+	return 0;
+}
+
 static int stm_prepare(void *user, uint32_t size)
 {
 	const port_image_t *img = sts_dfu_port();
+	uint32_t cap;
 
 	ARG_UNUSED(user);
 
@@ -267,27 +339,62 @@ static int stm_prepare(void *user, uint32_t size)
 	    (img->staging_size == NULL)) {
 		return -ENODEV;
 	}
-	if (size > img->staging_size(img->ctx)) {
+	/*
+	 * A zero granularity would make every erase length a non-multiple and
+	 * sts_dfu.c would refuse all of them. It cannot happen — sts_dfu.c falls
+	 * back to a fixed page size when the driver cannot describe the slot —
+	 * but the window arithmetic below is only meaningful with a real one, so
+	 * it is stated as a precondition rather than assumed.
+	 */
+	g.stm_erase_gran = sts_dfu_erase_granularity();
+	if (g.stm_erase_gran == 0U) {
+		return -ENODEV;
+	}
+	cap = img->staging_size(img->ctx);
+	if (size > cap) {
 		return -ENOSPC;
 	}
+
 	/*
-	 * Erase lazily, in transfer(): erasing 896 KB up front blocks this thread
-	 * for seconds and the flash layer erases per-sector on write anyway. The
-	 * cursor stops a rewind from re-erasing a sector that already holds data.
+	 * Erase incrementally, in transfer(), one granule ahead of the write —
+	 * see stm_ensure_erased() for why the window is that size and what it
+	 * costs. The ceiling is fixed here because neither the image size nor the
+	 * slot capacity can change while a session is open.
 	 */
+	g.stm_erase_ceiling = sts_fwupd_erase_ceiling(size, cap,
+						      g.stm_erase_gran);
 	g.stm_erased_to = 0U;
-	return 0;
+
+	/*
+	 * Clear the first window now, so the first chunk does not arrive to find
+	 * an unerased sector — exactly what core/mcp's FW_BEGIN does, and the
+	 * reason the per-chunk worst case is one sector rather than two.
+	 */
+	return stm_ensure_erased(img, 0U);
 }
 
 static int stm_transfer(void *user, uint32_t off, const uint8_t *data, size_t len,
 			bool last)
 {
 	const port_image_t *img = sts_dfu_port();
+	int rc;
 
 	ARG_UNUSED(user);
 
-	if ((img == NULL) || (img->staging_write == NULL)) {
+	if ((img == NULL) || (img->staging_write == NULL) ||
+	    (img->staging_erase == NULL)) {
 		return -ENODEV;
+	}
+	/*
+	 * Ahead of the write, never after it: staging_write() programs, and a
+	 * program into flash this seam has not blanked is a PGSERR on the H5.
+	 * core/fwupd guarantees `off` is the frontier and `off + len` is within
+	 * the declared size, so the sum cannot overflow and cannot exceed the
+	 * ceiling stm_prepare() fixed.
+	 */
+	rc = stm_ensure_erased(img, off + (uint32_t)len);
+	if (rc != 0) {
+		return rc;
 	}
 	return img->staging_write(img->ctx, off, data, len, last);
 }

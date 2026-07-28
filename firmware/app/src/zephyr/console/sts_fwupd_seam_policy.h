@@ -10,7 +10,7 @@
  * reason: every way these four decisions can be wrong is silent at runtime.
  *
  * fwupd_glue.c owns the wires (the ops tables, the mutex, the MP port). This
- * header owns the four judgements those wires are steered by:
+ * header owns the five judgements those wires are steered by:
  *
  *   1. WHAT A TRANSMIT RETURN MEANS. core/fwupd's ubx_fwupd_ops_t::tx is
  *      specified "0 on success"; the platform sink it is bound to,
@@ -46,8 +46,22 @@
  *      finish() -> restore(), which is an internal-flash trailer write for the
  *      STM32 target and 20 ms of k_msleep for the GNSS one.
  *
- * None of the four produces a crash, a log line or a failing request when it is
- * wrong, which is why all four are here as pure functions with one call site
+ *   5. HOW FAR AHEAD THE STAGING SLOT IS ERASED. The MP `fw.*` path writes the
+ *      STM32 image through port_image_t::staging_write(), and NOTHING under that
+ *      call erases — sts_dfu.c programs, it does not blank. So the erase is the
+ *      seam's job, and it has exactly two ways to be wrong. Too little: a write
+ *      lands in flash that still holds the last staged image, which on the H5 is
+ *      a programming error at the first chunk and makes the documented primary
+ *      update path work exactly once per board. Too much: erasing the whole
+ *      896 KB slot in one call holds the maintenance engine lock for seconds and
+ *      threatens the override dead-man's revert deadline (decision 4), and
+ *      erasing past staging_size() destroys the MCUboot trailer and move sector
+ *      that sts_stage_geom.h reserves. The window below is the one shape that is
+ *      neither: one erase granule of look-ahead per chunk, hard-clamped to the
+ *      usable region.
+ *
+ * None of the five produces a crash, a log line or a failing request when it is
+ * wrong, which is why all five are here as pure functions with one call site
  * each, pinned by tests/host/test_fwupd_seam_policy.c.
  */
 
@@ -57,6 +71,7 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -265,6 +280,120 @@ static inline const char *sts_fwupd_query_act_name(sts_fwupd_query_act_t a)
 	((((unsigned int)(misses) + 1U) *                                     \
 	  ((unsigned int)(period_ms) + (unsigned int)(lock_ms))) +            \
 	 (unsigned int)(work_ms))
+
+/* ===================================================================== *
+ *  5. the staging erase window
+ * ===================================================================== */
+
+/**
+ * Round @p v up to a multiple of @p gran, saturating rather than wrapping.
+ *
+ * The saturation matters: this is fed to an erase length, and a wrapped value
+ * would turn "erase everything above the frontier" into "erase from the
+ * frontier back to zero". The saturated result is clamped by the caller against
+ * the usable ceiling, so UINT32_MAX is always narrowed to something legal.
+ */
+static inline uint32_t sts_fwupd_align_up(uint32_t v, uint32_t gran)
+{
+	uint32_t r;
+
+	if (gran <= 1U) {
+		return v;
+	}
+	r = v % gran;
+	if (r == 0U) {
+		return v;
+	}
+	if (v > (UINT32_MAX - (gran - r))) {
+		return UINT32_MAX;
+	}
+	return v + (gran - r);
+}
+
+/**
+ * Highest staging offset this session's erase may ever reach.
+ *
+ * Two ceilings meet here and the LOWER wins:
+ *
+ *   the image itself, rounded up to a whole granule. There is no reason to
+ *   blank sectors the transfer will never write, and on a 901120 B slot
+ *   carrying a 740 KB image that is ~160 KB of erase nobody pays for;
+ *
+ *   port_image_t::staging_size(), which is sts_staging_usable() — the slot
+ *   MINUS the MCUboot trailer region and the swap-using-move free sector
+ *   (sts_stage_geom.h). Erasing into either is not a wasted erase, it is
+ *   destroying the metadata that decides whether the next boot swaps at all.
+ *
+ * @param image_size   Octets the session declared; must be <= @p staging_cap,
+ *                     which the caller has already enforced (-ENOSPC).
+ * @param staging_cap  port_image_t::staging_size().
+ * @param gran         Flash erase granularity, in octets.
+ *
+ * @return The ceiling, in octets. Never above @p staging_cap, and never below
+ *         @p image_size — so a clamp against it can not fall short of a chunk
+ *         the transfer is entitled to write.
+ *
+ * The result is a granule multiple whenever @p staging_cap is, which
+ * sts_staging_usable() guarantees by construction (it returns a whole number of
+ * sectors). That is the SAME invariant core/mcp's ensure_erased() already leans
+ * on, on the same port, and it has to stay one invariant rather than two:
+ * port_image_t::staging_erase() refuses an offset or length that is not a
+ * granule multiple, so a geometry that broke it would fail both paths loudly at
+ * their first erase rather than corrupting anything.
+ */
+static inline uint32_t sts_fwupd_erase_ceiling(uint32_t image_size,
+					       uint32_t staging_cap,
+					       uint32_t gran)
+{
+	uint32_t ceiling = sts_fwupd_align_up(image_size, gran);
+
+	if (ceiling > staging_cap) {
+		ceiling = staging_cap;
+	}
+	return ceiling;
+}
+
+/**
+ * Where the erase cursor must stand before @p need_end may be programmed.
+ *
+ * ONE granule of look-ahead, which is the whole shape of decision 5. Not zero:
+ * a chunk that begins a fresh sector would then wait for that sector's erase
+ * with the write already in hand, and the transfer would stall on every sector
+ * boundary instead of being one erase ahead of itself. Not the whole slot: on
+ * this board that is 110 sectors in one call, and the maintenance engine lock is
+ * held across it (decision 4).
+ *
+ * The bound that falls out is the number worth writing down, because it is what
+ * makes the per-call cost arguable. With a chunk ceiling of at most one granule
+ * — 1024 octets against 8192 on this board — successive calls move @p need_end
+ * by at most a granule, and the cursor is already a granule past the previous
+ * one, so each call erases AT MOST ONE granule. In general it is
+ * `ceil(chunk / gran) + 1` granules, which stays small for any real geometry
+ * because erase time scales with sector size.
+ *
+ * @param need_end  One past the last octet this chunk will program.
+ * @param gran      Flash erase granularity, in octets.
+ * @param ceiling   sts_fwupd_erase_ceiling() for this session.
+ *
+ * @return The cursor target. The caller erases `[cursor, target)` and does
+ *         nothing when @p target is at or below the cursor it already has —
+ *         which is what stops a retransmit, or a session restarted at the same
+ *         size, from re-erasing a sector that already holds accepted data.
+ */
+static inline uint32_t sts_fwupd_erase_target(uint32_t need_end, uint32_t gran,
+					      uint32_t ceiling)
+{
+	uint32_t target;
+
+	if (need_end > (UINT32_MAX - gran)) {
+		return ceiling;
+	}
+	target = sts_fwupd_align_up(need_end + gran, gran);
+	if (target > ceiling) {
+		target = ceiling;
+	}
+	return target;
+}
 
 #ifdef __cplusplus
 }

@@ -53,6 +53,15 @@
  *   with a target whose store is damaged as the chunk lands, which is the only
  *   arrangement where the wire is clean and the component is not.
  *
+ *   THE STAGING ERASE. The fake targets are not buffers, they are flash: an
+ *   octet is either blank or programmed, and a program into a programmed one
+ *   FAILS, exactly as the STM32H5 controller refuses a non-blank quad-word. That
+ *   single rule is what makes the erase testable at all — without it every
+ *   transfer succeeds whether or not anything was blanked, which is precisely
+ *   why the MP `fw.*` path shipped for a while with a prepare() that set an
+ *   erase cursor nothing ever read. Section 10 drives it, including the case
+ *   that hid the defect: a factory-fresh slot works exactly once.
+ *
  * Every reply is parsed back as JSON and asserted on the wire contract, exactly
  * as test_mp_rpc.c does — nothing reaches into mp_ctx_t or fwupd_ctx_t to
  * shortcut a transition.
@@ -66,6 +75,16 @@
 
 #include "fwupd/fwupd.h"
 #include "mp/mp.h"
+/*
+ * The shipped erase-window arithmetic, not a copy of it.
+ *
+ * fwupd_glue.c's stm_ensure_erased() is a Zephyr translation unit this suite
+ * cannot link, but the DECISION it is steered by is a pure function in a
+ * Zephyr-free header for exactly that reason (sts_fwupd_seam_policy.h,
+ * decision 5). The flash-backed target below calls it, so section 10 drives the
+ * real window and a change to it fails here rather than on a board.
+ */
+#include "zephyr/console/sts_fwupd_seam_policy.h"
 
 #include "host_sha256.h"
 
@@ -87,9 +106,48 @@
 #define IMG_LEN 1200U
 #define IMG_CAP 4096U
 
+/*
+ * The fake medium's geometry, scaled down from slot 1's.
+ *
+ * The granule equals the transfer's chunk size on purpose: that is the board's
+ * relationship in miniature (1024-octet chunks into 8192-octet sectors is the
+ * same "a chunk never spans more than one boundary" premise), and it makes the
+ * per-chunk erase count something a test can state exactly rather than
+ * approximately. The generalisation to other geometries is swept in
+ * test_fwupd_seam_policy.c, which owns the arithmetic.
+ */
+#define FAKE_GRAN 512U
+/** What an erased octet reads back as. */
+#define FAKE_BLANK 0xFFU
+
 /* ========================================================================= */
 /* Fake targets, and the restore ledger                                      */
 /* ========================================================================= */
+
+/** Who blanks the medium, and when. */
+typedef enum {
+	/**
+	 * The whole declared region, at prepare(). The u-blox safeboot loader's
+	 * shape: ubx_fwupd_begin() sends UBX_FWUPD_ID_ERASE and waits for the
+	 * ACK before the first write frame. The default, because it is what
+	 * every target in this file other than the STM32 image does.
+	 */
+	FAKE_ERASE_AT_PREPARE = 0,
+	/**
+	 * One granule ahead of the write, from transfer(). The STM32 staging
+	 * slot's shape: fwupd_glue.c stm_transfer() -> stm_ensure_erased(),
+	 * paced so no single call holds the maintenance engine lock for a
+	 * whole-slot erase.
+	 */
+	FAKE_ERASE_AHEAD,
+	/**
+	 * Nothing erases. THE DEFECT, kept reachable on purpose: it is the
+	 * baseline the tests in section 10 are measured against, and without a
+	 * target that can be put in this state "the erase is what makes the
+	 * transfer succeed" is an assertion nobody has ever seen fail.
+	 */
+	FAKE_ERASE_NONE,
+} fake_erase_t;
 
 typedef struct {
 	uint8_t comp;
@@ -134,7 +192,29 @@ typedef struct {
 	char version_after[FWUPD_VER_LEN];
 
 	uint32_t written;
+
+	/*
+	 * ---------------------------------------------------------------
+	 * The medium
+	 * ---------------------------------------------------------------
+	 *
+	 * `image[]` is flash, not a buffer. `blank[]` says which octets are
+	 * erased; medium_write() refuses to program one that is not, which is
+	 * what an STM32H5 does to a re-programmed quad-word (PGSERR) and what
+	 * makes a missing erase a failure here instead of a silent pass.
+	 */
+	uint8_t erase_mode;      /**< fake_erase_t */
+	uint32_t erase_gran;     /**< the medium's erase granularity */
+	uint32_t staging_cap;    /**< what port_image_t::staging_size() reports */
+	uint32_t erase_ceiling;  /**< sts_fwupd_erase_ceiling(), fixed by prepare */
+	uint32_t erased_to;      /**< the seam's cursor */
+	uint32_t erase_high;     /**< highest offset any erase has reached */
+	unsigned int erase_n;
+	int erase_rc;
+	unsigned int erase_fail_at; /* 1-based; 0 = never fail */
+
 	uint8_t image[IMG_CAP];
+	bool blank[IMG_CAP];
 } fake_t;
 
 static fake_t g_tgt[FWUPD_COMP__COUNT];
@@ -158,15 +238,137 @@ static int t_query(void *user, char *out, size_t cap)
 	return 0;
 }
 
+/* --------------------------------------------------------------- the medium */
+
+/**
+ * Leave the medium holding a previously staged image: nothing is blank.
+ *
+ * THE default state of a board that has ever been updated, and the state every
+ * test in this file starts from. A fixture that started blank would let a
+ * missing erase pass every assertion in the suite — which is exactly how the
+ * defect in section 10 survived review.
+ */
+static void medium_dirty(fake_t *t)
+{
+	size_t i;
+
+	for (i = 0U; i < IMG_CAP; i++) {
+		t->image[i] = (uint8_t)(0xA5U ^ (uint8_t)i);
+		t->blank[i] = false;
+	}
+	t->erase_high = 0U;
+	t->erased_to = 0U;
+}
+
+/**
+ * port_image_t::staging_erase(), preconditions and all.
+ *
+ * sts_dfu.c's dfu_staging_erase() refuses an offset or length that is not an
+ * erase-granule multiple, and refuses anything past staging_size(). Both are
+ * asserted rather than tolerated: a seam that violated either would be refused
+ * on the board, and the second one is the dangerous direction — past
+ * staging_size() lie the MCUboot trailer and the swap-using-move free sector.
+ */
+static int medium_erase(fake_t *t, uint32_t off, uint32_t len)
+{
+	uint32_t i;
+
+	t->erase_n++;
+	if ((t->erase_fail_at != 0U) && (t->erase_n == t->erase_fail_at)) {
+		return (t->erase_rc != 0) ? t->erase_rc : -EIO;
+	}
+
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, off % t->erase_gran,
+		"staging_erase() was given an offset that is not an erase-granule "
+		"multiple; sts_dfu.c refuses those");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, len % t->erase_gran,
+		"staging_erase() was given a length that is not an erase-granule "
+		"multiple; sts_dfu.c refuses those");
+	TEST_ASSERT_TRUE_MESSAGE(
+		((uint64_t)off + (uint64_t)len) <= (uint64_t)t->staging_cap,
+		"the erase ran past staging_size(), into the MCUboot trailer and "
+		"the swap-using-move free sector");
+
+	for (i = off; i < (off + len); i++) {
+		t->image[i] = FAKE_BLANK;
+		t->blank[i] = true;
+	}
+	if ((off + len) > t->erase_high) {
+		t->erase_high = off + len;
+	}
+	return 0;
+}
+
+/**
+ * A program. Only blank octets take one.
+ *
+ * The whole reason the medium exists. On the STM32H5 a program into a quad-word
+ * that has already been written raises a programming error, so a transfer into
+ * an un-erased slot fails loudly rather than corrupting the image — which is
+ * also why the missing erase was a non-functional update path and not a data
+ * hazard.
+ */
+static int medium_write(fake_t *t, uint32_t off, const uint8_t *data, size_t len)
+{
+	size_t i;
+
+	for (i = 0U; i < len; i++) {
+		if (!t->blank[off + i]) {
+			return -EIO;
+		}
+	}
+	for (i = 0U; i < len; i++) {
+		t->image[off + i] = data[i];
+		t->blank[off + i] = false;
+	}
+	return 0;
+}
+
 static int t_prepare(void *user, uint32_t image_size)
 {
 	fake_t *t = (fake_t *)user;
+	int rc;
 
-	(void)image_size;
 	t->prepare_n++;
 	if (t->prepare_rc != 0) {
 		return t->prepare_rc;
 	}
+	if (image_size > t->staging_cap) {
+		return -ENOSPC;
+	}
+
+	/* Fixed for the session, as fwupd_glue.c's stm_prepare() fixes it: the
+	 * image size and the slot capacity cannot change while one is open. */
+	t->erase_ceiling = sts_fwupd_erase_ceiling(image_size, t->staging_cap,
+						   t->erase_gran);
+	t->erased_to = 0U;
+
+	if (t->erase_mode == (uint8_t)FAKE_ERASE_AT_PREPARE) {
+		rc = medium_erase(t, 0U, t->erase_ceiling);
+		if (rc != 0) {
+			return rc;
+		}
+		t->erased_to = t->erase_ceiling;
+	} else if (t->erase_mode == (uint8_t)FAKE_ERASE_AHEAD) {
+		/* stm_prepare()'s pre-clear of the first window, so the first
+		 * chunk does not arrive to find an unerased sector. */
+		uint32_t target = sts_fwupd_erase_target(0U, t->erase_gran,
+							 t->erase_ceiling);
+
+		if (target > 0U) {
+			rc = medium_erase(t, 0U, target);
+			if (rc != 0) {
+				return rc;
+			}
+			t->erased_to = target;
+		}
+	} else {
+		/* FAKE_ERASE_NONE: the cursor is set and never used, which is
+		 * precisely what stm_prepare() did before section 10 existed. */
+	}
+
 	t->prepare_ok_n++;
 	g_prepares_ok++;
 	t->written = 0U;
@@ -177,6 +379,7 @@ static int t_transfer(void *user, uint32_t off, const uint8_t *data, size_t len,
 		      bool last)
 {
 	fake_t *t = (fake_t *)user;
+	int rc;
 
 	(void)last;
 	t->transfer_n++;
@@ -185,7 +388,31 @@ static int t_transfer(void *user, uint32_t off, const uint8_t *data, size_t len,
 		return (t->transfer_rc != 0) ? t->transfer_rc : -EIO;
 	}
 	TEST_ASSERT_TRUE(((size_t)off + len) <= IMG_CAP);
-	(void)memcpy(&t->image[off], data, len);
+
+	if (t->erase_mode == (uint8_t)FAKE_ERASE_AHEAD) {
+		/*
+		 * fwupd_glue.c stm_transfer() -> stm_ensure_erased(), through
+		 * the shipped window arithmetic. Ahead of the write, never
+		 * after it.
+		 */
+		uint32_t target = sts_fwupd_erase_target(off + (uint32_t)len,
+							 t->erase_gran,
+							 t->erase_ceiling);
+
+		if (target > t->erased_to) {
+			rc = medium_erase(t, t->erased_to,
+					  target - t->erased_to);
+			if (rc != 0) {
+				return rc;
+			}
+			t->erased_to = target;
+		}
+	}
+
+	rc = medium_write(t, off, data, len);
+	if (rc != 0) {
+		return rc;
+	}
 	if ((t->corrupt_at >= 0) && ((uint32_t)t->corrupt_at >= off) &&
 	    ((uint32_t)t->corrupt_at < (off + (uint32_t)len))) {
 		/* The cell did not take. Nothing upstream can tell. */
@@ -319,9 +546,9 @@ static fwupd_target_ops_t ops_readonly(fake_t *t)
  * k_mutex, k_uptime_get(), the MCUboot image API — so it cannot be linked into
  * a host suite, and three of its decisions are therefore re-implemented here.
  * A shim that drifted from the shipped one would leave this whole file testing
- * an implementation that does not exist. Section 9 closes that: it reads
- * fwupd_glue.c and asserts its CONFORMANCE to the same three decisions, so the
- * pair — contract here, conformance there — covers the seam from both sides.
+ * an implementation that does not exist. Section 11 closes that: it reads
+ * fwupd_glue.c and asserts its CONFORMANCE to the same decisions, so the pair —
+ * contract here, conformance there — covers the seam from both sides.
  *
  * What neither pins is the locking. fw_lock()/fw_unlock() wrap every shipped
  * mpfw_* body, and the reason mpfw_data() decides `duplicate` at the seam at
@@ -615,7 +842,21 @@ static void arm_targets(void)
 		g_tgt[i].comp = (uint8_t)i;
 		/* setUp() zeroes the array, and 0 is a valid offset. */
 		g_tgt[i].corrupt_at = -1;
+		g_tgt[i].erase_gran = FAKE_GRAN;
+		g_tgt[i].staging_cap = IMG_CAP;
+		/* The memset already picked FAKE_ERASE_AT_PREPARE; stated so the
+		 * default is a decision rather than a value of zero. */
+		g_tgt[i].erase_mode = (uint8_t)FAKE_ERASE_AT_PREPARE;
+		medium_dirty(&g_tgt[i]);
 	}
+	/*
+	 * The STM32 image is the one target whose transfer() erases, because it
+	 * is the one writing into a slot nothing else blanks (fwupd_glue.c
+	 * stm_ensure_erased(); sts_dfu.c's write path programs and does not
+	 * erase). Default rather than opt-in: that is the shipped wiring, so
+	 * every STM32 test in this file runs against the real window.
+	 */
+	g_tgt[FWUPD_COMP_STM32_APP].erase_mode = (uint8_t)FAKE_ERASE_AHEAD;
 	(void)snprintf(g_tgt[FWUPD_COMP_STM32_APP].version,
 		       sizeof(g_tgt[0].version), "1.2.3");
 	(void)snprintf(g_tgt[FWUPD_COMP_STM32_APP].version_after,
@@ -2930,7 +3171,385 @@ static void test_the_read_back_keeps_up_with_the_transfer(void)
 }
 
 /* ========================================================================= */
-/* 10. the shipped port conforms to the contract the shims above describe     */
+/* 10. the staging erase                                                      */
+/* ========================================================================= */
+
+/*
+ * Nothing under port_image_t::staging_write() erases. sts_dfu.c is a write-block
+ * aligner over flash_area_write(); its only erases are the trailer page that
+ * mark_pending() and request_revert() blank. So the STM32 target's transfer()
+ * has to do it, and for a while it did not — stm_prepare() set an erase cursor,
+ * documented erasing "lazily, in transfer()", and stm_transfer() called nothing
+ * but staging_write(). The cursor had exactly two references in the file: the
+ * declaration and that assignment.
+ *
+ * It failed loudly rather than silently (the H5 refuses to program a non-blank
+ * quad-word) and it failed only on a slot that had been staged before, which
+ * together is why nobody saw it: a factory-fresh board worked exactly once.
+ * test_a_factory_fresh_slot_hides_a_missing_erase() is that case, kept as a test
+ * so the reason it hid stays visible.
+ *
+ * Every test below runs against a medium that starts DIRTY — the steady state of
+ * any board that has ever been updated — and against the shipped window
+ * arithmetic through sts_fwupd_erase_target().
+ */
+
+/** No erase in this session reached past the ceiling prepare() fixed. */
+static void assert_erase_stayed_inside(const fake_t *t, const char *where)
+{
+	char msg[192];
+
+	(void)snprintf(msg, sizeof(msg),
+		       "%s: the erase reached %u, past the %u ceiling this "
+		       "session fixed — the MCUboot trailer and the "
+		       "swap-using-move free sector live above it",
+		       where, (unsigned int)t->erase_high,
+		       (unsigned int)t->erase_ceiling);
+	TEST_ASSERT_TRUE_MESSAGE(t->erase_high <= t->erase_ceiling, msg);
+	TEST_ASSERT_TRUE_MESSAGE(t->erase_ceiling <= t->staging_cap,
+				 "the ceiling itself is outside staging_size()");
+}
+
+/**
+ * The headline: a slot that still holds the last image takes a new one.
+ *
+ * Nothing about this session is unusual — it is the same walk as
+ * test_fw_data_walks_the_image_in_order() — except that the medium refuses a
+ * program into a cell it has not blanked, so the transfer can only succeed if
+ * the erase ran first.
+ */
+static void test_a_dirty_slot_is_erased_before_it_is_written(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+	size_t i;
+
+	/* The premise, asserted rather than assumed. */
+	for (i = 0U; i < IMG_LEN; i++) {
+		TEST_ASSERT_FALSE_MESSAGE(t->blank[i],
+					  "the fixture handed the transfer a "
+					  "blank slot, which tests nothing");
+	}
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_whole_image(sid);
+	fw_end(sid);
+
+	TEST_ASSERT_TRUE(res_b("ok"));
+	TEST_ASSERT_TRUE(prog_streq("state", "DONE"));
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(g_image, t->image, IMG_LEN);
+	TEST_ASSERT_TRUE_MESSAGE(t->erase_n > 0U,
+				 "the slot was written without ever being "
+				 "erased");
+	assert_erase_stayed_inside(t, "dirty slot");
+	assert_ledger("dirty slot erased");
+}
+
+/**
+ * THE baseline. Take the erase away and the identical session fails.
+ *
+ * Without this the test above proves only that the suite is green, not that the
+ * erase is what made it green — and that is the difference between a regression
+ * test and a decoration. The failure is at the FIRST chunk, at the target, and
+ * it ends the session: exactly what a board does.
+ */
+static void test_without_the_erase_the_same_transfer_fails(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+
+	t->erase_mode = (uint8_t)FAKE_ERASE_NONE;
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_chunk(sid, 0U, 512U);
+
+	TEST_ASSERT_EQUAL_INT64_MESSAGE(
+		MP_E_IO, err_code(),
+		"a write into an un-erased slot was accepted; the medium is not "
+		"modelling flash and section 10 proves nothing");
+	TEST_ASSERT_EQUAL_STRING("chunk", err_reason());
+	TEST_ASSERT_TRUE(err_data_streq("state", "FAILED"));
+	TEST_ASSERT_EQUAL_UINT(0U, t->erase_n);
+	TEST_ASSERT_EQUAL_UINT(0U, t->verify_n);
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, t->restore_n,
+		"prepare() succeeded, so restore() is owed on this exit too");
+	TEST_ASSERT_TRUE(t->last_restore_after_failure);
+	assert_ledger("no erase");
+}
+
+/**
+ * Why nobody noticed: on a slot that has never been staged it works.
+ *
+ * The same target, the same missing erase, a blank medium — and a complete,
+ * verified, successful update. One update. The second one is the test above.
+ */
+static void test_a_factory_fresh_slot_hides_a_missing_erase(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+
+	t->erase_mode = (uint8_t)FAKE_ERASE_NONE;
+	/* A slot as it leaves the factory: erased, never written. */
+	{
+		size_t i;
+
+		for (i = 0U; i < IMG_CAP; i++) {
+			t->image[i] = FAKE_BLANK;
+			t->blank[i] = true;
+		}
+	}
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_whole_image(sid);
+	fw_end(sid);
+
+	TEST_ASSERT_TRUE_MESSAGE(res_b("ok"),
+				 "a blank slot must not need an erase — this is "
+				 "the case that hid the defect, and it has to "
+				 "keep passing for the one above to mean "
+				 "anything");
+	TEST_ASSERT_EQUAL_UINT(0U, t->erase_n);
+	assert_ledger("factory-fresh slot");
+
+	/* And now it is dirty. The very next session is the one that fails. */
+	fw_revert(sid, (int)FWUPD_COMP_STM32_APP);
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_chunk(sid, 0U, 512U);
+	TEST_ASSERT_EQUAL_INT64_MESSAGE(
+		MP_E_IO, err_code(),
+		"the second update into the same slot must fail without an "
+		"erase; that is what makes this a one-shot path");
+	assert_ledger("second session on the same slot");
+}
+
+/**
+ * The erase is paced by the transfer, not taken in one hold at prepare().
+ *
+ * Both halves matter and they pull against each other. A prepare() that blanked
+ * the whole region would satisfy every other test in this section while holding
+ * the maintenance engine lock for a whole-slot erase — 110 sectors on the real
+ * board — which is what STS_MP_TICK_LOCK_MS/STS_MP_TICK_MISS_MAX give the
+ * override dead-man about 1.5 s of room for. A transfer() that erased nothing
+ * ahead would stall on every sector boundary with the write already in hand.
+ */
+static void test_the_erase_is_paced_by_the_transfer(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+	uint32_t off = 0U;
+	unsigned int seen;
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+
+	/* prepare() pays for exactly the first window, and no more. */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, t->erase_n,
+		"prepare() did not pre-clear exactly one window");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		FAKE_GRAN, t->erase_high,
+		"prepare() blanked more than the first granule — on the real "
+		"slot that is the difference between one sector erase and 110 "
+		"inside a single fw.begin");
+
+	while (off < IMG_LEN) {
+		size_t n = chunk_len(off, 512U);
+		uint32_t before_high = t->erase_high;
+		char msg[128];
+
+		seen = t->erase_n;
+		data_at(sid, off, &g_image[off], n);
+		off += (uint32_t)n;
+
+		(void)snprintf(msg, sizeof(msg),
+			       "one fw.data at off %u took %u erase calls",
+			       (unsigned int)(off - n),
+			       (unsigned int)(t->erase_n - seen));
+		TEST_ASSERT_TRUE_MESSAGE((t->erase_n - seen) <= 1U, msg);
+		(void)snprintf(msg, sizeof(msg),
+			       "one fw.data at off %u blanked %u octets, over "
+			       "the %u-octet granule",
+			       (unsigned int)(off - n),
+			       (unsigned int)(t->erase_high - before_high),
+			       (unsigned int)FAKE_GRAN);
+		TEST_ASSERT_TRUE_MESSAGE(
+			(t->erase_high - before_high) <= FAKE_GRAN, msg);
+
+		/* …and the octets just acknowledged really are in the blanked
+		 * region, which is the coverage half of the same claim. */
+		TEST_ASSERT_TRUE_MESSAGE(off <= t->erase_high,
+					 "a chunk was written past the erase "
+					 "cursor");
+	}
+
+	fw_end(sid);
+	TEST_ASSERT_TRUE(res_b("ok"));
+	assert_erase_stayed_inside(t, "paced erase");
+	assert_ledger("paced erase");
+}
+
+/**
+ * The erase stops at the usable ceiling, with the reserved region intact.
+ *
+ * `staging_cap` is squeezed to the image rounded up, so the look-ahead on the
+ * final chunks asks for a granule that does not exist and has to be clamped.
+ * Everything above the cap is a sentinel: on the board that region is the
+ * MCUboot trailer plus the swap-using-move free sector, and blanking either
+ * turns an upload that verifies and marks pending into an upgrade the
+ * bootloader silently declines on every subsequent boot.
+ */
+static void test_the_erase_stops_at_the_usable_ceiling(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+	const uint32_t cap = ((IMG_LEN + FAKE_GRAN - 1U) / FAKE_GRAN) * FAKE_GRAN;
+	size_t i;
+
+	t->staging_cap = cap;
+	/* A recognisable reserved region above the usable slot. */
+	for (i = cap; i < IMG_CAP; i++) {
+		t->image[i] = 0x5AU;
+		t->blank[i] = false;
+	}
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_whole_image(sid);
+	fw_end(sid);
+
+	TEST_ASSERT_TRUE(res_b("ok"));
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		cap, t->erase_ceiling,
+		"the ceiling did not clamp to staging_size()");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		cap, t->erase_high,
+		"the transfer did not blank the whole image region");
+	assert_erase_stayed_inside(t, "squeezed slot");
+
+	for (i = cap; i < IMG_CAP; i++) {
+		char msg[128];
+
+		(void)snprintf(msg, sizeof(msg),
+			       "octet %u of the reserved region was erased",
+			       (unsigned int)i);
+		TEST_ASSERT_EQUAL_HEX8_MESSAGE(0x5AU, t->image[i], msg);
+		TEST_ASSERT_FALSE_MESSAGE(t->blank[i], msg);
+	}
+	assert_ledger("erase ceiling");
+}
+
+/**
+ * An erase that fails mid-transfer ends the session and restores ONCE.
+ *
+ * The invariant this whole suite exists for, on the newest exit: the erase is
+ * the first thing a chunk does, so it is a new way for transfer() to fail, and
+ * an exit that skipped restore() would leave a component in whatever state
+ * prepare() put it in.
+ */
+static void test_an_erase_failure_mid_transfer_restores_exactly_once(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+
+	/* #1 is prepare()'s pre-clear; #2 is the first chunk's. */
+	t->erase_fail_at = 2U;
+	t->erase_rc = -EIO;
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	TEST_ASSERT_EQUAL_UINT(1U, t->erase_n);
+	TEST_ASSERT_EQUAL_UINT(1U, g_prepares_ok);
+
+	send_chunk(sid, 0U, 512U);
+	TEST_ASSERT_EQUAL_INT64(MP_E_IO, err_code());
+	TEST_ASSERT_EQUAL_STRING("chunk", err_reason());
+	TEST_ASSERT_EQUAL_UINT(2U, t->erase_n);
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, t->restore_n,
+		"an erase failure is a target error like any other, and restore "
+		"is owed for the prepare that succeeded");
+	TEST_ASSERT_TRUE(t->last_restore_after_failure);
+	TEST_ASSERT_EQUAL_UINT(0U, t->verify_n);
+	assert_ledger("erase failure mid-transfer");
+
+	/* Nothing was written: the erase runs before the program. */
+	TEST_ASSERT_EQUAL_UINT32(0U, t->written);
+
+	/* The session is over, exactly as a write failure leaves it. */
+	send_chunk(sid, 0U, 512U);
+	TEST_ASSERT_EQUAL_INT64(MP_E_STATE, err_code());
+	TEST_ASSERT_EQUAL_STRING("no transfer", err_reason());
+}
+
+/**
+ * An erase that fails at prepare() owes no restore.
+ *
+ * The other side of the same boundary: stm_prepare()'s pre-clear runs before
+ * core/fwupd records the prepare as successful, so a failure there is a failed
+ * prepare — and a failed prepare must not be handed a restore it never earned.
+ */
+static void test_an_erase_failure_at_prepare_owes_no_restore(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+
+	t->erase_fail_at = 1U;
+	t->erase_rc = -EIO;
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	TEST_ASSERT_EQUAL_INT64(MP_E_IO, err_code());
+	TEST_ASSERT_EQUAL_UINT(1U, t->prepare_n);
+	TEST_ASSERT_EQUAL_UINT(0U, t->prepare_ok_n);
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, t->restore_n,
+		"restore() ran for a prepare() whose erase never completed");
+	assert_ledger("erase failure at prepare");
+
+	/* And the orchestrator is usable again once the flash answers. */
+	t->erase_fail_at = 0U;
+	fw_revert(sid, (int)FWUPD_COMP_STM32_APP);
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_whole_image(sid);
+	fw_end(sid);
+	TEST_ASSERT_TRUE(res_b("ok"));
+	assert_ledger("recovered after an erase failure");
+}
+
+/**
+ * A restarted session re-erases what the abandoned one wrote.
+ *
+ * The rewind case, end to end: the cursor is per-session, so a second `fw.begin`
+ * blanks from zero again and the octets the first attempt programmed do not
+ * refuse the second attempt's writes.
+ */
+static void test_a_restarted_session_re_erases_the_slot(void)
+{
+	uint32_t sid = session();
+	fake_t *t = &g_tgt[FWUPD_COMP_STM32_APP];
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_chunk(sid, 0U, 512U);
+	fw_revert(sid, (int)FWUPD_COMP_STM32_APP);
+	TEST_ASSERT_TRUE(res_b("aborted"));
+	TEST_ASSERT_FALSE_MESSAGE(t->blank[0],
+				  "the abandoned attempt left nothing programmed, "
+				  "so the restart is not being tested");
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	TEST_ASSERT_TRUE_MESSAGE(
+		t->blank[0],
+		"the restarted session did not re-blank the octets the "
+		"abandoned one had programmed, so its first write would be "
+		"refused by the flash");
+	send_whole_image(sid);
+	fw_end(sid);
+
+	TEST_ASSERT_TRUE(res_b("ok"));
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(g_image, t->image, IMG_LEN);
+	assert_erase_stayed_inside(t, "restarted session");
+	assert_ledger("restarted session");
+}
+
+/* ========================================================================= */
+/* 11. the shipped port conforms to the contract the shims above describe     */
 /* ========================================================================= */
 
 #define GLUE_SRC "zephyr/console/fwupd_glue.c"
@@ -3237,6 +3856,95 @@ static void test_the_glue_gives_the_read_back_to_the_stm32_image_alone(void)
 		"for this path is a second thing to get wrong");
 }
 
+/**
+ * The shipped glue still erases, and still erases BEFORE it writes.
+ *
+ * Section 10 drives a flash-backed target through the same window arithmetic and
+ * proves that a transfer into a dirty slot needs the erase. What it cannot see
+ * is whether stm_transfer() calls it — and that is not a hypothetical gap, it is
+ * the defect this section was extended for: stm_prepare() zeroed an erase cursor
+ * and carried a comment saying transfer() erased lazily, stm_transfer() called
+ * nothing but staging_write(), and `g.stm_erased_to` had two references in the
+ * whole file, both writes. Every host suite was green throughout.
+ *
+ * The ORDER is asserted, not just the presence of both calls: an erase after the
+ * program blanks the octets it was supposed to make room for.
+ */
+static void test_the_glue_erases_ahead_of_every_staging_write(void)
+{
+	glue_span_t b = glue_fn_body("static int stm_transfer(");
+	const char *erase = "stm_ensure_erased(img, off + (uint32_t)len)";
+	const char *write = "img->staging_write(img->ctx, off, data, len, last)";
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, erase),
+		"fwupd_glue.c stm_transfer() no longer erases ahead of the "
+		"write. Nothing under port_image_t::staging_write() erases, so "
+		"the MP `fw.*` path now writes into whatever the last staged "
+		"image left behind — which the STM32H5 refuses, making the "
+		"update path documented in FMT §9.2 work exactly once per "
+		"board. Restore the call, do not delete this scan");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, write),
+		"fwupd_glue.c stm_transfer() no longer writes through "
+		"port_image_t::staging_write exactly once, so this scan cannot "
+		"order the erase against it. Fix the scan only after deciding "
+		"which of the two changed");
+	TEST_ASSERT_TRUE_MESSAGE(
+		offset_in(&b, erase) < offset_in(&b, write),
+		"fwupd_glue.c stm_transfer() now erases AFTER it programs, "
+		"which blanks the octets it was meant to make room for");
+}
+
+/**
+ * …and the window it erases is the seam policy's, clamped to the usable slot.
+ *
+ * Two claims, and both are load-bearing. stm_prepare() must fix the ceiling from
+ * sts_fwupd_erase_ceiling() — the clamp against port_image_t::staging_size() is
+ * the only thing keeping the erase out of the MCUboot trailer and the
+ * swap-using-move free sector that sts_stage_geom.h reserves. And
+ * stm_ensure_erased() must take its target from sts_fwupd_erase_target(), which
+ * is the function test_fwupd_seam_policy.c and section 10 both drive: a glue
+ * that open-coded its own arithmetic would leave both of them describing a
+ * window the board does not use.
+ */
+static void test_the_glue_takes_its_erase_window_from_the_seam_policy(void)
+{
+	glue_span_t prep = glue_fn_body("static int stm_prepare(");
+	glue_span_t ens = glue_fn_body("static int stm_ensure_erased(");
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&prep, "sts_fwupd_erase_ceiling(size, cap,"),
+		"fwupd_glue.c stm_prepare() no longer fixes the erase ceiling "
+		"from sts_fwupd_erase_ceiling(size, staging_size()). Without "
+		"that clamp the erase can reach the MCUboot trailer, and an "
+		"image that uploads and verifies is then silently declined by "
+		"swap_move() on every subsequent boot");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&prep, "stm_ensure_erased(img, 0U)"),
+		"fwupd_glue.c stm_prepare() no longer pre-clears the first "
+		"window, so the first chunk pays for two erases inside one "
+		"engine-lock hold instead of one");
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&ens, "sts_fwupd_erase_target(need_end,"),
+		"fwupd_glue.c stm_ensure_erased() no longer takes its target "
+		"from the seam policy, so test_fwupd_seam_policy.c and section "
+		"10 of this file are both testing arithmetic the board does not "
+		"run");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&ens, "if (target <= g.stm_erased_to) {"),
+		"fwupd_glue.c stm_ensure_erased() no longer short-circuits on "
+		"the cursor. Without it a restarted or rewound transfer "
+		"re-erases sectors that already hold accepted data, and every "
+		"chunk pays for an erase call it does not need");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&ens, "img->staging_erase(img->ctx, g.stm_erased_to,"),
+		"fwupd_glue.c stm_ensure_erased() no longer erases through "
+		"port_image_t::staging_erase from the cursor — the same port "
+		"call core/mcp's ensure_erased() makes on the same slot");
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -3301,10 +4009,21 @@ int main(void)
 	RUN_TEST(test_a_component_that_will_not_read_back_is_a_target_error);
 	RUN_TEST(test_the_read_back_keeps_up_with_the_transfer);
 
+	RUN_TEST(test_a_dirty_slot_is_erased_before_it_is_written);
+	RUN_TEST(test_without_the_erase_the_same_transfer_fails);
+	RUN_TEST(test_a_factory_fresh_slot_hides_a_missing_erase);
+	RUN_TEST(test_the_erase_is_paced_by_the_transfer);
+	RUN_TEST(test_the_erase_stops_at_the_usable_ceiling);
+	RUN_TEST(test_an_erase_failure_mid_transfer_restores_exactly_once);
+	RUN_TEST(test_an_erase_failure_at_prepare_owes_no_restore);
+	RUN_TEST(test_a_restarted_session_re_erases_the_slot);
+
 	RUN_TEST(test_the_glue_probes_the_board_once_per_walk_too);
 	RUN_TEST(test_the_glue_reads_done_before_the_write_it_compares_it_with);
 	RUN_TEST(test_the_glue_clamps_chunk_max_to_the_narrower_target);
 	RUN_TEST(test_the_glue_gives_the_read_back_to_the_stm32_image_alone);
+	RUN_TEST(test_the_glue_erases_ahead_of_every_staging_write);
+	RUN_TEST(test_the_glue_takes_its_erase_window_from_the_seam_policy);
 
 	return UNITY_END();
 }

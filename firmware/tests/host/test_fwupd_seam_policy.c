@@ -1,8 +1,8 @@
 /*
- * STS1000 "Meridian" — the firmware-update seam's four decisions.
+ * STS1000 "Meridian" — the firmware-update seam's five decisions.
  *
- * sts_fwupd_seam_policy.h exists because every one of the four is silent when
- * it is wrong, and three of the four have already been wrong in this tree. This
+ * sts_fwupd_seam_policy.h exists because every one of the five is silent when
+ * it is wrong, and four of the five have already been wrong in this tree. This
  * suite is written against the failure modes, not against the code:
  *
  *   1. THE TRANSMIT CONTRACT IS NOT INVERTED. core/fwupd's ubx_fwupd_ops_t::tx
@@ -28,13 +28,27 @@
  *      once-not-per-pass choice is a modelling decision that a future edit
  *      could quietly reverse in either direction.
  *
- * Nothing here round-trips against fwupd_glue.c: all four are pure functions of
+ *   5. THE STAGING ERASE COVERS THE WRITE AND STOPS THERE. Nothing under
+ *      port_image_t::staging_write() erases, so a window that falls short means
+ *      programming flash that still holds the previous image — which the H5
+ *      refuses, making the documented primary update path work exactly once per
+ *      board. A window that runs long is worse in the other direction: past
+ *      staging_size() lies the MCUboot trailer and the swap-using-move free
+ *      sector, and erasing either turns a successful upload into an upgrade the
+ *      bootloader silently declines. This half of the suite therefore asserts
+ *      both edges — that the window always covers the chunk, and that it never
+ *      passes the ceiling — plus the per-call bound the engine-lock budget in
+ *      decision 4 rests on.
+ *
+ * Nothing here round-trips against fwupd_glue.c: all five are pure functions of
  * their arguments, which is why they live in a header of their own.
  */
 
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "unity.h"
@@ -409,6 +423,326 @@ static void test_the_step_budget_clears_the_known_long_path(void)
 	TEST_ASSERT_TRUE(STS_FWUPD_STEP_BUDGET_MS >= (4U * gnss_recover_ms));
 }
 
+/* ===================================================================== */
+/* 5. the staging erase window                                           */
+/* ===================================================================== */
+
+/* The as-built slot 1 geometry, restated so this suite fails when it drifts.
+ * 896 KiB of 8 KiB sectors, 16 B write block; sts_stage_geom.h derives 110
+ * usable sectors from MCUboot's own arithmetic (root CLAUDE.md, sts_dfu.c). */
+#define SLOT_GRAN   8192U
+#define SLOT_USABLE (110U * SLOT_GRAN) /* 901120 */
+/* fwupd.h FWUPD_CHUNK_MAX, and stm_chunk_max()'s own ceiling. */
+#define STM_CHUNK   1024U
+
+/** align_up is the identity on multiples and never rounds down. */
+static void test_align_up_rounds_up_and_only_up(void)
+{
+	TEST_ASSERT_EQUAL_UINT32(0U, sts_fwupd_align_up(0U, SLOT_GRAN));
+	TEST_ASSERT_EQUAL_UINT32(SLOT_GRAN, sts_fwupd_align_up(1U, SLOT_GRAN));
+	TEST_ASSERT_EQUAL_UINT32(SLOT_GRAN,
+				 sts_fwupd_align_up(SLOT_GRAN, SLOT_GRAN));
+	TEST_ASSERT_EQUAL_UINT32(2U * SLOT_GRAN,
+				 sts_fwupd_align_up(SLOT_GRAN + 1U, SLOT_GRAN));
+
+	/* A granularity of 0 or 1 is the identity rather than a division by
+	 * zero: the helper is total, so a caller cannot make it trap. */
+	TEST_ASSERT_EQUAL_UINT32(1234U, sts_fwupd_align_up(1234U, 0U));
+	TEST_ASSERT_EQUAL_UINT32(1234U, sts_fwupd_align_up(1234U, 1U));
+}
+
+/**
+ * The saturation, which is the one arithmetic accident that would be silent.
+ *
+ * A wrapped round-up turns "erase up to here" into a target BELOW the cursor,
+ * and the caller's `target <= erased_to` test then skips the erase entirely —
+ * i.e. exactly the defect this whole decision exists to fix, reintroduced by an
+ * overflow nobody would look for.
+ */
+static void test_align_up_saturates_instead_of_wrapping(void)
+{
+	TEST_ASSERT_EQUAL_UINT32(UINT32_MAX,
+				 sts_fwupd_align_up(UINT32_MAX, SLOT_GRAN));
+	TEST_ASSERT_EQUAL_UINT32(UINT32_MAX,
+				 sts_fwupd_align_up(UINT32_MAX - 1U, SLOT_GRAN));
+	TEST_ASSERT_TRUE(sts_fwupd_align_up(UINT32_MAX, SLOT_GRAN) >=
+			 (UINT32_MAX - 1U));
+}
+
+/** The ceiling is the image rounded up, when the slot has room to spare. */
+static void test_the_ceiling_is_the_image_rounded_up(void)
+{
+	/* A 740 KiB image in the 880 KiB slot: 93 sectors, not 110. */
+	TEST_ASSERT_EQUAL_UINT32(93U * SLOT_GRAN,
+				 sts_fwupd_erase_ceiling(740U * 1024U,
+							 SLOT_USABLE, SLOT_GRAN));
+	TEST_ASSERT_EQUAL_UINT32(SLOT_GRAN,
+				 sts_fwupd_erase_ceiling(1U, SLOT_USABLE,
+							 SLOT_GRAN));
+	TEST_ASSERT_EQUAL_UINT32(0U,
+				 sts_fwupd_erase_ceiling(0U, SLOT_USABLE,
+							 SLOT_GRAN));
+}
+
+/**
+ * …and never the whole slot, which is the point.
+ *
+ * A ceiling that ignored the image would blank ~160 KiB of sectors the transfer
+ * never touches, at one engine-lock hold each, for no benefit whatsoever.
+ */
+static void test_the_ceiling_does_not_blank_sectors_the_image_never_reaches(void)
+{
+	uint32_t c = sts_fwupd_erase_ceiling(740U * 1024U, SLOT_USABLE,
+					     SLOT_GRAN);
+
+	TEST_ASSERT_TRUE_MESSAGE(c < SLOT_USABLE,
+				 "the erase window covers the whole slot rather "
+				 "than the image");
+	TEST_ASSERT_EQUAL_UINT32(0U, c % SLOT_GRAN);
+}
+
+/**
+ * THE dangerous edge: the ceiling never passes staging_size().
+ *
+ * Above it lie the MCUboot trailer region and the swap-using-move free sector
+ * (sts_stage_geom.h). Erasing into them does not fail the upload — it produces
+ * an image that verifies, marks pending, and is then silently declined by
+ * swap_move() on every subsequent boot, in a bootloader built with
+ * CONFIG_MCUBOOT_LOG_LEVEL_OFF.
+ */
+static void test_the_ceiling_never_passes_the_usable_region(void)
+{
+	uint32_t size;
+
+	/* An image filling the slot exactly: the round-up must not add a sector
+	 * that belongs to the trailer. */
+	TEST_ASSERT_EQUAL_UINT32(SLOT_USABLE,
+				 sts_fwupd_erase_ceiling(SLOT_USABLE,
+							 SLOT_USABLE, SLOT_GRAN));
+
+	/* Every size in the top sector, one octet at a time, is clamped. */
+	for (size = SLOT_USABLE - SLOT_GRAN + 1U; size <= SLOT_USABLE; size++) {
+		TEST_ASSERT_EQUAL_UINT32(SLOT_USABLE,
+					 sts_fwupd_erase_ceiling(size,
+								 SLOT_USABLE,
+								 SLOT_GRAN));
+	}
+
+	/*
+	 * And a capacity that is NOT a whole number of sectors is still clamped
+	 * to the capacity, never rounded past it. sts_staging_usable() cannot
+	 * produce one today, but "the clamp wins over the round-up" has to be
+	 * the property rather than "the two happen to agree".
+	 */
+	TEST_ASSERT_EQUAL_UINT32(SLOT_USABLE - 1U,
+				 sts_fwupd_erase_ceiling(SLOT_USABLE - 1U,
+							 SLOT_USABLE - 1U,
+							 SLOT_GRAN));
+}
+
+/** The ceiling always covers the image, so a clamp can never starve a chunk. */
+static void test_the_ceiling_always_covers_the_declared_image(void)
+{
+	uint32_t size;
+
+	for (size = 0U; size <= SLOT_USABLE; size += 997U) {
+		TEST_ASSERT_TRUE_MESSAGE(
+			sts_fwupd_erase_ceiling(size, SLOT_USABLE, SLOT_GRAN) >=
+				size,
+			"the erase ceiling fell below the declared image size");
+	}
+	TEST_ASSERT_TRUE(sts_fwupd_erase_ceiling(SLOT_USABLE, SLOT_USABLE,
+						 SLOT_GRAN) >= SLOT_USABLE);
+}
+
+/** One granule of look-ahead: the target is always past what is needed. */
+static void test_the_target_stands_one_granule_past_the_chunk(void)
+{
+	uint32_t ceiling = sts_fwupd_erase_ceiling(SLOT_USABLE, SLOT_USABLE,
+						   SLOT_GRAN);
+
+	/* prepare()'s pre-clear: nothing needed yet, one sector blanked. */
+	TEST_ASSERT_EQUAL_UINT32(SLOT_GRAN,
+				 sts_fwupd_erase_target(0U, SLOT_GRAN, ceiling));
+	/* The first chunk lands inside sector 0 and pulls sector 1 forward. */
+	TEST_ASSERT_EQUAL_UINT32(2U * SLOT_GRAN,
+				 sts_fwupd_erase_target(STM_CHUNK, SLOT_GRAN,
+							ceiling));
+	/* Exactly on a boundary is still one whole granule beyond. */
+	TEST_ASSERT_EQUAL_UINT32(2U * SLOT_GRAN,
+				 sts_fwupd_erase_target(SLOT_GRAN, SLOT_GRAN,
+							ceiling));
+	TEST_ASSERT_EQUAL_UINT32(3U * SLOT_GRAN,
+				 sts_fwupd_erase_target(SLOT_GRAN + 1U,
+							SLOT_GRAN, ceiling));
+}
+
+/**
+ * The transfer's whole walk: every chunk is covered, no call erases more than
+ * one sector, and the cursor stops at the ceiling.
+ *
+ * The three properties together are the decision. Coverage alone would be
+ * satisfied by erasing the slot at prepare(); the one-sector bound alone would
+ * be satisfied by never erasing at all.
+ */
+static void test_a_whole_transfer_erases_one_sector_at_a_time(void)
+{
+	const uint32_t size = 740U * 1024U;
+	uint32_t ceiling = sts_fwupd_erase_ceiling(size, SLOT_USABLE, SLOT_GRAN);
+	uint32_t cursor = 0U;
+	uint32_t off;
+	unsigned int erases = 0U;
+
+	/* prepare()'s pre-clear, exactly as stm_prepare() does it. */
+	cursor = sts_fwupd_erase_target(0U, SLOT_GRAN, ceiling);
+	TEST_ASSERT_EQUAL_UINT32(SLOT_GRAN, cursor);
+	erases++;
+
+	for (off = 0U; off < size; off += STM_CHUNK) {
+		uint32_t len = ((size - off) < STM_CHUNK) ? (size - off)
+							  : STM_CHUNK;
+		uint32_t target = sts_fwupd_erase_target(off + len, SLOT_GRAN,
+							 ceiling);
+		char msg[128];
+
+		if (target <= cursor) {
+			/* Already blank: the common case, seven chunks in
+			 * eight, and it must cost nothing. */
+			TEST_ASSERT_TRUE_MESSAGE(
+				(off + len) <= cursor,
+				"a chunk was written into flash the cursor had "
+				"not blanked");
+			continue;
+		}
+
+		(void)snprintf(msg, sizeof(msg),
+			       "one fw.data at off %u erased %u octets — more "
+			       "than the one granule the engine-lock budget "
+			       "assumes",
+			       (unsigned int)off,
+			       (unsigned int)(target - cursor));
+		TEST_ASSERT_TRUE_MESSAGE(((target - cursor) <= SLOT_GRAN), msg);
+		cursor = target;
+		erases++;
+
+		TEST_ASSERT_TRUE_MESSAGE(
+			(off + len) <= cursor,
+			"a chunk was written into flash the cursor had not "
+			"blanked");
+	}
+
+	/* Every octet of the image is inside the blanked region... */
+	TEST_ASSERT_TRUE(cursor >= size);
+	/* ...and not one octet past the ceiling. */
+	TEST_ASSERT_EQUAL_UINT32(ceiling, cursor);
+	TEST_ASSERT_TRUE_MESSAGE(cursor <= SLOT_USABLE,
+				 "the transfer erased into the MCUboot trailer");
+	/* 93 sectors of image, blanked in 93 calls out of the 740 that carried
+	 * it — the pre-clear plus one per sector boundary crossed. */
+	TEST_ASSERT_EQUAL_UINT(93U, erases);
+}
+
+/**
+ * A rewind erases nothing.
+ *
+ * core/fwupd absorbs a retransmit before transfer() is reached, but a session
+ * restarted at the same size replays prepare() — and if that re-erased from 0
+ * it would blank octets the tool had already been told were accepted.
+ */
+static void test_a_target_at_or_below_the_cursor_erases_nothing(void)
+{
+	uint32_t ceiling = sts_fwupd_erase_ceiling(SLOT_USABLE, SLOT_USABLE,
+						   SLOT_GRAN);
+	uint32_t cursor = sts_fwupd_erase_target(64U * SLOT_GRAN, SLOT_GRAN,
+						 ceiling);
+
+	TEST_ASSERT_EQUAL_UINT32(65U * SLOT_GRAN, cursor);
+	/* Every offset already inside the blanked region asks for no erase. */
+	TEST_ASSERT_TRUE(sts_fwupd_erase_target(0U, SLOT_GRAN, ceiling) <=
+			 cursor);
+	TEST_ASSERT_TRUE(sts_fwupd_erase_target(63U * SLOT_GRAN, SLOT_GRAN,
+						ceiling) <= cursor);
+	/* The first offset that does need one is the boundary itself. */
+	TEST_ASSERT_TRUE(sts_fwupd_erase_target((64U * SLOT_GRAN) + 1U,
+						SLOT_GRAN, ceiling) > cursor);
+}
+
+/** The look-ahead never carries the cursor past the ceiling. */
+static void test_the_look_ahead_is_clamped_at_the_ceiling(void)
+{
+	uint32_t ceiling = sts_fwupd_erase_ceiling(SLOT_USABLE, SLOT_USABLE,
+						   SLOT_GRAN);
+	uint32_t need;
+
+	/* The last sector of the image: the look-ahead wants one more and there
+	 * is none to give. */
+	for (need = SLOT_USABLE - SLOT_GRAN; need <= SLOT_USABLE; need++) {
+		TEST_ASSERT_EQUAL_UINT32(ceiling,
+					 sts_fwupd_erase_target(need, SLOT_GRAN,
+								ceiling));
+	}
+
+	/* And an absurd request — which core/fwupd's range checks make
+	 * unreachable — is still clamped rather than wrapped. */
+	TEST_ASSERT_EQUAL_UINT32(ceiling,
+				 sts_fwupd_erase_target(UINT32_MAX, SLOT_GRAN,
+							ceiling));
+	TEST_ASSERT_EQUAL_UINT32(ceiling,
+				 sts_fwupd_erase_target(UINT32_MAX - 1U,
+							SLOT_GRAN, ceiling));
+}
+
+/**
+ * The per-call bound holds for every geometry, not just this board's.
+ *
+ * The engine-lock argument in fwupd_glue.c is "at most one sector per chunk",
+ * and that rests on the chunk being no larger than a granule. A part with small
+ * sectors breaks the premise, so the general bound — ceil(chunk/gran) + 1
+ * granules — is what is asserted, across a sweep that includes granules both
+ * larger and smaller than the chunk.
+ */
+static void test_the_per_call_erase_is_bounded_for_every_geometry(void)
+{
+	static const uint32_t grans[] = { 256U, 512U, 1024U, 2048U, 4096U,
+					  8192U, 65536U, 131072U };
+	size_t g;
+
+	for (g = 0U; g < (sizeof(grans) / sizeof(grans[0])); g++) {
+		uint32_t gran = grans[g];
+		const uint32_t size = 300U * 1024U;
+		uint32_t ceiling = sts_fwupd_erase_ceiling(size, SLOT_USABLE,
+							   gran);
+		uint32_t bound = (((STM_CHUNK + gran - 1U) / gran) + 1U) * gran;
+		uint32_t cursor = sts_fwupd_erase_target(0U, gran, ceiling);
+		uint32_t off;
+		char msg[160];
+
+		for (off = 0U; off < size; off += STM_CHUNK) {
+			uint32_t len = ((size - off) < STM_CHUNK)
+					       ? (size - off) : STM_CHUNK;
+			uint32_t target = sts_fwupd_erase_target(off + len,
+								 gran, ceiling);
+
+			if (target <= cursor) {
+				continue;
+			}
+			(void)snprintf(msg, sizeof(msg),
+				       "gran %u: one call erased %u octets, "
+				       "over the %u-octet bound",
+				       (unsigned int)gran,
+				       (unsigned int)(target - cursor),
+				       (unsigned int)bound);
+			TEST_ASSERT_TRUE_MESSAGE((target - cursor) <= bound,
+						 msg);
+			cursor = target;
+			TEST_ASSERT_TRUE_MESSAGE((off + len) <= cursor,
+						 "a chunk outran the cursor");
+		}
+		TEST_ASSERT_TRUE(cursor >= size);
+		TEST_ASSERT_TRUE(cursor <= SLOT_USABLE);
+	}
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -437,6 +771,18 @@ int main(void)
 	RUN_TEST(test_the_pass_terms_are_counted_per_pass);
 	RUN_TEST(test_the_budget_is_monotone_in_every_argument);
 	RUN_TEST(test_the_step_budget_clears_the_known_long_path);
+
+	RUN_TEST(test_align_up_rounds_up_and_only_up);
+	RUN_TEST(test_align_up_saturates_instead_of_wrapping);
+	RUN_TEST(test_the_ceiling_is_the_image_rounded_up);
+	RUN_TEST(test_the_ceiling_does_not_blank_sectors_the_image_never_reaches);
+	RUN_TEST(test_the_ceiling_never_passes_the_usable_region);
+	RUN_TEST(test_the_ceiling_always_covers_the_declared_image);
+	RUN_TEST(test_the_target_stands_one_granule_past_the_chunk);
+	RUN_TEST(test_a_whole_transfer_erases_one_sector_at_a_time);
+	RUN_TEST(test_a_target_at_or_below_the_cursor_erases_nothing);
+	RUN_TEST(test_the_look_ahead_is_clamped_at_the_ceiling);
+	RUN_TEST(test_the_per_call_erase_is_bounded_for_every_geometry);
 
 	return UNITY_END();
 }
