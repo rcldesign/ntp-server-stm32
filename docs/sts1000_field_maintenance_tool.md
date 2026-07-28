@@ -503,7 +503,9 @@ never bypass them:
 
 Channel 7 tunnels USART3. The firmware drives the guarded sequence: flag timing
 degraded → suspend its own UBX use → assert `GPS_SAFEBOOT_N` (PD15) with a
-`GPS_RST_N` (PD11) pulse to enter the loader → negotiate → stream the vendor image in
+`GPS_RST_N` (PD11) pulse to enter the loader → negotiate → **erase the application region
+with the loader's own command**, acknowledged before the first write frame, so §9.2's
+incremental window does not apply on this path → stream the vendor image in
 acknowledged chunks with retry → reset back to normal mode → verify the reported version
 via UBX-MON-VER → **re-apply the full timing configuration** (constellations, rates,
 timepulse, TX-ready remap, TMODE/fixed position) → clear degraded. Every unknown or
