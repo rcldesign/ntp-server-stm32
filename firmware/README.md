@@ -30,12 +30,30 @@ Requires Zephyr SDK 0.17.2 (`arm-zephyr-eabi`); Zephyr v4.2.2 is pinned in `west
 
 ## Current build figures
 
+Measured on a pristine sysbuild at commit `ad62268`. Re-measure rather than
+trust this table — it has been stale before, and by a margin that mattered: it
+read 46 % / 45 % while the image was at 81 % / 81 %, which is the difference
+between "plenty of room" and "budget the next feature".
+
 | Image | FLASH | RAM |
 |---|---|---|
-| Application (slot 0) | 414 KB / 901 KB (46 %) | 296 KB / 640 KB (45 %) |
+| Application (slot 0) | 736 KB / 901 KB (**81.7 %**) | 533 KB / 640 KB (**81.4 %**) |
 | MCUboot | 51 KB / 128 KB (39 %) | — |
 
-Host tests: **25 suites, all passing**. Core line coverage: **98 %** (gate: 80 %).
+Host tests: **69 suites, all passing**. Core line coverage: **96 %** (gate: 80 %).
+
+**Both budgets are tight enough to plan around.**
+
+- *RAM.* The largest single discretionary allocation is the skyplot's 224×224
+  indexed canvas at 50 KiB (7.8 % of SRAM), held permanently for a page that is
+  on screen only when someone has walked the panel to it. `STS_UI_SKY_MAX_SIDE`
+  in `src/zephyr/ui/sts_ui.h` is the one knob; band-rendering or nibble-packing
+  the canvas would recover ~42 KiB or ~25 KiB respectively, at the cost of
+  touching golden-image-tested code in `core/ui/skyplot.c`.
+- *The web response buffer.* `STS_WEB_RESP_SIZE` is 8192 B and the worst-case
+  telemetry frame is now **6657 B** — 1535 B of headroom, pinned by an assertion
+  in `tests/host/test_rest.c`. The next field added to any REST group should
+  check it rather than assume.
 
 ## Layout
 
