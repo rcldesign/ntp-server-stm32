@@ -413,11 +413,45 @@ static int blit_row(const ui_surface_t *s, uint8_t row)
 	if (big != NULL) {
 		unsigned int c0 = big->col;
 		unsigned int ncol = big->len;
-		unsigned int pitch = ncol * UI_FONT_W;
+		/*
+		 * The stride must be the width actually WRITTEN, not the width
+		 * of the source cells.
+		 *
+		 * raster_cell() below is called with scale 2 at x = i*UI_FONT_W*2,
+		 * so `ncol` glyphs occupy ncol*16 px. This was ncol*8 — the
+		 * source-cell width — so the writer laid out ncol*16 columns at a
+		 * stride of ncol*8. Two consequences, both real:
+		 *
+		 *   * every glyph past the halfway point wrote into the NEXT
+		 *     buffer row. On the Home page's big clock (12 columns)
+		 *     glyph 6 landed at offset y*96 + 96, so the second half of
+		 *     the time overwrote the first half shifted down one pixel
+		 *     row;
+		 *   * the BLIT_MAX_PX guard admitted ncol up to 30, at which the
+		 *     highest index written is 31*(30*8) + 30*16 - 1 = 7919
+		 *     against a 7680-element blit[] — a 480-byte out-of-bounds
+		 *     write into whatever the linker placed next, which now
+		 *     includes the 50 KiB skyplot canvas.
+		 *
+		 * The pages in tree emit ~12 columns, so the overflow was latent
+		 * while the mis-render was not.
+		 *
+		 * NOTE on the contract: core/ui/ui.h describes UI_HINT_BIGNUM as
+		 * "the cells at (row, col..col+len-1) with double-size glyphs",
+		 * and ui_surface_hint() validates col+len against the grid — but
+		 * `len` double-width glyphs need 2*len cells of room, so the
+		 * validation is for the source extent and not the drawn one.
+		 * Rather than reinterpret the hint here, this refuses to draw
+		 * anything that would leave the panel, which turns a
+		 * would-be-corrupting hint into a missing one.
+		 */
+		unsigned int pitch = ncol * UI_FONT_W * 2u;
 		unsigned int h = 2u * UI_FONT_H;
 		unsigned int i;
 
 		if (ncol == 0u || (size_t)c0 + ncol > s->cols ||
+		    (size_t)c0 * UI_FONT_W + pitch >
+			    (size_t)s->cols * UI_FONT_W ||
 		    (size_t)pitch * h > BLIT_MAX_PX) {
 			return 0;
 		}
