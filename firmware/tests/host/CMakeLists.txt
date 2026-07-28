@@ -233,7 +233,7 @@ module_deps(ldap_ca)
 # and the descriptor's numbers as plain values rather than including the engine,
 # so the suite states what G.8275.1 requires instead of asking the code that
 # implements it. Hence the empty dependency list.
-module_deps(ptp_profile_policy)
+module_deps(ptp_profile_policy cfg ptp util quality)
 
 # The Wave-4c security cluster. `core/auth` holds the AAA chain plus the RADIUS,
 # TACACS+ and LDAP codecs, so all four suites compile the same source set; the

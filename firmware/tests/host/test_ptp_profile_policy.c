@@ -26,6 +26,11 @@
 
 #include "unity.h"
 
+#include "cfg/cfg.h"
+#include "cfg/cfg_schema.h"
+#include "ptp/ptp.h"
+#include "ptp/ptp_profile.h"
+
 #include "zephyr/net/sts_ptp_profile_policy.h"
 
 /*
@@ -50,8 +55,147 @@
 #define PROFILE_G82751 1U
 #define PROFILE_COUNT 4U
 
+/* Hoisted so the pinning tests below can compare them to the live tables. */
+#define SCHEMA_LOG_SYNC_MIN (-7)
+#define SCHEMA_LOG_SYNC_MAX 1
+#define DESC_DEFAULT_LOG_SYNC_MIN (-1)
+#define DESC_DEFAULT_LOG_SYNC_MAX 1
+#define DESC_DEFAULT_LOG_SYNC 0
+#define G82751_DOMAIN_LO 24U
+#define G82751_DOMAIN_HI 43U
+#define SCHEMA_LOG_ANNOUNCE 1
+#define G82751_LOG_ANNOUNCE (-3)
+#define XPORT_L2 2U
+#define XPORT_UDP4 0U
+#define MASK_L2_ONLY (1U << XPORT_L2)
+
 void setUp(void) {}
 void tearDown(void) {}
+
+/* ===================================================================== *
+ *  The constants above are COPIES. Pin them to the live tables.
+ *
+ *  A reviewer read this file and called it "substantially decorative":
+ *  its 41 tests exercise the header's arithmetic correctly, but the file's
+ *  own stated premise — "the real numbers, so a test that passes is saying
+ *  something about this board rather than about arithmetic" — was false,
+ *  because every board-specific number here is a private #define. It
+ *  demonstrated that by changing ptp.domain's schema default from 0 to 5
+ *  in cfg_schema.h: 41 tests, 0 failures.
+ *
+ *  That is the same failure mode this suite exists to guard against, one
+ *  level up: the header stays correct while the thing it describes moves.
+ *  core/cfg and core/ptp are both host-buildable — there was never a
+ *  technical obstacle, only an unexamined assumption that a policy header's
+ *  suite should compile nothing.
+ *
+ *  So these tests fail if a copy drifts, and they name which one.
+ * ===================================================================== */
+
+static void test_the_schema_defaults_are_this_boards(void)
+{
+	const cfg_key_t *k;
+
+	k = cfg_key_find((uint16_t)CFG_ID_PTP_DOMAIN);
+	TEST_ASSERT_NOT_NULL(k);
+	TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+		SCHEMA_DOMAIN, k->def.u,
+		"SCHEMA_DOMAIN no longer matches cfg_schema.h's ptp.domain "
+		"default");
+
+	k = cfg_key_find((uint16_t)CFG_ID_PTP_LOG_SYNC);
+	TEST_ASSERT_NOT_NULL(k);
+	TEST_ASSERT_EQUAL_INT32_MESSAGE(
+		SCHEMA_LOG_SYNC, k->def.i,
+		"SCHEMA_LOG_SYNC no longer matches ptp.log.sync's default");
+	TEST_ASSERT_EQUAL_INT32_MESSAGE(
+		SCHEMA_LOG_SYNC_MIN, k->min.i,
+		"the schema's ptp.log.sync lower bound moved; the "
+		"Default-profile exemption is sized against it");
+	TEST_ASSERT_EQUAL_INT32(SCHEMA_LOG_SYNC_MAX, k->max.i);
+
+	k = cfg_key_find((uint16_t)CFG_ID_PTP_LOG_ANNOUNCE);
+	TEST_ASSERT_NOT_NULL(k);
+	TEST_ASSERT_EQUAL_INT32(SCHEMA_LOG_ANNOUNCE, k->def.i);
+
+	/* The transport collision that forces sts_ptp.c's Default bypass. */
+	k = cfg_key_find((uint16_t)CFG_ID_PTP_TRANSPORT);
+	TEST_ASSERT_NOT_NULL(k);
+	TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+		1U, k->def.u,
+		"ptp.transport's schema default moved; if it now equals "
+		"desc_default's, the bypass in sts_ptp.c is dead code");
+}
+
+static void test_the_g82751_numbers_are_the_descriptors(void)
+{
+	const ptp_profile_desc_t *d =
+		ptp_profile_desc((uint8_t)PTP_PROFILE_TELECOM_G8275_1);
+
+	TEST_ASSERT_NOT_NULL(d);
+	TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+		G82751_DOMAIN, d->domain_default,
+		"G82751_DOMAIN no longer matches desc_g8275_1");
+	TEST_ASSERT_EQUAL_UINT64(G82751_DOMAIN_LO, d->domain_range.min);
+	TEST_ASSERT_EQUAL_UINT64(G82751_DOMAIN_HI, d->domain_range.max);
+	TEST_ASSERT_EQUAL_INT32_MESSAGE(
+		G82751_LOG_SYNC, d->log_sync_default,
+		"G.8275.1's Sync interval moved");
+	TEST_ASSERT_EQUAL_INT32(G82751_LOG_SYNC, d->log_sync_range.min);
+	TEST_ASSERT_EQUAL_INT32(G82751_LOG_SYNC, d->log_sync_range.max);
+	TEST_ASSERT_EQUAL_INT32(G82751_LOG_ANNOUNCE, d->log_announce_default);
+
+	/* L2-only: the mask this suite models must be the real one. */
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		MASK_L2_ONLY, d->transport_mask,
+		"G.8275.1's transport mask moved; the transport tests model it");
+}
+
+static void test_the_default_descriptor_is_wider_than_it_looks(void)
+{
+	const ptp_profile_desc_t *d =
+		ptp_profile_desc((uint8_t)PTP_PROFILE_DEFAULT);
+
+	TEST_ASSERT_NOT_NULL(d);
+	TEST_ASSERT_EQUAL_INT32(DESC_DEFAULT_LOG_SYNC, d->log_sync_default);
+	TEST_ASSERT_EQUAL_INT32(DESC_DEFAULT_LOG_SYNC_MIN,
+				d->log_sync_range.min);
+	TEST_ASSERT_EQUAL_INT32(DESC_DEFAULT_LOG_SYNC_MAX,
+				d->log_sync_range.max);
+	TEST_ASSERT_EQUAL_UINT64_MESSAGE(
+		XPORT_UDP4, d->transport_default,
+		"desc_default's transport moved; see the schema collision above");
+
+	/*
+	 * The inequality the whole Default-profile exemption rests on, now
+	 * against both live tables rather than two #defines in this file. If
+	 * the schema ever narrows to the descriptor, the exemption protects
+	 * nothing and should be deleted rather than left as decoration.
+	 */
+	{
+		const cfg_key_t *k = cfg_key_find((uint16_t)CFG_ID_PTP_LOG_SYNC);
+
+		TEST_ASSERT_NOT_NULL(k);
+		TEST_ASSERT_TRUE_MESSAGE(
+			k->min.i < d->log_sync_range.min,
+			"the schema is no longer wider than desc_default for "
+			"ptp.log.sync — the Default exemption has nothing left "
+			"to protect");
+	}
+}
+
+static void test_the_profile_enum_is_what_the_clamp_assumes(void)
+{
+	TEST_ASSERT_EQUAL_UINT8(PROFILE_DEFAULT, (uint8_t)PTP_PROFILE_DEFAULT);
+	TEST_ASSERT_EQUAL_UINT8(PROFILE_G82751,
+				(uint8_t)PTP_PROFILE_TELECOM_G8275_1);
+	TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+		PROFILE_COUNT, (uint8_t)PTP_PROFILE_COUNT,
+		"a profile was added or removed; the clamp tests sweep "
+		"PROFILE_COUNT");
+	TEST_ASSERT_EQUAL_UINT64(XPORT_L2, (uint64_t)PTP_TRANSPORT_L2);
+	TEST_ASSERT_EQUAL_UINT64(XPORT_UDP4, (uint64_t)PTP_TRANSPORT_UDP_IPV4);
+}
 
 /* ===================================================================== *
  *  pick_u64 — the precedence rule itself
@@ -276,10 +420,6 @@ static void test_a_commissioned_unit_keeps_what_the_operator_typed(void)
  *   log_announce                 1                -3         -3..-3
  *   log_sync                     0                -4         -4..-4
  */
-#define G82751_DOMAIN_LO 24U
-#define G82751_DOMAIN_HI 43U
-#define SCHEMA_LOG_ANNOUNCE 1
-#define G82751_LOG_ANNOUNCE (-3)
 
 static void test_an_out_of_profile_domain_is_refused_not_fatal(void)
 {
@@ -410,9 +550,6 @@ static void test_a_null_how_is_accepted(void)
 /* --- transport: a mask, not a range --------------------------------- */
 
 /* PTP_TRANSPORT_UDP_IPV4 = 0, UDP_IPV6 = 1, L2 = 2 (core/ptp/ptp.h). */
-#define XPORT_L2 2U
-#define XPORT_UDP4 0U
-#define MASK_L2_ONLY (1U << XPORT_L2)
 
 static void test_a_transport_the_profile_forbids_is_refused(void)
 {
@@ -531,12 +668,6 @@ static void test_the_commissioned_g82751_unit_now_stays_on_g82751(void)
  *      ptp.log.announce          -3 .. 4              0 .. 4
  *      ptp.log.delayreq          -7 .. 5              0 .. 5
  * ===================================================================== */
-
-#define SCHEMA_LOG_SYNC_MIN (-7)
-#define SCHEMA_LOG_SYNC_MAX 1
-#define DESC_DEFAULT_LOG_SYNC_MIN (-1)
-#define DESC_DEFAULT_LOG_SYNC_MAX 1
-#define DESC_DEFAULT_LOG_SYNC 0
 
 static void test_default_takes_the_schema_range_not_the_descriptors(void)
 {
@@ -740,6 +871,11 @@ static void test_the_default_transport_is_the_stored_one(void)
 int main(void)
 {
 	UNITY_BEGIN();
+
+	RUN_TEST(test_the_schema_defaults_are_this_boards);
+	RUN_TEST(test_the_g82751_numbers_are_the_descriptors);
+	RUN_TEST(test_the_default_descriptor_is_wider_than_it_looks);
+	RUN_TEST(test_the_profile_enum_is_what_the_clamp_assumes);
 
 	RUN_TEST(test_an_untouched_key_takes_the_profiles_value);
 	RUN_TEST(test_an_operator_set_key_beats_the_profile);
