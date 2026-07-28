@@ -119,26 +119,79 @@ typedef char sts_web_sky_bound_check_t
 	[(REST_SAT_MAX >= STS_GNSS_SKY_MAX_SV) ? 1 : -1];
 
 /**
- * Is a cached NAV-SAT frame fresh enough to serve as the current sky?
+ * How old is a cached NAV-SAT frame, and is that age meaningful at all?
  *
  * @param now_ms         sts_mono_ms() at the moment of the request.
  * @param frame_mono_ms  sts_gnss_sky_t::mono_ms; 0 means never received.
+ * @param out_age_ms     Optional; set to 0 when the age is not meaningful.
+ * @return true when @p out_age_ms is a real age.
+ *
+ * ONE place computes the age, and everything that needs it — the freshness
+ * verdict and the number the document carries — comes through here. Written
+ * that way deliberately: while the two had their own arithmetic, the guards in
+ * the freshness half were unreachable (an unsigned wrap of a future stamp is
+ * always ~2^64 ms, which no window admits), so a mutation could delete them
+ * without a single test noticing while the identical guard in the age half was
+ * load-bearing.
  *
  * A frame stamped in the future is refused rather than clamped. It cannot
  * happen from one monotonic clock, so if it is seen the snapshot is torn or the
  * caller passed the wrong clock — neither is evidence about the sky, and an
- * unsigned subtraction would turn it into an enormous age that passes no test
- * or a tiny one that passes every test depending on which way it wrapped.
+ * unsigned subtraction turns it into 2^64-minus-a-bit, which saturates to "49.7
+ * days old" and would be reported as a real measurement.
+ *
+ * The age SATURATES at UINT32_MAX rather than truncating. 2^32 ms is 49.7 days,
+ * well inside this appliance's specified uptime, and a truncating cast would
+ * describe a receiver silent for seven weeks as seconds old.
  */
-static inline bool sts_web_sky_fresh(uint64_t now_ms, uint64_t frame_mono_ms)
+static inline bool sts_web_sky_age_ms(uint64_t now_ms, uint64_t frame_mono_ms,
+				      uint32_t *out_age_ms)
 {
+	uint64_t age;
+
+	if (out_age_ms != NULL) {
+		*out_age_ms = 0U;
+	}
 	if (frame_mono_ms == 0U) {
 		return false;
 	}
 	if (now_ms < frame_mono_ms) {
 		return false;
 	}
-	return (now_ms - frame_mono_ms) <= (uint64_t)STS_WEB_SKY_STALE_MS;
+	age = now_ms - frame_mono_ms;
+	if (out_age_ms != NULL) {
+		*out_age_ms = (age > (uint64_t)UINT32_MAX) ? UINT32_MAX
+							  : (uint32_t)age;
+	}
+	return true;
+}
+
+/** Is a cached NAV-SAT frame fresh enough to serve as the current sky? */
+static inline bool sts_web_sky_fresh(uint64_t now_ms, uint64_t frame_mono_ms)
+{
+	uint32_t age = 0U;
+
+	if (!sts_web_sky_age_ms(now_ms, frame_mono_ms, &age)) {
+		return false;
+	}
+	return age <= (uint32_t)STS_WEB_SKY_STALE_MS;
+}
+
+/**
+ * How many of a snapshot's records may actually be read.
+ *
+ * `count` is a uint8_t the platform area copies out of a UBX frame, so it can
+ * in principle exceed the array it indexes. This is its own function rather
+ * than a third conjunct in the fill loop because a loop conjunct's failure mode
+ * is an out-of-bounds READ, which no host test can observe deterministically —
+ * it is only ever caught by a sanitiser nobody runs on a header. As a value it
+ * is checkable directly.
+ */
+static inline uint8_t sts_web_sky_usable(uint8_t count)
+{
+	return (count > (uint8_t)STS_GNSS_SKY_MAX_SV)
+		       ? (uint8_t)STS_GNSS_SKY_MAX_SV
+		       : count;
 }
 
 /**
@@ -219,6 +272,7 @@ static inline bool sts_web_sky_admit(uint8_t gnss_id, uint8_t sv_id,
 static inline void sts_web_sky_fill(const sts_gnss_sky_t *sky, uint64_t now_ms,
 				    rest_gnss_t *out)
 {
+	uint8_t usable;
 	uint8_t n = 0U;
 	uint8_t i;
 
@@ -233,14 +287,8 @@ static inline void sts_web_sky_fill(const sts_gnss_sky_t *sky, uint64_t now_ms,
 		return;
 	}
 
-	if ((sky->mono_ms != 0U) && (now_ms >= sky->mono_ms)) {
-		uint64_t age = now_ms - sky->mono_ms;
-
-		out->sat_age_ms = (age > (uint64_t)UINT32_MAX)
-					  ? UINT32_MAX
-					  : (uint32_t)age;
-		out->sat_age_valid = true;
-	}
+	out->sat_age_valid = sts_web_sky_age_ms(now_ms, sky->mono_ms,
+						&out->sat_age_ms);
 
 	if (!sts_web_sky_fresh(now_ms, sky->mono_ms)) {
 		return;
@@ -249,9 +297,18 @@ static inline void sts_web_sky_fill(const sts_gnss_sky_t *sky, uint64_t now_ms,
 	/* Fresh: the list is authoritative even when it is empty. */
 	out->detail_available = true;
 
-	for (i = 0U; (i < sky->count) && (i < (uint8_t)STS_GNSS_SKY_MAX_SV) &&
-		     (n < (uint8_t)REST_SAT_MAX);
-	     i++) {
+	/*
+	 * `n < REST_SAT_MAX` is unreachable today and deliberately kept.
+	 * n <= i always (n rises at most once per iteration), i < usable <=
+	 * STS_GNSS_SKY_MAX_SV, and the compile-time check above forces
+	 * REST_SAT_MAX >= STS_GNSS_SKY_MAX_SV — so the `i` bound always binds
+	 * first and no test can distinguish `<` from `<=` here. It stays as the
+	 * second, independent guard on the write: if the two constants ever
+	 * diverge the other way, this is the one that stops the overrun, and
+	 * the sole cost of keeping it is one comparison per satellite.
+	 */
+	usable = sts_web_sky_usable(sky->count);
+	for (i = 0U; (i < usable) && (n < (uint8_t)REST_SAT_MAX); i++) {
 		const sts_gnss_sv_t *s = &sky->sv[i];
 
 		if (sts_web_sky_admit(s->gnss_id, s->sv_id, s->elev_deg,

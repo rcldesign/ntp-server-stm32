@@ -1137,25 +1137,96 @@ static int32_t schema_def_i32(uint16_t id)
 }
 
 /*
+ * The schema's own bounds, used as the effective range under the Default
+ * profile. cfg_set() already refuses anything outside them, so a pick against
+ * these can never refuse — which is the point: it makes the Default path a
+ * no-op rather than a second, stricter gate.
+ */
+static int32_t schema_min_i32(uint16_t id)
+{
+	const cfg_key_t *k = cfg_key_find(id);
+
+	return (k != NULL) ? k->min.i : INT32_MIN;
+}
+
+static int32_t schema_max_i32(uint16_t id)
+{
+	const cfg_key_t *k = cfg_key_find(id);
+
+	return (k != NULL) ? k->max.i : INT32_MAX;
+}
+
+static uint64_t schema_min_u64(uint16_t id)
+{
+	const cfg_key_t *k = cfg_key_find(id);
+
+	return (k != NULL) ? k->min.u : 0U;
+}
+
+static uint64_t schema_max_u64(uint16_t id)
+{
+	const cfg_key_t *k = cfg_key_find(id);
+
+	return (k != NULL) ? k->max.u : UINT64_MAX;
+}
+
+/*
  * The two picks, as macros purely so the log line can name the cfg key without
  * every call site repeating it. Each expands to one sts_ptp_prof_pick_*_r()
  * plus the warning that used to be missing: an override the profile forbids is
  * dropped for that field alone, rather than failing validation and taking the
  * whole profile down with it. See sts_ptp_profile_policy.h.
  */
+/*
+ * THE DEFAULT PROFILE IS NOT RANGE-CONSTRAINED, and the glue must not invent a
+ * constraint core deliberately declined to impose.
+ *
+ * ptp_port.c's profile_range_check() returns 0 immediately for
+ * PTP_PROFILE_DEFAULT, and says why: Annex I.3 states the Default profile's
+ * intervals as *recommendations*, IEEE 1588 permits any value the field can
+ * hold, and enforcing the descriptor's ranges "would reject configurations the
+ * standard allows". desc_default's ranges exist to keep cfg validation passing
+ * and to give the BMCA a dataset — they are not a contract.
+ *
+ * The first version of these macros applied the descriptor range to every
+ * profile including Default, and the schema disagrees with the descriptor
+ * exactly where it matters:
+ *
+ *     key                 schema         desc_default
+ *     ptp.log.sync        -7 .. 1        -1 .. 1
+ *     ptp.log.announce    -3 .. 4         0 .. 4
+ *     ptp.log.delayreq    -7 .. 5         0 .. 5
+ *
+ * So a unit on the shipped Default profile with ptp.log.sync = -3 — 8 Sync/s,
+ * legal, stored, and honoured by every build before this one — had it refused
+ * and replaced with 0, and served 1 Sync/s behind nothing louder than a
+ * LOG_WRN. Worse for an operator setting it live: the web page returns success,
+ * the value is stored, and it never takes effect.
+ *
+ * For Default, therefore, the effective bound is the SCHEMA's, which cfg
+ * already enforces on write — so the refusal branch cannot fire and the result
+ * is the stored value, exactly as it was before profiles were applied at all.
+ */
 #define PICK_U64(id, prof_val, range, keyname)                                 \
 	({                                                                     \
 		sts_ptp_pick_t how_;                                           \
-		uint64_t v_ = sts_ptp_prof_pick_u64_r(                         \
+		uint64_t lo_, hi_;                                             \
+		uint64_t v_;                                                   \
+		sts_ptp_prof_range_u64(requested_profile,                      \
+				       (uint8_t)PTP_PROFILE_DEFAULT,           \
+				       (uint64_t)(range).min,                  \
+				       (uint64_t)(range).max,                  \
+				       schema_min_u64(id), schema_max_u64(id), \
+				       &lo_, &hi_);                            \
+		v_ = sts_ptp_prof_pick_u64_r(                                  \
 			sts_net_cfg_u64((id), (uint64_t)(prof_val)),           \
-			schema_def_u64(id), (uint64_t)(prof_val),              \
-			(uint64_t)(range).min, (uint64_t)(range).max, &how_);  \
+			schema_def_u64(id), (uint64_t)(prof_val), lo_, hi_,    \
+			&how_);                                                \
 		if (sts_ptp_pick_notable(how_)) {                              \
 			LOG_WRN("%s is outside profile %s (%u..%u); using %u",  \
 				(keyname),                                     \
 				ptp_profile_name(requested_profile),           \
-				(unsigned int)(range).min,                     \
-				(unsigned int)(range).max,                     \
+				(unsigned int)lo_, (unsigned int)hi_,          \
 				(unsigned int)v_);                             \
 		}                                                              \
 		v_;                                                            \
@@ -1164,15 +1235,23 @@ static int32_t schema_def_i32(uint16_t id)
 #define PICK_I32(id, prof_val, range, keyname)                                 \
 	({                                                                     \
 		sts_ptp_pick_t how_;                                           \
-		int32_t v_ = sts_ptp_prof_pick_i32_r(                          \
+		int32_t lo_, hi_;                                              \
+		int32_t v_;                                                    \
+		sts_ptp_prof_range_i32(requested_profile,                      \
+				       (uint8_t)PTP_PROFILE_DEFAULT,           \
+				       (int32_t)(range).min,                   \
+				       (int32_t)(range).max,                   \
+				       schema_min_i32(id), schema_max_i32(id), \
+				       &lo_, &hi_);                            \
+		v_ = sts_ptp_prof_pick_i32_r(                                  \
 			sts_net_cfg_i32((id), (int32_t)(prof_val)),            \
-			schema_def_i32(id), (int32_t)(prof_val),               \
-			(int32_t)(range).min, (int32_t)(range).max, &how_);    \
+			schema_def_i32(id), (int32_t)(prof_val), lo_, hi_,     \
+			&how_);                                                \
 		if (sts_ptp_pick_notable(how_)) {                              \
 			LOG_WRN("%s is outside profile %s (%d..%d); using %d",  \
 				(keyname),                                     \
 				ptp_profile_name(requested_profile),           \
-				(int)(range).min, (int)(range).max, (int)v_);   \
+				(int)lo_, (int)hi_, (int)v_);                  \
 		}                                                              \
 		v_;                                                            \
 	})
@@ -1233,8 +1312,34 @@ int sts_ptp_start(void)
 			port_cfg.log_min_delay_req_interval,
 			d->log_min_delay_req_range, "ptp.log.delayreq");
 
-		/* Transport carries a bit mask rather than a range. */
-		{
+		/*
+		 * Transport carries a bit mask rather than a range — and under
+		 * the Default profile it is not the profile's to choose.
+		 *
+		 * `ptp.transport`'s schema default is 1 (UDPv6, ptp.h's
+		 * ptp_transport_t: 0 UDPv4, 1 UDPv6, 2 L2), while
+		 * desc_default.transport_default is UDPv4. Under the general
+		 * rule "stored == schema default means the operator never set
+		 * it", an untouched key therefore resolved to the profile's
+		 * UDPv4 — silently moving every unit that had not explicitly
+		 * chosen a transport off ff0e::181 and onto 224.0.1.129 at the
+		 * next boot, taking its PTP clients with it. And because
+		 * STS_PTP_PICK_PROFILE is not "notable", nothing said so.
+		 *
+		 * Whether an appliance should default to v6-only PTP multicast
+		 * is a product question — `ptp.transport` appears nowhere in
+		 * docs/ in either numbering — but it is not one this change gets
+		 * to answer by accident. Default keeps the stored value; the
+		 * telecom and power profiles, whose transport IS normative,
+		 * still get the mask check.
+		 */
+		if (!sts_ptp_prof_owns_transport(
+			    requested_profile,
+			    (uint8_t)PTP_PROFILE_DEFAULT)) {
+			transport = (uint8_t)sts_net_cfg_u64(
+				CFG_ID_PTP_TRANSPORT,
+				(uint64_t)port_cfg.transport);
+		} else {
 			sts_ptp_pick_t how;
 
 			transport = (uint8_t)sts_ptp_prof_pick_xport(

@@ -147,6 +147,61 @@ static void test_a_long_uptime_does_not_break_the_window(void)
 	TEST_ASSERT_FALSE(sts_web_sky_fresh(late, late - 60000ULL));
 }
 
+static void test_the_age_is_only_meaningful_when_it_is_measurable(void)
+{
+	uint32_t age = 0xDEADBEEFu;
+
+	/* Never received: not an age of zero. */
+	TEST_ASSERT_FALSE(sts_web_sky_age_ms(NOW, 0ULL, &age));
+	TEST_ASSERT_EQUAL_UINT32(0u, age);
+
+	/* Future-stamped: refused, NOT reported as 2^64-minus-a-bit saturated
+	 * to "49.7 days old", which is what an unguarded subtraction gives. */
+	age = 0xDEADBEEFu;
+	TEST_ASSERT_FALSE(sts_web_sky_age_ms(NOW, NOW + 1ULL, &age));
+	TEST_ASSERT_EQUAL_UINT32(0u, age);
+	TEST_ASSERT_FALSE(sts_web_sky_age_ms(NOW, UINT64_MAX, &age));
+	TEST_ASSERT_EQUAL_UINT32(0u, age);
+
+	/* A real age, exactly. */
+	TEST_ASSERT_TRUE(sts_web_sky_age_ms(NOW, NOW - 1234ULL, &age));
+	TEST_ASSERT_EQUAL_UINT32(1234u, age);
+	TEST_ASSERT_TRUE(sts_web_sky_age_ms(NOW, NOW, &age));
+	TEST_ASSERT_EQUAL_UINT32(0u, age);
+
+	/* Saturating, not truncating: 2^32 ms is 49.7 days and this box is
+	 * specified to run for years. */
+	TEST_ASSERT_TRUE(sts_web_sky_age_ms((1ULL << 32) + 6ULL, 1ULL, &age));
+	TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, age);
+
+	/* And the out pointer is optional. */
+	TEST_ASSERT_TRUE(sts_web_sky_age_ms(NOW, NOW - 1ULL, NULL));
+	TEST_ASSERT_FALSE(sts_web_sky_age_ms(NOW, 0ULL, NULL));
+}
+
+static void test_the_readable_record_count_is_clamped_to_the_array(void)
+{
+	/*
+	 * `count` is a uint8_t the platform area copies out of a UBX frame. A
+	 * value past the array it indexes must become a bound, not a loop trip
+	 * count — the failure mode otherwise is an out-of-bounds read of
+	 * receiver-supplied data, which no host test can observe.
+	 */
+	TEST_ASSERT_EQUAL_UINT(0u, sts_web_sky_usable(0u));
+	TEST_ASSERT_EQUAL_UINT(1u, sts_web_sky_usable(1u));
+	TEST_ASSERT_EQUAL_UINT((unsigned int)STS_GNSS_SKY_MAX_SV - 1U,
+			       sts_web_sky_usable(
+				       (uint8_t)(STS_GNSS_SKY_MAX_SV - 1U)));
+	TEST_ASSERT_EQUAL_UINT((unsigned int)STS_GNSS_SKY_MAX_SV,
+			       sts_web_sky_usable(
+				       (uint8_t)STS_GNSS_SKY_MAX_SV));
+	TEST_ASSERT_EQUAL_UINT((unsigned int)STS_GNSS_SKY_MAX_SV,
+			       sts_web_sky_usable(
+				       (uint8_t)(STS_GNSS_SKY_MAX_SV + 1U)));
+	TEST_ASSERT_EQUAL_UINT((unsigned int)STS_GNSS_SKY_MAX_SV,
+			       sts_web_sky_usable(255u));
+}
+
 /* ===================================================================== */
 /* admission                                                             */
 /* ===================================================================== */
@@ -513,6 +568,26 @@ static void test_an_enormous_age_saturates_rather_than_truncating(void)
 	TEST_ASSERT_TRUE(g_out.sat_age_valid);
 	TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, g_out.sat_age_ms);
 	TEST_ASSERT_FALSE(g_out.detail_available);
+}
+
+static void test_a_future_stamped_frame_is_not_served_and_has_no_age(void)
+{
+	sky_reset();
+	(void)sky_add(0u, 1u, 45, 90, 44u, true);
+	g_sky.mono_ms = NOW + 1ULL;
+
+	sts_web_sky_fill(&g_sky, NOW, &g_out);
+
+	/*
+	 * A torn snapshot or the wrong clock. Neither the satellites nor an age
+	 * may be served: an unguarded subtraction gives 2^64-1 ms, which
+	 * saturates to UINT32_MAX and would be published as "the receiver last
+	 * spoke 49.7 days ago" — a measurement, from nothing.
+	 */
+	TEST_ASSERT_FALSE(g_out.detail_available);
+	TEST_ASSERT_FALSE(g_out.sat_age_valid);
+	TEST_ASSERT_EQUAL_UINT32(0u, g_out.sat_age_ms);
+	TEST_ASSERT_EQUAL_UINT(0u, g_out.n_sats);
 }
 
 /* ===================================================================== */
@@ -993,6 +1068,8 @@ int main(void)
 	RUN_TEST(test_the_staleness_window_is_inclusive_at_its_edge);
 	RUN_TEST(test_a_frame_from_the_future_is_refused_not_wrapped);
 	RUN_TEST(test_a_long_uptime_does_not_break_the_window);
+	RUN_TEST(test_the_age_is_only_meaningful_when_it_is_measurable);
+	RUN_TEST(test_the_readable_record_count_is_clamped_to_the_array);
 
 	RUN_TEST(test_an_unmeasured_almanac_record_is_refused);
 	RUN_TEST(test_a_satellite_in_the_solution_is_always_admitted);
@@ -1015,6 +1092,7 @@ int main(void)
 	RUN_TEST(test_fill_tolerates_a_missing_snapshot);
 	RUN_TEST(test_fill_leaves_the_quality_derived_members_alone);
 	RUN_TEST(test_an_enormous_age_saturates_rather_than_truncating);
+	RUN_TEST(test_a_future_stamped_frame_is_not_served_and_has_no_age);
 
 	RUN_TEST(test_the_admission_rule_matches_the_panels);
 	RUN_TEST(test_both_views_hold_the_same_number_of_satellites);

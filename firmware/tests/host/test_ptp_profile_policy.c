@@ -512,6 +512,231 @@ static void test_the_commissioned_g82751_unit_now_stays_on_g82751(void)
 	TEST_ASSERT_EQUAL_UINT64(G82751_DOMAIN, dom);
 }
 
+/* ===================================================================== *
+ *  The Default profile is not range-constrained
+ *
+ *  This block exists because the range-refusal shipped as a regression and
+ *  no test in this file caught it: sts_ptp_prof_pick_i32_r() was correct in
+ *  isolation, and the defect was in WHICH range sts_ptp.c handed it. These
+ *  tests pin the numbers from both sides of that decision, so a future edit
+ *  that reintroduces the descriptor's range for Default fails here.
+ *
+ *  ptp_port.c's profile_range_check() returns 0 immediately for
+ *  PTP_PROFILE_DEFAULT — Annex I.3's intervals are recommendations, and
+ *  enforcing them "would reject configurations the standard allows". The
+ *  schema is deliberately wider than desc_default for exactly that reason:
+ *
+ *      key                 schema (cfg_schema.h)   desc_default
+ *      ptp.log.sync              -7 .. 1             -1 .. 1
+ *      ptp.log.announce          -3 .. 4              0 .. 4
+ *      ptp.log.delayreq          -7 .. 5              0 .. 5
+ * ===================================================================== */
+
+#define SCHEMA_LOG_SYNC_MIN (-7)
+#define SCHEMA_LOG_SYNC_MAX 1
+#define DESC_DEFAULT_LOG_SYNC_MIN (-1)
+#define DESC_DEFAULT_LOG_SYNC_MAX 1
+#define DESC_DEFAULT_LOG_SYNC 0
+
+static void test_default_takes_the_schema_range_not_the_descriptors(void)
+{
+	int32_t lo = 999, hi = 999;
+
+	sts_ptp_prof_range_i32(PROFILE_DEFAULT, PROFILE_DEFAULT,
+			       DESC_DEFAULT_LOG_SYNC_MIN,
+			       DESC_DEFAULT_LOG_SYNC_MAX, SCHEMA_LOG_SYNC_MIN,
+			       SCHEMA_LOG_SYNC_MAX, &lo, &hi);
+
+	TEST_ASSERT_EQUAL_INT32_MESSAGE(SCHEMA_LOG_SYNC_MIN, lo,
+					"Default must be held to the schema, "
+					"which cfg already enforces");
+	TEST_ASSERT_EQUAL_INT32(SCHEMA_LOG_SYNC_MAX, hi);
+}
+
+static void test_a_named_profile_takes_the_descriptor_range(void)
+{
+	int32_t lo = 999, hi = 999;
+
+	sts_ptp_prof_range_i32(PROFILE_G82751, PROFILE_DEFAULT,
+			       G82751_LOG_SYNC, G82751_LOG_SYNC,
+			       SCHEMA_LOG_SYNC_MIN, SCHEMA_LOG_SYNC_MAX, &lo,
+			       &hi);
+
+	TEST_ASSERT_EQUAL_INT32(G82751_LOG_SYNC, lo);
+	TEST_ASSERT_EQUAL_INT32(G82751_LOG_SYNC, hi);
+}
+
+static void test_the_range_choice_composes_with_the_pick(void)
+{
+	/*
+	 * The two halves together, which is the path sts_ptp.c actually takes
+	 * and the one the earlier tests could not reach: choosing the range and
+	 * then applying it. Under Default, 8 Sync/s survives; under G.8275.1 the
+	 * same value is refused for the profile's own.
+	 */
+	int32_t lo, hi, v;
+
+	sts_ptp_prof_range_i32(PROFILE_DEFAULT, PROFILE_DEFAULT,
+			       DESC_DEFAULT_LOG_SYNC_MIN,
+			       DESC_DEFAULT_LOG_SYNC_MAX, SCHEMA_LOG_SYNC_MIN,
+			       SCHEMA_LOG_SYNC_MAX, &lo, &hi);
+	v = sts_ptp_prof_pick_i32_r(-3, SCHEMA_LOG_SYNC, DESC_DEFAULT_LOG_SYNC,
+				    lo, hi, NULL);
+	TEST_ASSERT_EQUAL_INT32_MESSAGE(-3, v,
+					"Default: the operator's 8 Sync/s must "
+					"survive");
+
+	sts_ptp_prof_range_i32(PROFILE_G82751, PROFILE_DEFAULT, G82751_LOG_SYNC,
+			       G82751_LOG_SYNC, SCHEMA_LOG_SYNC_MIN,
+			       SCHEMA_LOG_SYNC_MAX, &lo, &hi);
+	v = sts_ptp_prof_pick_i32_r(-3, SCHEMA_LOG_SYNC, G82751_LOG_SYNC, lo,
+				    hi, NULL);
+	TEST_ASSERT_EQUAL_INT32_MESSAGE(G82751_LOG_SYNC, v,
+					"G.8275.1: -4 is normative and -3 is "
+					"not it");
+}
+
+static void test_the_unsigned_range_choice_matches(void)
+{
+	uint64_t lo = 999U, hi = 999U;
+
+	sts_ptp_prof_range_u64(PROFILE_DEFAULT, PROFILE_DEFAULT, 24U, 43U, 0U,
+			       255U, &lo, &hi);
+	TEST_ASSERT_EQUAL_UINT64(0U, lo);
+	TEST_ASSERT_EQUAL_UINT64(255U, hi);
+
+	sts_ptp_prof_range_u64(PROFILE_G82751, PROFILE_DEFAULT, 24U, 43U, 0U,
+			       255U, &lo, &hi);
+	TEST_ASSERT_EQUAL_UINT64(24U, lo);
+	TEST_ASSERT_EQUAL_UINT64(43U, hi);
+}
+
+static void test_only_a_named_profile_owns_the_transport(void)
+{
+	unsigned int i;
+
+	TEST_ASSERT_FALSE_MESSAGE(
+		sts_ptp_prof_owns_transport(PROFILE_DEFAULT, PROFILE_DEFAULT),
+		"Default must not move a unit off its stored transport");
+	for (i = 1U; i < PROFILE_COUNT; i++) {
+		TEST_ASSERT_TRUE(sts_ptp_prof_owns_transport(
+			(uint8_t)i, PROFILE_DEFAULT));
+	}
+}
+
+static void test_default_profile_keeps_a_fast_sync_the_schema_allows(void)
+{
+	sts_ptp_pick_t how = STS_PTP_PICK_REFUSED;
+	/*
+	 * 8 Sync/s. Legal per the schema, stored, and honoured by every build
+	 * before profiles were applied. Under the SCHEMA's range it must survive
+	 * as the operator's value.
+	 */
+	int32_t v = sts_ptp_prof_pick_i32_r(-3, SCHEMA_LOG_SYNC,
+					    DESC_DEFAULT_LOG_SYNC,
+					    SCHEMA_LOG_SYNC_MIN,
+					    SCHEMA_LOG_SYNC_MAX, &how);
+
+	TEST_ASSERT_EQUAL_INT32(-3, v);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_OPERATOR, how);
+}
+
+static void test_the_descriptor_range_would_have_broken_it(void)
+{
+	sts_ptp_pick_t how = STS_PTP_PICK_OPERATOR;
+	/*
+	 * The regression, pinned as the thing NOT to do. Handing the same value
+	 * desc_default's -1..1 refuses it and substitutes 0 — 1 Sync/s where the
+	 * operator asked for 8. If someone reverts sts_ptp.c to pass the
+	 * descriptor range for Default, the test above goes red and this one
+	 * documents why.
+	 */
+	int32_t v = sts_ptp_prof_pick_i32_r(-3, SCHEMA_LOG_SYNC,
+					    DESC_DEFAULT_LOG_SYNC,
+					    DESC_DEFAULT_LOG_SYNC_MIN,
+					    DESC_DEFAULT_LOG_SYNC_MAX, &how);
+
+	TEST_ASSERT_EQUAL_INT32(DESC_DEFAULT_LOG_SYNC, v);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_REFUSED, how);
+	TEST_ASSERT_TRUE_MESSAGE(
+		SCHEMA_LOG_SYNC_MIN < DESC_DEFAULT_LOG_SYNC_MIN,
+		"the schema must stay wider than desc_default here, or the "
+		"Default-profile exemption has nothing to protect");
+}
+
+static void test_a_schema_range_can_never_refuse(void)
+{
+	/*
+	 * The property that makes the Default path a no-op rather than a second
+	 * gate: cfg_set() already refuses anything outside the schema bounds, so
+	 * every value that can reach the pick is inside them.
+	 */
+	int32_t probes[] = { SCHEMA_LOG_SYNC_MIN, -3, -1, 0, SCHEMA_LOG_SYNC_MAX };
+	size_t i;
+
+	for (i = 0U; i < (sizeof(probes) / sizeof(probes[0])); i++) {
+		sts_ptp_pick_t how = STS_PTP_PICK_REFUSED;
+
+		(void)sts_ptp_prof_pick_i32_r(probes[i], SCHEMA_LOG_SYNC,
+					      DESC_DEFAULT_LOG_SYNC,
+					      SCHEMA_LOG_SYNC_MIN,
+					      SCHEMA_LOG_SYNC_MAX, &how);
+		TEST_ASSERT_NOT_EQUAL_MESSAGE(
+			STS_PTP_PICK_REFUSED, how,
+			"a value the schema accepts must never be refused "
+			"under the Default profile");
+	}
+}
+
+static void test_a_telecom_profile_still_gets_its_normative_range(void)
+{
+	/* The exemption is Default-only: G.8275.1's -4..-4 still binds. */
+	sts_ptp_pick_t how = STS_PTP_PICK_OPERATOR;
+	int32_t v = sts_ptp_prof_pick_i32_r(-3, SCHEMA_LOG_SYNC,
+					    G82751_LOG_SYNC, G82751_LOG_SYNC,
+					    G82751_LOG_SYNC, &how);
+
+	TEST_ASSERT_EQUAL_INT32(G82751_LOG_SYNC, v);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_REFUSED, how);
+}
+
+static void test_the_default_transport_is_the_stored_one(void)
+{
+	/*
+	 * ptp.transport's schema default is 1 (UDPv6); desc_default's is 0
+	 * (UDPv4). Under the plain rule an untouched key resolves to the
+	 * profile's UDPv4 and every client on ff0e::181 loses the grandmaster,
+	 * silently — STS_PTP_PICK_PROFILE is not notable. sts_ptp.c therefore
+	 * bypasses the pick entirely for Default; this pins the collision that
+	 * makes the bypass necessary, so narrowing the schema default later
+	 * makes the reason visible rather than mysterious.
+	 */
+	const uint64_t schema_default_transport = 1U;  /* UDPv6, cfg_schema.h */
+	const uint64_t desc_default_transport = XPORT_UDP4; /* ptp_profile.c */
+	sts_ptp_pick_t how = STS_PTP_PICK_OPERATOR;
+	uint64_t v;
+
+	TEST_ASSERT_TRUE_MESSAGE(
+		schema_default_transport != desc_default_transport,
+		"if these ever agree, the Default-transport bypass in "
+		"sts_ptp.c is dead code and should go");
+
+	/* What the generic rule WOULD do, which is why sts_ptp.c bypasses it:
+	 * an untouched key silently becomes the profile's UDPv4, reported as
+	 * PICK_PROFILE, which sts_ptp_pick_notable() does not log. */
+	v = sts_ptp_prof_pick_xport(schema_default_transport,
+				    schema_default_transport,
+				    desc_default_transport,
+				    (1U << XPORT_UDP4) | (1U << 1) |
+					    (1U << XPORT_L2),
+				    &how);
+	TEST_ASSERT_EQUAL_UINT64(desc_default_transport, v);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_PROFILE, how);
+	TEST_ASSERT_FALSE_MESSAGE(
+		sts_ptp_pick_notable(how),
+		"the flip was silent, which is what made it dangerous");
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -553,6 +778,17 @@ int main(void)
 	RUN_TEST(test_an_out_of_range_transport_does_not_alias_onto_a_valid_one);
 	RUN_TEST(test_an_empty_transport_mask_refuses_every_override);
 	RUN_TEST(test_the_commissioned_g82751_unit_now_stays_on_g82751);
+
+	RUN_TEST(test_default_takes_the_schema_range_not_the_descriptors);
+	RUN_TEST(test_a_named_profile_takes_the_descriptor_range);
+	RUN_TEST(test_the_range_choice_composes_with_the_pick);
+	RUN_TEST(test_the_unsigned_range_choice_matches);
+	RUN_TEST(test_only_a_named_profile_owns_the_transport);
+	RUN_TEST(test_default_profile_keeps_a_fast_sync_the_schema_allows);
+	RUN_TEST(test_the_descriptor_range_would_have_broken_it);
+	RUN_TEST(test_a_schema_range_can_never_refuse);
+	RUN_TEST(test_a_telecom_profile_still_gets_its_normative_range);
+	RUN_TEST(test_the_default_transport_is_the_stored_one);
 
 	return UNITY_END();
 }

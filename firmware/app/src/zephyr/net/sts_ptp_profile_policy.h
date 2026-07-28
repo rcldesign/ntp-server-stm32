@@ -233,6 +233,92 @@ static inline bool sts_ptp_pick_notable(sts_ptp_pick_t how)
 	return how == STS_PTP_PICK_REFUSED;
 }
 
+/* --------------------------------------------- which range actually applies */
+
+/**
+ * Choose the bound a profile-owned field is held to.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS A FUNCTION AND NOT AN `IF` AT THE CALL SITE
+ * ---------------------------------------------------------------------------
+ *
+ * The first version of the range refusal applied the profile descriptor's
+ * range to every profile, Default included. ptp_port.c's
+ * profile_range_check() does the opposite — it returns 0 immediately for
+ * PTP_PROFILE_DEFAULT, because Annex I.3 states that profile's intervals as
+ * *recommendations* and enforcing them "would reject configurations the
+ * standard allows". The schema is deliberately wider than the descriptor
+ * exactly there:
+ *
+ *     key                 schema      desc_default
+ *     ptp.log.sync        -7 .. 1       -1 .. 1
+ *     ptp.log.announce    -3 .. 4        0 .. 4
+ *     ptp.log.delayreq    -7 .. 5        0 .. 5
+ *
+ * So a unit on the shipped Default profile at ptp.log.sync = -3 — 8 Sync/s,
+ * legal, stored, honoured by every prior build — had it refused and replaced
+ * with 0, and served 1 Sync/s behind a LOG_WRN.
+ *
+ * That defect was invisible to this header's tests, because the header was
+ * correct in isolation: sts_ptp_prof_pick_i32_r() did exactly what it was
+ * asked, and the mistake was in WHICH range the glue handed it. A reviewer
+ * had to find it by reading. Putting the choice here is what makes it a thing
+ * a test can hold — the .c now asks this function rather than deciding.
+ *
+ * @param profile      the profile actually selected.
+ * @param dflt_profile PTP_PROFILE_DEFAULT, passed in so this header stays
+ *                     free of the engine's enum.
+ * @param schema_lo/hi the cfg schema's own bounds, which cfg_set() already
+ *                     enforces on write — so a pick against them cannot
+ *                     refuse, which is precisely the intent for Default.
+ */
+static inline void sts_ptp_prof_range_i32(uint8_t profile, uint8_t dflt_profile,
+					  int32_t desc_lo, int32_t desc_hi,
+					  int32_t schema_lo, int32_t schema_hi,
+					  int32_t *lo, int32_t *hi)
+{
+	if (profile == dflt_profile) {
+		*lo = schema_lo;
+		*hi = schema_hi;
+	} else {
+		*lo = desc_lo;
+		*hi = desc_hi;
+	}
+}
+
+/** Unsigned form of sts_ptp_prof_range_i32(). */
+static inline void sts_ptp_prof_range_u64(uint8_t profile, uint8_t dflt_profile,
+					  uint64_t desc_lo, uint64_t desc_hi,
+					  uint64_t schema_lo, uint64_t schema_hi,
+					  uint64_t *lo, uint64_t *hi)
+{
+	if (profile == dflt_profile) {
+		*lo = schema_lo;
+		*hi = schema_hi;
+	} else {
+		*lo = desc_lo;
+		*hi = desc_hi;
+	}
+}
+
+/**
+ * Whether the profile gets to choose the transport at all.
+ *
+ * False for Default, and that is not symmetry for its own sake:
+ * `ptp.transport`'s schema default is 1 (UDPv6) while desc_default's is 0
+ * (UDPv4), so the plain "stored == schema default means unset" rule resolved an
+ * untouched key to UDPv4 and moved every such unit off ff0e::181 onto
+ * 224.0.1.129 at the next boot — silently, because STS_PTP_PICK_PROFILE is not
+ * notable. Whether the appliance should default to v6-only PTP multicast is a
+ * product question; it is not one the profile machinery gets to answer by
+ * accident.
+ */
+static inline bool sts_ptp_prof_owns_transport(uint8_t profile,
+					       uint8_t dflt_profile)
+{
+	return profile != dflt_profile;
+}
+
 /**
  * Whether a stored `ptp.profile` is one the engine knows.
  *

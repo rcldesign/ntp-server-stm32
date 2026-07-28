@@ -888,6 +888,36 @@ int sts_pwrseq_poe_kill(void);
  * MP_MIRROR_F_IDENTIFY reports). 0 stops it. Safe from any thread. */
 void sts_supervisor_identify(uint32_t duration_ms);
 
+/* ---- FE-5680A serial link (UART7 + the K1 RS-232/CMOS relay) ------------- */
+/*
+ * The Rb housekeeping port, as an operator sees it. The FE-5680A variant fitted
+ * decides whether it speaks RS-232 through U46 or CMOS directly
+ * (docs/rb_rs232_interface.md), and getting that wrong is silent: the link just
+ * never answers. So the position is commissionable and observable rather than
+ * assumed.
+ */
+typedef struct {
+	uint8_t  mode;        /* 0 = RS-232 through U46, 1 = direct CMOS */
+	bool     locked;      /* RB_LOCK (PB13), variant polarity applied */
+	bool     rail_up;     /* RB_PWR_EN asserted, so U46 has a supply */
+	bool     tunnel_open; /* a maintenance raw tunnel holds the port */
+	uint32_t tx_bytes;
+	uint32_t rx_bytes;
+	uint32_t overruns;
+} sts_rb_serial_t;
+
+/* Snapshot the Rb serial link. @retval 0 / -EINVAL for NULL. Fields read as
+ * zero/false when the platform never brought UART7 up. */
+int sts_rb_serial_status(sts_rb_serial_t *out);
+
+/* Move the K1 DPDT relay. Blocks for the contact settling time.
+ *
+ * @retval 0        Moved (or already there).
+ * @retval -EINVAL  @p mode is not 0 or 1.
+ * @retval -EBUSY   A raw tunnel holds the port.
+ * @retval -ENODEV  UART7 was never initialised. */
+int sts_rb_serial_set_mode(uint8_t mode);
+
 /* Liveness: each area calls this periodically; the supervisor ANDs all
  * registered bits before kicking the external watchdog. id is allocated
  * via sts_liveness_register at init.

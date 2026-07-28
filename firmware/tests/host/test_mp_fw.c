@@ -1828,6 +1828,17 @@ static void test_a_zero_length_chunk_is_refused(void)
 	TEST_ASSERT_EQUAL_INT64(MP_E_BAD_PARAMS, err_code());
 	TEST_ASSERT_EQUAL_STRING("empty chunk", err_reason());
 
+	/*
+	 * And it carries NO rewind point. The refusal never reached the
+	 * orchestrator, so there is no offset it is authoritative about —
+	 * offering one would be inventing a resumption point from a request that
+	 * was rejected before anything looked at the transfer.
+	 */
+	TEST_ASSERT_EQUAL_INT64_MESSAGE(
+		-1, err_data_i("next_off"),
+		"a request refused before core/fwupd saw it offered a rewind "
+		"point anyway");
+
 	/* No `data` member at all is the same class of error. */
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"fw.data\","

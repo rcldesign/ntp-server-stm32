@@ -73,6 +73,7 @@
 
 #include "fwupd/rb_fwupd.h"
 #include "zephyr/platform/platform.h"
+#include "zephyr/sts_app.h"
 
 LOG_MODULE_REGISTER(sts_rb_serial, CONFIG_STS1000_LOG_LEVEL);
 
@@ -458,4 +459,35 @@ void rb_serial_stats(uint32_t *tx, uint32_t *rx, uint32_t *overruns)
 	if (overruns != NULL) {
 		*overruns = rb.overruns;
 	}
+}
+
+/* ------------------------------------------------- cross-area accessors --- */
+
+/*
+ * The console and MP planes may not include platform.h (ARCHITECTURE.md §2), so
+ * the operator-facing view of this file crosses the seam through sts_app.h.
+ * One snapshot rather than six getters: every caller wants the whole picture,
+ * and six calls would let the relay position and the lock state come from
+ * different instants — which is exactly the pair an operator is comparing when
+ * they are commissioning the polarity.
+ */
+
+int sts_rb_serial_status(sts_rb_serial_t *out)
+{
+	if (out == NULL) {
+		return -EINVAL;
+	}
+
+	(void)memset(out, 0, sizeof(*out));
+	out->mode = rb_serial_mode();
+	out->locked = rb_serial_locked();
+	out->rail_up = rb_serial_rail_up();
+	out->tunnel_open = rb_serial_tunnel_active();
+	rb_serial_stats(&out->tx_bytes, &out->rx_bytes, &out->overruns);
+	return 0;
+}
+
+int sts_rb_serial_set_mode(uint8_t mode)
+{
+	return rb_serial_set_mode(mode);
 }

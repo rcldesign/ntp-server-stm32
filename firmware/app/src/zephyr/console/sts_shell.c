@@ -1746,6 +1746,72 @@ static int cmd_pwr_rbretry(const struct shell *sh, size_t argc, char **argv)
 	return pwr_request(sh, sts_pwrseq_rb_retry(), "Rb sequence retry");
 }
 
+static int cmd_pwr_rb(const struct shell *sh, size_t argc, char **argv)
+{
+	sts_rb_serial_t s;
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	rc = sts_rb_serial_status(&s);
+	if (rc != 0) {
+		shell_error(sh, "Rb serial status unavailable (%d)", rc);
+		return rc;
+	}
+
+	shell_print(sh, "K1 relay     %s", (s.mode == 0U) ? "RS-232 (U46)"
+							  : "direct CMOS");
+	shell_print(sh, "RB_PWR_EN    %s%s", s.rail_up ? "asserted" : "off",
+		    s.rail_up ? "" : "  (U46 has no supply; the link is dead)");
+	shell_print(sh, "RB_LOCK      %s", s.locked ? "locked" : "not locked");
+	shell_print(sh, "tunnel       %s", s.tunnel_open ? "OPEN (a maintenance "
+							   "session owns UART7)"
+							 : "closed");
+	shell_print(sh, "bytes        tx %u, rx %u, overruns %u", s.tx_bytes,
+		    s.rx_bytes, s.overruns);
+	return 0;
+}
+
+/*
+ * `sts pwr rbmode <rs232|cmos>` — commission the K1 position.
+ *
+ * Which one the fitted FE-5680A needs is a property of the surplus variant, not
+ * of the board, and the failure mode of choosing wrong is silence rather than
+ * damage. FMT §5.2 puts the K1 serial-mode relay in G1; on this plane the
+ * equivalent gate is mutating_allowed().
+ */
+static int cmd_pwr_rbmode(const struct shell *sh, size_t argc, char **argv)
+{
+	uint8_t mode;
+	int rc;
+
+	ARG_UNUSED(argc);
+
+	if (!mutating_allowed(sh)) {
+		return -EACCES;
+	}
+	if (strcmp(argv[1], "rs232") == 0) {
+		mode = 0U;
+	} else if (strcmp(argv[1], "cmos") == 0) {
+		mode = 1U;
+	} else {
+		shell_error(sh, "usage: sts pwr rbmode <rs232|cmos>");
+		return -EINVAL;
+	}
+
+	rc = sts_rb_serial_set_mode(mode);
+	if (rc != 0) {
+		shell_error(sh, "relay refused (%d)%s", rc,
+			    (rc == -EBUSY) ? " - a raw tunnel holds the port"
+					   : "");
+		return rc;
+	}
+	shell_print(sh, "K1 now in the %s position",
+		    (mode == 0U) ? "RS-232" : "CMOS");
+	return 0;
+}
+
 /* ------------------------------------------------------------------------- */
 /* cal tempco — the §10.4 OCXO characterisation fit                          */
 /* ------------------------------------------------------------------------- */
@@ -2048,6 +2114,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_pwr_ovclear, 1, 0),
 	SHELL_CMD_ARG(rbretry, NULL, "re-run the guarded rubidium sequence",
 		      cmd_pwr_rbretry, 1, 0),
+	SHELL_CMD_ARG(rb, NULL, "FE-5680A serial link: relay, lock, counters",
+		      cmd_pwr_rb, 1, 0),
+	SHELL_CMD_ARG(rbmode, NULL, "rbmode <rs232|cmos> - move the K1 relay",
+		      cmd_pwr_rbmode, 2, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(

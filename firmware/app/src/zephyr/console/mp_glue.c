@@ -1516,6 +1516,22 @@ static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 			    sts_mp_tunnel_gnss_open() ? "OPEN (suspect)" : "closed",
 			    sts_mp_tunnel_rb_open() ? "OPEN (suspect)" : "closed");
 	}
+
+	{
+		uint32_t gnss = 0U;
+		uint32_t rb = 0U;
+		uint32_t refused = 0U;
+
+		/*
+		 * The other direction. mp_tunnel.c keeps these precisely so a
+		 * refused host->device burst is visible somewhere — the protocol
+		 * sends no reply for one — and this is the "somewhere" its
+		 * comments name.
+		 */
+		sts_mp_tunnel_tx_stats(&gnss, &rb, &refused);
+		shell_print(sh, "host->dev    gnss %u B, rb %u B (refused %u)",
+			    gnss, rb, refused);
+	}
 	return 0;
 }
 
