@@ -106,6 +106,7 @@
 #include "auth/auth.h"
 #include "console/mp_glue.h"
 #include "console/sts_console.h"
+#include "console/sts_mp_telem.h"
 #include "console/sts_recovery_policy.h"
 #include "fault/fault.h"
 #include "ina228/ina228.h"
@@ -413,9 +414,33 @@ static void fill_health(mp_health_t *h, const sts_health_t *s)
 	h->bkp_gps_pg = s->bkp_gps_pg;
 }
 
+/**
+ * Assemble one telemetry record (FMT §7.1).
+ *
+ * Console-thread context, inside mp_lock. Every read here is a snapshot
+ * accessor and none of them is a timing lock:
+ *
+ *   sts_quality_snapshot()  lock-free seqlock (core/quality)
+ *   sts_pwrseq_snapshot()   lock-free seqlock (platform/sts_pwrseq_pub.h)
+ *   sts_health_snapshot()   bounded mutex; the housekeeping thread holds it for
+ *                           one struct copy per sweep
+ *   sts_gnss_detail()       bounded mutex; the gnss thread holds it for three
+ *                           struct copies per second
+ *
+ * so the whole provider is bounded by a handful of memcpys and cannot park this
+ * thread behind a producer, nor a producer behind it — which is the rule that
+ * put snapshots in this architecture in the first place (ARCHITECTURE.md §10).
+ *
+ * What is NOT filled, and why, is stated in sts_mp_telem.h rather than here, so
+ * the list sits beside the binding it qualifies.
+ */
 static int prov_telem(void *user, mp_telem_t *out)
 {
 	sts_health_t hs;
+	sts_pwrseq_snap_t ps;
+	sts_gnss_detail_t gd;
+	bool have_ps;
+	bool have_gd;
 
 	ARG_UNUSED(user);
 	memset(out, 0, sizeof(*out));
@@ -427,17 +452,16 @@ static int prov_telem(void *user, mp_telem_t *out)
 		fill_health(&out->h, &hs);
 	}
 	out->alarms = sts_alarms_active();
+	out->alarms_latched = sts_alarms_latched();
 	out->uptime_s = (uint32_t)(k_uptime_get() / 1000);
 	(void)sts_time_tai_ns(&out->tai_ns);
 	out->time_fallback = sts_time_is_fallback();
 
-	/*
-	 * The remaining fields (pwrseq stage, gnssmgr state, survey progress,
-	 * RB_LOCK, EXTREF_MON) live in the platform area behind no accessor. They
-	 * stay zero rather than being guessed; see the TODO block above.
-	 */
-	out->rb_lock = (out->q.active_ref == (uint8_t)QUALITY_REF_RB);
-	out->extref_ok = (out->q.active_ref == (uint8_t)QUALITY_REF_EXTREF);
+	have_ps = (sts_pwrseq_snapshot(&ps) == 0);
+	have_gd = (sts_gnss_detail(&gd) == 0);
+
+	sts_mp_telem_bind_pwrseq(out, have_ps ? &ps : NULL, out->q.active_ref);
+	sts_mp_telem_bind_gnss(out, have_gd ? &gd : NULL);
 	return 0;
 }
 

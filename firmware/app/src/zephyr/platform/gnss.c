@@ -452,13 +452,20 @@ static void gnss_build_evidence(sts_gnss_pulse_evidence_t *e, bool pvt_usable)
  * -EAGAIN from a getter is "not decoded yet", not a failure, so each block
  * simply stays zeroed with its own valid flag clear.
  */
-static void gnss_build_detail(sts_gnss_detail_t *d)
+static void gnss_build_detail(sts_gnss_detail_t *d, gnssmgr_state_t state)
 {
 	gnssmgr_svin_t sv;
 	gnssmgr_ecef_t pos;
 	gnssmgr_rf_t rf;
 
 	memset(d, 0, sizeof(*d));
+
+	/*
+	 * Passed in rather than re-read: gnss_publish() already has it, and one
+	 * read means the state published here cannot disagree with the cfg_ack /
+	 * cfg_failed booleans derived from it in the same snapshot.
+	 */
+	d->mgr_state = (uint8_t)state;
 
 	if (gnssmgr_svin(&mgr, &sv) == 0) {
 		d->svin_seen = sv.valid_msg;
@@ -560,7 +567,7 @@ static void gnss_publish(uint32_t now_ms)
 	}
 
 	gnss_build_evidence(&e, s.have_status);
-	gnss_build_detail(&d);
+	gnss_build_detail(&d, state);
 
 	(void)k_mutex_lock(&snap_mutex, K_FOREVER);
 	snap = s;

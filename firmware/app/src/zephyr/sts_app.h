@@ -563,6 +563,14 @@ int sts_gnss_sky(sts_gnss_sky_t *out);
  * once a second. Callable from any cooperative thread, NOT from an ISR.
  */
 typedef struct {
+	/* core/gnssmgr's own lifecycle state (gnssmgr_state_t): IDLE, CONFIG,
+	 * SURVEY_IN, FIXED, CONFIG_FAILED, FW_UPDATE. sts_gnss_snap_t carries
+	 * only the two booleans the sequencer needs (cfg_ack / cfg_failed),
+	 * which cannot distinguish "still walking the config" from "surveying"
+	 * from "the receiver belongs to the firmware updater" — and those are
+	 * three very different answers to "why is this unit not serving". */
+	uint8_t  mgr_state;
+
 	/* Survey-in progress, UBX-NAV-SVIN. */
 	bool     svin_seen;      /* a NAV-SVIN has been decoded this session */
 	bool     svin_active;    /* a survey is running right now */
@@ -593,10 +601,29 @@ typedef struct {
 
 /* Fill @p out from the gnss thread's published view.
  *
+ * Takes the gnss thread's snapshot mutex, which that thread holds only for
+ * three struct copies once a second — no I/O, no logging, no allocation — so
+ * the wait is bounded by a memcpy rather than by any device. Same shape as
+ * sts_health_snapshot(). Not from an ISR.
+ *
  * @retval 0        Written; individual `*_valid` flags say what is populated.
  * @retval -EINVAL  @p out is NULL.
  * @retval -ENODEV  The gnss thread never started; @p out is zeroed. */
 int sts_gnss_detail(sts_gnss_detail_t *out);
+
+/* Convert a UBX 0.1 mm accuracy to millimetres, rounded to nearest.
+ *
+ * Lives here, beside the sts_gnss_detail_t members that carry the 0.1 mm unit,
+ * because every plane that reports survey or position accuracy reports it in
+ * millimetres and a factor of ten on the one number an operator compares
+ * against `gnss.survey.acc` looks entirely plausible either way. One
+ * implementation, three consumers (web, MP telemetry, panel). */
+static inline uint32_t sts_gnss_acc_0p1mm_to_mm(uint32_t v)
+{
+	/* Not (v + 5) / 10: v may be UINT32_MAX and the add would wrap, turning
+	 * the widest possible accuracy into 0 mm — "perfectly surveyed". */
+	return (v / 10U) + (((v % 10U) >= 5U) ? 1U : 0U);
+}
 
 /* ---- e-compass (IIS2MDC magnetometer + LIS2DH12 accelerometer) ----------- */
 /*
@@ -782,6 +809,93 @@ typedef struct {
 
 /* Fill @p out from the housekeeping cache. Returns 0, or -EINVAL for NULL. */
 int sts_health_snapshot(sts_health_t *out);
+
+/* ---- power sequencer (platform area, pwrseq_exec.c) --------------------- */
+/*
+ * What the stage machine decided, and what it decided it from.
+ *
+ * core/pwrseq owns every gated load on the board — GPS power, the display, the
+ * guarded rubidium sequence, the PoE shed ladder, the 26 V over-voltage latch,
+ * the watchdog arm and the holdover relay — and until this snapshot existed
+ * nothing outside the platform area could see any of it. A technician on the
+ * Field Maintenance Tool read stage 0, shed level 0 and an empty alarm word on
+ * a unit that was in fact halted at stage 8 with the rubidium deferred, which
+ * is precisely the state you need to see when a unit will not come up.
+ *
+ * Flat scalars rather than core/pwrseq's own structs, for the reason
+ * sts_gnss_detail_t states: sts_app.h is the seam between four areas and must
+ * not drag core/pwrseq's header into all of them (ARCHITECTURE.md §2).
+ *
+ * Two halves, and the distinction matters when reading a unit that is wrong:
+ *
+ *   DECIDED   core/pwrseq's own flattened status (pwrseq_status()). These are
+ *             the sequencer's beliefs and its commanded pin states.
+ *   OBSERVED  the inputs it was handed on that same tick (pwrseq_in_t). These
+ *             are the hardware's answers. `rb_lock_pin` is RB_LOCK (PB13) with
+ *             the per-unit polarity applied — NOT the same signal as
+ *             quality_block_t::active_ref, which is what the discipline loop
+ *             *selected*; a unit whose FE has dropped lock but has not yet been
+ *             switched away differs between the two, and that difference is the
+ *             diagnosis.
+ *
+ * Published by the housekeeping thread's 4 Hz sequencer pass through a
+ * single-writer seqlock, so sts_pwrseq_snapshot() never blocks that thread and
+ * never blocks on it. Safe from any thread; not from an ISR.
+ */
+typedef struct {
+	/* False = the sequencer never started; every field below is zero and
+	 * means nothing. Distinct from stage 0 (PWRSEQ_STAGE_IDLE). */
+	bool started;
+
+	/* -------------------------------------------------- decided -------- */
+	uint8_t  stage;            /* pwrseq_stage_t */
+	uint32_t stage_entered_ms;
+	uint8_t  retries;          /* attempts at the current step */
+	uint8_t  shed;             /* pwrseq_shed_level_t */
+	uint32_t alarms;           /* bit n = pwrseq_alarm_t n active */
+	bool     halted;
+	bool     rb_deferred;      /* stage 8 skipped; retry is an operator act */
+	bool     rb_enabled;       /* RB_PWR_EN commanded */
+	bool     rb_gated;         /* RB_VCC_GATE commanded */
+	bool     rb_locked;        /* pwrseq's fused verdict: gated AND the pin
+				    * reads locked AND EXTREF_MON is in band */
+	uint8_t  rb_auto_retries;
+	bool     ov_latched;       /* the firmware-side 26 V latch stands */
+	bool     wdt_armed;
+	bool     relay_eligible;
+	bool     display_on;
+	bool     panel_led_on;
+	bool     gps_on;
+	bool     ant_bias_on;
+	bool     disc_started;
+	bool     phy_released;
+	bool     pfi_seen;         /* a power-fail early warning has fired */
+	bool     pfi_expected;     /* a commanded POE_KILL was already armed */
+
+	/* -------------------------------------------------- observed ------- */
+	bool     rb_wanted;        /* cfg pwr.rb.policy: this unit has an FE */
+	bool     rb_lock_pin;      /* RB_LOCK (PB13), polarity applied */
+	bool     rb_ov_det;        /* RB_OV_DET (PE3) reads high right now */
+	uint32_t extref_hz;        /* EXTREF_MON (PB14/TIM12) measurement */
+	bool     extref_valid;     /* that measurement is fresh and trustworthy */
+	bool     extref_in_band;   /* ...and inside the 10 MHz acceptance band */
+	uint32_t tick_mono_ms;     /* when this observation was taken */
+} sts_pwrseq_snap_t;
+
+/* Copy the published sequencer view.
+ *
+ * Lock-free and O(1): a bounded seqlock retry against a single writer, so it
+ * cannot park the caller behind the housekeeping thread and cannot delay that
+ * thread either. Callable from any thread, not from an ISR.
+ *
+ * @retval 0        Written.
+ * @retval -EINVAL  @p out is NULL.
+ * @retval -ENODEV  The sequencer never started; @p out is zeroed.
+ * @retval -EAGAIN  The publisher won every retry; @p out is zeroed. Only
+ *                  reachable if the reader is preempted repeatedly inside the
+ *                  copy, which needs eight consecutive 250 ms ticks to land in
+ *                  the same few microseconds. */
+int sts_pwrseq_snapshot(sts_pwrseq_snap_t *out);
 
 /* ---- alarms / health ---------------------------------------------------- */
 /* Bitmask view of active alarms (fault-module alarm ids, FAULT_ALARM_BIT). */

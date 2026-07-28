@@ -367,6 +367,22 @@ module_deps(factory_policy)
 # panel's (spec §371) — static inline only, so no `ui` link edge.
 module_deps(web_sky web)
 
+# `mp_telem` is the join between the platform area's published state and the
+# Maintenance Protocol telemetry record — sts_pwrseq_pub.h, sts_mp_telem.h and
+# sts_ui_refs.h. It exists because `mp_stream` proved the wire and the defect was
+# upstream of it: mp_telem_t declared the sequencer's stage, the receiver's state
+# and the survey progress, mp_stream.c encoded them, and nothing wrote them, so
+# every unit in the field reported zeros with every test passing.
+#
+# Every edge is a real one, no models. `pwrseq` because the suite drives a real
+# pwrseq_ctx_t through pwrseq_step()/pwrseq_shed_step()/pwrseq_ov_observe() and
+# reads it with pwrseq_status() — a hand-set ctx would still pass against a
+# status accessor that had stopped reading the field. `mp` for the encoder and
+# the CBOR reader that decodes what it produced. `gnssmgr` and `refsel` for the
+# enumerations the record carries raw. `ui` and `web` because the survey-accuracy
+# rule is shared by three planes and is pinned across all three here.
+module_deps(mp_telem mp pwrseq gnssmgr refsel ui web)
+
 # `recovery_policy` (app/src/zephyr/console/sts_recovery_policy.h) is the
 # operator-recovery surface's three decisions: which latch may be acknowledged
 # and what the answer means, whether a tempco fit may be believed, and which

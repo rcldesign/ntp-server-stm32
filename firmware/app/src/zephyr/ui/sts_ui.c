@@ -70,6 +70,7 @@
 #include "zephyr/ui/sts_sky_policy.h"
 #include "zephyr/ui/sts_ui.h"
 #include "zephyr/ui/sts_ui_echo.h"
+#include "zephyr/ui/sts_ui_refs.h"
 
 /*
  * The factory-reset key wipe is a net-area implementation
@@ -749,36 +750,37 @@ static void build_sky(ui_health_t *h)
 /**
  * Build the health snapshot core/ui renders from.
  *
- * TODO(ui-health): the fields below the quality-derived block have no typed
- * cross-area source in sts_app.h (per-rail INA, fan/PoE, the network/PTP
- * counters and the Rb detail). They stay zero until a health getter is added to
- * sts_app.h by the platform/net owners. Home/Clocks/Alarms are fully populated
- * from the quality block and the alarm mask, and the Sky page's per-SV
- * az/el/CN0 now comes from sts_gnss_sky() through build_sky().
+ * TODO(ui-health): the per-rail INA readings, the fan/PoE figures and the
+ * network/PTP counters still have no typed cross-area source in sts_app.h and
+ * stay zero until a health getter is added by the platform/net owners.
+ * Home/Clocks/Alarms are fully populated from the quality block and the alarm
+ * mask; the Sky page's per-SV az/el/CN0 comes from sts_gnss_sky() through
+ * build_sky(); the antenna verdict, the survey progress and the whole
+ * RUBIDIUM / EXTERNAL block now come from the platform's published sequencer
+ * and receiver views (sts_ui_refs.h), which is where the reasoning about what
+ * each of those fields is allowed to mean lives.
+ *
+ * `rb_temp_mc` is deliberately still zero: it comes from the FE's own serial
+ * telemetry over UART7 and sts_rb_serial_t carries link statistics, not
+ * readings.
  */
 static void build_health(ui_health_t *h, const quality_block_t *q,
 			 uint64_t alarms)
 {
+	sts_pwrseq_snap_t ps;
+	sts_gnss_detail_t gd;
+
 	memset(h, 0, sizeof(*h));
 	fill_time(h, q);
 	fill_ident(h);
 	fill_alarms(h, alarms);
 	build_sky(h);
 
-	/* Antenna state is not directly exposed; approximate from the GNSS
-	 * time-lock flag so the Home/Sky badge is not permanently "UNKNOWN". */
-	h->ant_state = ((q->flags & QUALITY_FLAG_GNSS_TIME_LOCKED) != 0u)
-			       ? (uint8_t)UI_ANT_OK
-			       : (uint8_t)UI_ANT_UNKNOWN;
-
-	/* Reflect the active reference into the Rb/ext view where the quality
-	 * block already tells us. */
-	if (q->active_ref == (uint8_t)QUALITY_REF_RB) {
-		h->rb_present = true;
-		h->rb_powered = true;
-		h->rb_locked = true;
-	} else if (q->active_ref == (uint8_t)QUALITY_REF_EXTREF) {
-		h->extref_ok = true;
+	if (sts_pwrseq_snapshot(&ps) == 0) {
+		sts_ui_refs_from_pwrseq(h, &ps);
+	}
+	if (sts_gnss_detail(&gd) == 0) {
+		sts_ui_refs_from_gnss(h, &gd);
 	}
 }
 

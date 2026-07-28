@@ -389,12 +389,16 @@ static inline uint8_t sts_web_ant_state(uint64_t alarms, uint32_t quality_flags,
 	return (uint8_t)REST_ANT_UNKNOWN;
 }
 
-/** Convert a UBX 0.1 mm accuracy to millimetres, rounded to nearest. */
+/**
+ * Convert a UBX 0.1 mm accuracy to millimetres, rounded to nearest.
+ *
+ * Forwards to sts_app.h, which owns the conversion because the unit is declared
+ * there and three planes report it. Kept as a name so this header reads the way
+ * it always did and so the rounding cannot fork per plane.
+ */
 static inline uint32_t sts_web_0p1mm_to_mm(uint32_t v)
 {
-	/* Not (v + 5) / 10: v may be UINT32_MAX and the add would wrap, turning
-	 * the widest possible accuracy into 0 mm — "perfectly surveyed". */
-	return (v / 10U) + (((v % 10U) >= 5U) ? 1U : 0U);
+	return sts_gnss_acc_0p1mm_to_mm(v);
 }
 
 /**

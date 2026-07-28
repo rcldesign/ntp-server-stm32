@@ -139,7 +139,7 @@
 atecc_status_name                      # fmt: no-caller. core/atecc does no logging at all; atecc.c:567/949 pass the byte to atecc_status_to_errno() and discard it, so the code never leaves the device
 ina228_cause_str                       # fmt: no-caller. INA228_CAUSE_* appears nowhere outside core/ina228, and its producer ina228_diag_cause() is itself allow-listed no-caller
 ldap_result_name                       # fmt: no-caller BY DESIGN, and the only entry here whose absence is a security property. sts_aaa.c:1182 does ldap_result_to_errno(r.code) and never logs the code because FMT spec sts1000_field_maintenance_tool.md §5.3 makes a wrong password, an unknown user, an over-long field and "no authority could answer" one indistinguishable refusal (anti-enumeration). Naming the LDAP result would undo that. Do not "fix" this by adding a log line
-pwrseq_alarm_name                      # fmt: no-caller. pwrseq_alarms(), pwrseq_status() and pwrseq_stage() are all absent from zephyr.elf — nothing on the device reads the alarm word this would name
+pwrseq_alarm_name                      # fmt: no-caller, but the old reason ("pwrseq_alarms(), pwrseq_status() and pwrseq_stage() are all absent, so nothing reads the alarm word this would name") is now FALSE: pwrseq_status() is bound (pwrseq_exec.c pwrseq_publish) and the word goes out on MP telemetry key 46 and reaches sts_pwrseq_snap_t::alarms. It is still absent because the device transmits the bitmap and the host renders the names — tools/meridian_ctl.py carries no table for pwrseq_alarm_t, so today the name is rendered only by the out-of-tree FMT GUI
 ubx_fwupd_state_name                   # fmt: no-caller. Its producer ubx_fwupd_state() is allow-listed TODO and absent from the image
 # The rest keep the original reason: an MP-plane or UI formatter the device does
 # not call, whose name is rendered host-side. Qualification above applies.
@@ -358,15 +358,14 @@ ptp_port_fault                         # TODO: wire it up or give it a reason
 ptp_port_fault_reset                   # TODO: wire it up or give it a reason
 ptp_tsmsg_decode                       # TODO: wire it up or give it a reason
 pwrseq_action_count                    # TODO: wire it up or give it a reason
-pwrseq_alarms                          # TODO: wire it up or give it a reason
+pwrseq_alarms                          # no-caller: superseded by pwrseq_status(), which is bound and whose pwrseq_status_t carries this exact field as .alarms. One locked read per publish beats six; the tests/host/test_pwrseq.c suite is the sole exerciser of the individual getter
 pwrseq_ocxo_is_warming                 # TODO: wire it up or give it a reason
-pwrseq_ov_latched                      # TODO: wire it up or give it a reason
-pwrseq_rb_auto_retries                 # TODO: wire it up or give it a reason
+pwrseq_ov_latched                      # no-caller: superseded by pwrseq_status(), which is bound and whose pwrseq_status_t carries this exact field as .ov_latched. One locked read per publish beats six; the tests/host/test_pwrseq.c suite is the sole exerciser of the individual getter
+pwrseq_rb_auto_retries                 # no-caller: superseded by pwrseq_status(), which is bound and whose pwrseq_status_t carries this exact field as .rb_auto_retries. One locked read per publish beats six; the tests/host/test_pwrseq.c suite is the sole exerciser of the individual getter
 pwrseq_rb_fault                        # TODO: wire it up or give it a reason
-pwrseq_shed_level                      # TODO: wire it up or give it a reason
-pwrseq_stage                           # TODO: wire it up or give it a reason
-pwrseq_status                          # TODO: wire it up or give it a reason
-pwrseq_wdt_armed                       # TODO: wire it up or give it a reason
+pwrseq_shed_level                      # no-caller: superseded by pwrseq_status(), which is bound and whose pwrseq_status_t carries this exact field as .shed. One locked read per publish beats six; the tests/host/test_pwrseq.c suite is the sole exerciser of the individual getter
+pwrseq_stage                           # no-caller: superseded by pwrseq_status(), which is bound and whose pwrseq_status_t carries this exact field as .stage. One locked read per publish beats six; the tests/host/test_pwrseq.c suite is the sole exerciser of the individual getter
+pwrseq_wdt_armed                       # no-caller: superseded by pwrseq_status(), which is bound and whose pwrseq_status_t carries this exact field as .wdt_armed. One locked read per publish beats six; the tests/host/test_pwrseq.c suite is the sole exerciser of the individual getter
 quality_holdover_time_to_ns            # TODO: wire it up or give it a reason
 rb_capability                          # TODO: wire it up or give it a reason
 rb_fwupd_feed                          # TODO: wire it up or give it a reason

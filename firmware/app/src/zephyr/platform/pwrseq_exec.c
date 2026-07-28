@@ -53,6 +53,7 @@
 #include <zephyr/sys/atomic.h>
 
 #include "zephyr/platform/platform.h"
+#include "zephyr/platform/sts_pwrseq_pub.h"
 #include "zephyr/platform/sts_rbguard.h"
 #include "zephyr/sts_app.h"
 
@@ -106,6 +107,14 @@ static const struct gpio_dt_spec *const pwrseq_inputs[] = {
 static pwrseq_ctx_t pwrseq;
 static int pwrseq_liveness_id;
 static bool pwrseq_started;
+
+/*
+ * The cross-area view (sts_app.h sts_pwrseq_snap_t). Written only from the
+ * housekeeping thread's sequencer pass, read lock-free by the console, MP, web,
+ * SNMP and panel planes — see sts_pwrseq_pub.h for why it is a seqlock and not
+ * a mutex.
+ */
+static sts_pwrseq_pub_t pwrseq_pub;
 
 /* ------------------------------------------------------------- config ----- */
 
@@ -187,7 +196,17 @@ static uint32_t pwrseq_fault_snapshot(void)
  */
 static bool pwrseq_service_requests(uint32_t now_ms);
 
-static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms)
+/*
+ * @p out_extref_hz / @p out_extref_valid hand the raw EXTREF_MON measurement
+ * back to the caller for publication. pwrseq_in_t carries only the in-band
+ * verdict, which is all the stage machine decides with, but a technician needs
+ * the number: "the sequencer refused the external reference" and "the external
+ * reference reads 9.9994 MHz" are different sentences and only one of them is
+ * actionable. Reading TIM12 a second time in the publish path would be a second
+ * gate interval and a different instant, so it is threaded through instead.
+ */
+static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms,
+			       uint32_t *out_extref_hz, bool *out_extref_valid)
 {
 	sts_hk_snapshot_t hk;
 	quality_block_t q;
@@ -206,6 +225,8 @@ static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms)
 	(void)sts_hk_read(&hk);
 	(void)sts_quality_snapshot(&q);
 	sts_extref_mon_read(&extref_hz, &extref_valid, &extref_edges);
+	*out_extref_hz = extref_hz;
+	*out_extref_valid = extref_valid;
 
 	/* Stages platform.c already completed, reported as done. */
 	in->nor_ready = true;
@@ -524,9 +545,53 @@ static void pwrseq_drain(void)
 	}
 }
 
+/*
+ * Refresh the cross-area view. Housekeeping-thread context only — it is the
+ * seqlock's single writer.
+ *
+ * Called AFTER pwrseq_drain(), so the published pin states are the ones the
+ * board is actually in rather than the ones the sequencer has just decided to
+ * command. Called on the refused-input path too: a sequencer that is rejecting
+ * its own observations is exactly when an operator needs to see its stage, and
+ * publishing only on the happy path would freeze the view at the last good tick
+ * with nothing saying so.
+ *
+ * @p in may be NULL at start, before any observation exists; the observed half
+ * then stays zero and `tick_mono_ms` stays 0, which reads as "no tick yet".
+ */
+static void pwrseq_publish(const pwrseq_in_t *in, uint32_t extref_hz,
+			   bool extref_valid)
+{
+	sts_pwrseq_snap_t s;
+	pwrseq_status_t st;
+
+	if (pwrseq_status(&pwrseq, &st) != 0) {
+		return;
+	}
+
+	sts_pwrseq_snap_from_status(&s, &st);
+	sts_pwrseq_snap_observe(&s, in, extref_hz, extref_valid);
+	sts_pwrseq_pub_publish(&pwrseq_pub, &s);
+}
+
+int sts_pwrseq_snapshot(sts_pwrseq_snap_t *out)
+{
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	if (!pwrseq_started) {
+		memset(out, 0, sizeof(*out));
+		return -ENODEV;
+	}
+
+	return sts_pwrseq_pub_read(&pwrseq_pub, out);
+}
+
 void sts_pwrseq_step(uint32_t now_ms)
 {
 	pwrseq_in_t in;
+	uint32_t extref_hz = 0;
+	bool extref_valid = false;
 	bool operator_acted;
 
 	if (!pwrseq_started) {
@@ -538,7 +603,7 @@ void sts_pwrseq_step(uint32_t now_ms)
 	 * late. */
 	operator_acted = pwrseq_service_requests(now_ms);
 
-	pwrseq_build_input(&in, now_ms);
+	pwrseq_build_input(&in, now_ms, &extref_hz, &extref_valid);
 
 	if (pwrseq_step(&pwrseq, &in) != 0) {
 		/* The sequencer refused its input, but an operator action has
@@ -547,10 +612,12 @@ void sts_pwrseq_step(uint32_t now_ms)
 		if (operator_acted) {
 			pwrseq_drain();
 		}
+		pwrseq_publish(&in, extref_hz, extref_valid);
 		return;
 	}
 
 	pwrseq_drain();
+	pwrseq_publish(&in, extref_hz, extref_valid);
 
 	sts_liveness_feed(pwrseq_liveness_id);
 }
@@ -803,6 +870,15 @@ int sts_pwrseq_start(uint32_t now_ms)
 
 	pwrseq_liveness_id = sts_liveness_register("pwrseq");
 	pwrseq_started = true;
+
+	/*
+	 * Publish before returning. sts_pwrseq_snapshot() answers -ENODEV until
+	 * pwrseq_started, and 0 from the moment it is set; without this the
+	 * window between here and the first 4 Hz tick would report stage 0 with
+	 * everything false, which is the exact class of untruth this snapshot
+	 * exists to end. No observation has been taken yet, hence NULL.
+	 */
+	pwrseq_publish(NULL, 0U, false);
 
 	LOG_INF("pwrseq up: rb_vmax %u mV, op code %u, safe code %u", cfg.rb_vmax_mv,
 		cfg.digipot_operating_code, cfg.digipot_safe_code);

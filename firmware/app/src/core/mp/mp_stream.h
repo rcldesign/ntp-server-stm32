@@ -206,6 +206,15 @@ typedef struct {
  *   47 gnss [state,ant]  48 survey [dur_s,acc_mm]
  *   49 refs (bitmap: 0 rb_lock, 1 rb_powered, 2 extref_ok, 3 pfi)
  *   50 extref_hz         51 refsel_state
+ *
+ * Enumerations carried raw, so the host renders one set of names rather than
+ * the device maintaining a second wire encoding of the same fact:
+ *   46 stage   pwrseq_stage_t        46 shed    pwrseq_shed_level_t
+ *   46 alarms  bit n = pwrseq_alarm_t n
+ *   47 state   gnssmgr_state_t       47 ant     gnssmgr_ant_state_t
+ *   51         refsel_state_t
+ * Keys 12/13 (lock_state/active_ref) and 43/44 (alarms) keep core/quality's and
+ * core/fault's own encodings for the same reason.
  */
 typedef struct {
 	uint32_t seq;

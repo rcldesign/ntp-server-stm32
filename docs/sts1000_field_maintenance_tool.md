@@ -357,14 +357,33 @@ Read-only, session-free, subscription-driven.
 | Group | Contents |
 |---|---|
 | Power | **INA228 ×9 (V/I/P + die temp): PoE 0x40, 3V3_STM 0x41, 5V_DISP 0x42, 3V3 main 0x43, V_ANT 0x45, OCXO 0x46, VCC_RB 0x47, GPS 0x4A, panel-LED 0x4C.** *Correction: the draft listed "GPS VCC 0x43" and "3V3 bulk 0x44" — 0x43 is the main 3V3 rail and **0x44 is the SHT45 humidity sensor**, which is precisely why the GPS monitor is strapped to **0x4A**. The draft's open item about an OCXO/Rb address swap is **closed**: OCXO is 0x46, VCC_RB is 0x47.* |
-| PoE | negotiated class, NCP1095 status (NCM/NCL/LCF), PFI comparator state |
+| PoE | measured draw + granted budget, PFI (key 49 bit 3, the sequencer's record that the early-warning comparator fired) |
 | Thermal | TMP117 ×2 (oscillator 0x49, enclosure 0x48), SHT45 humidity 0x44, STM32 die temp, fan duty + RPM, INA die temps |
-| Rails | all eight PG bits + EN-fault flags + INA alert lines from the 1 kHz GPIOF/GPIOG scan; backup PG ×2; latched fault causes with DIAG_ALRT decode |
-| Timing | loop state, active reference, Vc commanded + sensed (each with a validity flag), phase/frequency error, holdover elapsed + estimated error + time-to-demotion, ADEV(1/10/100 s), stratum, leap state |
-| GNSS | fix type, SVs used/visible, accuracy estimate, survey-in progress, antenna state, leap info |
-| Rb | powered, lock (opto + serial cross-check), warm-up timer, measured VCC_RB |
+| Rails | per-rail V/I/P + DIAG_ALRT + validity (key 34); backup PG ×2 (key 42); the active and latched alarm masks (keys 43/44) |
+| Sequencer | **stage, load-shed rung and alarm word from core/pwrseq (key 46)** — what the board is doing about GPS power, the display, the guarded rubidium sequence, the PoE shed ladder, the 26 V latch, the watchdog arm and the holdover relay |
+| Timing | loop state, active reference, Vc commanded + sensed (each with a validity flag), phase/frequency error, holdover elapsed + estimated error + time-to-demotion, ADEV(1/10/100 s), stratum, leap state; selected reference (key 51) |
+| GNSS | fix type, SVs used/visible, accuracy estimate, leap info; **receiver lifecycle state and antenna verdict (key 47), survey-in elapsed + accuracy-in-force (key 48)** |
+| Rb | powered = RB_PWR_EN (key 49 bit 1), lock = **RB_LOCK (PB13) itself** (bit 0), measured VCC_RB on INA228 0x47 in the rail array; EXTREF_MON in-band verdict (bit 2) and its measured frequency (key 50) |
 | UI | reed switch, button states, display on/off, heading (tilt-compensated), accel XYZ |
 | System | uptime, per-thread stack/CPU, heap, filesystem usage, USB/Ethernet stats, liveness participants |
+
+**What the record carries and what it does not.** Keys 46–51 above were declared and
+encoded from the beginning but written by nothing, so every unit reported stage 0, shed 0,
+an empty alarm word, receiver state 0 and no survey progress. They are now bound from the
+platform's published snapshots (`sts_pwrseq_snapshot()`, `sts_gnss_detail()`); the
+enumerations go out in core's own encodings (`pwrseq_stage_t`, `pwrseq_shed_level_t`,
+`pwrseq_alarm_t`, `gnssmgr_state_t`, `gnssmgr_ant_state_t`, `refsel_state_t`) and the host
+renders the names. Two things the table above used to claim are still **not** on the wire,
+and are listed here rather than left to be discovered:
+
+- **`scan_state` (key 45), the 1 kHz GPIOF/GPIOG debounced signal bitmap.** The alarm view
+  of the same evidence *is* carried (keys 43/44); the raw per-signal bitmap needs a
+  platform-area accessor for `fault_state()` and has none.
+- **NCP1095 negotiated class and NCM/NCL/LCF.** `poe_class` encodes 0/unknown: the pins are
+  wired and pulled up but not decoded (`hk.c`).
+
+`rb_lock` is the opto (PB13) with the per-unit polarity bit applied. There is no serial
+cross-check against the FE's own lock word in the record, and no Rb warm-up timer.
 
 ### 7.2 PPS/discipline stream (channel 5, 1 Hz)
 
