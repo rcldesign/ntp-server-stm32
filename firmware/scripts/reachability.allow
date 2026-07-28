@@ -341,7 +341,7 @@ mp_obj_count_in                        # TODO: wire it up or give it a reason
 mp_ovr_set_phrase                      # TODO: wire it up or give it a reason
 mp_ovr_veto                            # TODO: wire it up or give it a reason
 mp_post_event                          # TODO: wire it up or give it a reason
-mp_shell_byte                          # TODO: wire it up or give it a reason
+mp_shell_byte                          # no-caller. The MP_MAGIC_ENTER matcher. Its one in-app caller is sts_mp_shell_tap(), which is itself absent for the structural reason recorded on that entry below; the two live or die together and test_mp_rpc.c is the sole exerciser
 mp_veto                                # TODO: wire it up or give it a reason
 ntp_ef_iter_init                       # TODO: wire it up or give it a reason
 ntp_ef_iter_next                       # TODO: wire it up or give it a reason
@@ -391,9 +391,14 @@ sts_fwupd_query                        # TODO: wire it up or give it a reason
 sts_fwupd_rb_ctx                       # TODO: wire it up or give it a reason
 sts_fwupd_status                       # TODO: wire it up or give it a reason
 sts_mp_active                          # TODO: wire it up or give it a reason
-sts_mp_notify_break                    # TODO: wire it up or give it a reason
-sts_mp_notify_link                     # TODO: wire it up or give it a reason
-sts_mp_shell_tap                       # TODO: wire it up or give it a reason
+# sts_mp_notify_link is no longer here: sts_usb.c calls it on every CDC-ACM #0
+# DTR transition and on VBUS loss, which is what makes a closed console port
+# revert the overrides and hand the shell back. Its two neighbours below stayed,
+# and the reasons are structural rather than backlog — both were audited against
+# the Zephyr 4.2 sources named in them, and both have a matching correction in
+# docs/sts1000_field_maintenance_tool.md so the doc and the image agree.
+sts_mp_notify_break                    # no-caller, UNCALLABLE on this board rather than unwired. `zephyr,shell-uart` is cdc_acm_uart0 and there is no physical console UART, so a BREAK would have to arrive one of two ways and neither exists: cdc_acm_driver_api (subsys/usb/device/class/cdc_acm.c) publishes no `.err_check`, so z_impl_uart_err_check() returns -ENOSYS and UART_BREAK is unreadable; and cdc_acm_class_handle_req() implements only SET_LINE_CODING and SET_CONTROL_LINE_STATE, so a host's USB CDC SEND_BREAK is answered -ENOTSUP with no callback and nothing recorded. Kept as the seam a physical console would use; the shell's mode-entry banner no longer offers BREAK as an escape
+sts_mp_shell_tap                       # no-caller, and structurally unfeedable rather than pending. On ACM1 it would be wrong: MP transmits through uart_poll_out(DT_CHOSEN(zephyr_shell_uart)), so a magic accepted on the MCP channel answers on a port the sender is not reading. On ACM0 the Zephyr shell owns the bytes and its only seam, shell_set_bypass(), is all-or-nothing with no way to hand one back; the byte-level diversion in shell_uart.c's uart_rx_handle() is compiled in only under CONFIG_MCUMGR_TRANSPORT_SHELL and hardcoded to smp_shell_rx_bytes(). Full argument in the wiring block of src/zephyr/console/mp_glue.c
 sts_pfi_fired                          # TODO: wire it up or give it a reason
 sts_ptpclk_dev                         # TODO: wire it up or give it a reason
 sts_supervisor_counters                # TODO: wire it up or give it a reason

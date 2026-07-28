@@ -78,7 +78,8 @@ host hardcodes nothing.
 | VBUS | Sensed on **PE2 as a digital input** (polled). PE2 has **no ADC channel** — presence detect only, not VBUS measurement |
 | Speed | FS, 12 Mbit/s, 64-byte bulk endpoints |
 | Line coding | Ignored by the device (virtual). Host may open at any rate |
-| DTR | DTR assert = host attached. DTR drop / suspend / disconnect = dead-man trigger (§5.4) |
+| DTR | DTR assert = host attached. **ACM0's** DTR is the MP link: `sts_usb_poll()` samples it beside the VBUS gate every 250 ms and calls `sts_mp_notify_link()` on a transition, so a drop is a dead-man trigger (§5.4). **VBUS loss forces the link down without consulting DTR** — CDC-ACM's DTR is a host-written `line_state` the class driver clears only on a controller-reported `USB_DC_DISCONNECTED`, and a VBUS-gated board calls `usb_disable()` itself, so the last sample can read "asserted" across a cable pull. USB *suspend* is not a trigger as built: nothing polls `dev_data->suspended` |
+| BREAK | **Not detectable on this transport, and no longer offered.** `zephyr,shell-uart` is `cdc_acm_uart0` and the board has no physical console UART. Zephyr's `cdc_acm_driver_api` publishes no `.err_check`, so `uart_err_check()` returns `-ENOSYS` and `UART_BREAK` is unreachable; `cdc_acm_class_handle_req()` implements only `SET_LINE_CODING` and `SET_CONTROL_LINE_STATE`, so a host's USB CDC `SEND_BREAK` is answered `-ENOTSUP` with no callback and nothing recorded. `sts_mp_notify_break()` is kept as the seam a physical console would use and is allow-listed with that evidence. The escapes the shell names on entry are the two that work: the in-band `\x01MP0\x02` (Ctrl-A M P 0 Ctrl-B) and closing the port |
 
 > **Why two CDC interfaces, not one framed port.** An earlier draft chose a single CDC
 > with everything multiplexed. As built there are two, because the human shell and the
@@ -93,12 +94,35 @@ host hardcodes nothing.
 |---|---|---|
 | Shell | default on ACM0 | Human line shell (`sts …` commands, §13.3) |
 | MCP | default on ACM1 | As-built binary protocol (§13.2) |
-| MP | `mp enter` on the shell, or the magic `\x01MP1\x02` on either binary interface | Framed protocol §3 |
+| MP | **`mp enter` on ACM0's shell, or the `sys.mode` request** — MP then owns ACM0 through `shell_set_bypass()` | Framed protocol §3 |
 | SMP recovery | MCUboot when no valid application boots | Raw MCUmgr/SMP over MCUboot's own CDC |
 
-FMT connect sequence: enumerate by VID/PID → open the binary interface → send the MP
-magic → on `hello`, proceed; else try MCP `HELLO`; else probe SMP (device is in the
-bootloader → offer recovery flash); else fall back to shell scraping.
+> **The `\x01MP1\x02` entry magic is specified and is not offered by the device.** It is
+> implemented in core (`mp_shell_byte()`, and `sts_mp_shell_tap()` in the glue) and nothing
+> can feed it on either interface, for reasons that are structural rather than pending:
+>
+> * **ACM1 is the wrong port.** MP's transport is `DT_CHOSEN(zephyr_shell_uart)` = ACM0 and
+>   every frame leaves through `uart_poll_out(mp_uart, …)`. A magic accepted on the MCP
+>   channel would put the device in MP mode and answer on a port the sender is not reading,
+>   while its five bytes desynchronise the COBS stream ACM1 exists to carry.
+> * **ACM0 is the right port and the Zephyr shell owns its bytes.** The only seam the shell
+>   offers is `shell_set_bypass()`, which is all-or-nothing — while a bypass is installed the
+>   line editor sees nothing and there is no API to hand a byte back. Zephyr's byte-level
+>   diversion for exactly this shape (`smp_shell_rx_bytes()` in `shell_uart.c`'s
+>   `uart_rx_handle()`) is compiled in only under `CONFIG_MCUMGR_TRANSPORT_SHELL` and is
+>   hardcoded to the SMP transport. The remaining routes — rewriting `shell_transport_uart.api`
+>   at runtime, or taking over the backend's UART callback and re-injecting into its RX ring —
+>   are writes into upstream internals with no compatibility promise, on the path that carries
+>   the recovery console.
+>
+> Both symbols are in `firmware/scripts/reachability.allow` with that reasoning, so the gate
+> keeps recording them as absent rather than letting them read as delivered.
+
+FMT connect sequence, as built: enumerate by VID/PID → open **ACM1** and try MCP `HELLO` →
+else probe SMP (device is in the bootloader → offer recovery flash) → else fall back to
+**ACM0** shell scraping, which is also the route to MP: send `mp enter\r`, then speak §3
+framing on that port. The magic-first probe in earlier drafts assumed a device that would
+accept `\x01MP1\x02` on the binary interface; this one does not.
 
 ---
 
@@ -261,9 +285,17 @@ session's role nor its typed-serial confirmation. Every mutating call is audit-l
 
 ### 5.4 Dead-man
 
-Overrides hold only while **all** of: session valid, keepalive fresh (≤5 s), DTR
-asserted, USB not suspended. Any failure reverts every override to automatic within 2 s
-and logs it. FMT sends keepalive at 1 Hz.
+Overrides hold only while **all** of: session valid, keepalive fresh (≤5 s), and the
+console link up — ACM0 DTR asserted **and** VBUS present, which is the conjunction
+`sts_console_link_policy.h` evaluates and `mp_ovr_set_link()` consumes. Any failure reverts
+every override to automatic within 2 s and logs it. FMT sends keepalive at 1 Hz.
+
+> **"USB not suspended" is specified and is not enforced.** The dead-man's link term is
+> DTR ∧ VBUS. Nothing reads the CDC-ACM class's `suspended` flag — Zephyr's legacy device
+> stack keeps it private to `cdc_acm.c` and exposes no accessor — so a host that suspends the
+> bus without dropping DTR holds an override for the keepalive TTL rather than reverting on
+> the suspend itself. Bounded, not unbounded: the keepalive stops arriving, so the dead-man
+> still fires within TTL + 2 s.
 
 ### 5.5 Hard interlocks (device-enforced, non-overridable)
 
@@ -646,7 +678,7 @@ code exists, is unit-tested on the host, and links into the signed image.
 | Multi-IC update orchestrator + inventory | in tree |
 | Capability manifest content | 91 objects (power 12, reference 7, gnss 5, panel 9, system 6, sensor 52); every object carries guard, caps, interlocks and its schematic designator |
 | Guard escalation | cumulative: G0 session → G1 `ack` → G2 typed device serial + interlocks → G3 phrase + hold |
-| Dead-man revert | keepalive TTL 5 s, checked on a 100 ms tick, so worst case ≈5.1 s; `session.close`, DTR drop, BREAK and mode-exit revert **synchronously**. 16 leases, no allocation |
+| Dead-man revert | keepalive TTL 5 s, checked by `sts_mp_tick()` on the **250 ms** console-supervisor loop (`sts_console.c:CONSOLE_PERIOD_MS`), so a keepalive that stops reverts in **≈5.25 s typical and ≤6.95 s worst case** — the earlier "100 ms tick, ≈5.1 s" described neither the tick nor the bound. The worst case is 5 s TTL plus the longest gap between two *successful* ticks, which `sts_console.c`'s `BUILD_ASSERT` pins at `(STS_MP_TICK_MISS_MAX + 1) × (250 + STS_MP_TICK_LOCK_MS) + STS_FWUPD_STEP_BUDGET_MS` = `6 × 300 + 150` = 1950 ms, inside `MP_TICK_MAX_MS` (2000). `session.close` and mode-exit revert **synchronously** on the request thread. **A link drop reverts synchronously when the engine is idle — the ordinary case — and otherwise within one tick**: `sts_mp_notify_link()` runs on the console supervisor, which shares its pass with `sts_mp_tick()`, and that pass has exactly one timed lock wait to spend, so the notification tries `K_NO_WAIT` and parks the transition rather than adding a second (which would take the worst case to 2250 ms and break the assertion it was meant to protect). `mp status` counts the deferrals. **BREAK does not revert anything, because no BREAK reaches this transport** (§2.1). 16 leases, no allocation |
 | Diag registry | 14 tests; a failing step does not abort the run (a technician wants the whole picture); verdicts rank PASS < SKIP < FAIL < ERROR |
 | Footprint | 53.1 KB flash, 23.0 KB RAM — **over the §11 aim** of 24 KB/12 KB. Structural to the scope (91 objects, 29 methods, 14 tests, 12 channels); the manifest's const string table is 13.2 KB and is the single biggest reduction lever (string pool, or the spec's optional gzip path) |
 | Host application (§10) | **not started** — specified only |

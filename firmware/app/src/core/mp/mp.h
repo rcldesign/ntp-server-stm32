@@ -97,7 +97,11 @@ extern "C" {
  *
  * The spec's `mp exit` is a *shell* command, which cannot be typed while the
  * console is in MP mode, so an in-band exit is required for a host that has no
- * way to assert BREAK. A BREAK still works through mp_mode_exit().
+ * way to assert BREAK. A BREAK leaves MP mode through mp_mode_exit() on any
+ * platform whose glue can detect one — which is a real qualification and not a
+ * formality: the STS1000's own console is CDC-ACM, where Zephyr surfaces no
+ * BREAK at all, so this in-band sequence is the exit that exists there. See
+ * sts_mp_notify_break() in src/zephyr/console/mp_glue.h.
  */
 #define MP_MAGIC_EXIT "\x01MP0\x02"
 

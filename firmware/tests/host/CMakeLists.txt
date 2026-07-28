@@ -278,6 +278,16 @@ module_deps(mp_fw       mp)
 # empty dependency list.
 module_deps(mp_tunnel_policy)
 
+# `console_link_policy` (app/src/zephyr/console/sts_console_link_policy.h) is the
+# other half of that area's MP wiring: when the console port's (VBUS, DTR) sample
+# is a *link transition*, which FMT §5.4 makes the override dead-man's outermost
+# condition. The `mp` edge is real and is the point of the suite — it drives the
+# policy's verdict into a live mp_ctx_t holding an actual override lease, because
+# the defect it guards was never in the seam (mp_set_link() always worked) but in
+# nothing deciding to call it, and a suite that reached the seam directly would
+# have passed throughout.
+module_deps(console_link_policy mp)
+
 # `fwupd_seam_policy` (app/src/zephyr/console/sts_fwupd_seam_policy.h) is the
 # firmware-update seam's four decisions: converting the platform's count-returning
 # transmit onto core/fwupd's "0 on success" contract, telling an absent raw

@@ -67,15 +67,55 @@
  * neither producer has to ask the engine — under the lock — whether anyone is
  * listening.
  *
- * Still missing, and not silent:
+ * Link: WIRED, and it is the dead-man's outermost condition (FMT §5.4).
+ * sts_usb.c samples CDC-ACM #0's DTR alongside the VBUS gate it already ran and
+ * calls sts_mp_notify_link() on a transition; sts_console_link_policy.h owns the
+ * decision and states what a cable pull used to leave behind. The notification
+ * tries the lock with K_NO_WAIT and parks the transition for the tick on
+ * contention — the argument is at sts_mp_notify_link() and is the supervisor's
+ * pass budget, not a preference.
  *
- * 1. Autobaud entry magic. sts_mp_shell_tap() implements it, but something has
- *    to feed it every console byte while the shell owns the port. That means one
- *    line in the shell's RX path (src/zephyr/console/sts_shell.c) or a
- *    cross-area accessor. Until then MP mode is entered with `mp enter`, which
- *    covers every case except a host that cannot type.
+ * Not offered, and deliberately not offered silently:
  *
- * 2. The object write path. Most control objects live on GPIO/PWM/DAC that the
+ * 1. BREAK. It is undetectable on this console and the shell no longer claims
+ *    otherwise. `zephyr,shell-uart` is cdc_acm_uart0 and the board has no
+ *    physical console UART, so there are two places a BREAK could surface and
+ *    neither does: Zephyr's cdc_acm_driver_api publishes no `.err_check`, which
+ *    makes uart_err_check() answer -ENOSYS and puts UART_BREAK permanently out
+ *    of reach; and cdc_acm_class_handle_req() implements only SET_LINE_CODING
+ *    and SET_CONTROL_LINE_STATE, so a host's USB CDC SEND_BREAK is answered
+ *    -ENOTSUP with nothing recorded and no callback. sts_mp_notify_break() is
+ *    kept as the seam a physical console would use — it is correct, it is
+ *    tested, and it is in scripts/reachability.allow with that evidence — but
+ *    nothing on this board can call it. What changed is the *instruction*: the
+ *    shell used to tell a technician BREAK would get them out.
+ *
+ * 2. Autobaud entry magic. sts_mp_shell_tap() implements it and nothing can
+ *    feed it, on either interface:
+ *
+ *      ACM1 is the wrong port. MP's transport is DT_CHOSEN(zephyr_shell_uart)
+ *      and every frame leaves through uart_poll_out(mp_uart, …), so a magic
+ *      accepted on the MCP channel would put the device in MP mode and answer
+ *      on a port the sender is not reading — while its five bytes desynchronise
+ *      the COBS stream ACM1 exists to carry.
+ *
+ *      ACM0 is the right port and the Zephyr shell owns its bytes. The one seam
+ *      the shell offers is shell_set_bypass(), which is all-or-nothing: while a
+ *      bypass is installed the line editor sees nothing, and there is no API to
+ *      hand a byte back. Zephyr has a byte-level diversion for exactly this
+ *      shape of problem — smp_shell_rx_bytes() in shell_uart.c's
+ *      uart_rx_handle() — but it is compiled in only under
+ *      CONFIG_MCUMGR_TRANSPORT_SHELL and hardcoded to the SMP transport. The
+ *      remaining routes (rewriting shell_transport_uart.api at runtime, or
+ *      taking over the backend's UART callback and re-injecting into its RX
+ *      ring) are writes into upstream internals with no compatibility promise,
+ *      on the path that carries the recovery console.
+ *
+ *    So MP mode is entered with `mp enter` or the `sys.mode` request, docs/
+ *    sts1000_field_maintenance_tool.md §2.2 says so, and mp_glue.h no longer
+ *    points at a TODO here that had already been rewritten away.
+ *
+ * 3. The object write path. Most control objects live on GPIO/PWM/DAC that the
  *    *platform* area owns, and sts_app.h exposes only sts_panel_led_set(); the
  *    GNSS and Rb tunnels are the other two wired writes. Every remaining write
  *    answers MP_E_NOTSUP, but the manifest still publishes the object, its guard
@@ -261,10 +301,39 @@ static bool mp_auth_window;
 /** A BREAK / DTR drop that arrived during that window, honoured by mp_bypass(). */
 static bool mp_exit_pending;
 
+/*
+ * A link transition sts_mp_notify_link() could not apply where it was reported,
+ * because the engine lock was held. 0 = nothing pending, 1 = up, 2 = down.
+ *
+ * The caller is sts_usb_poll(), on the console supervisor — the same thread and
+ * the same pass as sts_mp_tick(), whose lock wait is the *one* the BUILD_ASSERT
+ * in sts_console.c budgets. So the notification tries K_NO_WAIT and parks the
+ * transition here rather than adding a second timed wait, exactly as
+ * sts_mp_stream_raw() does and for the same arithmetic. The next successful tick
+ * applies it, which puts the revert inside the deadline that assertion proves
+ * (1950 ms, against MP_TICK_MAX_MS = 2000) instead of outside it.
+ *
+ * Atomic because it is written by whichever thread notices the port and read by
+ * both engine drivers; atomic_set() returns the previous value, so the read is a
+ * swap and a transition can never be applied twice or lost to a racing write.
+ */
+#define MP_LINK_PEND_NONE 0
+#define MP_LINK_PEND_UP   1
+#define MP_LINK_PEND_DOWN 2
+static atomic_t mp_link_pending = ATOMIC_INIT(MP_LINK_PEND_NONE);
+
 /* Tick-skip accounting; reported by `mp status`. */
 static uint32_t mp_tick_misses;
 static uint8_t mp_tick_miss_run;
 static uint8_t mp_tick_miss_worst;
+/*
+ * Link transitions that had to be deferred to a tick; `mp status`.
+ *
+ * Atomic, unlike the tick-miss counters beside it, because this one is
+ * incremented on the path that *failed* to take the engine lock — so it is the
+ * one counter here with no mutual exclusion available to it.
+ */
+static atomic_t mp_link_defers;
 
 /** Enter the engine from a thread that may wait. Never call from an ISR. */
 static void mp_engine_lock(void)
@@ -1178,6 +1247,37 @@ void sts_mp_mirror_publish(const mp_mirror_in_t *frame)
 /* --------------------------------------------------------- shell hand-off */
 
 /**
+ * Apply a link transition. **Called with the engine lock held.**
+ *
+ * The one place mp_set_link() is reached from, so the auth-window rule is stated
+ * once: while prov_auth() has the lock released the shell thread is suspended
+ * inside a credential check with an inbound frame half-decoded, and
+ * mp_mode_exit() resets that decoder. So the half that must not wait — reverting
+ * every lease, because the link *is* the dead-man's outermost condition
+ * (mp_override.c §5.3) — runs here and now, and only the mode change is left to
+ * mp_bypass(), which reaches it once mp_input() has returned.
+ */
+static void mp_link_apply_locked(bool up)
+{
+	if (!up && mp_auth_window) {
+		(void)mp_ovr_set_link(&mp.ovr, false, (uint32_t)k_uptime_get_32());
+		mp_exit_pending = true;
+	} else {
+		(void)mp_set_link(&mp, up);
+	}
+}
+
+/** Drain a deferred link transition. **Called with the engine lock held.** */
+static void mp_link_pending_apply_locked(void)
+{
+	atomic_val_t pend = atomic_set(&mp_link_pending, MP_LINK_PEND_NONE);
+
+	if (pend != MP_LINK_PEND_NONE) {
+		mp_link_apply_locked(pend == MP_LINK_PEND_UP);
+	}
+}
+
+/**
  * The shell bypass callback: every console byte, on the shell thread.
  *
  * shell_set_bypass() is called *outside* the lock. It touches shell state, not
@@ -1194,10 +1294,22 @@ static void mp_bypass(const struct shell *sh, uint8_t *data, size_t len)
 	(void)mp_input(&mp, data, len);
 
 	/*
-	 * A BREAK or DTR drop that arrived while prov_auth() had the lock
-	 * released could not reset the frame decoder under mp_input()'s feet, so
-	 * it was deferred to here — the first point at which no engine state is
-	 * live on this stack.
+	 * Deferred work, at the first point on this stack where no engine state
+	 * is live — mp_input() has returned, so resetting the frame decoder is
+	 * safe here and was not safe where either of these was reported.
+	 *
+	 * The link first: this thread is the *reason* a notification deferred
+	 * (it is the only other contender for the lock), so draining it here
+	 * rather than waiting for the tick is what keeps a busy host from
+	 * postponing its own dead-man. mp_link_apply_locked() cannot re-defer
+	 * from here — mp_auth_window is false once prov_auth() has returned, and
+	 * prov_auth() is reached through mp_input().
+	 */
+	mp_link_pending_apply_locked();
+
+	/*
+	 * Then the mode change a BREAK or DTR drop left behind because it landed
+	 * while prov_auth() had the lock released.
 	 */
 	if (mp_exit_pending) {
 		mp_exit_pending = false;
@@ -1211,7 +1323,8 @@ static void mp_bypass(const struct shell *sh, uint8_t *data, size_t len)
 	mp_engine_unlock();
 
 	if (left) {
-		/* The exit magic, sys.mode, or a deferred BREAK brought us back. */
+		/* The exit magic, sys.mode, or a deferred link drop brought us
+		 * back. */
 		shell_set_bypass(mp_shell, NULL);
 		LOG_INF("MP mode left; shell restored");
 	}
@@ -1254,23 +1367,47 @@ void sts_mp_notify_link(bool up)
 	if (!mp_started) {
 		return;
 	}
-	mp_engine_lock();
-	if (!up && mp_auth_window) {
-		/*
-		 * The shell thread is suspended inside a credential check with a
-		 * frame half-decoded (see prov_auth). Do the half that must not
-		 * wait — the link is the dead-man's outermost condition, so every
-		 * lease is reverted here and now — and leave the mode change,
-		 * which resets that decoder, to mp_bypass().
-		 */
-		(void)mp_ovr_set_link(&mp.ovr, false, (uint32_t)k_uptime_get_32());
-		mp_exit_pending = true;
-	} else {
-		(void)mp_set_link(&mp, up);
-	}
-	mp_armed_refresh();
-	mp_engine_unlock();
 
+	/*
+	 * K_NO_WAIT, and it is the same load-bearing argument as
+	 * sts_mp_stream_raw()'s rather than an optimisation.
+	 *
+	 * The caller is sts_usb_poll(), which sts_console.c runs on the console
+	 * supervisor immediately before sts_mp_tick() — the same pass, and
+	 * sts_console.c's BUILD_ASSERT budgets exactly one timed lock wait in it.
+	 * A 50 ms wait here would make the worst interval between two successful
+	 * ticks (5 + 1) * (250 + 50 + 50) + 150 = 2250 ms, past the 2000 ms
+	 * MP_TICK_MAX_MS an override's dead-man is allowed to take to revert: a
+	 * wait added to *protect* the revert would be what broke its deadline.
+	 * And the supervisor also feeds sts_liveness_feed(), so an unbounded wait
+	 * would stop the TPS3430 kick and cold-cycle the board — a technician
+	 * closing a terminal window would reboot the grandmaster.
+	 *
+	 * So: apply it here when the engine is free, which is the ordinary case
+	 * (a link that just went away is not sending bytes, and the shell thread
+	 * is the only other contender), and park it otherwise. The tick two lines
+	 * later in the same pass, or mp_bypass() on the thread that caused the
+	 * contention, drains it — inside the deadline the BUILD_ASSERT proves.
+	 */
+	if (k_is_in_isr() || (k_mutex_lock(&mp_lock, K_NO_WAIT) != 0)) {
+		atomic_set(&mp_link_pending,
+			   up ? MP_LINK_PEND_UP : MP_LINK_PEND_DOWN);
+		(void)atomic_inc(&mp_link_defers);
+	} else {
+		mp_link_apply_locked(up);
+		mp_armed_refresh();
+		(void)k_mutex_unlock(&mp_lock);
+	}
+
+	/*
+	 * Outside the lock either way, and unconditional on a drop — including
+	 * the deferred path. Taking the port back from mp_bypass() is what makes
+	 * the console reachable again, it touches shell state and not engine
+	 * state, and it must not be the thing that waits: a host that has closed
+	 * the port is not going to send the exit magic. mp_bypass() is harmless
+	 * if it is already running (it re-reads the engine's mode and clears the
+	 * bypass itself), and clearing a bypass that is not installed is a no-op.
+	 */
 	if (!up && (mp_shell != NULL)) {
 		shell_set_bypass(mp_shell, NULL);
 	}
@@ -1391,6 +1528,13 @@ void sts_mp_tick(void)
 	}
 
 	mp_tick_miss_run = 0U;
+	/*
+	 * Before mp_tick(), not after: a parked link drop is a dead-man failure
+	 * that has already happened, and applying it first means this pass's
+	 * mp_ovr_tick() runs against the true link state instead of reverting the
+	 * same leases one pass later for the weaker keepalive reason.
+	 */
+	mp_link_pending_apply_locked();
 	(void)mp_tick(&mp);
 	/*
 	 * The unconditional republication of the armed mask. Every other call
@@ -1427,7 +1571,23 @@ static int cmd_mp_enter(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "MP mode: proto %u, manifest %u objects, hash 0x%08x",
 		    (unsigned int)MP_PROTO_VER, (unsigned int)mp_obj_count(),
 		    (unsigned int)hash);
-	shell_print(sh, "send \\x01MP0\\x02 or BREAK to return to the shell");
+	/*
+	 * Both escapes named here are ones this image actually implements, which
+	 * the previous wording was not: it offered "BREAK", and no BREAK is
+	 * detectable on this console. The port is CDC-ACM (DT_CHOSEN(zephyr_shell_uart)
+	 * is cdc_acm_uart0; the board has no physical console UART), Zephyr's
+	 * cdc_acm_driver_api publishes no .err_check — so uart_err_check() answers
+	 * -ENOSYS and UART_BREAK can never be read — and cdc_acm_class_handle_req()
+	 * handles only SET_LINE_CODING and SET_CONTROL_LINE_STATE, so the USB CDC
+	 * SEND_BREAK request is refused with no application-visible surface at all.
+	 * Naming an escape that does not exist is worse than naming none: it is
+	 * the instruction a technician follows while the shell is unreachable.
+	 *
+	 * The exit magic is spelled out in keystrokes because a human is reading
+	 * this on a terminal, and "\x01" is not something one types.
+	 */
+	shell_print(sh, "to return to the shell: type Ctrl-A M P 0 Ctrl-B "
+			"(\\x01MP0\\x02), or close the port");
 	shell_set_bypass(sh, mp_bypass);
 	return 0;
 }
@@ -1471,8 +1631,17 @@ static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	mp_engine_lock();
-	shell_print(sh, "mode         %s",
-		    (mp_mode(&mp) == (uint8_t)MP_MODE_MP) ? "mp" : "shell");
+	/*
+	 * The link is printed next to the mode because it is now an input the
+	 * board changes underneath the operator: a closed console port reverts
+	 * every override (FMT §5.4), and "my override went away by itself" has
+	 * exactly one honest first question. `defer` counts transitions that had
+	 * to wait for a tick because the engine was busy — normally 0.
+	 */
+	shell_print(sh, "mode         %s (link %s, defer %u)",
+		    (mp_mode(&mp) == (uint8_t)MP_MODE_MP) ? "mp" : "shell",
+		    mp.ovr.link_up ? "up" : "down",
+		    (unsigned int)atomic_get(&mp_link_defers));
 	shell_print(sh, "manifest     %u objects, hash 0x%08x, ver %u",
 		    (unsigned int)mp_obj_count(),
 		    (unsigned int)mp_manifest_hash_cached(&mp),

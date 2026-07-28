@@ -30,13 +30,15 @@
  * taking a third endpoint, so entering it means taking the port away from the
  * Zephyr shell. That is done with `shell_set_bypass()`, which exists for exactly
  * this: while the bypass is installed every received byte goes to mp_input() and
- * the shell parses nothing. `mp exit`, the in-band exit magic, a BREAK and a DTR
- * drop all clear it.
+ * the shell parses nothing. `mp exit`, the in-band exit magic and a DTR drop all
+ * clear it. A BREAK would too, and no BREAK reaches this transport — see
+ * sts_mp_notify_break() below.
  *
  * The engine is started by sts_console_start() and serviced by the console
- * supervisor; the panel mirror is published by the ui area. See the wiring block
- * at the top of mp_glue.c for the one hook still missing (the raw shell tap for
- * the autobaud entry magic) and for the object writes that remain unbound.
+ * supervisor; the link is sampled by sts_usb.c and the panel mirror is published
+ * by the ui area. See the wiring block at the top of mp_glue.c for what is
+ * deliberately not offered (BREAK, the raw shell tap for the autobaud entry
+ * magic) and for the object writes that remain unbound.
  *
  * ---------------------------------------------------------------------------
  * Threading (F11). The engine has two independent drivers
@@ -127,14 +129,38 @@ void sts_mp_tick(void);
 bool sts_mp_active(void);
 
 /**
- * Report a DTR change; a drop is a dead-man failure and leaves MP mode.
+ * Report a console DTR change; a drop is a dead-man failure and leaves MP mode.
  *
- * Takes the engine lock. Not ISR-safe: call it from the thread that polls the
- * line state, not from a USB callback.
+ * Called by sts_usb.c from the console supervisor, once per transition of
+ * CDC-ACM #0's DTR (sts_console_link_policy.h decides what a transition is). A
+ * drop reverts every override — FMT §5.4 makes the link the outermost condition
+ * — and hands the console UART back to the Zephyr shell, which is what makes the
+ * box usable again after a cable pull.
+ *
+ * **Never waits.** It tries the engine lock with K_NO_WAIT and, on contention or
+ * from an ISR, parks the transition for sts_mp_tick() or the next mp_bypass()
+ * pass to apply. That is not a convenience: the caller shares a supervisor pass
+ * with sts_mp_tick(), and sts_console.c's BUILD_ASSERT budgets exactly one timed
+ * lock wait in it. Handing the port back to the shell happens either way, and
+ * outside the lock.
+ *
+ * Deferral costs at most one tick, so the revert stays inside the deadline that
+ * BUILD_ASSERT proves. `mp status` prints the link and the deferral count.
  */
 void sts_mp_notify_link(bool up);
 
-/** Report a UART BREAK: leaves MP mode (FMT §2.3). Takes the lock; not ISR-safe. */
+/**
+ * Report a UART BREAK: leaves MP mode (FMT §2.3). Takes the lock; not ISR-safe.
+ *
+ * **Nothing on this board calls it, and nothing can.** The console is CDC-ACM
+ * (`zephyr,shell-uart` = cdc_acm_uart0; there is no physical console UART), and
+ * Zephyr's CDC-ACM surfaces a host BREAK nowhere: cdc_acm_driver_api has no
+ * `.err_check`, so uart_err_check() returns -ENOSYS and UART_BREAK is
+ * unreachable, and cdc_acm_class_handle_req() does not implement the USB CDC
+ * SEND_BREAK request. Kept as the seam a physical console would use, correct and
+ * covered; listed in scripts/reachability.allow with that evidence rather than
+ * as backlog. The shell's mode-entry banner names the escapes that do work.
+ */
 void sts_mp_notify_break(void);
 
 /**
@@ -142,8 +168,15 @@ void sts_mp_notify_break(void);
  * magic (`\x01MP1\x02`) can be recognised without the shell cooperating.
  *
  * Returns true when the magic completed and MP has taken the port — the caller
- * must then stop handing the byte to the shell. See the TODO in mp_glue.c: the
- * console area cannot install this tap itself.
+ * must then stop handing the byte to the shell.
+ *
+ * **Nothing feeds it, on either interface**, and the reasons are structural
+ * rather than pending: MP's transport is the shell UART, so the magic cannot be
+ * accepted on the MCP channel; and on the shell UART the Zephyr shell owns the
+ * byte stream, whose only seam (shell_set_bypass) cannot hand a byte back. The
+ * full argument, including the upstream hook that would have served and why it
+ * is not available, is in the wiring block at the top of mp_glue.c. MP mode is
+ * entered with `mp enter` or `sys.mode`.
  *
  * Takes the engine lock, so it must be called from the shell's RX *thread*, not
  * from the UART ISR.

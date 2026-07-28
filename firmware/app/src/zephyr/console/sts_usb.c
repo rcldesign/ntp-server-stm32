@@ -19,6 +19,14 @@
  * Nothing here is allowed to block the boot. If VBUS never appears the device
  * simply never attaches, which is the normal state of a rack-mounted
  * grandmaster.
+ *
+ * This file is also where the **maintenance link** is observed. ACM0 carries
+ * MP as well as the shell, and FMT §5.4 makes that link the outermost condition
+ * of the override dead-man — so the DTR this file was already reading for
+ * sts_usb_configured() now drives sts_mp_notify_link() too. The decision of
+ * *when* that is a transition lives in sts_console_link_policy.h, away from
+ * Zephyr, because every way it can be wrong is silent; the rationale, and the
+ * defect it closes, are written out there.
  */
 
 #include <zephyr/kernel.h>
@@ -34,7 +42,9 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/usb/usb_device.h>
 
+#include "console/mp_glue.h"
 #include "console/sts_console.h"
+#include "console/sts_console_link_policy.h"
 
 LOG_MODULE_REGISTER(sts_usb, CONFIG_STS1000_LOG_LEVEL);
 
@@ -49,9 +59,11 @@ static const struct device *const cdc_mcp =
 	DEVICE_DT_GET(DT_NODELABEL(cdc_acm_uart1));
 
 static bool vbus_gpio_ok;
-static bool vbus_state;
 static bool usb_attached;
 static bool usb_dc_configured;
+
+/* VBUS + console-DTR sampler; see sts_console_link_policy.h. */
+static sts_link_state_t link_state;
 
 /* ------------------------------------------------------------------------- */
 
@@ -101,7 +113,7 @@ bool sts_usb_configured(void)
 
 bool sts_usb_vbus_present(void)
 {
-	return vbus_state;
+	return link_state.vbus;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -121,7 +133,7 @@ static bool vbus_read(void)
 
 	val = gpio_pin_get_dt(&vbus_sense);
 	if (val < 0) {
-		return vbus_state;
+		return link_state.vbus;
 	}
 	return val != 0;
 }
@@ -169,22 +181,46 @@ static void usb_detach(void)
 
 void sts_usb_poll(void)
 {
-	bool now = vbus_read();
+	bool vbus = vbus_read();
+	sts_link_act_t act = sts_console_link_step(&link_state, vbus,
+						   dtr_asserted(cdc_console));
 
-	if (now == vbus_state) {
-		return;
+	/*
+	 * MP first, and before any detach: a link drop is the dead-man's
+	 * outermost condition (FMT §5.4), so it reverts every override and takes
+	 * the shell UART back from mp_bypass() — which is the whole reason the
+	 * console is reachable again after a cable pull. Cheap on the pass that
+	 * has nothing to report, and it never *waits* for the engine lock: see
+	 * sts_mp_notify_link(), which defers to the tick on contention rather
+	 * than spending a wait this loop's BUILD_ASSERT has not budgeted.
+	 */
+	switch (act.mp) {
+	case STS_LINK_MP_UP:
+		LOG_INF("console port opened (DTR): maintenance link up");
+		sts_mp_notify_link(true);
+		break;
+	case STS_LINK_MP_DOWN:
+		LOG_INF("console port closed: maintenance link down, overrides "
+			"revert");
+		sts_mp_notify_link(false);
+		break;
+	case STS_LINK_MP_NONE:
+	default:
+		break;
 	}
 
-	vbus_state = now;
-	if (now) {
-		usb_attach();
-	} else {
-		/*
-		 * Drop the MCP session before tearing the stack down so a
-		 * response held for a link that no longer exists does not
-		 * wedge the engine's input path on the next attach.
-		 */
+	/*
+	 * Drop the MCP session before tearing the stack down so a response held
+	 * for a link that no longer exists does not wedge the engine's input
+	 * path on the next attach.
+	 */
+	if (act.mcp_down) {
 		sts_mcp_notify_link_down();
+	}
+	if (act.attach) {
+		usb_attach();
+	}
+	if (act.detach) {
 		usb_detach();
 	}
 }
@@ -207,8 +243,8 @@ int sts_usb_start(void)
 			"unconditionally");
 	}
 
-	vbus_state = vbus_read();
-	if (vbus_state) {
+	sts_console_link_seed(&link_state, vbus_read());
+	if (link_state.vbus) {
 		usb_attach();
 	} else {
 		LOG_INF("USB held detached: no VBUS on the console port");

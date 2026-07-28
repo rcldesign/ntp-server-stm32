@@ -120,9 +120,12 @@ __weak void sts_store_note_log_cursor(uint32_t cursor)
  * src/zephyr/console/Kconfig.mp — because it is a physical-access surface that
  * answers at role `none` before any credential is presented, and an operator has
  * to be able to take it out of the image. app/CMakeLists.txt drops mp_glue.c and
- * mp_tunnel.c when it is n, which leaves callers in two always-compiled places:
+ * mp_tunnel.c when it is n, which leaves callers in three always-compiled
+ * places:
  *
  *   src/zephyr/console/sts_console.c   sts_mp_start(), sts_mp_tick()
+ *   src/zephyr/console/sts_usb.c       sts_mp_notify_link(), from the VBUS/DTR
+ *                                      sampler that is compiled either way
  *   src/zephyr/platform/gnss.c         the byte tees and their arming predicates
  *
  * Same completeness rule as the storage set above, and the same reason: the set
