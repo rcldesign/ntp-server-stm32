@@ -851,6 +851,33 @@ static bool ldap_ca_ready(void)
  */
 #define LDAP_CA_INFO_WAIT_MS 200
 
+/**
+ * How long the ERASE will wait for the exchange mutex before giving up on the
+ * in-RAM half and letting the caller's reboot finish the job.
+ *
+ * Same mutex, same unbounded holder, opposite response to a timeout — and the
+ * asymmetry is the point. sts_aaa_ldap_ca_info() answers a status poll it can
+ * honestly decline (-EBUSY, retry). sts_aaa_ldap_ca_erase() is the retraction
+ * half of a factory reset, running INLINE on a liveness participant with
+ * CONFIG_STS1000_LIVENESS_DEADLINE_MS to spend, so it can neither wait for the
+ * exchange nor refuse the work: it does the persisted half without this mutex
+ * at all, and treats the wait below as the only thing the RAM half is allowed
+ * to cost. sts_ldap_ca.h carries the reasoning in full.
+ *
+ * 250 ms clears every legitimate holder of this mutex outside an in-flight
+ * exchange — the longest is sts_aaa_ldap_ca_install(), a parse and a memcpy
+ * over at most 3 KiB followed by a LittleFS write of the same — and is a 20x
+ * margin against the 5 000 ms deadline this call is one step of. The rest of
+ * that budget is not this function's to spend: sts_cfg_factory_reset() erases
+ * NVS and fans out every applier, and sts_cert_reset() unlinks three files,
+ * before and after it on the same thread.
+ */
+#define LDAP_CA_ERASE_WAIT_MS 250
+
+BUILD_ASSERT(LDAP_CA_ERASE_WAIT_MS * 4U < CONFIG_STS1000_LIVENESS_DEADLINE_MS,
+	     "the factory-reset erase must leave the watchdog wide margin: it "
+	     "runs inline on a liveness participant");
+
 int sts_aaa_ldap_ca_info(sts_aaa_ldap_ca_t *out)
 {
 	if (out == NULL) {
@@ -888,7 +915,7 @@ int sts_aaa_ldap_ca_install(const char *pem, size_t len)
 		if (sts_fs_ready()) {
 			int frc = fs_unlink(STS_LDAP_CA_PATH);
 
-			if (frc != 0 && frc != -ENOENT) {
+			if (!sts_ldap_ca_unlink_ok(frc)) {
 				LOG_WRN("unlink %s: %d", STS_LDAP_CA_PATH, frc);
 			}
 		}
@@ -914,24 +941,90 @@ int sts_aaa_ldap_ca_install(const char *pem, size_t len)
 	return rc;
 }
 
+/**
+ * Remove the persisted anchor, and fold the outcome into @p e.
+ *
+ * Takes no lock and must not grow one: the whole point of splitting the erase
+ * is that this half cannot be made to wait behind an authentication exchange.
+ * Nothing else on the board reads or writes STS_LDAP_CA_PATH under g_lock —
+ * ca_file_read()/ca_file_write() are called with it held, but the file is not
+ * shared STATE the mutex protects, and the volatile objects that are (g_ca_pem,
+ * the credential entry) are dealt with separately by the caller.
+ *
+ * Idempotent and monotone, so the caller can run it twice.
+ */
+static void ca_persist_erase(sts_ldap_ca_erase_t *e)
+{
+	int frc;
+
+	if (!sts_fs_ready()) {
+		/* Nothing persisted this call can reach; see sts_ldap_ca.h. */
+		return;
+	}
+	e->fs_ready = true;
+
+	frc = fs_unlink(STS_LDAP_CA_PATH);
+	if (!sts_ldap_ca_unlink_ok(frc)) {
+		LOG_ERR("unlink %s: %d", STS_LDAP_CA_PATH, frc);
+		e->unlinked = false;
+	}
+}
+
 int sts_aaa_ldap_ca_erase(void)
 {
-	int rc = 0;
+	sts_ldap_ca_erase_t e = {
+		.fs_ready = false,
+		.unlinked = true, /* "nothing to unlink" is the same state */
+		.ram_erased = false,
+	};
 
-	k_mutex_lock(&g_lock, K_FOREVER);
-	ldap_ca_forget();
-	g_ca_scanned = true; /* erased on purpose: do not lazily reload it */
-	if (sts_fs_ready()) {
-		int frc = fs_unlink(STS_LDAP_CA_PATH);
+	/*
+	 * (1) The persisted half, FIRST and WITHOUT g_lock.
+	 *
+	 * This is the half that has to survive, because it is the only one the
+	 * reboot at the end of a factory reset cannot do by itself — and it is
+	 * the half that must never queue behind a backend exchange, which holds
+	 * g_lock for minutes. sts_ldap_ca.h has the full account of what taking
+	 * the mutex here used to cost.
+	 */
+	ca_persist_erase(&e);
 
-		/* -ENOENT is the desired end state, not a failure. */
-		if (frc != 0 && frc != -ENOENT) {
-			LOG_ERR("unlink %s: %d", STS_LDAP_CA_PATH, frc);
-			rc = -EIO;
-		}
+	/*
+	 * (2) The volatile half, under a BOUNDED wait. do_ldap() is the
+	 * credential's only reader and ldap_ca_forget() deletes the credential
+	 * entry before zeroing the buffer it points at, so this genuinely needs
+	 * the mutex — but it does not need it badly enough to wait for a bind.
+	 */
+	if (k_mutex_lock(&g_lock, K_MSEC(LDAP_CA_ERASE_WAIT_MS)) == 0) {
+		ldap_ca_forget();
+		g_ca_scanned = true; /* erased on purpose: no lazy reload */
+
+		/*
+		 * Repeat the unlink now that nothing else can be inside this
+		 * mutex. sts_aaa_ldap_ca_install() persists the anchor while
+		 * holding g_lock, so an install that completed between step (1)
+		 * and this lock would otherwise have re-created the file behind
+		 * a factory reset that had already passed it.
+		 */
+		ca_persist_erase(&e);
+
+		k_mutex_unlock(&g_lock);
+		e.ram_erased = true;
 	}
-	k_mutex_unlock(&g_lock);
-	return rc;
+
+	if (sts_ldap_ca_erase_ram_deferred(&e)) {
+		/*
+		 * An exchange is in flight and owns the buffer. Not a failure:
+		 * every caller of this function reboots unconditionally (see
+		 * sts_ldap_ca.h), and the reboot is what clears RAM. Say so
+		 * anyway — the claim is only true while that stays true.
+		 */
+		LOG_WRN("ldap ca: an AAA exchange holds the anchor buffer; the "
+			"/lfs copy is erased and the in-RAM copy is left for "
+			"the reboot to clear");
+	}
+
+	return sts_ldap_ca_erase_result(&e);
 }
 
 /**

@@ -225,6 +225,14 @@ module_deps(secops_policy)
 # the wire. It compiles no core module, hence the empty dependency list; it
 # includes core/web/rest.h only through zephyr/net/sts_web.h, for the sec-tag
 # collision check, and links nothing from it.
+#
+# The same header also owns the anchor's ERASE, and that half of the suite reads
+# zephyr/net/sts_aaa.c the way `factory_policy` and `smear_isolation` read their
+# sources: the rule is that the /lfs unlink runs before — and independently of —
+# the AAA exchange mutex, which is a property of the statement order and cannot
+# be expressed in C. Taking that mutex with K_FOREVER, as it once did, made a
+# factory reset wait on a directory bind and cold-cycle the board mid-wipe with
+# the previous operator's CA still installed.
 module_deps(ldap_ca)
 
 # `ptp_profile_policy` (app/src/zephyr/net/sts_ptp_profile_policy.h) is the

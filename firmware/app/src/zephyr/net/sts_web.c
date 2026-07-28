@@ -643,11 +643,21 @@ static int pv_reboot(void *u, uint8_t mode)
  *      It also lives in /lfs/tls beside the material in (4) and was installed
  *      the same way, through the same admin-only route, so treating the two
  *      differently would be the surprise. Erase.
+ *
+ *      What it erases and what it defers is not symmetric, and the asymmetry
+ *      is deliberate: the /lfs file is unlinked with no lock held, because the
+ *      AAA exchange mutex is held for the length of a directory bind and
+ *      waiting for it here would blow this thread's liveness deadline and
+ *      cold-cycle the board mid-reset; the in-RAM copy is dropped under a
+ *      bounded wait and, if an exchange owns it, left for (5) to clear.
+ *      sts_ldap_ca.h states why that is sound and what it depends on.
  *   5. Everything that lives only in RAM — the NTS cookie master keyring
  *      (src/zephyr/net/sts_net.c), the per-boot NTS-KE server key, mbedTLS and
- *      PSA volatile keys — by REBOOTING. That reboot is not a convenience: it
+ *      PSA volatile keys, and any in-RAM LDAPS anchor (4b) could not take under
+ *      its bounded wait — by REBOOTING. That reboot is not a convenience: it
  *      is what makes the claim in (5) true, and it is also what mints the fresh
- *      TLS identity that (4) deleted.
+ *      TLS identity that (4) deleted. It is scheduled unconditionally below,
+ *      and (4b) depends on that.
  *
  * What it deliberately does NOT erase, and why:
  *

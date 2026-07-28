@@ -111,10 +111,23 @@ int sts_aaa_ldap_ca_info(sts_aaa_ldap_ca_t *out);
 int sts_aaa_ldap_ca_install(const char *pem, size_t len);
 
 /**
- * Erase the trust anchor: the credential entry, the RAM copy and the /lfs file.
+ * Erase the trust anchor: the /lfs file, then the RAM copy and the credential
+ * entry.
  *
- * Called by the factory-reset sweep (sts_sec_factory_wipe()). @retval 0 also
- * covers "there was nothing to erase".
+ * Called by the factory-reset sweep (sts_sec_factory_wipe()). Never blocks for
+ * an authentication exchange: the /lfs file — the only half a reboot cannot
+ * clear — is unlinked before any mutex is taken, and the volatile half is
+ * best-effort under a bounded wait. **The caller MUST reboot unconditionally**;
+ * that is what makes a deferred RAM copy harmless, and it is the reason a
+ * contended call still reports success. sts_ldap_ca.h holds the reasoning.
+ *
+ * Returns quickly enough to be called inline from a thread that feeds a
+ * liveness participant, which all three factory-reset planes do.
+ *
+ * @retval 0    No anchor can survive the reboot. Also covers "there was nothing
+ *              to erase" and "this build has no TLS socket layer".
+ * @retval -EIO The persisted anchor could not be removed; the next boot loads
+ *              it back, so the unit is not factory-clean.
  */
 int sts_aaa_ldap_ca_erase(void);
 

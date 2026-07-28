@@ -50,11 +50,22 @@
  * TLS_PEER_VERIFY_NONE, but that is the *server* socket declining to demand a
  * client certificate from a browser — the opposite direction, and not a
  * precedent for relaxing what this client demands of a directory server.
+ *
+ * ---------------------------------------------------------------------------
+ * AND HOW THE ANCHOR IS TAKEN AWAY AGAIN
+ * ---------------------------------------------------------------------------
+ *
+ * The last section of this header owns the *erase*, which is a separate
+ * decision with a separate failure mode: the erase is the factory reset's only
+ * means of retracting "which directory may tell this box who its administrators
+ * are", and it used to be able to cold-cycle the board instead of running. See
+ * sts_ldap_ca_erase_t.
  */
 
 #ifndef STS1000_ZEPHYR_NET_STS_LDAP_CA_H_
 #define STS1000_ZEPHYR_NET_STS_LDAP_CA_H_
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -331,6 +342,138 @@ static inline const char *sts_ldap_ca_reason(sts_ldap_ca_verdict_t v)
 	default:
 		return "unknown";
 	}
+}
+
+/* ----------------------------------------------------- erasing the anchor */
+
+/**
+ * What one attempt at erasing the anchor managed to do.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE ERASE HAS TWO HALVES AND ONLY ONE OF THEM IS THE ANSWER
+ * ---------------------------------------------------------------------------
+ *
+ * Erasing the anchor touches two places with opposite safety requirements:
+ *
+ *   THE /lfs FILE (STS_LDAP_CA_PATH) is what survives a reboot, and it is the
+ *   only half that has to happen. Nothing reads or writes it under sts_aaa.c's
+ *   exchange mutex, so unlinking it needs no lock at all.
+ *
+ *   THE RAM COPY and its Zephyr credential entry do need that mutex: do_ldap()
+ *   is the credential's only reader, and sts_aaa.c deletes the credential entry
+ *   BEFORE zeroing the buffer the entry points at (tls_credentials.c stores the
+ *   pointer and copies nothing).
+ *
+ * They used to be one critical section entered with K_FOREVER — and that mutex
+ * is held for the WHOLE of a backend exchange. sts_secops.h prices that at up
+ * to 240 s for LDAP alone and ~540 s for a configured local->radius->tacacs->
+ * ldap chain, with no ceiling at all when a directory dribbles one octet just
+ * inside each per-recv timeout.
+ *
+ * Every caller of the erase is a factory reset running INLINE on a thread that
+ * feeds a liveness participant against CONFIG_STS1000_LIVENESS_DEADLINE_MS
+ * (5 000): the web worker (net/sts_web.c pv_factory_reset), the panel's ui
+ * thread (ui/sts_ui.c UI_ACTION_FACTORY_RESET) and the mcp console thread
+ * (console/sts_mcp.c mcp_cfg_factory_reset). So a factory reset issued while an
+ * unauthenticated login was parked on a slow or hostile directory withheld the
+ * watchdog kick, and the external TPS3430 cold-cycled the board — AFTER
+ * sts_cfg_factory_reset(), auth_web_wipe() and sts_cert_reset() had already
+ * run, and BEFORE the plane could annunciate the reset as incomplete. The unit
+ * came back with its credentials and TLS identity gone, looking factory-clean,
+ * still trusting the previous operator's certificate authority. That is exactly
+ * the outcome erasing the anchor exists to prevent, reached by the erase
+ * itself, and reachable on demand by anyone who can make the box attempt a
+ * bind.
+ *
+ * Hence the shape recorded here:
+ *
+ *   THE PERSISTED HALF IS UNCONDITIONAL AND LOCK-FREE.  It runs first, before
+ *   any mutex is taken, so nothing an authentication exchange is doing can
+ *   delay or skip it.
+ *
+ *   THE RAM HALF IS BEST-EFFORT UNDER A BOUNDED WAIT.  Overrunning that wait is
+ *   not a failure, because the caller reboots and the reboot clears RAM.
+ *
+ *   THE RESULT REPORTS THE PERSISTED HALF ONLY.  A `false` from the RAM half
+ *   must never become -EIO: that would report an anchor which cannot outlive
+ *   the next second as a failed erase, and (via sts_factory_result()) brand a
+ *   correctly-wiped unit as one that must not be treated as decommissioned.
+ *
+ * The third rule is sound for exactly one reason, and it is a property of the
+ * CALLERS rather than of this file: all three reboot unconditionally. The panel
+ * gates its sys_reboot() on sts_factory_should_reboot(), which takes the
+ * outcome and ignores it by construction; the web and mcp planes each
+ * k_work_reschedule() their reboot outside every conditional. If that ever
+ * stops being true on any plane, this rule has to be revisited with it —
+ * tests/host/test_factory_policy.c is what keeps it true.
+ */
+typedef struct {
+	/**
+	 * /lfs was mounted, so the unlink had something it could reach.
+	 *
+	 * A dead /lfs is NOT a failure — the same convention sts_cert_reset()
+	 * uses, and for the same reason: there is then nothing persisted for
+	 * this call to remove, and the volatile copies have been dealt with
+	 * separately.
+	 */
+	bool fs_ready;
+	/**
+	 * Every unlink attempt this call made returned 0 or -ENOENT.
+	 * Meaningless when !fs_ready; initialise it true, so "no attempt was
+	 * needed" and "the attempt succeeded" are one state.
+	 */
+	bool unlinked;
+	/**
+	 * The exchange mutex was obtained within its bounded wait, so the RAM
+	 * copy and the credential-store entry went too.
+	 *
+	 * False means they were left for the reboot. It never reaches the
+	 * result — see the header comment — but it IS worth a log line, because
+	 * "the reboot will finish this" is only true while the reboot is.
+	 */
+	bool ram_erased;
+} sts_ldap_ca_erase_t;
+
+/**
+ * Normalise one fs_unlink() of the anchor.
+ *
+ * -ENOENT is the desired end state, not a failure: the erase is trying to reach
+ * "there is no anchor on this box", and a unit that never had one is already
+ * there.
+ */
+static inline bool sts_ldap_ca_unlink_ok(int rc)
+{
+	return (rc == 0) || (rc == -ENOENT);
+}
+
+/**
+ * The result the erase reports to the factory-reset sweep.
+ *
+ * @retval 0     No anchor can survive the reboot by way of /lfs.
+ * @retval -EIO  The persisted anchor is still there; the unit must NOT be
+ *               described as factory-clean, because the next boot loads it
+ *               straight back in.
+ */
+static inline int sts_ldap_ca_erase_result(const sts_ldap_ca_erase_t *e)
+{
+	if (e == NULL) {
+		return -EIO;
+	}
+	if (e->fs_ready && !e->unlinked) {
+		return -EIO;
+	}
+	return 0;
+}
+
+/**
+ * Whether the in-RAM anchor outlived the call and was left for the reboot.
+ *
+ * True is not an error; it is a fact the caller must log, because it is only
+ * harmless for as long as the reboot that follows is unconditional.
+ */
+static inline bool sts_ldap_ca_erase_ram_deferred(const sts_ldap_ca_erase_t *e)
+{
+	return (e != NULL) && !e->ram_erased;
 }
 
 #ifdef __cplusplus
