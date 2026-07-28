@@ -11,23 +11,26 @@
  * Mostly private to src/zephyr/console/, like sts_console.h — with one
  * deliberate exception, stated here so it is a contract rather than a leak. The
  * **byte tees and their arming predicates** (`sts_mp_tee_*`,
- * `sts_mp_gnss_tee_armed`, `sts_mp_ch_armed`, `sts_mp_tunnel_*_open`) and the
- * **event producer** (`sts_mp_post_event`) are called from outside this area,
- * because that is where the bytes and the edges are: platform/gnss.c owns the
+ * `sts_mp_gnss_tee_armed`, `sts_mp_ch_armed`, `sts_mp_tunnel_*_open`), the
+ * **event producer** (`sts_mp_post_event`) and the **firmware veto**
+ * (`sts_mp_veto`) are called from outside this area, because that is where the
+ * bytes, the edges and the unsafe conditions are: platform/gnss.c owns the
  * USART3 receive path, platform/rb_serial.c owns UART7, platform/io_scan.c owns
- * the 1 kHz GPIOF/GPIOG scan, and sts_app.c's sts_alarm_set() is where an
- * alarm's active state transitions. sts_mp_mirror_publish() crosses the same
- * seam in the other direction and is declared in sts_app.h instead; these are
- * not, because sts_app.h is not this change's to extend. The dependency is made
- * safe two ways:
+ * the 1 kHz GPIOF/GPIOG scan, sts_app.c's sts_alarm_set() is where an
+ * alarm's active state transitions, and platform/pwrseq_exec.c is where every
+ * rail an override can hold is actually driven. sts_mp_mirror_publish() crosses
+ * the same seam in the other direction and is declared in sts_app.h instead;
+ * these are not, because sts_app.h is not this change's to extend. The
+ * dependency is made safe two ways:
  *
  *   - src/zephyr/platform/sts_area_weak.c carries a __weak no-op for **every**
  *     function declared below, so CONFIG_STS1000_MP=n (which drops mp_glue.c
  *     and mp_tunnel.c from the build, app/CMakeLists.txt) still links;
  *   - every one of them is safe to call from a hot loop or an ISR: the tees and
  *     the event producer do a bounded copy into a staging ring behind a
- *     spinlock and nothing else, and the predicates are one atomic read.
- *     Nothing on this path takes the engine mutex or touches the console UART.
+ *     spinlock and nothing else, the veto is a single atomic OR, and the
+ *     predicates are one atomic read. Nothing on this path takes the engine
+ *     mutex or touches the console UART.
  *
  * Mode entry (FMT §2.3). MP shares the human console on CDC-ACM #0 rather than
  * taking a third endpoint, so entering it means taking the port away from the
@@ -67,6 +70,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "console/sts_mp_veto_policy.h"
 #include "mp/mp.h"
 
 #ifdef __cplusplus
@@ -421,6 +425,48 @@ void sts_mp_event_stats(uint32_t *queued, uint32_t *staged, uint32_t *dropped);
  * before it publishes the engine, i.e. before any producer can be armed.
  */
 void sts_mp_event_init(void);
+
+/* ------------------------------------------------------------ firmware veto */
+
+/**
+ * Withdraw every override the board has just made untrue (FMT §5.1.2, §5.4).
+ *
+ * The producer half of the veto seam. Called from the platform area at the one
+ * place firmware actually drives a rail an override can hold — pwrseq's action
+ * executor — and from the antenna-bias supervisor's out-of-band write, which is
+ * the only such writer that does not pass through the action queue. @p subject
+ * names what firmware did in platform's own terms; console/sts_mp_veto_policy.h
+ * maps it to manifest ids and this file's drain calls mp_veto() on each.
+ *
+ * **Safe from any context, including an ISR and the 1 kHz scan**, and cheaper
+ * than the event producer beside it: a call is one atomic OR of one bit and a
+ * return. There is no arming test and deliberately so — unlike an event, whose
+ * only consumer is a subscriber on channel 0x09, a veto's job is to drop the
+ * lease and revert the pin whether or not anyone is watching.
+ *
+ * DEFERRED, like everything else that crosses this seam. mp_ovr_veto() reverts
+ * through the apply callback and writes the audit line, so it must run under the
+ * engine mutex; sts_mp_tick() drains inside the lock it already takes, which
+ * costs the console supervisor's pass no second timed wait (sts_console.c's
+ * BUILD_ASSERT budgets exactly one and it is still the tick's own). Latency is
+ * therefore one console pass, 250 ms typical.
+ *
+ * NOT A QUEUE, and that is the point of the bitmap. A staged *event* may be
+ * dropped on overflow because the loss is reportable; a dropped veto would leave
+ * an override standing against a rail that is already down, which is the defect
+ * itself. A bit cannot overflow, repeat requests coalesce — which is correct
+ * rather than lossy, because mp_ovr_veto() is idempotent and answers -ENOENT
+ * when no lease exists — and the whole staging costs one word of RAM. It is the
+ * same argument, and the same shape, as pwrseq_exec.c's own `pwrseq_req`.
+ *
+ * @param subject What firmware just did. STS_MP_VETO_NONE and out-of-range
+ *                values are ignored, so a caller may pass the result of
+ *                sts_mp_veto_of_action() unfiltered.
+ */
+void sts_mp_veto(sts_mp_veto_t subject);
+
+/** Veto requests raised / subjects drained, for `mp status`. May be NULL. */
+void sts_mp_veto_stats(uint32_t *raised, uint32_t *applied);
 
 #ifdef __cplusplus
 }

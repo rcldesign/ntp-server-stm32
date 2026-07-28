@@ -338,9 +338,7 @@ mp_json_i32_range                      # TODO: wire it up or give it a reason
 mp_mirror_dirty                        # TODO: wire it up or give it a reason
 mp_obj_count_in                        # TODO: wire it up or give it a reason
 mp_ovr_set_phrase                      # TODO: wire it up or give it a reason
-mp_ovr_veto                            # TODO: wire it up or give it a reason
 mp_shell_byte                          # no-caller. The MP_MAGIC_ENTER matcher. Its one in-app caller is sts_mp_shell_tap(), which is itself absent for the structural reason recorded on that entry below; the two live or die together and test_mp_rpc.c is the sole exerciser
-mp_veto                                # TODO: wire it up or give it a reason
 ntp_ef_iter_init                       # TODO: wire it up or give it a reason
 ntp_ef_iter_next                       # TODO: wire it up or give it a reason
 ntp_stats_reset                        # TODO: wire it up or give it a reason
@@ -358,7 +356,6 @@ ptp_tsmsg_decode                       # TODO: wire it up or give it a reason
 pwrseq_action_count                    # TODO: wire it up or give it a reason
 pwrseq_alarms                          # no-caller: superseded by pwrseq_status(), which is bound and whose pwrseq_status_t carries this exact field as .alarms. One locked read per publish beats six; the tests/host/test_pwrseq.c suite is the sole exerciser of the individual getter
 pwrseq_ocxo_is_warming                 # TODO: wire it up or give it a reason
-pwrseq_ov_latched                      # no-caller: superseded by pwrseq_status(), which is bound and whose pwrseq_status_t carries this exact field as .ov_latched. One locked read per publish beats six; the tests/host/test_pwrseq.c suite is the sole exerciser of the individual getter
 pwrseq_rb_auto_retries                 # no-caller: superseded by pwrseq_status(), which is bound and whose pwrseq_status_t carries this exact field as .rb_auto_retries. One locked read per publish beats six; the tests/host/test_pwrseq.c suite is the sole exerciser of the individual getter
 pwrseq_rb_fault                        # TODO: wire it up or give it a reason
 pwrseq_shed_level                      # no-caller: superseded by pwrseq_status(), which is bound and whose pwrseq_status_t carries this exact field as .shed. One locked read per publish beats six; the tests/host/test_pwrseq.c suite is the sole exerciser of the individual getter

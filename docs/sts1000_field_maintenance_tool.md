@@ -290,6 +290,48 @@ console link up — ACM0 DTR asserted **and** VBUS present, which is the conjunc
 `sts_console_link_policy.h` evaluates and `mp_ovr_set_link()` consumes. Any failure reverts
 every override to automatic within 2 s and logs it. FMT sends keepalive at 1 Hz.
 
+**Firmware veto (§5.1.2), and it is wired.** The dead-man is the *session's* half; the
+veto is the *board's*. When firmware drives a rail an override is holding the other way,
+the lease is withdrawn on the spot rather than left standing until its keepalive lapses.
+The trigger is `platform/pwrseq_exec.c`'s action executor — the single choke point for
+every rail `pwrseq` owns — plus `sts_pwrseq_ant_bias_request()`, the one writer that does
+not pass through the action queue:
+
+| Firmware action | Subject | Objects withdrawn | Reason on the wire |
+|---|---|---|---|
+| `RB_PWR_DIS` / `RB_VCC_GATE_DIS` with `pwrseq_ov_latched()` | `RB_OV` | `pwr.rb.en`, `pwr.rb.gate` | `Rb 26 V OV latch tripped` |
+| `RB_PWR_DIS` / `RB_VCC_GATE_DIS` otherwise (intent withdrawn, rail out of window, shed rung 3) | `RB_RAIL` | `pwr.rb.en`, `pwr.rb.gate` | `pwrseq dropped the Rb rail` |
+| `ANT_BIAS_DIS`, and the supervisor's latched-short write | `ANT_BIAS` | `pwr.ant.bias.en` | `antenna bias short latched` |
+| `DISP_DIS` (shed rung 1, stage fail-action) | `DISPLAY` | `pwr.disp.en` | `display shed (power/thermal)` |
+| `PANEL_LED_DIS` (shed rung 2, stage fail-action) | `PANEL_LED` | `pwr.panel.led.en`, `ui.panel.duty` | `panel LED shed (power/thermal)` |
+| `GPS_PWR_DIS` (stage fail-action) | `GPS_RAIL` | `pwr.gps.en` | `pwrseq dropped the GPS rail` |
+
+Only the **off** direction is mapped. Firmware bringing a load up under a lease that wants
+it off is the weaker symmetrical case and mapping it would fire a veto on every bring-up,
+before a session can exist. The **edge** is the veto; the **level** is the interlock —
+`MP_ILK_RB_OV` refuses a *re*-grant while the latch stands, so the two together close the
+loop without the veto having to re-fire on every 4 Hz sequencer pass.
+
+Layering: platform names the *condition* in its own terms and the console binds it to the
+manifest. `sts_mp_veto()` is one atomic OR of one bit — safe from an ISR, from the 1 kHz
+scan and from the priority-4 discipline loop, none of which may wait on the engine mutex —
+and `sts_mp_tick()` maps the subject through `console/sts_mp_veto_policy.h`, resolves each
+id with `mp_obj_find()` and calls `mp_ovr_veto()` **inside the engine lock it already
+holds**, so the supervisor's pass gains no second timed lock wait. Latency is one console
+pass (250 ms typical). A bitmap and not a queue: repeats coalesce, which is correct because
+`mp_ovr_veto()` is idempotent and answers `-ENOENT` when no lease exists, and nothing can
+be dropped — a lost veto is an override left standing against a dead rail.
+
+> **The power-fail park list stages a veto it will never drain, deliberately.**
+> `sts_pwrseq_pfi()` runs the park list through the same executor, so its `RB_*_DIS`
+> actions do raise a subject; what they do not get is a synchronous path. PFI leaves
+> ~4.8 ms of hold-up (`sts1000_power_fail_input.md` §3.5) against a 250 ms drain, and the
+> engine mutex may be held by the shell thread — a synchronous veto would either miss the
+> window or park the park list behind a maintenance request. Nothing is lost by that: a
+> lease does not re-assert itself (`obj_apply()` runs once at grant and once at revert), so
+> an override cannot fight the park list at the pin, and §5.1.3 reverts everything at the
+> next boot anyway.
+
 > **"USB not suspended" is specified and is not enforced.** The dead-man's link term is
 > DTR ∧ VBUS. Nothing reads the CDC-ACM class's `suspended` flag — Zephyr's legacy device
 > stack keeps it private to `cdc_acm.c` and exposes no accessor — so a host that suspends the
@@ -457,7 +499,7 @@ for ordering one event against another.
 | 2 `prox` | `PROX_WAKE` | `PROX` | reed switch, 50 ms debounce |
 | 3 `touch` | `TOUCH_INT` | `TOUCH` | touch controller INT. **Assert only** — core/fault does not raise a release event for the INT (`fault.c`, `FAULT_CLASS_TOUCH`), so there is none to carry |
 | 4 `alarm` | `fault_alarm_id_t` ≥ 32 | 0 | `sts_alarm_set()`, on a change of the alarm's active state. Ids 0–31 are the scanned signals and arrive as `fault` above, with the same numbering, so a transition is never reported twice |
-| 5 `override` | manifest object index | `mp_ovr_ev_t` — grant/release/expire/deadman | the override engine |
+| 5 `override` | manifest object index | `mp_ovr_ev_t` — grant/release/expire/deadman/**veto**/verify-fail | the override engine; the **veto** sub-kind is raised by the firmware-veto seam (§5.4) |
 | 6 `diag` | `(test << 8) \| step` | diag event | the diagnostic runner |
 | 7 `mode` | 0 | 0 | MP mode entered/left |
 
@@ -473,8 +515,15 @@ of the next batch, alongside the engine queue's own overflows. A gap on this cha
 therefore never silent, which matters because the channel's whole value is that quiet
 means quiet. `mp status` prints both stages separately (`events`, `event stage`).
 
-The veto sub-kind of `override` is **not** currently raised: `mp_veto()` has no caller in
-the image.
+The veto sub-kind of `override` **is** raised. `platform/pwrseq_exec.c` calls
+`sts_mp_veto()` from the action executor and from the antenna-bias write, and
+`sts_mp_tick()` drains the request through `mp_veto()` → `mp_ovr_veto()` inside the engine
+lock — so a withdrawn lease arrives here as `MP_OVR_EV_VETO` carrying the reason
+(§5.4's table), alongside the `LOGR_WARN` audit line §5.3 requires. Before this,
+**`mp_veto` and `mp_ovr_veto` were both absent from `zephyr.elf`**: the only in-app
+relocation to `mp_ovr_veto` sat inside `.text.mp_veto`, a dead subtree citing itself, and
+an override the firmware had decided was unsafe stood until its keepalive expired with
+nothing on this channel and nothing in the log.
 
 ---
 
@@ -702,10 +751,10 @@ code exists, is unit-tested on the host, and links into the signed image.
 |---|---|
 | Frame mux (COBS + CRC16, channel dispatch, `mp enter/exit`) | in tree |
 | Manifest generator (build-time table → runtime JSON + content hash) | in tree |
-| Override engine (lease table, dead-man, revert hooks, veto reporting) | in tree |
+| Override engine (lease table, dead-man, revert hooks, veto reporting) | in tree, and the **firmware veto is now raised** (§5.4). `platform/pwrseq_exec.c`'s action executor maps six OFF actions to a veto subject through the Zephyr-free `console/sts_mp_veto_policy.h`, `sts_mp_veto()` stages it as one atomic bit, and `sts_mp_tick()` withdraws the matching leases inside the engine lock it already holds — no second timed lock wait, so `sts_console.c`'s `BUILD_ASSERT` budget is unchanged. Verified reachable in the linked image, not merely present: `sts_mp_tick → bl mp_veto → b.w mp_ovr_veto` (a **tail call**, so no `bl` appears on the second edge) and `pwrseq_drain → bl sts_mp_veto`. `tests/host/test_mp_veto.c` drives the *condition* — `RB_OV_DET` on a real `pwrseq_in_t`, the real stage machine's decision to shut the rubidium down — not `mp_ovr_veto()` directly |
 | Sessions + guard/interlock evaluation | in tree, authenticating through `sts_aaa_check()` so the credential store and lockout table are shared with the console and web planes; role floor enforced per §5.3, fail-closed at role `none` |
 | Streams (telemetry/PPS/log/event/mirror CBOR) | in tree, and now **fed**. The NMEA/UBX/passthrough tees are driven from `platform/gnss.c` and `platform/rb_serial.c` (`sts_mp_tee_*`), and the event channel has producers for all five board-side kinds — see the row below |
-| Event channel 0x09 producers (§7.5) | in tree. `platform/io_scan.c` stages `fault`/`button`/`prox`/`touch` from the 1 kHz scan and `sts_app.c`'s `sts_alarm_set()` stages `alarm` on each active-state transition; `console/mp_events.c` is the bounded staging queue between them and the drain in `sts_mp_tick()`. Before this, **`mp_post_event()` had no caller and was absent from `zephyr.elf`** — five of the eight kinds could not be produced at all, and a subscriber heard silence through a power-good drop, an alarm, a button press and a door event. `touch` is assert-only because core/fault emits no release event; the `override` **veto** sub-kind is still unraisable (`mp_veto`/`mp_ovr_veto` have no caller) |
+| Event channel 0x09 producers (§7.5) | in tree. `platform/io_scan.c` stages `fault`/`button`/`prox`/`touch` from the 1 kHz scan and `sts_app.c`'s `sts_alarm_set()` stages `alarm` on each active-state transition; `console/mp_events.c` is the bounded staging queue between them and the drain in `sts_mp_tick()`. Before this, **`mp_post_event()` had no caller and was absent from `zephyr.elf`** — five of the eight kinds could not be produced at all, and a subscriber heard silence through a power-good drop, an alarm, a button press and a door event. `touch` is assert-only because core/fault emits no release event; the `override` **veto** sub-kind is raised by the firmware-veto seam — see the override-engine row above |
 | Tunnels (USART3) with firmware-suspend handshake | in tree. Opening the GNSS tunnel calls `sts_gnss_uart_suspend()`, so the receiver is genuinely stood down rather than merely alarmed about |
 | Tunnels (UART7, rubidium) | in tree, and the rubidium is **genuinely stood down**. The obstacle this row used to describe — `rb_serial_tunnel_open()` demands an **ISR-context** byte sink, and the only useful sink reached `uart_poll_out()` through a mutex — is what `console/mp_tunnel.c` was built to solve: the sink stages a bounded copy into a ring under a `k_spinlock` and `sts_mp_tick()` frames it on the console supervisor. While the tunnel holds UART7, `rb_serial_ops()`'s transmit path answers `-EBUSY` (`platform/rb_serial.c:316`), the RX ISR routes every octet to the tunnel sink instead of the parser ring (`:162`), and `rb_serial_set_mode()` refuses to throw the K1 relay (`:226`). Firmware is **not** a second reader or writer for the duration |
 | Diag runner + support bundle | in tree |

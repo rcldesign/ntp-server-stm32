@@ -52,6 +52,7 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
 
+#include "console/mp_glue.h"
 #include "zephyr/platform/platform.h"
 #include "zephyr/platform/sts_pwrseq_pub.h"
 #include "zephyr/platform/sts_rbguard.h"
@@ -375,6 +376,40 @@ static const fault_sig_t sig_rb[] = {
 
 static void pwrseq_exec_action(const pwrseq_act_t *a)
 {
+	sts_mp_veto_t subj;
+
+	/*
+	 * The firmware veto (FMT §5.1.2, §5.4), raised BEFORE the pin moves.
+	 *
+	 * This switch is the single choke point for every rail an override can
+	 * hold, so it is the one place that knows firmware is about to act on an
+	 * object a maintenance lease may be holding the other way. An override
+	 * cannot be honoured through a shed, a latched over-voltage or a
+	 * stage fail-action: the hardware has already acted or is about to, and
+	 * a lease that stands until its keepalive lapses is a lie about the
+	 * board on the one channel a technician trusts.
+	 *
+	 * pwrseq_ov_latched() is read here rather than folded into the action
+	 * because the same two actions carry both stories — the autonomous 26 V
+	 * latch killed the buck, or the sequencer took the rail down — and only
+	 * this side knows which. The mapping itself is
+	 * console/sts_mp_veto_policy.h, which also states what is deliberately
+	 * NOT mapped (the ON direction, the VCC_RB setpoint objects) and why.
+	 *
+	 * Deferred, never synchronous: sts_mp_veto() is one atomic OR and the
+	 * console supervisor does the reverting inside the engine lock it
+	 * already holds. This is the housekeeping thread and the action it is
+	 * about to run may be a busy-wait or an SPI transfer; queueing it behind
+	 * a maintenance request would be the priority inversion the console area
+	 * is built to prevent, and on the PFI park list it would miss the
+	 * hold-up window outright.
+	 */
+	subj = sts_mp_veto_of_action((uint16_t)a->action,
+				     pwrseq_ov_latched(&pwrseq));
+	if (subj != STS_MP_VETO_NONE) {
+		sts_mp_veto(subj);
+	}
+
 	switch ((pwrseq_action_t)a->action) {
 	/* Stages platform.c already drove — idempotent no-ops or re-drives. */
 	case PWRSEQ_ACT_NOR_RST_RELEASE:
@@ -809,10 +844,26 @@ void sts_pwrseq_ant_bias_request(bool on)
 	if (on) {
 		EXPECT_OFF(false, sig_ant);
 		pwrseq_set(&ant_bias_en, 1);
-	} else {
-		pwrseq_set(&ant_bias_en, 0);
-		EXPECT_OFF(true, sig_ant);
+		return;
 	}
+
+	pwrseq_set(&ant_bias_en, 0);
+	EXPECT_OFF(true, sig_ant);
+
+	/*
+	 * The one writer of a rail an override can hold that does NOT pass
+	 * through the action queue, so it carries its own veto rather than
+	 * inheriting pwrseq_exec_action()'s.
+	 *
+	 * gnssmgr reaches here only from ant_enter(GNSSMGR_ANT_SHORT), once, on
+	 * the latch — recovery is gnssmgr_ant_reenable() and nothing else — so
+	 * this is a genuine edge and not a level re-assertion. A lease holding
+	 * `pwr.ant.bias.en` on against a latched short is exactly the case FMT
+	 * §5.1.2 reserves to firmware. The early return above is what keeps the
+	 * re-enable path from raising one: restoring the bias is not contrary to
+	 * an override that wanted it on.
+	 */
+	sts_mp_veto(STS_MP_VETO_ANT_BIAS);
 }
 
 int sts_pwrseq_start(uint32_t now_ms)

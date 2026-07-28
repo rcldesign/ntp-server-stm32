@@ -128,6 +128,8 @@ __weak void sts_store_note_log_cursor(uint32_t cursor)
  *                                      sampler that is compiled either way
  *   src/zephyr/platform/gnss.c         the byte tees and their arming predicates
  *   src/zephyr/platform/io_scan.c      sts_mp_post_event(), from the 1 kHz scan
+ *   src/zephyr/platform/pwrseq_exec.c  sts_mp_veto(), from the action executor
+ *                                      and the antenna-bias write
  *   src/zephyr/sts_app.c               sts_mp_post_event(), from sts_alarm_set()
  *
  * Same completeness rule as the storage set above, and the same reason: the set
@@ -348,4 +350,25 @@ __weak void sts_mp_event_stats(uint32_t *queued, uint32_t *staged,
 
 __weak void sts_mp_event_init(void)
 {
+}
+
+/*
+ * The firmware veto. Dropping the request is the correct no-op: with no engine
+ * there is no lease table, so there is no override to withdraw — and unlike the
+ * tunnel setters, nothing here is being claimed to a caller that could act on
+ * the answer, because the producer is fire-and-forget by design.
+ */
+__weak void sts_mp_veto(sts_mp_veto_t subject)
+{
+	ARG_UNUSED(subject);
+}
+
+__weak void sts_mp_veto_stats(uint32_t *raised, uint32_t *applied)
+{
+	if (raised != NULL) {
+		*raised = 0U;
+	}
+	if (applied != NULL) {
+		*applied = 0U;
+	}
 }

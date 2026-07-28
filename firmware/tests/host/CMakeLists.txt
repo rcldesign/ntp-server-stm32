@@ -429,6 +429,23 @@ module_deps(recovery_policy fault disc mp)
 # CBOR reader that decodes it.
 module_deps(mp_events mp fault ina228 logring util)
 
+# `mp_veto` is the seam that lets FIRMWARE withdraw an override (FMT §5.1.2,
+# §5.4). It exists because test_mp_override.c proved mp_ovr_veto() and
+# test_mp_rpc.c proved mp_veto(), and the defect was upstream of both — nothing
+# raised one, so both symbols were absent from zephyr.elf and an override the
+# board had made untrue stood until its keepalive lapsed, with no veto on
+# channel 0x09 and no audit line.
+#
+# Real edges, no models. `pwrseq` because the condition is the real stage
+# machine deciding to drop the rubidium — the suite raises RB_OV_DET on a real
+# pwrseq_in_t and takes the actions pwrseq_step() emits, so a change to that
+# decision changes this suite; `ina228` for the rail table the sequencer's
+# inputs are built from; `mp` for the lease table, the manifest the subject map
+# resolves against, the event stream and the frame decoder that reads the veto
+# back off the wire; `logring` for the audit line, which is the half FMT §5.3
+# requires and a stream subscriber does not provide.
+module_deps(mp_veto mp pwrseq ina228 logring util)
+
 # ---------------------------------------------------------------------------
 # Dependency resolution
 # ---------------------------------------------------------------------------

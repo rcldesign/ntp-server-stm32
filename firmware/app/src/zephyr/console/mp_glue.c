@@ -335,6 +335,26 @@ static uint8_t mp_tick_miss_worst;
  */
 static atomic_t mp_link_defers;
 
+/*
+ * Firmware-veto staging (mp_glue.h sts_mp_veto()).
+ *
+ * One bit per sts_mp_veto_t subject, OR-ed in by the platform area and swapped
+ * to zero by the drain under the engine lock. A bitmap rather than a queue
+ * because a veto is a COMMAND and not a record: two requests for the same
+ * subject must coalesce (mp_ovr_veto() is idempotent), and nothing may ever be
+ * dropped — a lost veto leaves an override standing against a rail that is
+ * already down, which is the whole defect.
+ *
+ * The counters are separate from mp.ovr.vetoes, which counts leases actually
+ * withdrawn by anyone (including a grant whose apply refused). These two count
+ * the seam: what platform asked for, and how many of those requests the drain
+ * has consumed. `raised` is incremented on the producer's thread, so it is
+ * atomic; `applied` is written only by the drain, under the lock.
+ */
+static atomic_t mp_veto_pending;
+static atomic_t mp_veto_raised;
+static uint32_t mp_veto_applied;
+
 /** Enter the engine from a thread that may wait. Never call from an ISR. */
 static void mp_engine_lock(void)
 {
@@ -1367,6 +1387,109 @@ static void mp_event_drain_locked(void)
 	}
 }
 
+/* --------------------------------------------------------- firmware vetoes */
+
+void sts_mp_veto(sts_mp_veto_t subject)
+{
+	/*
+	 * No arming test, unlike sts_mp_post_event(). A veto's consumer is the
+	 * lease table, not a subscriber: it has to run whether or not anyone is
+	 * watching channel 0x09, and gating it on a subscription would make the
+	 * safety property depend on a technician's stream being open. The call
+	 * is one atomic OR either way, and its producers are 4 Hz (the
+	 * sequencer's action drain) and 1 Hz (the antenna supervisor), not the
+	 * 1 kHz scan.
+	 */
+	if ((subject <= STS_MP_VETO_NONE) || (subject >= STS_MP_VETO_COUNT)) {
+		return;
+	}
+
+	(void)atomic_or(&mp_veto_pending, (atomic_val_t)STS_MP_VETO_BIT(subject));
+	(void)atomic_inc(&mp_veto_raised);
+}
+
+/**
+ * Withdraw the overrides the board has made untrue. **Call with mp_lock held.**
+ *
+ * The consumer half of the veto seam. Runs inside the wait sts_mp_tick() already
+ * spends, so it adds no timed lock wait to the supervisor's pass — the same
+ * arrangement, and the same reason, as mp_event_drain_locked() above.
+ *
+ * Claimed with atomic_set(), not read-then-clear: a subject raised while this
+ * function is running belongs to the NEXT pass, and clearing after the work
+ * would swallow it. The cost of the swap-first order is at worst one redundant
+ * veto next pass, which answers -ENOENT.
+ */
+static void mp_veto_drain_locked(void)
+{
+	atomic_val_t pend = atomic_set(&mp_veto_pending, 0);
+	unsigned int s;
+
+	if (pend == 0) {
+		return;
+	}
+
+	for (s = (unsigned int)STS_MP_VETO_NONE + 1U;
+	     s < (unsigned int)STS_MP_VETO_COUNT; s++) {
+		const char *const *ids;
+		const char *reason;
+		size_t n = 0U;
+		size_t i;
+
+		if ((pend & (atomic_val_t)STS_MP_VETO_BIT(s)) == 0) {
+			continue;
+		}
+		mp_veto_applied++;
+
+		reason = sts_mp_veto_reason((sts_mp_veto_t)s);
+		ids = sts_mp_veto_objects((sts_mp_veto_t)s, &n);
+
+		for (i = 0U; i < n; i++) {
+			int obj = mp_obj_find(ids[i]);
+			int rc;
+
+			if (obj < 0) {
+				/* A manifest rename that missed this table.
+				 * Loud, because the veto it was meant to carry
+				 * did not happen — tests/host/test_mp_veto.c
+				 * resolves every id in the table for exactly
+				 * this reason, so reaching here means the two
+				 * were changed apart. */
+				LOG_ERR("MP veto: manifest has no object `%s`; "
+					"an override on it cannot be withdrawn",
+					ids[i]);
+				continue;
+			}
+
+			rc = mp_veto(&mp, (size_t)obj, reason);
+			/*
+			 * -ENOENT is the ordinary answer and is not an error:
+			 * almost every veto is raised with no lease on the
+			 * object, because the board sheds loads far more often
+			 * than a technician overrides one. Logging it would put
+			 * a line in the operator's log on every boot's
+			 * bring-up. rc == 0 is already audited at LOGR_WARN and
+			 * streamed as MP_OVR_EV_VETO by the engine's own event
+			 * sink, so there is nothing to add here either.
+			 */
+			if ((rc != 0) && (rc != -ENOENT)) {
+				LOG_ERR("MP veto on `%s` failed (%d)", ids[i],
+					rc);
+			}
+		}
+	}
+}
+
+void sts_mp_veto_stats(uint32_t *raised, uint32_t *applied)
+{
+	if (raised != NULL) {
+		*raised = (uint32_t)atomic_get(&mp_veto_raised);
+	}
+	if (applied != NULL) {
+		*applied = mp_veto_applied;
+	}
+}
+
 /**
  * The shell bypass callback: every console byte, on the shell thread.
  *
@@ -1619,6 +1742,17 @@ void sts_mp_tick(void)
 
 	mp_tick_miss_run = 0U;
 	/*
+	 * Firmware vetoes first, ahead of both the link transition and the tick.
+	 *
+	 * All three can revert the same lease, and whichever runs first owns the
+	 * reason a technician is left with. A veto's reason is a statement about
+	 * the BOARD — "Rb 26 V OV latch tripped" — and the other two are
+	 * statements about the console session ("keepalive or link lost", "lease
+	 * expired"). When the hardware acted and the cable was pulled in the same
+	 * 250 ms, the hardware is the answer to "why did my override go away".
+	 */
+	mp_veto_drain_locked();
+	/*
 	 * Before mp_tick(), not after: a parked link drop is a dead-man failure
 	 * that has already happened, and applying it first means this pass's
 	 * mp_ovr_tick() runs against the true link state instead of reverting the
@@ -1788,6 +1922,23 @@ static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "events       %u queued, %u dropped",
 		    (unsigned int)mp_stream_event_count(&mp.st),
 		    mp_stream_event_dropped(&mp.st));
+	{
+		uint32_t raised = 0U;
+		uint32_t applied = 0U;
+
+		/*
+		 * The firmware-veto seam, and the two numbers do different jobs.
+		 * `raised` counts what the platform area asked for — it climbs
+		 * on every shed and every rail drop whether or not a lease
+		 * existed, so a steady climb is the sequencer working, not a
+		 * fault. The gap between it and `applied` is the backlog waiting
+		 * for the next drain, normally zero. `safety … vetoes` above is
+		 * the one that counts leases actually withdrawn.
+		 */
+		sts_mp_veto_stats(&raised, &applied);
+		shell_print(sh, "veto seam    %u raised, %u drained",
+			    (unsigned int)raised, (unsigned int)applied);
+	}
 	mp_engine_unlock();
 
 	{
