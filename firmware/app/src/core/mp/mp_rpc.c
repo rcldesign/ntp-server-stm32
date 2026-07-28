@@ -124,6 +124,9 @@ void mp_fail(mp_ctx_t *c, int code, const char *what)
 	c->err_code = code;
 	c->err_msg = mp_err_msg(code);
 	c->err_data[0] = '\0';
+	c->err_has_rewind = false;
+	c->err_next_off = 0U;
+	c->err_state = NULL;
 	if (what != NULL) {
 		size_t n = strlen(what);
 
@@ -133,6 +136,29 @@ void mp_fail(mp_ctx_t *c, int code, const char *what)
 		(void)memcpy(c->err_data, what, n);
 		c->err_data[n] = '\0';
 	}
+}
+
+/**
+ * mp_fail() plus the rewind point a refused `fw.data` chunk owes its caller.
+ *
+ * Static because `fw.data` is the only refusal in the protocol that leaves a
+ * resumable operation open at an offset the tool cannot otherwise learn. Every
+ * other error is terminal for its request, and adding two members to their
+ * replies would be noise.
+ *
+ * @param next_off  Where the orchestrator actually is; the tool rewinds here.
+ * @param state     fwupd_state_name(); NULL omits it.
+ */
+static void mp_fail_rewind(mp_ctx_t *c, int code, const char *what,
+			   uint32_t next_off, const char *state)
+{
+	mp_fail(c, code, what);
+	if (c == NULL) {
+		return;
+	}
+	c->err_has_rewind = true;
+	c->err_next_off = next_off;
+	c->err_state = state;
 }
 
 int mp_map_errno(int rc)
@@ -2681,6 +2707,7 @@ static int m_fw_data(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	uint32_t sid = 0U;
 	uint32_t off = 0U;
 	uint32_t next = 0U;
+	bool duplicate = false;
 	mp_fw_status_t st;
 	int n;
 	int rc;
@@ -2724,7 +2751,8 @@ static int m_fw_data(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 		return MP_E_BAD_PARAMS;
 	}
 
-	rc = c->w.fwupd->data(c->w.fwupd->ctx, off, raw, (size_t)n, &next);
+	rc = c->w.fwupd->data(c->w.fwupd->ctx, off, raw, (size_t)n, &next,
+			      &duplicate);
 	if (fw_status(c, &st) != 0) {
 		return MP_E_IO;
 	}
@@ -2732,13 +2760,19 @@ static int m_fw_data(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 		int code = mp_map_errno(rc);
 
 		/*
-		 * A refusal still carries `next_off`, because that is the whole
-		 * point of it: the orchestrator refuses a gap or a partial overlap
-		 * rather than trimming it, and the tool needs to know where to
-		 * rewind to. A target error has already ended the session, which
-		 * `progress.state` reports.
+		 * A refusal carries `next_off` and `state`, because that is the
+		 * whole point of it: the orchestrator refuses a gap or a partial
+		 * overlap rather than trimming it, and the tool needs to know
+		 * where to rewind to. A target error has already ended the
+		 * session, which the state says.
+		 *
+		 * mp_fail() alone would emit only `{code, message,
+		 * data.reason}`, so the promise needs mp_fail_rewind() to be
+		 * kept — the comment that used to sit here described a reply the
+		 * error builder never produced.
 		 */
-		mp_fail(c, code, (rc == -EPROTO) ? "offset" : "chunk");
+		mp_fail_rewind(c, code, (rc == -EPROTO) ? "offset" : "chunk",
+			       next, fwupd_state_name(st.progress.state));
 		if ((rc != -EINVAL) && (rc != -EPROTO) && (rc != -ENOSPC)) {
 			/*
 			 * Everything except the three recoverable refusals ends
@@ -2766,8 +2800,15 @@ static int m_fw_data(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	(void)mp_jw_kv_u64(w, "off", off);
 	(void)mp_jw_kv_u64(w, "len", (uint64_t)n);
 	(void)mp_jw_kv_u64(w, "next_off", next);
-	/* A retransmit wholly inside what is already written advances nothing. */
-	(void)mp_jw_kv_bool(w, "duplicate", next != (off + (uint32_t)n));
+	/*
+	 * Straight from the port, not derived. `next != off + n` is true only
+	 * for a retransmit that is a STRICT subset of what is written; the
+	 * commonest retransmit of all — resending the chunk you were unsure
+	 * about, which ends exactly at `done` — is indistinguishable from a
+	 * fresh write by that test and used to report false. See mp.h
+	 * mp_fwupd_t::data.
+	 */
+	(void)mp_jw_kv_bool(w, "duplicate", duplicate);
 	fw_emit_progress(w, &st);
 	(void)mp_jw_obj_close(w);
 	return 0;
@@ -3105,6 +3146,9 @@ int mp_rpc_handle(mp_ctx_t *c, const uint8_t *msg, size_t len, const char **out,
 	c->err_code = 0;
 	c->err_msg = NULL;
 	c->err_data[0] = '\0';
+	c->err_has_rewind = false;
+	c->err_next_off = 0U;
+	c->err_state = NULL;
 
 	rc = mp_json_parse(&p, (const char *)msg, len, c->tok, MP_RPC_TOKENS,
 			   (uint8_t)MP_JSON_DEPTH_MAX);
@@ -3231,6 +3275,12 @@ int mp_rpc_handle(mp_ctx_t *c, const uint8_t *msg, size_t len, const char **out,
 				   (c->err_data[0] != '\0') ? c->err_data
 							    : NULL);
 		(void)mp_jw_kv_str(&w, "method", NULL);
+		if (c->err_has_rewind) {
+			/* A refused but resumable operation: where to rewind to,
+			 * and whether the session survived the refusal. */
+			(void)mp_jw_kv_u64(&w, "next_off", c->err_next_off);
+			(void)mp_jw_kv_str(&w, "state", c->err_state);
+		}
 		(void)mp_jw_obj_close(&w);
 		(void)mp_jw_obj_close(&w);
 		c->rpc_errors++;

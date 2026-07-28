@@ -545,6 +545,59 @@ typedef struct {
  *                  is zeroed. A render tick may simply skip the frame. */
 int sts_gnss_sky(sts_gnss_sky_t *out);
 
+/* ---- GNSS receiver detail (survey-in, stored position, RF front end) ----- */
+/*
+ * Spec §7.1 asks the `gnss` shell group for "survey-in start/stop, ... antenna
+ * status"; the survey progress, the stored ECEF and the MON-RF view are what
+ * answer it, and none of them belongs in the discipline snapshot above — the
+ * timing path never reads them and copying them onto the priority-6 thread's
+ * hot path would be pure cost.
+ *
+ * Flat scalars rather than core/gnssmgr's own structs on purpose: sts_app.h is
+ * the seam between four areas and must not drag core/gnssmgr's header into all
+ * of them (ARCHITECTURE.md §2). The gnss thread reads gnssmgr_svin(),
+ * gnssmgr_position() and gnssmgr_rf() on its own thread — which is where the
+ * manager may be read at all — and publishes the result here.
+ *
+ * A snapshot under the same bounded mutex as sts_gnss_snapshot(), refreshed
+ * once a second. Callable from any cooperative thread, NOT from an ISR.
+ */
+typedef struct {
+	/* Survey-in progress, UBX-NAV-SVIN. */
+	bool     svin_seen;      /* a NAV-SVIN has been decoded this session */
+	bool     svin_active;    /* a survey is running right now */
+	bool     svin_ok;        /* the surveyed position met its limits */
+	uint32_t svin_dur_s;
+	uint32_t svin_obs;
+	uint32_t svin_acc_0p1mm; /* mean accuracy so far */
+
+	/* Stored antenna position: surveyed, seeded from NVS, or operator-set. */
+	bool     pos_valid;
+	int32_t  pos_x_cm;
+	int32_t  pos_y_cm;
+	int32_t  pos_z_cm;
+	uint32_t pos_acc_0p1mm;
+
+	/* RF front end, UBX-MON-RF. */
+	bool     rf_valid;
+	bool     rf_ant_short;
+	bool     rf_ant_open;
+	uint8_t  rf_ant_power;   /* UBX_ANT_POWER_* */
+	uint8_t  rf_jamming;     /* worst UBX_JAMMING_* across the blocks */
+
+	/* Antenna supervisor verdict and the manager's own alarm set. */
+	uint8_t  ant_state;         /* gnssmgr_ant_state_t */
+	bool     ant_short_latched; /* bias cut; only sts_gnss_ant_reenable() undoes it */
+	uint32_t alarms;            /* bit n = gnssmgr_alarm_t n active */
+} sts_gnss_detail_t;
+
+/* Fill @p out from the gnss thread's published view.
+ *
+ * @retval 0        Written; individual `*_valid` flags say what is populated.
+ * @retval -EINVAL  @p out is NULL.
+ * @retval -ENODEV  The gnss thread never started; @p out is zeroed. */
+int sts_gnss_detail(sts_gnss_detail_t *out);
+
 /* ---- e-compass (IIS2MDC magnetometer + LIS2DH12 accelerometer) ----------- */
 /*
  * Sampled by the housekeeping sweep and consumed by the UI area's skyplot to
@@ -737,6 +790,103 @@ uint64_t sts_alarms_active(void);
 /* Raise or clear a software alarm (fault_alarm_id_t >= 32). Scanned signals
  * 0..31 are owned by the io_scan thread and must not be set this way. */
 int sts_alarm_set(uint8_t alarm_id, bool active);
+
+/* Bitmask view of LATCHED alarms — every alarm that has fired since the last
+ * clear, whether or not its condition still holds. The expected-off mask does
+ * not apply: the latch is a historical record. */
+uint64_t sts_alarms_latched(void);
+
+/* Acknowledge one latch, so an alarm that has gone away stops being reported.
+ *
+ * Unlike sts_alarm_set(), scanned-signal ids (0..31) ARE accepted: the io_scan
+ * thread owns those signals' active state, not their latch. A latch whose
+ * condition is still true is refused — acknowledging a live fault would make
+ * the alarm page read clean over it.
+ *
+ * @retval 0        The latch is gone.
+ * @retval -EINVAL  @p alarm_id is not an alarm id.
+ * @retval -ENOENT  Nothing was latched.
+ * @retval -EBUSY   The condition is still active; the latch stands. */
+int sts_alarm_clear(uint8_t alarm_id);
+
+/* Acknowledge every latch whose condition has gone away. Still-active alarms
+ * keep theirs. Returns 0; read sts_alarms_latched() for the result. */
+int sts_alarm_clear_all(void);
+
+/* ---- operator recovery actions ------------------------------------------ */
+/*
+ * The field-service set: everything a technician standing at the board can do
+ * to a subsystem that has latched itself off. Each is implemented by the area
+ * that owns the state, and every one of them is a REQUEST rather than a call
+ * wherever the owning subsystem is single-threaded — the same arrangement, and
+ * for the same reason, as the GNSS operator requests above: a management thread
+ * must never mutate a timing or sequencing context underneath the thread that
+ * owns it (ARCHITECTURE.md §10 invariant 10).
+ */
+
+/* Restore GNSS antenna bias after a latched short (spec §3.7: there is no
+ * automatic recovery, by design — a self-restoring bias would flap into a
+ * genuine fault at the debounce period forever).
+ *
+ * Queued for the gnss thread, which applies it within one of its ticks and logs
+ * the result. Idempotent: safe when nothing is latched.
+ *
+ * @retval 0        Queued.
+ * @retval -ENODEV  The gnss thread never started.
+ * @retval -EBUSY   A previous GNSS operator request has not been drained. */
+int sts_gnss_ant_reenable(void);
+
+/* Clear core/refsel's sticky reference-flap latch (REFSEL_FLAG_FLAP_ALARM) and
+ * the switch-failed latch with it.
+ *
+ * Queued for the discipline thread, which owns the refsel context. Non-blocking
+ * and idempotent.
+ *
+ * @retval 0        Queued.
+ * @retval -ENODEV  The discipline thread never started. */
+int sts_ref_clear_flap(void);
+
+/* Clock-security-system events since boot: the count of times the STM32 CSS
+ * fired because the HSE feeding PH0 stopped. A non-zero value that keeps
+ * growing is the signature of a marginal reference or a mux handoff that is not
+ * settling. Read-only and cheap. */
+uint32_t sts_clock_css_events(void);
+
+/* Clear the firmware-side rubidium over-voltage latch and pulse RB_OV_RESET
+ * (PD3). The autonomous 26 V hardware latch is the real backstop; this is the
+ * acknowledgement that lets pwrseq leave PWRSEQ_ALARM_RB_OV.
+ *
+ * Queued for the housekeeping thread's 4 Hz sequencer pass, which owns the
+ * pwrseq context and its action queue. The outcome is logged there.
+ *
+ * @retval 0        Queued.
+ * @retval -ENODEV  The sequencer never started.
+ * @retval -EBUSY   The same request is already pending. */
+int sts_pwrseq_ov_clear(void);
+
+/* Operator-initiated retry of the guarded rubidium sequence, for instance once
+ * the PoE budget frees up. Clears the deferral and the rubidium alarms and
+ * re-enters stage 8 at its first step, so the full guarded sequence runs again.
+ * Refused by core/pwrseq while the sequencer is halted.
+ *
+ * Queued exactly as sts_pwrseq_ov_clear() is; same return values. */
+int sts_pwrseq_rb_retry(void);
+
+/* Assert POE_KILL (PE15): drop the PD's own supply so the PSE re-powers the
+ * board. A cold cycle, not a reboot — everything volatile is lost and recovery
+ * depends on the PSE.
+ *
+ * FMT §5.2 lists POE_KILL under G3, and the MP object `pwr.poe.kill` carries
+ * that class; this entry point performs no confirmation of its own, so a caller
+ * that is not behind a G3 guard must not use it.
+ *
+ * Queued exactly as sts_pwrseq_ov_clear() is; same return values. The board
+ * therefore stays up long enough for the caller's reply to reach the wire. */
+int sts_pwrseq_poe_kill(void);
+
+/* Blink the status RGB blue for @p duration_ms (operator locate, the flag
+ * MP_MIRROR_F_IDENTIFY reports). 0 stops it. Safe from any thread. */
+void sts_supervisor_identify(uint32_t duration_ms);
 
 /* Liveness: each area calls this periodically; the supervisor ANDs all
  * registered bits before kicking the external watchdog. id is allocated

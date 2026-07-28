@@ -223,9 +223,27 @@ typedef struct {
 			 size_t max, size_t *n, size_t *total);
 	/** fwupd_begin(): guards, allow-list, QUERY and PREPARE. */
 	int (*begin)(void *ctx, uint8_t comp, const fwupd_req_t *req);
-	/** fwupd_data(): one chunk; @p next_off is always set. */
+	/**
+	 * fwupd_data(): one chunk; @p next_off is always set.
+	 *
+	 * @param duplicate  Optional. Set true when the chunk was accepted and
+	 *                   advanced nothing — i.e. core/fwupd counted it in
+	 *                   `chunks_duplicate` and did not call transfer().
+	 *                   False on every other outcome, including refusals.
+	 *
+	 * The flag is an OUT-PARAM rather than something the caller derives,
+	 * because it cannot be derived. `(off, len, next_off)` alone cannot tell
+	 * a retransmit that ends exactly at the write offset — the commonest
+	 * retransmit there is — from a fresh write: both leave
+	 * `next_off == off + len`. Only the value of `done` BEFORE the call
+	 * separates them, and the only place that can be read without a race is
+	 * inside whatever mutual exclusion the implementation already holds
+	 * around fwupd_data(). A `status()` round trip from the caller is a
+	 * second, separate acquisition of that lock, so the `done` it returns is
+	 * not provably the one fwupd_data() then saw.
+	 */
 	int (*data)(void *ctx, uint32_t off, const uint8_t *d, size_t len,
-		    uint32_t *next_off);
+		    uint32_t *next_off, bool *duplicate);
 	/** fwupd_end(): length + SHA-256, then VERIFY and RESTORE. */
 	int (*end)(void *ctx);
 	/** fwupd_abort() then fwupd_reset(): RESTORE runs, state returns to IDLE. */
@@ -430,6 +448,19 @@ typedef struct {
 	int err_code;
 	const char *err_msg;
 	char err_data[MP_ERR_DATA_MAX];
+	/*
+	 * Optional rewind point carried by a REFUSAL, not just a success.
+	 *
+	 * `fw.data` refuses a gap, an over-long chunk or a chunk past the end
+	 * rather than trimming it, and leaves the transfer open — so the one
+	 * thing the tool needs from the refusal is where the orchestrator
+	 * actually is. Without this the error reply is `{code, message,
+	 * data.reason}` and the tool has to guess or re-derive it from a
+	 * separate request.
+	 */
+	bool err_has_rewind;
+	uint32_t err_next_off;
+	const char *err_state; /**< fwupd_state_name(), or NULL */
 
 	/* magic detectors (shell mode: enter; MP mode: exit) */
 	uint8_t magic_n;

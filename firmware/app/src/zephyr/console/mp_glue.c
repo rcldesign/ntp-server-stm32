@@ -106,6 +106,7 @@
 #include "auth/auth.h"
 #include "console/mp_glue.h"
 #include "console/sts_console.h"
+#include "console/sts_recovery_policy.h"
 #include "fault/fault.h"
 #include "ina228/ina228.h"
 #include "zephyr/sts_app.h"
@@ -1003,6 +1004,19 @@ static int obj_apply(void *user, size_t obj, const int32_t *value)
 	}
 
 	/*
+	 * The locate beacon. A release (value == NULL) and an explicit 0 both
+	 * stop it, so the LED cannot outlive the lease that asked for it — which
+	 * is what makes MP_MIRROR_F_IDENTIFY, the flag the mirror already
+	 * reports, mean something.
+	 */
+	if (sts_recov_bool_action(o->id) == STS_RECOV_IDENTIFY) {
+		bool on = (value != NULL) && (*value != 0);
+
+		sts_supervisor_identify(on ? STS_RECOV_IDENTIFY_MS : 0U);
+		return 0;
+	}
+
+	/*
 	 * A release of an object we never applied must succeed, or the dead-man
 	 * would count a release error on every revert.
 	 */
@@ -1012,13 +1026,44 @@ static int obj_apply(void *user, size_t obj, const int32_t *value)
 	return -ENOTSUP;
 }
 
+/*
+ * The two pulsable recovery objects. Both are platform-owned pins, so both are
+ * REQUESTS posted to the housekeeping sequencer rather than writes from this
+ * thread (sts_app.h, "operator recovery actions").
+ *
+ * The pulse WIDTH the manifest carries is not passed on, and that is deliberate
+ * for both. RB_OV_RESET's width is fixed by the OV-latch datasheet and asserted
+ * by pwrseq_exec.c's own busy-wait; POE_KILL is a latch, not a pulse — Q3
+ * sustains it and recovery is the PSE's, so a duration would be a number
+ * nothing could honour. mp_rpc.c has already range-checked `ms` against the
+ * manifest envelope by the time we are called, so accepting and ignoring it is
+ * the honest reading of an object whose min == max would be a lie.
+ *
+ * Guard classes come from the manifest and are enforced by m_obj_pulse() before
+ * this runs: `pwr.poe.kill` is G3 (typed phrase + hold, admin floor) per FMT
+ * §5.2, `pwr.rb.ov.reset` is G2 (typed device serial, admin floor).
+ */
 static int obj_pulse(void *user, size_t obj, uint32_t ms)
 {
+	const mp_obj_t *o = mp_obj_at(obj);
+
 	ARG_UNUSED(user);
-	ARG_UNUSED(obj);
 	ARG_UNUSED(ms);
-	/* Every pulsable object is a platform-owned pin; see the TODO block. */
-	return -ENOTSUP;
+
+	if (o == NULL) {
+		return -EINVAL;
+	}
+
+	switch (sts_recov_pulse_action(o->id)) {
+	case STS_RECOV_POE_KILL:
+		return sts_pwrseq_poe_kill();
+	case STS_RECOV_RB_OV_RESET:
+		return sts_pwrseq_ov_clear();
+	default:
+		/* Every other pulsable object is a platform-owned pin with no
+		 * seam yet; see the TODO block. */
+		return -ENOTSUP;
+	}
 }
 
 static int diag_action(void *user, uint8_t test, uint8_t step,

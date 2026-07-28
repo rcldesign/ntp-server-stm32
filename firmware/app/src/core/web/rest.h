@@ -174,9 +174,30 @@ typedef struct {
 	char sw_version[24];
 	char hw_version[16];
 
-	/** False when no GNSS receiver thread has published yet; the SPA shows
-	 *  "no receiver detail" rather than an empty sky. */
+	/**
+	 * True when @ref sat and @ref n_sats are a CURRENT per-satellite list.
+	 *
+	 * The distinction this exists to carry is "no satellites visible"
+	 * (true, n_sats 0 — a legitimate report from a unit whose antenna is
+	 * indoors) versus "no data" (false — the receiver has never spoken, or
+	 * has stopped). A client that cannot tell those apart cannot tell a
+	 * working receiver under a metal roof from a dead one, so the SPA
+	 * renders the two differently.
+	 */
 	bool detail_available;
+
+	/**
+	 * Age of the satellite frame at the moment the document was built, ms.
+	 *
+	 * Meaningful only when @ref sat_age_valid; false means no frame has
+	 * ever been received, which is a different thing from an age of zero.
+	 * Served even when @ref detail_available is false, because "the
+	 * receiver last spoke 400 s ago" is the most useful thing the document
+	 * can say when the list is empty. A remote client is entitled to apply
+	 * a stricter policy than the server's own staleness window.
+	 */
+	uint32_t sat_age_ms;
+	bool     sat_age_valid;
 } rest_gnss_t;
 
 /** Network snapshot. */

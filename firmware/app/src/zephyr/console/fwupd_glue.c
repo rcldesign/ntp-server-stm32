@@ -1059,17 +1059,41 @@ static int mpfw_begin(void *ctx, uint8_t comp, const fwupd_req_t *req)
 }
 
 static int mpfw_data(void *ctx, uint32_t off, const uint8_t *d, size_t len,
-		     uint32_t *next_off)
+		     uint32_t *next_off, bool *duplicate)
 {
+	fwupd_event_t before;
+	uint32_t local_next = 0U;
 	int rc;
 
 	ARG_UNUSED(ctx);
+
+	if (next_off == NULL) {
+		next_off = &local_next;
+	}
+	if (duplicate != NULL) {
+		*duplicate = false;
+	}
 
 	rc = fw_lock(K_FOREVER);
 	if (rc != 0) {
 		return rc;
 	}
+
+	/*
+	 * Read `done` and write it in ONE acquisition of the orchestrator's
+	 * mutex. That is the whole reason the duplicate flag is decided here and
+	 * not by the caller: fwupd_data() returns 0 both for a chunk it wrote
+	 * and for a retransmit it discarded, and `next_off` is identical in the
+	 * two cases whenever the retransmit ends exactly where the write offset
+	 * already was. Only "did `done` move" separates them, and asking through
+	 * a second locked status() call would be asking about a different
+	 * instant.
+	 */
+	(void)fwupd_progress(&g.fw, &before);
 	rc = fwupd_data(&g.fw, off, d, len, next_off, (uint64_t)k_uptime_get());
+	if ((rc == 0) && (duplicate != NULL)) {
+		*duplicate = (*next_off == before.done);
+	}
 	fw_unlock();
 	return rc;
 }

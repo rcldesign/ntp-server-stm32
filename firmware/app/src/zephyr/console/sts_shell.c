@@ -43,9 +43,12 @@
 #include <zephyr/shell/shell.h>
 #include <zephyr/sys/util.h>
 
+#include "auth/auth.h"
 #include "cfg/cfg.h"
 #include "console/sts_console.h"
+#include "console/sts_recovery_policy.h"
 #include "console/sts_rollback.h"
+#include "disc/disc.h"
 #include "fault/fault.h"
 #include "logring/logring.h"
 #include "mcp/mcp.h"
@@ -53,6 +56,18 @@
 #include "storage/sts_atecc.h"
 #include "storage/sts_store.h"
 #include "zephyr/sts_app.h"
+
+/*
+ * Net-area entry points, reached the way mp_glue.c reaches sts_aaa_check_fed():
+ * a weak extern rather than an include. src/zephyr/net/sts_aaa.h and sts_net.h
+ * are PRIVATE to that area (ARCHITECTURE.md §2), and with CONFIG_STS1000_NET=n
+ * there is no net area at all — the symbols then resolve to NULL and the
+ * commands say so, instead of the image failing to link.
+ */
+extern int sts_aaa_unlock(const char *user) __attribute__((weak));
+extern void sts_aaa_flush(void) __attribute__((weak));
+extern int sts_aaa_stats(auth_stats_t *out) __attribute__((weak));
+extern int sts_nts_rotate_now(void) __attribute__((weak));
 
 /*
  * Self-detecting Kconfig presence. This area's Kconfig fragment lives in
@@ -520,35 +535,134 @@ static const char *alarm_name(unsigned int id)
 	return names[id - 32U];
 }
 
+/** Resolve `all`, a decimal/hex id, or a name from alarm_name(). */
+static int alarm_resolve(const char *token, bool *all, uint64_t *id)
+{
+	*all = (strcmp(token, "all") == 0);
+	if (*all) {
+		*id = 0U;
+		return 0;
+	}
+	if (parse_u64(token, id) == 0) {
+		return 0;
+	}
+	for (unsigned int i = STS_ALARM_FIRST_SOFTWARE; i < STS_ALARM_ID_COUNT;
+	     i++) {
+		const char *n = alarm_name(i);
+
+		if ((n != NULL) && (strcmp(n, token) == 0)) {
+			*id = i;
+			return 0;
+		}
+	}
+	return -ENOENT;
+}
+
+/**
+ * `sts alarms clear <id|name|all>` — acknowledge latches whose cause has gone.
+ *
+ * A latch that is still active is refused by core/fault and reported as a
+ * failure; a latch that was never set is reported and is NOT a failure, because
+ * `clear` is idempotent and the operator's intent is already satisfied. The two
+ * readings live in sts_recovery_policy.h so they are asserted rather than
+ * re-derived here.
+ */
+static int cmd_alarms_clear(const struct shell *sh, const char *token)
+{
+	sts_aclr_outcome_t out;
+	uint64_t id = 0U;
+	bool all = false;
+
+	if (!mutating_allowed(sh)) {
+		return -EACCES;
+	}
+	if (alarm_resolve(token, &all, &id) != 0) {
+		shell_error(sh, "unknown alarm: %s", token);
+		return -ENOENT;
+	}
+
+	switch (sts_aclr_target(all, id)) {
+	case STS_ACLR_TARGET_ALL: {
+		uint64_t before = sts_alarms_latched();
+		uint64_t after;
+
+		(void)sts_alarm_clear_all();
+		after = sts_alarms_latched();
+		shell_print(sh, "cleared %u latch(es); 0x%016llx still latched "
+				"(condition still active)",
+			    (unsigned int)__builtin_popcountll(before & ~after),
+			    (unsigned long long)after);
+		return 0;
+	}
+	case STS_ACLR_TARGET_ONE:
+		out = sts_aclr_outcome(sts_alarm_clear((uint8_t)id));
+		break;
+	case STS_ACLR_TARGET_BAD:
+	default:
+		shell_error(sh, "alarm id must be 0..%u",
+			    STS_ALARM_ID_COUNT - 1U);
+		return -EINVAL;
+	}
+
+	if (sts_aclr_is_failure(out)) {
+		shell_error(sh, "alarm %u: %s", (unsigned int)id,
+			    sts_aclr_outcome_name(out));
+		return (out == STS_ACLR_STILL_ACTIVE) ? -EBUSY : -EINVAL;
+	}
+	shell_print(sh, "alarm %u: %s", (unsigned int)id,
+		    sts_aclr_outcome_name(out));
+	return 0;
+}
+
 static int cmd_alarms(const struct shell *sh, size_t argc, char **argv)
 {
-	uint64_t mask = sts_alarms_active();
+	uint64_t mask;
+	uint64_t latched;
 	unsigned int shown = 0U;
 
-	ARG_UNUSED(argc);
-	ARG_UNUSED(argv);
+	if (argc >= 2U) {
+		if (strcmp(argv[1], "clear") != 0) {
+			shell_error(sh, "usage: sts alarms [clear "
+					"<id|name|all>]");
+			return -EINVAL;
+		}
+		if (argc < 3U) {
+			shell_error(sh, "usage: sts alarms clear "
+					"<id|name|all>");
+			return -EINVAL;
+		}
+		return cmd_alarms_clear(sh, argv[2]);
+	}
 
-	shell_print(sh, "active mask 0x%016llx", (unsigned long long)mask);
-	if (mask == 0U) {
-		shell_print(sh, "no active alarms");
+	/* One pair of reads, so the two masks describe the same instant as
+	 * closely as two mutex sections can. */
+	mask = sts_alarms_active();
+	latched = sts_alarms_latched();
+
+	shell_print(sh, "active  mask 0x%016llx", (unsigned long long)mask);
+	shell_print(sh, "latched mask 0x%016llx", (unsigned long long)latched);
+	if ((mask | latched) == 0U) {
+		shell_print(sh, "no active or latched alarms");
 		return 0;
 	}
 
 	for (unsigned int id = 0U; id < 64U; id++) {
+		uint64_t bit = UINT64_C(1) << id;
 		const char *name;
 
-		if ((mask & (UINT64_C(1) << id)) == 0U) {
+		if (((mask | latched) & bit) == 0U) {
 			continue;
 		}
 		name = alarm_name(id);
-		if (name != NULL) {
-			shell_print(sh, "  %2u  %s", id, name);
-		} else {
-			shell_print(sh, "  %2u  scanned-signal-%u", id, id);
-		}
+		shell_print(sh, "  %2u  %-18s %s%s", id,
+			    (name != NULL) ? name : "scanned-signal",
+			    ((mask & bit) != 0U) ? "ACTIVE" : "-",
+			    ((latched & bit) != 0U) ? " latched" : "");
 		shown++;
 	}
-	shell_print(sh, "%u active", shown);
+	shell_print(sh, "%u alarm(s); `sts alarms clear <id|name|all>` "
+			"acknowledges those whose cause has gone",
+		    shown);
 	return 0;
 }
 
@@ -1402,6 +1516,474 @@ static int cmd_diag_sky(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_diag_identify(const struct shell *sh, size_t argc, char **argv)
+{
+	uint64_t ms = 30000U;
+
+	if (!mutating_allowed(sh)) {
+		return -EACCES;
+	}
+	if (argc >= 2U) {
+		if ((parse_u64(argv[1], &ms) != 0) || (ms > 600000U)) {
+			shell_error(sh, "duration must be 0..600000 ms");
+			return -EINVAL;
+		}
+	}
+
+	sts_supervisor_identify((uint32_t)ms);
+	if (ms == 0U) {
+		shell_print(sh, "identify beacon off");
+	} else {
+		shell_print(sh, "status RGB pulsing blue for %u ms "
+				"(0 stops it)",
+			    (unsigned int)ms);
+	}
+	return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* gnss — spec §7.1: survey-in, fixed position, antenna status               */
+/* ------------------------------------------------------------------------- */
+
+static const char *ant_state_name(uint8_t s)
+{
+	static const char *const names[] = { "unknown", "off (commanded)", "ok",
+					     "OPEN", "SHORT" };
+
+	return (s < ARRAY_SIZE(names)) ? names[s] : "?";
+}
+
+static int cmd_gnss_show(const struct shell *sh, size_t argc, char **argv)
+{
+	sts_gnss_detail_t d;
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	rc = sts_gnss_detail(&d);
+	if (rc != 0) {
+		shell_error(sh, "the gnss thread is not running (%d)", rc);
+		return rc;
+	}
+
+	shell_print(sh, "antenna      %s%s", ant_state_name(d.ant_state),
+		    d.ant_short_latched ? "  [BIAS CUT - latched short]" : "");
+	if (d.ant_short_latched) {
+		shell_warn(sh, "  there is no automatic recovery: run "
+				"`sts gnss reenable` once the fault is fixed");
+	}
+	shell_print(sh, "mgr alarms   0x%08x", (unsigned int)d.alarms);
+
+	if (d.rf_valid) {
+		shell_print(sh, "MON-RF       antPower %u, jamming %u%s%s",
+			    d.rf_ant_power, d.rf_jamming,
+			    d.rf_ant_short ? ", SHORT" : "",
+			    d.rf_ant_open ? ", OPEN" : "");
+	} else {
+		shell_print(sh, "MON-RF       no frame decoded yet");
+	}
+
+	if (d.svin_seen) {
+		shell_print(sh, "survey-in    %s, %u s, %u obs, mean acc %u.%u mm%s",
+			    d.svin_active ? "RUNNING" : "idle",
+			    (unsigned int)d.svin_dur_s,
+			    (unsigned int)d.svin_obs,
+			    (unsigned int)(d.svin_acc_0p1mm / 10U),
+			    (unsigned int)(d.svin_acc_0p1mm % 10U),
+			    d.svin_ok ? ", limits met" : "");
+	} else {
+		shell_print(sh, "survey-in    no NAV-SVIN decoded");
+	}
+
+	if (d.pos_valid) {
+		shell_print(sh, "position     ECEF %d, %d, %d cm (acc %u.%u mm)",
+			    (int)d.pos_x_cm, (int)d.pos_y_cm, (int)d.pos_z_cm,
+			    (unsigned int)(d.pos_acc_0p1mm / 10U),
+			    (unsigned int)(d.pos_acc_0p1mm % 10U));
+	} else {
+		shell_print(sh, "position     none stored (surveying or "
+				"unconfigured)");
+	}
+	return 0;
+}
+
+static int cmd_gnss_survey(const struct shell *sh, size_t argc, char **argv)
+{
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!mutating_allowed(sh)) {
+		return -EACCES;
+	}
+
+	rc = sts_gnss_request_survey(true);
+	if (rc != 0) {
+		shell_error(sh, "survey-in refused (%d)%s", rc,
+			    (rc == -EBUSY) ? " - a request is already pending"
+					   : "");
+		return rc;
+	}
+	shell_print(sh, "survey-in requested; the stored position is discarded "
+			"when it starts");
+	shell_print(sh, "watch `sts gnss show` — this can take an hour");
+	return 0;
+}
+
+static int cmd_gnss_reenable(const struct shell *sh, size_t argc, char **argv)
+{
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!mutating_allowed(sh)) {
+		return -EACCES;
+	}
+
+	rc = sts_gnss_ant_reenable();
+	if (rc != 0) {
+		shell_error(sh, "antenna re-enable refused (%d)%s", rc,
+			    (rc == -EBUSY) ? " - a request is already pending"
+					   : "");
+		return rc;
+	}
+	shell_print(sh, "antenna bias restore queued; if the short is still "
+			"there the supervisor re-latches it");
+	return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* clock — reference selection, CSS, the flap latch                          */
+/* ------------------------------------------------------------------------- */
+
+static int cmd_clock_show(const struct shell *sh, size_t argc, char **argv)
+{
+	static const char *const req[] = { "auto", "force-ocxo", "extref" };
+	quality_block_t q;
+	uint8_t r = sts_ref_override_get();
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	shell_print(sh, "requested    %s",
+		    (r < ARRAY_SIZE(req)) ? req[r] : "?");
+	if (sts_quality_snapshot(&q) == 0) {
+		shell_print(sh, "active       %s (lock %s)",
+			    ref_name(q.active_ref),
+			    lock_state_name(q.lock_state));
+	}
+	shell_print(sh, "CSS events   %u  (HSE stopped and the clock security "
+			"system fired)",
+		    (unsigned int)sts_clock_css_events());
+	return 0;
+}
+
+static int cmd_clock_flapclear(const struct shell *sh, size_t argc, char **argv)
+{
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!mutating_allowed(sh)) {
+		return -EACCES;
+	}
+
+	rc = sts_ref_clear_flap();
+	if (rc != 0) {
+		shell_error(sh, "the discipline thread is not running (%d)", rc);
+		return rc;
+	}
+	shell_print(sh, "reference-flap and switch-failed latches cleared on "
+			"the next discipline pass");
+	return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* pwr — the rubidium recovery actions                                       */
+/* ------------------------------------------------------------------------- */
+
+/** Shared reply for the three deferred pwrseq requests. */
+static int pwr_request(const struct shell *sh, int rc, const char *what)
+{
+	if (rc != 0) {
+		shell_error(sh, "%s refused (%d)%s", what, rc,
+			    (rc == -EBUSY)
+				    ? " - the same request is already pending"
+				    : ((rc == -ENODEV)
+					       ? " - the sequencer has not started"
+					       : ""));
+		return rc;
+	}
+	shell_print(sh, "%s queued for the sequencer; the outcome is in the "
+			"log (`sts log tail`)",
+		    what);
+	return 0;
+}
+
+static int cmd_pwr_ovclear(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!mutating_allowed(sh)) {
+		return -EACCES;
+	}
+	return pwr_request(sh, sts_pwrseq_ov_clear(), "Rb OV-latch clear");
+}
+
+static int cmd_pwr_rbretry(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!mutating_allowed(sh)) {
+		return -EACCES;
+	}
+	return pwr_request(sh, sts_pwrseq_rb_retry(), "Rb sequence retry");
+}
+
+/* ------------------------------------------------------------------------- */
+/* cal tempco — the §10.4 OCXO characterisation fit                          */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * Operator-entered samples, fitted on demand.
+ *
+ * Deliberately NOT self-sampling. disc.h states that tempco learning is offline
+ * and that the runtime only ever *applies* the stored coefficient, and it is
+ * right: while the loop is disciplined it is actively CANCELLING the tempco, so
+ * the residual it publishes is the one quantity that cannot measure it. The
+ * measurement is a chamber sweep against a reference counter, and the operator
+ * is the only thing on the board that has those numbers.
+ *
+ * What this buys is the arithmetic and the refusal — a technician at a bench
+ * gets the slope, the intercept and R^2 without a spreadsheet, and a data set
+ * that cannot support a slope is refused instead of being pasted into
+ * cal.tempco, which the discipline loop applies as feed-forward.
+ *
+ * The buffer is static because the Zephyr shell dispatches one command at a
+ * time and 192 bytes has no business on the console thread's stack.
+ */
+static struct {
+	float temp_c[STS_TEMPCO_MAX_SAMPLES];
+	float osc_ppb[STS_TEMPCO_MAX_SAMPLES];
+	uint8_t n;
+} tempco;
+
+static int cmd_cal_tempco_add(const struct shell *sh, size_t argc, char **argv)
+{
+	float t;
+	float y;
+
+	ARG_UNUSED(argc);
+
+	if (tempco.n >= (uint8_t)STS_TEMPCO_MAX_SAMPLES) {
+		shell_error(sh, "the sample set is full (%u); `sts cal tempco "
+				"clear` first",
+			    STS_TEMPCO_MAX_SAMPLES);
+		return -ENOSPC;
+	}
+	if ((parse_f32(argv[1], &t) != 0) || (parse_f32(argv[2], &y) != 0)) {
+		shell_error(sh, "usage: sts cal tempco add <temp_c> <osc_ppb>");
+		return -EINVAL;
+	}
+
+	tempco.temp_c[tempco.n] = t;
+	tempco.osc_ppb[tempco.n] = y;
+	tempco.n++;
+	shell_print(sh, "%u/%u samples", tempco.n, STS_TEMPCO_MAX_SAMPLES);
+	return 0;
+}
+
+static int cmd_cal_tempco_clear(const struct shell *sh, size_t argc,
+				char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	tempco.n = 0U;
+	shell_print(sh, "tempco sample set cleared");
+	return 0;
+}
+
+static int cmd_cal_tempco_list(const struct shell *sh, size_t argc, char **argv)
+{
+	char f1[24];
+	char f2[24];
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	for (uint8_t i = 0U; i < tempco.n; i++) {
+		shell_print(sh, "  %2u  %8s C  %10s ppb", i,
+			    fmt_f32(f1, sizeof(f1), tempco.temp_c[i], 2),
+			    fmt_f32(f2, sizeof(f2), tempco.osc_ppb[i], 3));
+	}
+	shell_print(sh, "%u/%u samples, span %s C", tempco.n,
+		    STS_TEMPCO_MAX_SAMPLES,
+		    fmt_f32(f1, sizeof(f1),
+			    sts_tempco_span(tempco.temp_c, tempco.n), 2));
+	return 0;
+}
+
+static int cmd_cal_tempco_fit(const struct shell *sh, size_t argc, char **argv)
+{
+	sts_tempco_verdict_t v;
+	char f1[24];
+	char f2[24];
+	float slope = 0.0f;
+	float offset = 0.0f;
+	float r2 = 0.0f;
+	float span;
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	rc = disc_tempco_fit(tempco.temp_c, tempco.osc_ppb, tempco.n, &slope,
+			     &offset, &r2);
+	if (rc != 0) {
+		shell_error(sh, "fit failed (%d)%s", rc,
+			    (rc == -EDOM) ? " - the temperature does not vary"
+					  : "");
+		return rc;
+	}
+
+	span = sts_tempco_span(tempco.temp_c, tempco.n);
+	shell_print(sh, "n %u, span %s C", tempco.n,
+		    fmt_f32(f1, sizeof(f1), span, 2));
+	shell_print(sh, "slope  %s ppb/C", fmt_f32(f1, sizeof(f1), slope, 4));
+	shell_print(sh, "offset %s ppb   R2 %s",
+		    fmt_f32(f1, sizeof(f1), offset, 3),
+		    fmt_f32(f2, sizeof(f2), r2, 4));
+
+	v = sts_tempco_check(tempco.n, span, r2, slope);
+	if (v != STS_TEMPCO_OK) {
+		shell_error(sh, "not usable: %s", sts_tempco_verdict_name(v));
+		return -ERANGE;
+	}
+
+	shell_print(sh, "accepted. To apply it:");
+	shell_print(sh, "  sts cfg set cal.tempco %s",
+		    fmt_f32(f1, sizeof(f1), slope, 4));
+	shell_print(sh, "  sts cfg commit");
+	return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+/* sec — AAA lockouts and the NTS cookie keyring                             */
+/* ------------------------------------------------------------------------- */
+
+static int cmd_sec_aaa(const struct shell *sh, size_t argc, char **argv)
+{
+	auth_stats_t s;
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (sts_aaa_stats == NULL) {
+		shell_error(sh, "no net area in this image");
+		return -ENOSYS;
+	}
+	rc = sts_aaa_stats(&s);
+	if (rc != 0) {
+		shell_error(sh, "AAA is not running (%d)", rc);
+		return rc;
+	}
+
+	shell_print(sh, "checks       %u", s.checks);
+	shell_print(sh, "accepts      %u  (cache hits %u, fills %u)", s.accepts,
+		    s.cache_hits, s.cache_fills);
+	shell_print(sh, "rejects      %u", s.rejects);
+	shell_print(sh, "locked out   %u", s.locked);
+	shell_print(sh, "unavailable  %u  (no backend could answer)",
+		    s.unavailable);
+	for (unsigned int b = 0U; b < (unsigned int)AUTH_BE_COUNT; b++) {
+		shell_print(sh, "  %-8s   %u accepts",
+			    auth_backend_name((uint8_t)b), s.by_backend[b]);
+	}
+	return 0;
+}
+
+static int cmd_sec_unlock(const struct shell *sh, size_t argc, char **argv)
+{
+	int rc;
+
+	ARG_UNUSED(argc);
+
+	if (!mutating_allowed(sh)) {
+		return -EACCES;
+	}
+	if (sts_aaa_unlock == NULL) {
+		shell_error(sh, "no net area in this image");
+		return -ENOSYS;
+	}
+
+	rc = sts_aaa_unlock(argv[1]);
+	if (rc != 0) {
+		shell_error(sh, "unlock failed (%d)%s", rc,
+			    (rc == -EHOSTUNREACH) ? " - AAA is not running"
+						  : "");
+		return rc;
+	}
+	shell_print(sh, "lockout cleared for '%s'", argv[1]);
+	sts_log((uint8_t)LOGR_SUB_SEC, (uint8_t)LOGR_NOTICE,
+		"account lockout cleared from the local console");
+	return 0;
+}
+
+static int cmd_sec_aaaflush(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!mutating_allowed(sh)) {
+		return -EACCES;
+	}
+	if (sts_aaa_flush == NULL) {
+		shell_error(sh, "no net area in this image");
+		return -ENOSYS;
+	}
+
+	sts_aaa_flush();
+	shell_print(sh, "every cached AAA decision dropped; the next login "
+			"re-runs the chain");
+	return 0;
+}
+
+static int cmd_sec_ntsrotate(const struct shell *sh, size_t argc, char **argv)
+{
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!mutating_allowed(sh)) {
+		return -EACCES;
+	}
+	if (sts_nts_rotate_now == NULL) {
+		shell_error(sh, "no net area in this image");
+		return -ENOSYS;
+	}
+
+	rc = sts_nts_rotate_now();
+	if (rc != 0) {
+		shell_error(sh, "NTS key rotation refused (%d)%s", rc,
+			    (rc == -ENOTSUP) ? " - NTS is disabled" : "");
+		return rc;
+	}
+	shell_print(sh, "cookie key rotation queued. Outstanding cookies keep "
+			"working until they age out of the ring.");
+	sts_log((uint8_t)LOGR_SUB_SEC, (uint8_t)LOGR_NOTICE,
+		"NTS cookie key rotation forced from the local console");
+	return 0;
+}
+
 /* ------------------------------------------------------------------------- */
 /* Registration                                                              */
 /* ------------------------------------------------------------------------- */
@@ -1432,6 +2014,57 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_sec_passwd, 2, 0),
 	SHELL_CMD_ARG(attest, NULL, "secure-element report and anti-rollback state",
 		      cmd_sec_attest, 1, 0),
+	SHELL_CMD_ARG(aaa, NULL, "AAA counters (checks, lockouts, per-backend)",
+		      cmd_sec_aaa, 1, 0),
+	SHELL_CMD_ARG(unlock, NULL, "unlock <user> - clear a brute-force lockout",
+		      cmd_sec_unlock, 2, 0),
+	SHELL_CMD_ARG(aaaflush, NULL, "drop every cached AAA decision",
+		      cmd_sec_aaaflush, 1, 0),
+	SHELL_CMD_ARG(ntsrotate, NULL, "force an NTS cookie-key rotation now",
+		      cmd_sec_ntsrotate, 1, 0),
+	SHELL_SUBCMD_SET_END);
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_sts_gnss,
+	SHELL_CMD_ARG(show, NULL, "antenna, survey-in, position and MON-RF",
+		      cmd_gnss_show, 1, 0),
+	SHELL_CMD_ARG(survey, NULL, "start survey-in (discards the stored position)",
+		      cmd_gnss_survey, 1, 0),
+	SHELL_CMD_ARG(reenable, NULL, "restore antenna bias after a latched short",
+		      cmd_gnss_reenable, 1, 0),
+	SHELL_SUBCMD_SET_END);
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_sts_clock,
+	SHELL_CMD_ARG(show, NULL, "reference request/state and CSS events",
+		      cmd_clock_show, 1, 0),
+	SHELL_CMD_ARG(flapclear, NULL, "clear the reference-flap latch",
+		      cmd_clock_flapclear, 1, 0),
+	SHELL_SUBCMD_SET_END);
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_sts_pwr,
+	SHELL_CMD_ARG(ovclear, NULL, "clear the Rb over-voltage latch (RB_OV_RESET)",
+		      cmd_pwr_ovclear, 1, 0),
+	SHELL_CMD_ARG(rbretry, NULL, "re-run the guarded rubidium sequence",
+		      cmd_pwr_rbretry, 1, 0),
+	SHELL_SUBCMD_SET_END);
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_sts_cal_tempco,
+	SHELL_CMD_ARG(add, NULL, "add <temp_c> <osc_ppb> - one sweep sample",
+		      cmd_cal_tempco_add, 3, 0),
+	SHELL_CMD_ARG(list, NULL, "the samples held so far", cmd_cal_tempco_list,
+		      1, 0),
+	SHELL_CMD_ARG(clear, NULL, "discard them", cmd_cal_tempco_clear, 1, 0),
+	SHELL_CMD_ARG(fit, NULL, "least-squares df/dT, with an acceptance check",
+		      cmd_cal_tempco_fit, 1, 0),
+	SHELL_SUBCMD_SET_END);
+
+SHELL_STATIC_SUBCMD_SET_CREATE(
+	sub_sts_cal,
+	SHELL_CMD(tempco, &sub_sts_cal_tempco,
+		  "OCXO tempco characterisation (spec 10.4)", NULL),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
@@ -1454,6 +2087,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 	SHELL_CMD_ARG(mcp, NULL, "MCP channel counters", cmd_diag_mcp, 1, 0),
 	SHELL_CMD_ARG(sky, NULL, "the §6.3 polar skyplot, as characters",
 		      cmd_diag_sky, 1, 0),
+	SHELL_CMD_ARG(identify, NULL, "identify [ms] - pulse the status RGB blue",
+		      cmd_diag_identify, 1, 1),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_STATIC_SUBCMD_SET_CREATE(
@@ -1463,11 +2098,16 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_status, 1, 1),
 	SHELL_CMD_ARG(quality, NULL, "the §3.8 clock-quality block", cmd_quality,
 		      1, 0),
-	SHELL_CMD_ARG(alarms, NULL, "active alarm mask", cmd_alarms, 1, 0),
+	SHELL_CMD_ARG(alarms, NULL, "alarms [clear <id|name|all>]", cmd_alarms,
+		      1, 2),
 	SHELL_CMD(log, &sub_sts_log, "structured log", NULL),
 	SHELL_CMD(cfg, &sub_sts_cfg, "configuration registry", NULL),
 	SHELL_CMD(sec, &sub_sts_sec, "security provisioning", NULL),
 	SHELL_CMD(fw, &sub_sts_fw, "firmware slots and DFU state", NULL),
+	SHELL_CMD(gnss, &sub_sts_gnss, "GNSS receiver and antenna", NULL),
+	SHELL_CMD(clock, &sub_sts_clock, "reference selection and recovery", NULL),
+	SHELL_CMD(pwr, &sub_sts_pwr, "power-sequencer recovery actions", NULL),
+	SHELL_CMD(cal, &sub_sts_cal, "bench calibration", NULL),
 	SHELL_CMD_ARG(reboot, NULL, "reboot [recovery]", cmd_reboot, 1, 1),
 	SHELL_CMD(diag, &sub_sts_diag, "diagnostics", NULL),
 	SHELL_SUBCMD_SET_END);

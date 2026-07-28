@@ -623,6 +623,53 @@ int sts_alarm_set(uint8_t alarm_id, bool active)
 	return rc;
 }
 
+uint64_t sts_alarms_latched(void)
+{
+	uint64_t mask;
+
+	sts_fault_lock();
+	mask = fault_alarms_latched(sts_fault());
+	sts_fault_unlock();
+
+	return mask;
+}
+
+int sts_alarm_clear(uint8_t alarm_id)
+{
+	int rc;
+
+	/*
+	 * Note the deliberate asymmetry with sts_alarm_set() above: ids 0..31
+	 * ARE accepted here. That function refuses them because the 1 kHz scan
+	 * owns the scanned signals' ACTIVE state and a second writer would make
+	 * the two disagree. Clearing touches only the LATCH — a historical
+	 * record fault_scan_input() never writes — and a technician who cannot
+	 * acknowledge a power-good glitch that has since gone away has no use
+	 * for the latch at all. core/fault still refuses to clear a latch whose
+	 * condition is live (-EBUSY), which is the safety property.
+	 */
+	if (alarm_id >= FAULT_ALARM_COUNT) {
+		return -EINVAL;
+	}
+
+	sts_fault_lock();
+	rc = fault_alarm_clear(sts_fault(), (fault_alarm_id_t)alarm_id);
+	sts_fault_unlock();
+
+	return rc;
+}
+
+int sts_alarm_clear_all(void)
+{
+	int rc;
+
+	sts_fault_lock();
+	rc = fault_alarm_clear_all(sts_fault());
+	sts_fault_unlock();
+
+	return rc;
+}
+
 /* ========================================================================= */
 /* MCP status encoders                                                       */
 /* ========================================================================= */

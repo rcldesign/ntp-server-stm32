@@ -516,6 +516,17 @@ static int enc_gnss(rest_ctx_t *c, web_jw_t *w)
 	web_jw_kbool(w, "bias_on", g.ant_bias_on);
 	web_jw_obj_end(w);
 
+	/*
+	 * The age sits beside the array it describes rather than at the top of
+	 * the document: a client reading `satellites` has the one number that
+	 * says whether to believe it in the same object, and `null` says the
+	 * receiver has never reported at all — which an age of 0 would not.
+	 */
+	if (g.sat_age_valid) {
+		web_jw_ku64(w, "sat_age_ms", g.sat_age_ms);
+	} else {
+		web_jw_knull(w, "sat_age_ms");
+	}
 	web_jw_karr(w, "satellites");
 	for (i = 0U; i < g.n_sats && i < REST_SAT_MAX; i++) {
 		web_jw_obj_begin(w);

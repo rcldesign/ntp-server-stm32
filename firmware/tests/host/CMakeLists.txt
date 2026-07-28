@@ -344,6 +344,37 @@ module_deps(ptp_icv_policy ptp)
 # `smear_isolation` it reads the sources, it does not link them.
 module_deps(factory_policy)
 
+# `web_sky` (app/src/zephyr/net/sts_web_sky.h) is the web plane's GNSS-detail
+# decision: whether the cached NAV-SAT frame is fresh enough to serve, which
+# records are worth serving, what `detail_available` is allowed to mean, and the
+# antenna verdict the net area can honestly reach. Every one of them is silent
+# when it is wrong — sts_app.h leaves the last good frame in the cache when a
+# receiver stops talking, so an unaged read serves an hour-old sky as current
+# with no indication anywhere.
+#
+# The `web` edge is real rather than type-only: the suite drives rest.c's
+# encoder to prove the worst-case satellite list still fits STS_WEB_RESP_SIZE,
+# because rest_encode_telemetry()'s -ENOSPC makes ws_run() send nothing at all.
+# It also includes ui/sts_sky_policy.h to pin its admission rule against the
+# panel's (spec §371) — static inline only, so no `ui` link edge.
+module_deps(web_sky web)
+
+# `recovery_policy` (app/src/zephyr/console/sts_recovery_policy.h) is the
+# operator-recovery surface's three decisions: which latch may be acknowledged
+# and what the answer means, whether a tempco fit may be believed, and which
+# recovery action an MP object id names. Each is silent when wrong and each
+# guards something a technician only reaches after something else has already
+# failed.
+#
+# Three real edges, no models. `fault` because the clear-outcome map is a
+# translation of fault_alarm_clear()'s errnos and is only correct against them;
+# `disc` because the acceptance rule is judged on numbers from the real
+# disc_tempco_fit(), including the two-point R^2 = 1.0 case it exists to catch;
+# `mp` because the object router is asserted against the shipped manifest —
+# `pwr.poe.kill` must still be G3 with MP_OF_PULSE and without MP_OF_WRITE, and
+# a downgrade there is exactly the change no reviewer would notice.
+module_deps(recovery_policy fault disc mp)
+
 # ---------------------------------------------------------------------------
 # Dependency resolution
 # ---------------------------------------------------------------------------

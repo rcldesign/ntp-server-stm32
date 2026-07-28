@@ -1063,7 +1063,7 @@
 	function Skyplot(big) {
 		var cv = el('canvas', { cls: 'sky' + (big ? ' lg' : '') });
 		var wrap = el('div', { cls: 'cvw' }, cv);
-		var sats = [], mask = null, detail = true;
+		var sats = [], mask = null, detail = true, ageMs = null;
 		var geom = null, hit = [];
 
 		/* Polar: north up, azimuth clockwise, 90 deg elevation at the centre,
@@ -1153,9 +1153,17 @@
 			g.textBaseline = 'alphabetic';
 			g.textAlign = 'left';
 
+			/* detail_available false is a statement about the DATA,
+			 * not about the build: either the receiver has never
+			 * reported (age null) or its last frame has aged out of
+			 * the server's staleness window. Say which — the two
+			 * mean very different things at 3 a.m. */
 			if (!detail) {
-				centerNote(g, w, h, ['no receiver detail',
-					'GNSS detail is not available in this build']);
+				centerNote(g, w, h, isNum(ageMs)
+					? ['no current satellite data',
+						'last frame ' + fdur(ageMs / 1000) + ' ago']
+					: ['no satellite data',
+						'the GNSS receiver has not reported yet']);
 				return;
 			}
 			if (!sats.length) {
@@ -1221,10 +1229,11 @@
 		return {
 			el: wrap,
 			draw: regDraw(draw),
-			set: function (satArr, maskDeg, detailAvail) {
+			set: function (satArr, maskDeg, detailAvail, satAgeMs) {
 				sats = Array.isArray(satArr) ? satArr : [];
 				mask = isNum(maskDeg) ? maskDeg : null;
 				detail = detailAvail !== false;
+				ageMs = isNum(satAgeMs) ? satAgeMs : null;
 				draw();
 			},
 			destroy: function () {
@@ -1953,7 +1962,8 @@
 
 			sky.set(g ? g.satellites : [],
 				Cfg.loaded ? Cfg.val('gnss.elev.mask') : null,
-				g ? g.detail_available : false);
+				g ? g.detail_available : false,
+				g ? g.sat_age_ms : null);
 
 			clear(svc);
 			if (!s || !s.services) {
@@ -2471,7 +2481,8 @@
 
 			sky.set(g ? g.satellites : [],
 				Cfg.loaded ? Cfg.val('gnss.elev.mask') : null,
-				g ? g.detail_available : false);
+				g ? g.detail_available : false,
+				g ? g.sat_age_ms : null);
 
 			clear(surveyDisp);
 			surveyRow.sync(!!(g && g.survey && g.survey.state === 'active'));
@@ -2527,6 +2538,10 @@
 					['bias', boolTxt(an.bias_on, 'on', 'off')],
 					['detail available', boolTxt(g.detail_available),
 						g.detail_available ? 'ok' : 'warn'],
+					['satellite frame age', isNum(g.sat_age_ms)
+						? fdur(g.sat_age_ms / 1000) : 'never reported',
+						(!isNum(g.sat_age_ms) || !g.detail_available)
+							? 'warn' : 'ok'],
 					['software', g.sw_version],
 					['hardware', g.hw_version],
 					['cable delay', Cfg.loaded && isNum(Cfg.val('gnss.cable.ns'))
@@ -2548,9 +2563,18 @@
 					cell(td[4], isNum(x.azim) ? x.azim + '°' : null, 'num');
 					cell(td[5], x.used ? 'yes' : 'no', x.used ? 'ok' : 'dim');
 				});
+			/*
+			 * detail_available distinguishes "no satellites visible"
+			 * from "no data". Say which one this is, and for a stale
+			 * frame say how stale — the number is the diagnosis.
+			 */
 			satNote.textContent = (g && g.detail_available === false)
-				? 'No receiver detail: the GNSS receiver thread is not present in this build, ' +
-				'so the satellite list is empty by design.'
+				? (isNum(g.sat_age_ms)
+					? 'No current detail: the last satellite frame is ' +
+					fdur(g.sat_age_ms / 1000) + ' old, past the staleness ' +
+					'window, so the list is withheld rather than shown as current.'
+					: 'No detail: the GNSS receiver has not reported a ' +
+					'satellite frame since boot.')
 				: sats.length + ' tracked';
 		}
 

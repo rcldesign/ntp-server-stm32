@@ -31,6 +31,13 @@
 #include "web/rest.h"
 #include "web/web.h"
 #include "web/wss.h"
+/*
+ * The net area's response-buffer size, so the worst-case telemetry frame is
+ * measured against the buffer sts_web.c actually serves it from rather than
+ * against a comfortable test-local one. Header-only; nothing is linked from the
+ * glue layer. test_ldap_ca.c reaches for the same header for the same reason.
+ */
+#include "zephyr/net/sts_web.h"
 
 #include "host_aes.h"
 #include "test_support.h"
@@ -849,6 +856,117 @@ static int pv_gnss_alt3(void *u, rest_gnss_t *out)
 	return rc;
 }
 
+/*
+ * The satellite array at its bound, with every field at its widest.
+ *
+ * `n_sats` is REST_SAT_MAX here; pv_gnss_over() below sets it one past, which
+ * the encoder must clamp rather than walk off the end of a fixed array with a
+ * count that came, ultimately, from a GNSS receiver.
+ */
+static void gnss_fill_max(rest_gnss_t *out)
+{
+	unsigned int i;
+
+	memset(out, 0, sizeof(*out));
+	out->detail_available = true;
+	out->sat_age_valid = true;
+	out->sat_age_ms = UINT32_MAX;
+	out->fix_type = (uint8_t)QUALITY_GNSS_TIME_ONLY;
+	out->sv_used = 32U;
+	out->sv_visible = 32U;
+	out->tacc_ns = UINT32_MAX;
+	out->survey_state = (uint8_t)REST_SURVEY_ACTIVE;
+	out->survey_dur_s = UINT32_MAX;
+	out->survey_obs = UINT32_MAX;
+	out->survey_acc_mm = UINT32_MAX;
+	out->position_valid = true;
+	out->ecef_x_cm = INT64_MIN;
+	out->ecef_y_cm = INT64_MIN;
+	out->ecef_z_cm = INT64_MIN;
+	out->ant_state = (uint8_t)REST_ANT_OK;
+	out->ant_bias_on = true;
+	out->leap_current_s = -32768;
+	out->leap_pending = -128;
+	out->utc_valid = true;
+	out->n_sats = (uint8_t)REST_SAT_MAX;
+	for (i = 0U; i < (unsigned int)REST_SAT_MAX; i++) {
+		out->sat[i].gnss_id = 6U; /* "glonass", the longest name */
+		out->sat[i].sv_id = (uint8_t)(200U + i);
+		out->sat[i].cno = 255U;
+		out->sat[i].elev_deg = -128;
+		out->sat[i].azim_deg = 359;
+		out->sat[i].used = true;
+	}
+	memset(out->sw_version, 'X', sizeof(out->sw_version) - 1U);
+	memset(out->hw_version, 'X', sizeof(out->hw_version) - 1U);
+}
+
+static int pv_gnss_max(void *u, rest_gnss_t *out)
+{
+	(void)u;
+	if (fk.gnss_rc != 0) {
+		return fk.gnss_rc;
+	}
+	gnss_fill_max(out);
+	return 0;
+}
+
+/* One past the array bound. Must be clamped, not served and not read. */
+static int pv_gnss_over(void *u, rest_gnss_t *out)
+{
+	(void)u;
+	if (fk.gnss_rc != 0) {
+		return fk.gnss_rc;
+	}
+	gnss_fill_max(out);
+	out->n_sats = (uint8_t)(REST_SAT_MAX + 1U);
+	/* A distinguishable marker in the last legal slot, so the count of
+	 * emitted objects can be checked without counting braces. */
+	out->sat[REST_SAT_MAX - 1U].sv_id = 199U;
+	return 0;
+}
+
+/* Fresh, and genuinely empty: the case that must not read as "no data". */
+static int pv_gnss_empty(void *u, rest_gnss_t *out)
+{
+	(void)u;
+	if (fk.gnss_rc != 0) {
+		return fk.gnss_rc;
+	}
+	memset(out, 0, sizeof(*out));
+	out->detail_available = true;
+	out->sat_age_valid = true;
+	out->sat_age_ms = 250U;
+	out->n_sats = 0U;
+	return 0;
+}
+
+/* Stale: a list existed once, and its age is the useful half of the answer. */
+static int pv_gnss_stale(void *u, rest_gnss_t *out)
+{
+	(void)u;
+	if (fk.gnss_rc != 0) {
+		return fk.gnss_rc;
+	}
+	memset(out, 0, sizeof(*out));
+	out->detail_available = false;
+	out->sat_age_valid = true;
+	out->sat_age_ms = 412345U;
+	out->n_sats = 0U;
+	return 0;
+}
+
+/* Never heard from the receiver at all. */
+static int pv_gnss_never(void *u, rest_gnss_t *out)
+{
+	(void)u;
+	if (fk.gnss_rc != 0) {
+		return fk.gnss_rc;
+	}
+	memset(out, 0, sizeof(*out));
+	return 0;
+}
+
 static int pv_net(void *u, rest_net_t *out)
 {
 	(void)u;
@@ -1263,6 +1381,24 @@ static bool body_has(const char *needle)
 	return strstr(body_str(), needle) != NULL;
 }
 
+/* How many times @p needle occurs in the body. Non-overlapping. */
+static unsigned int body_count(const char *needle)
+{
+	const char *p = body_str();
+	size_t n = strlen(needle);
+	unsigned int c = 0U;
+
+	TEST_ASSERT_TRUE(n != 0U);
+	for (;;) {
+		p = strstr(p, needle);
+		if (p == NULL) {
+			return c;
+		}
+		c++;
+		p += n;
+	}
+}
+
 /* ---- routing ------------------------------------------------------------ */
 
 static void test_routing_basics(void)
@@ -1460,6 +1596,128 @@ static void test_status_groups(void)
 						       &g_resp));
 		TEST_ASSERT_EQUAL_UINT(500U, g_resp.status);
 	}
+}
+
+/*
+ * The skyplot's data path through the encoder (spec §336, §371).
+ *
+ * pv_gnss() used to hardcode `detail_available = false` and n_sats = 0, so this
+ * array was serialised faithfully and always empty and no test could tell. The
+ * provider now fills it from sts_gnss_sky(); these cases are the encoder's half
+ * of that — the decision logic behind the provider is tests/host/test_web_sky.c.
+ */
+static void test_gnss_satellites(void)
+{
+	setup_rest((uint8_t)WEB_ROLE_VIEWER);
+
+	/* ---- a fresh list serialises every field of every entry --------- */
+	g_pv.gnss = pv_gnss;
+	get_auth("/api/v1/status/gnss");
+	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+	TEST_ASSERT_TRUE(body_has("\"detail_available\":true"));
+	TEST_ASSERT_TRUE(body_has(
+		"{\"constellation\":\"gps\",\"sv\":1,\"cno\":44,\"elev\":65,"
+		"\"azim\":180,\"used\":true}"));
+	TEST_ASSERT_TRUE(body_has(
+		"{\"constellation\":\"galileo\",\"sv\":11,\"cno\":0,\"elev\":0,"
+		"\"azim\":0,\"used\":true}"));
+	TEST_ASSERT_EQUAL_UINT(3U, body_count("\"constellation\":"));
+
+	/* ---- empty but fresh is DATA, not absence ----------------------- */
+	g_pv.gnss = pv_gnss_empty;
+	get_auth("/api/v1/status/gnss");
+	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+	TEST_ASSERT_TRUE(body_has("\"detail_available\":true"));
+	TEST_ASSERT_TRUE(body_has("\"sat_age_ms\":250"));
+	TEST_ASSERT_TRUE(body_has("\"satellites\":[]"));
+	TEST_ASSERT_EQUAL_UINT(0U, body_count("\"constellation\":"));
+
+	/* ---- stale: no list, but the age still tells the operator why --- */
+	g_pv.gnss = pv_gnss_stale;
+	get_auth("/api/v1/status/gnss");
+	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+	TEST_ASSERT_TRUE(body_has("\"detail_available\":false"));
+	TEST_ASSERT_TRUE(body_has("\"sat_age_ms\":412345"));
+	TEST_ASSERT_TRUE(body_has("\"satellites\":[]"));
+
+	/* ---- never heard from: age is null, not zero -------------------- */
+	g_pv.gnss = pv_gnss_never;
+	get_auth("/api/v1/status/gnss");
+	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+	TEST_ASSERT_TRUE(body_has("\"detail_available\":false"));
+	TEST_ASSERT_TRUE(body_has("\"sat_age_ms\":null"));
+
+	/* ---- the array bound, exactly -------------------------------- */
+	g_pv.gnss = pv_gnss_max;
+	get_auth("/api/v1/status/gnss");
+	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+	TEST_ASSERT_EQUAL_UINT((unsigned int)REST_SAT_MAX,
+			       body_count("\"constellation\":"));
+	TEST_ASSERT_TRUE(body_has("\"sv\":200"));
+	TEST_ASSERT_TRUE(body_has("\"sv\":231")); /* 200 + 32 - 1 */
+	TEST_ASSERT_TRUE(body_has("\"cno\":255"));
+	TEST_ASSERT_TRUE(body_has("\"elev\":-128"));
+	TEST_ASSERT_TRUE(body_has("\"azim\":359"));
+	TEST_ASSERT_TRUE(body_has("\"sat_age_ms\":4294967295"));
+
+	/* ---- and one past it: clamped, never walked past ---------------- */
+	g_pv.gnss = pv_gnss_over;
+	get_auth("/api/v1/status/gnss");
+	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+	TEST_ASSERT_EQUAL_UINT((unsigned int)REST_SAT_MAX,
+			       body_count("\"constellation\":"));
+	/* The last legal entry is present, so the clamp dropped the extra one
+	 * rather than the last real one. */
+	TEST_ASSERT_TRUE(body_has("\"sv\":199"));
+
+	/*
+	 * ---- the boundary the JSON writer itself can get wrong -----------
+	 *
+	 * A full satellite list is ~2.6 KB of growth in a response the net area
+	 * serves from a fixed STS_WEB_RESP_SIZE buffer. web_jw_finish() answers
+	 * -ENOSPC on overflow, rest_dispatch() turns that into a 500, and
+	 * ws_run() sends no telemetry frame at all — so the failure mode of
+	 * getting this wrong is a management plane that goes quiet exactly when
+	 * a unit finally has a full sky. Measure it against the real buffer.
+	 */
+	{
+		static char frame[STS_WEB_RESP_SIZE];
+		char tight[512];
+		int n;
+
+		g_pv.gnss = pv_gnss_max;
+
+		n = rest_encode_telemetry(&g_rest, WSS_GRP_ALL, 1U, frame,
+					  sizeof(frame));
+		TEST_ASSERT_TRUE(n > 0);
+		TEST_ASSERT_TRUE((size_t)n < sizeof(frame));
+		frame[n] = '\0';
+		TEST_ASSERT_NOT_NULL(strstr(frame, "\"gnss\":{"));
+		TEST_ASSERT_NOT_NULL(strstr(frame, "\"power\":{"));
+		printf("worst-case telemetry frame: %d B of %u B\n", n,
+		       (unsigned int)sizeof(frame));
+		/* Headroom, so the next field added to any group is not the one
+		 * that silently breaks this. */
+		TEST_ASSERT_TRUE((size_t)n < (sizeof(frame) - 1024U));
+
+		/* The whole /api/v1/status document, same worst case. */
+		get_auth("/api/v1/status");
+		TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
+		TEST_ASSERT_TRUE(g_resp.body_len < STS_WEB_RESP_SIZE);
+		printf("worst-case /api/v1/status: %u B of %u B\n",
+		       (unsigned int)g_resp.body_len,
+		       (unsigned int)STS_WEB_RESP_SIZE);
+
+		/* And when it genuinely does not fit, it says so rather than
+		 * emitting a truncated document. */
+		TEST_ASSERT_EQUAL_INT(-ENOSPC,
+				      rest_encode_telemetry(&g_rest,
+							    WSS_GRP_GNSS, 1U,
+							    tight,
+							    sizeof(tight)));
+	}
+
+	g_pv.gnss = pv_gnss;
 }
 
 static void test_missing_providers(void)
@@ -2928,6 +3186,7 @@ int main(void)
 	/* rest.c */
 	RUN_TEST(test_routing_basics);
 	RUN_TEST(test_status_groups);
+	RUN_TEST(test_gnss_satellites);
 	RUN_TEST(test_missing_providers);
 	RUN_TEST(test_unauthenticated_is_401);
 	RUN_TEST(test_role_enforcement);

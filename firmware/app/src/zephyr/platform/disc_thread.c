@@ -117,6 +117,17 @@ static atomic_t disc_park_req = ATOMIC_INIT(0);
 static atomic_t disc_unpark_req = ATOMIC_INIT(0);
 
 /*
+ * The operator's request to clear core/refsel's sticky flap latch.
+ *
+ * A flag rather than a call, for exactly the reason the park requests above are
+ * flags: this thread owns `refsel` and refsel_clear_flap() writes five of its
+ * fields, so a console command calling it directly would mutate the state
+ * machine between refsel_step() and refsel_actions() — i.e. while an action list
+ * built from the old state is still being executed.
+ */
+static atomic_t ref_flap_clear_req = ATOMIC_INIT(0);
+
+/*
  * The operator's standing reference request (sts_app.h sts_ref_req_t), read by
  * this thread once a second as refsel_in_t::request.
  *
@@ -582,6 +593,50 @@ static void disc_handle_park(void)
 	}
 }
 
+/**
+ * Apply a pending operator request to clear the reference-flap latch.
+ *
+ * Runs at the top of this thread's loop, before disc_step_refsel() builds the
+ * next input — so a cleared latch is visible to the same pass rather than one
+ * second later, and the clear can never land between refsel_step() and the
+ * execution of the action list it produced.
+ */
+static void disc_handle_ref_requests(void)
+{
+	if (atomic_set(&ref_flap_clear_req, 0) == 0) {
+		return;
+	}
+
+	if (refsel_clear_flap(&refsel) == 0) {
+		sts_log(LOGR_SUB_TIMING, LOGR_NOTICE,
+			"operator cleared the reference-flap latch");
+	} else {
+		sts_log(LOGR_SUB_TIMING, LOGR_WARN,
+			"reference-flap clear refused: refsel is not initialised");
+	}
+}
+
+int sts_ref_clear_flap(void)
+{
+	if (!dt_state.started) {
+		return -ENODEV;
+	}
+	atomic_set(&ref_flap_clear_req, 1);
+	return 0;
+}
+
+uint32_t sts_clock_css_events(void)
+{
+	/*
+	 * The counter itself lives in clkmux.c, which owns the CSS NMI handler.
+	 * This is the seam rather than a second counter: platform.h is private to
+	 * this area (ARCHITECTURE.md §2), so the console cannot ask clkmux.c
+	 * directly, and a duplicate count kept here would drift the moment the
+	 * NMI fired between the two increments.
+	 */
+	return sts_clkmux_css_events();
+}
+
 /*
  * Pair the UBX-TIM-TP sawtooth with the edge just captured, by GPS time of week.
  *
@@ -652,6 +707,7 @@ static void disc_entry(void *p1, void *p2, void *p3)
 		mono_ms = sts_mono_ms();
 
 		disc_handle_park();
+		disc_handle_ref_requests();
 
 		/*
 		 * A CSS event means the hardware has already dropped SYSCLK to

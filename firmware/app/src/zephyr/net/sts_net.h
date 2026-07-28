@@ -238,6 +238,24 @@ int sts_ntp_start(void);
  */
 void sts_ntp_reload_keys(void);
 
+/**
+ * Force an immediate NTS cookie-key rotation.
+ *
+ * The ring already rotates on the `nts.rotation.h` schedule inside the NTP
+ * thread's loop; this is the operator's override for a suspected compromise,
+ * where waiting up to a day is the wrong answer. Rotation is graceful — the
+ * keys still in the ring keep unsealing outstanding cookies, and a client whose
+ * cookie has aged out of it re-runs NTS-KE.
+ *
+ * DEFERRED to the NTP thread, which is the ring's only reader; the console must
+ * not mint a key into it mid-unseal.
+ *
+ * @retval 0        Queued; the thread applies it within its 500 ms poll.
+ * @retval -ENOTSUP NTS is disabled in configuration.
+ * @retval -ENODEV  The keyring failed to initialise, so NTS is unavailable.
+ */
+int sts_nts_rotate_now(void);
+
 /** Snapshot the core/ntp and core/nts counters plus the socket-level ones. */
 typedef struct {
 	ntp_stats_t ntp;

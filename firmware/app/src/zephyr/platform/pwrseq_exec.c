@@ -50,6 +50,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 #include "zephyr/platform/platform.h"
 #include "zephyr/platform/sts_rbguard.h"
@@ -176,6 +177,15 @@ static uint32_t pwrseq_fault_snapshot(void)
 
 	return asserted;
 }
+
+/*
+ * Defined below, next to the operator-request handlers it dispatches, but
+ * called from the tick above them. Without this declaration C assumes a
+ * returns-int function and the definition then conflicts with it — which is a
+ * hard error here rather than a warning, and the right place to fix it is the
+ * declaration, not the definition's type.
+ */
+static bool pwrseq_service_requests(uint32_t now_ms);
 
 static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms)
 {
@@ -517,14 +527,26 @@ static void pwrseq_drain(void)
 void sts_pwrseq_step(uint32_t now_ms)
 {
 	pwrseq_in_t in;
+	bool operator_acted;
 
 	if (!pwrseq_started) {
 		return;
 	}
 
+	/* Before the step, so the stage machine's own input already reflects a
+	 * cleared OV latch or a re-entered stage 8 rather than seeing it a tick
+	 * late. */
+	operator_acted = pwrseq_service_requests(now_ms);
+
 	pwrseq_build_input(&in, now_ms);
 
 	if (pwrseq_step(&pwrseq, &in) != 0) {
+		/* The sequencer refused its input, but an operator action has
+		 * already queued pin work — a POE_KILL that sat undrained here
+		 * would be a stop button that did nothing. */
+		if (operator_acted) {
+			pwrseq_drain();
+		}
 		return;
 	}
 
@@ -568,13 +590,105 @@ void sts_pwrseq_rb_quiesce_from_isr(void)
 	pwrseq_set(&rb_pwr_en, 0);
 }
 
-int sts_pwrseq_rb_retry(uint32_t now_ms)
+/* ------------------------------------------------- operator requests ------ */
+
+/*
+ * Three recovery actions reach core/pwrseq from outside the housekeeping
+ * thread, and none of them may call into it directly.
+ *
+ * pwrseq_rb_retry(), pwrseq_ov_clear() and pwrseq_poe_kill() all end in emit(),
+ * which writes the action ring's head and length. pwrseq_drain() reads the same
+ * ring and then EXECUTES each action, and executing is not instantaneous — a
+ * digipot write is an SPI transfer and the OV reset pulse busy-waits. A console
+ * or MP thread that called any of the three would therefore be appending to a
+ * queue whose consumer is mid-drain, with no lock anywhere: exactly the mutual
+ * exclusion this file already states for pwrseq_pfi(), which is documented as
+ * safe only *because* it runs in housekeeping context.
+ *
+ * So the entry points post a bit and this function, called from the sequencer
+ * pass, performs the action on the owning thread. The cost is up to one 250 ms
+ * tick of latency, which is invisible for a latch acknowledgement and actively
+ * wanted for POE_KILL — the caller's reply has to reach the wire before the
+ * board loses power.
+ *
+ * A single atomic word rather than a queue: each bit is idempotent (retrying a
+ * retry, clearing a cleared latch, killing an already-killed rail are all
+ * no-ops) so coalescing two requests into one is the correct behaviour, not a
+ * lost message.
+ */
+#define PWRSEQ_REQ_RB_RETRY BIT(0)
+#define PWRSEQ_REQ_OV_CLEAR BIT(1)
+#define PWRSEQ_REQ_POE_KILL BIT(2)
+
+static atomic_t pwrseq_req;
+
+/** Claim one request bit. -EBUSY when the same one is already pending. */
+static int pwrseq_req_post(atomic_val_t bit)
 {
 	if (!pwrseq_started) {
 		return -ENODEV;
 	}
+	if ((atomic_or(&pwrseq_req, bit) & bit) != 0) {
+		return -EBUSY;
+	}
+	return 0;
+}
 
-	return pwrseq_rb_retry(&pwrseq, now_ms);
+/**
+ * Apply every pending operator request. Housekeeping-thread context only.
+ *
+ * @return true when at least one request produced actions, so the caller knows
+ *         the queue must be drained even if pwrseq_step() bailed.
+ */
+static bool pwrseq_service_requests(uint32_t now_ms)
+{
+	atomic_val_t req = atomic_clear(&pwrseq_req);
+	bool acted = false;
+	int rc;
+
+	if (req == 0) {
+		return false;
+	}
+
+	if ((req & PWRSEQ_REQ_OV_CLEAR) != 0) {
+		rc = pwrseq_ov_clear(&pwrseq, now_ms);
+		sts_log(LOGR_SUB_PWR, (rc == 0) ? LOGR_NOTICE : LOGR_WARN,
+			"operator cleared the Rb over-voltage latch (rc %d)", rc);
+		acted = acted || (rc == 0);
+	}
+
+	if ((req & PWRSEQ_REQ_RB_RETRY) != 0) {
+		rc = pwrseq_rb_retry(&pwrseq, now_ms);
+		sts_log(LOGR_SUB_PWR, (rc == 0) ? LOGR_NOTICE : LOGR_WARN,
+			"operator retried the guarded rubidium sequence (rc %d)",
+			rc);
+		acted = acted || (rc == 0);
+	}
+
+	if ((req & PWRSEQ_REQ_POE_KILL) != 0) {
+		rc = pwrseq_poe_kill(&pwrseq, PWRSEQ_POE_KILL_MAGIC, now_ms);
+		sts_log(LOGR_SUB_PWR, LOGR_CRIT,
+			"operator asserted POE_KILL: board cold-cycle (rc %d)",
+			rc);
+		acted = acted || (rc == 0);
+	}
+
+	return acted;
+}
+
+int sts_pwrseq_ov_clear(void)
+{
+	return pwrseq_req_post(PWRSEQ_REQ_OV_CLEAR);
+}
+
+int sts_pwrseq_rb_retry(void)
+{
+	return pwrseq_req_post(PWRSEQ_REQ_RB_RETRY);
+}
+
+int sts_pwrseq_poe_kill(void)
+{
+	return pwrseq_req_post(PWRSEQ_REQ_POE_KILL);
 }
 
 bool sts_pwrseq_rb_lock(void)

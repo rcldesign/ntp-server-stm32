@@ -138,6 +138,14 @@ static sts_gnss_snap_t snap;
  * an epoch of history to name a pulse at all. sts_app.h states the case.
  */
 static sts_gnss_pulse_evidence_t evidence;
+/*
+ * The operator's view: survey-in progress, the stored ECEF and the MON-RF
+ * front-end verdict. Published beside `snap` under the same mutex because it is
+ * filled on the same 1 Hz pass, but kept a separate structure because nothing on
+ * the timing path reads it — the discipline thread copies `snap` on the PPS edge
+ * and must not pay for fields only a console command wants.
+ */
+static sts_gnss_detail_t detail;
 static K_MUTEX_DEFINE(snap_mutex);
 
 /*
@@ -168,6 +176,16 @@ enum gnss_req_kind {
 	GNSS_REQ_NONE = 0,
 	GNSS_REQ_SURVEY,
 	GNSS_REQ_FIXED,
+	/*
+	 * Restore antenna bias after a latched short. It shares the one slot
+	 * with the two TMODE requests even though it is not mutually exclusive
+	 * with them, because the slot is "one operator action in flight" rather
+	 * than "one TMODE setting in flight": a technician who asks for two
+	 * things at once and is told -EBUSY re-issues, and the alternative — a
+	 * second slot — would let a survey request and a bias restore be applied
+	 * in an order neither of them chose.
+	 */
+	GNSS_REQ_ANT_REENABLE,
 };
 
 static struct k_spinlock req_lock;
@@ -422,6 +440,56 @@ static void gnss_build_evidence(sts_gnss_pulse_evidence_t *e, bool pvt_usable)
 	}
 }
 
+/*
+ * The operator's view of the receiver, sts_app.h sts_gnss_detail_t.
+ *
+ * Every read below is a gnssmgr getter, and every one of them is on THIS
+ * thread: gnssmgr.h is explicit that a manager belongs to one thread and is not
+ * internally synchronised, so a console command calling gnssmgr_svin() itself
+ * would read the survey block while gnssmgr_on_msg() is rewriting it. The cost
+ * of publishing instead is one struct copy a second.
+ *
+ * -EAGAIN from a getter is "not decoded yet", not a failure, so each block
+ * simply stays zeroed with its own valid flag clear.
+ */
+static void gnss_build_detail(sts_gnss_detail_t *d)
+{
+	gnssmgr_svin_t sv;
+	gnssmgr_ecef_t pos;
+	gnssmgr_rf_t rf;
+
+	memset(d, 0, sizeof(*d));
+
+	if (gnssmgr_svin(&mgr, &sv) == 0) {
+		d->svin_seen = sv.valid_msg;
+		d->svin_active = sv.active;
+		d->svin_ok = sv.valid;
+		d->svin_dur_s = sv.dur_s;
+		d->svin_obs = sv.obs;
+		d->svin_acc_0p1mm = sv.mean_acc_0p1mm;
+	}
+
+	if (gnssmgr_position(&mgr, &pos) == 0) {
+		d->pos_valid = pos.valid;
+		d->pos_x_cm = pos.x_cm;
+		d->pos_y_cm = pos.y_cm;
+		d->pos_z_cm = pos.z_cm;
+		d->pos_acc_0p1mm = pos.acc_0p1mm;
+	}
+
+	if (gnssmgr_rf(&mgr, &rf) == 0) {
+		d->rf_valid = rf.valid;
+		d->rf_ant_short = rf.ant_short;
+		d->rf_ant_open = rf.ant_open;
+		d->rf_ant_power = rf.ant_power;
+		d->rf_jamming = rf.jamming_state;
+	}
+
+	d->ant_state = (uint8_t)gnssmgr_ant_get_state(&mgr);
+	d->ant_short_latched = gnssmgr_ant_short_latched(&mgr);
+	d->alarms = gnssmgr_alarms(&mgr);
+}
+
 static void gnss_publish(uint32_t now_ms)
 {
 	gnssmgr_status_t st;
@@ -430,6 +498,7 @@ static void gnss_publish(uint32_t now_ms)
 	gnssmgr_state_t state = gnssmgr_get_state(&mgr);
 	sts_gnss_snap_t s;
 	sts_gnss_pulse_evidence_t e;
+	sts_gnss_detail_t d;
 
 	ARG_UNUSED(now_ms);
 
@@ -491,10 +560,12 @@ static void gnss_publish(uint32_t now_ms)
 	}
 
 	gnss_build_evidence(&e, s.have_status);
+	gnss_build_detail(&d);
 
 	(void)k_mutex_lock(&snap_mutex, K_FOREVER);
 	snap = s;
 	evidence = e;
+	detail = d;
 	(void)k_mutex_unlock(&snap_mutex);
 }
 
@@ -527,6 +598,23 @@ int sts_gnss_snapshot(sts_gnss_snap_t *out)
 
 	(void)k_mutex_lock(&snap_mutex, K_FOREVER);
 	*out = snap;
+	(void)k_mutex_unlock(&snap_mutex);
+
+	return 0;
+}
+
+int sts_gnss_detail(sts_gnss_detail_t *out)
+{
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	if (!gs.started) {
+		memset(out, 0, sizeof(*out));
+		return -ENODEV;
+	}
+
+	(void)k_mutex_lock(&snap_mutex, K_FOREVER);
+	*out = detail;
 	(void)k_mutex_unlock(&snap_mutex);
 
 	return 0;
@@ -921,6 +1009,22 @@ static void gnss_drain_requests(uint32_t now_ms)
 		return;
 	}
 
+	if (kind == (uint8_t)GNSS_REQ_ANT_REENABLE) {
+		/*
+		 * gnssmgr_ant_reenable() clears the latch, forgets the debounced
+		 * verdict and calls back into set_ant_bias(true) — which routes
+		 * to sts_pwrseq_ant_bias_request(), the single writer of PC9. If
+		 * the short is still there the supervisor will re-latch it after
+		 * its debounce, which is the intended behaviour: this is an
+		 * acknowledgement, not an override.
+		 */
+		rc = gnssmgr_ant_reenable(&mgr);
+		sts_log(LOGR_SUB_GNSS, (rc == 0) ? LOGR_NOTICE : LOGR_ERR,
+			"operator restored antenna bias after a latched short "
+			"(rc %d)", rc);
+		return;
+	}
+
 	/*
 	 * Fixed position. gnssmgr_set_stored_ecef() only records the constant —
 	 * it does not re-issue TMODE, and the receiver stays in whatever timing
@@ -1172,6 +1276,15 @@ int sts_gnss_request_survey(bool start)
 	}
 
 	return gnss_req_post((uint8_t)GNSS_REQ_SURVEY, NULL);
+}
+
+int sts_gnss_ant_reenable(void)
+{
+	if (!gs.started) {
+		return -ENODEV;
+	}
+
+	return gnss_req_post((uint8_t)GNSS_REQ_ANT_REENABLE, NULL);
 }
 
 int sts_gnss_set_fixed_ecef(int64_t x_cm, int64_t y_cm, int64_t z_cm)

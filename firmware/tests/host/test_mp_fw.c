@@ -280,11 +280,35 @@ static int mpfw_begin(void *ctx, uint8_t comp, const fwupd_req_t *req)
 	return fwupd_begin(&g_fw, comp, req, (uint64_t)g_now);
 }
 
+/*
+ * The same shape as fwupd_glue.c's mpfw_data(), including the duplicate
+ * decision: `done` is read before the call and compared with `next_off` after
+ * it, which is the only test that separates a discarded retransmit from a
+ * write. Deriving it any other way here would test a different implementation
+ * from the one that ships.
+ */
 static int mpfw_data(void *ctx, uint32_t off, const uint8_t *d, size_t len,
-		     uint32_t *next_off)
+		     uint32_t *next_off, bool *duplicate)
 {
+	fwupd_event_t before;
+	uint32_t local_next = 0U;
+	int rc;
+
 	(void)ctx;
-	return fwupd_data(&g_fw, off, d, len, next_off, (uint64_t)g_now);
+
+	if (next_off == NULL) {
+		next_off = &local_next;
+	}
+	if (duplicate != NULL) {
+		*duplicate = false;
+	}
+
+	(void)fwupd_progress(&g_fw, &before);
+	rc = fwupd_data(&g_fw, off, d, len, next_off, (uint64_t)g_now);
+	if ((rc == 0) && (duplicate != NULL)) {
+		*duplicate = (*next_off == before.done);
+	}
+	return rc;
 }
 
 static int mpfw_end(void *ctx)
@@ -690,6 +714,48 @@ static const char *err_reason(void)
 				  reason, sizeof(reason));
 	}
 	return reason;
+}
+
+/**
+ * An integer member of the last error reply's `data`.
+ *
+ * -1 when `data` has no such member, so a test can assert its ABSENCE as well
+ * as its value — which matters here: the rewind point is carried only by the
+ * refusals that leave the transfer resumable, and adding it everywhere would be
+ * telling a tool it can rewind into a session that is over.
+ */
+static int64_t err_data_i(const char *key)
+{
+	int e = mp_json_obj_get(&g_rp, 0, "error");
+	int64_t v = 0;
+	int d;
+	int t;
+
+	TEST_ASSERT_TRUE(e >= 0);
+	d = mp_json_obj_get(&g_rp, e, "data");
+	if (d < 0) {
+		return -1;
+	}
+	t = mp_json_obj_get(&g_rp, d, key);
+	if (t < 0) {
+		return -1;
+	}
+	TEST_ASSERT_EQUAL_INT(0, mp_json_i64(&g_rp, t, &v));
+	return v;
+}
+
+/** True when the last error reply's `data.state` equals @p want. */
+static bool err_data_streq(const char *key, const char *want)
+{
+	int e = mp_json_obj_get(&g_rp, 0, "error");
+	int d;
+
+	TEST_ASSERT_TRUE(e >= 0);
+	d = mp_json_obj_get(&g_rp, e, "data");
+	if (d < 0) {
+		return false;
+	}
+	return mp_json_streq(&g_rp, mp_json_obj_get(&g_rp, d, key), want);
 }
 
 static int64_t res_i(const char *key)
@@ -1606,19 +1672,17 @@ static void test_a_duplicate_chunk_advances_nothing(void)
 	TEST_ASSERT_FALSE(res_b("duplicate"));
 
 	/*
-	 * The same chunk again. What has to hold is that it is a no-op: the
-	 * target is not written twice and the offset does not move.
-	 *
-	 * The `duplicate` FLAG is not asserted here, and that is deliberate. It
-	 * is computed in m_fw_data() as `next != off + n`, which cannot
-	 * distinguish a retransmit that ends exactly at `done` from a fresh
-	 * write — both leave next == off + n. So this case, the commonest
-	 * retransmit there is, reports duplicate:false. See the strict-subset
-	 * case below for the half of the flag that does work, and the note in
-	 * this file's report for the defect.
+	 * The same chunk again — the commonest retransmit there is, and the one
+	 * `next != off + n` could never see: it ends exactly where `done`
+	 * already was, so the arithmetic is identical to a fresh write's. The
+	 * flag now comes from the port, which read `done` before the call inside
+	 * the same lock, so it reports the truth.
 	 */
 	send_chunk(sid, 0U, 512U);
 	TEST_ASSERT_EQUAL_INT64(512, res_i("next_off"));
+	TEST_ASSERT_TRUE_MESSAGE(
+		res_b("duplicate"),
+		"a retransmit ending exactly at `done` reported duplicate:false");
 	TEST_ASSERT_EQUAL_INT64(512, prog_i("done"));
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
 		1U, g_tgt[FWUPD_COMP_STM32_APP].transfer_n,
@@ -1631,9 +1695,17 @@ static void test_a_duplicate_chunk_advances_nothing(void)
 	TEST_ASSERT_EQUAL_INT64(512, res_i("next_off"));
 	TEST_ASSERT_EQUAL_UINT(1U, g_tgt[FWUPD_COMP_STM32_APP].transfer_n);
 
+	/* And the other side of the flag: the NEXT genuine write must not
+	 * inherit it. Without this the whole assertion above is satisfied by a
+	 * port that answers `true` unconditionally. */
+	send_chunk(sid, 512U, 512U);
+	TEST_ASSERT_EQUAL_INT64(1024, res_i("next_off"));
+	TEST_ASSERT_FALSE_MESSAGE(res_b("duplicate"),
+				  "a fresh write was reported as a duplicate");
+	TEST_ASSERT_EQUAL_UINT(2U, g_tgt[FWUPD_COMP_STM32_APP].transfer_n);
+
 	/* The transfer is untouched and still finishes — which also proves the
 	 * streaming hash did not absorb the retransmitted octets. */
-	send_chunk(sid, 512U, 512U);
 	send_chunk(sid, 1024U, 512U);
 	fw_end(sid);
 	TEST_ASSERT_TRUE_MESSAGE(res_b("ok"),
@@ -1659,6 +1731,19 @@ static void test_a_gap_is_refused_and_the_transfer_survives_it(void)
 	TEST_ASSERT_EQUAL_INT64(MP_E_STATE, err_code());
 	TEST_ASSERT_EQUAL_STRING("offset", err_reason());
 	TEST_ASSERT_EQUAL_UINT(1U, g_tgt[FWUPD_COMP_STM32_APP].transfer_n);
+
+	/*
+	 * The refusal itself has to say where to rewind to. Without it the tool
+	 * learns only that the offset was wrong, and mp_rpc.c's comment claiming
+	 * the reply "still carries next_off" described something mp_fail() never
+	 * emitted.
+	 */
+	TEST_ASSERT_EQUAL_INT64_MESSAGE(
+		512, err_data_i("next_off"),
+		"a refused chunk did not carry the rewind point");
+	TEST_ASSERT_TRUE_MESSAGE(
+		err_data_streq("state", "TRANSFER"),
+		"a refused chunk did not say the session was still open");
 
 	/* Rewinding to the real offset works: the session was not closed. */
 	send_chunk(sid, 512U, 512U);

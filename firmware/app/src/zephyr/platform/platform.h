@@ -293,13 +293,12 @@ void sts_pwrseq_pfi(uint32_t now_ms);
  */
 void sts_pwrseq_rb_quiesce_from_isr(void);
 
-/**
- * Operator-initiated retry of the guarded rubidium sequence.
- *
- * Exposed for a console/MCP command; the bounded automatic retry lives in
- * core/pwrseq. Returns pwrseq_rb_retry()'s result, or -ENODEV before start.
+/*
+ * The operator recovery actions this file implements — sts_pwrseq_rb_retry(),
+ * sts_pwrseq_ov_clear(), sts_pwrseq_poe_kill() — are declared in
+ * src/zephyr/sts_app.h, not here: their callers are the console and MP planes,
+ * which may not include this header (ARCHITECTURE.md §2).
  */
-int sts_pwrseq_rb_retry(uint32_t now_ms);
 
 /** RB_LOCK (PB13) as a logical "the FE reports lock", polarity applied. */
 bool sts_pwrseq_rb_lock(void);
@@ -316,8 +315,9 @@ void sts_pwrseq_ant_bias_request(bool on);
 /** Stage 9: assert WDT_EN and begin the kick cadence. */
 int sts_supervisor_arm(void);
 
-/** Blink the status RGB blue for @p duration_ms (operator locate). */
-void sts_supervisor_identify(uint32_t duration_ms);
+/* sts_supervisor_identify() is declared in src/zephyr/sts_app.h: its callers
+ * are the console shell and the MP object router, neither of which may include
+ * this header. */
 
 void sts_supervisor_counters(uint32_t *kicks, uint32_t *withheld, bool *armed);
 

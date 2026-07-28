@@ -78,6 +78,7 @@
 #include "net/sts_net.h"
 #include "net/sts_secops.h"
 #include "net/sts_web.h"
+#include "net/sts_web_sky.h"
 #include "storage/sts_store.h"
 #include "util/cobs.h"
 #include "web/auth_web.h"
@@ -211,24 +212,53 @@ static int pv_health(void *u, rest_health_t *out)
 }
 
 /*
- * GNSS detail. Only what the §3.8 quality block carries is available today: the
- * GNSS receiver thread (UBX over USART3, gnssmgr) is not in the tree yet, so
- * there is no source for the satellite list, the survey-in progress or the
- * antenna verdict. `detail_available = false` says so explicitly, and the SPA
- * renders an empty sky with a note rather than an error. When the gnss thread
- * lands, ONLY this function changes — the REST and WSS shapes already carry the
- * fields.
+ * GNSS detail: the §3.8 quality block, plus the per-satellite frame the GNSS
+ * thread caches for the skyplot.
+ *
+ * WHAT FEEDS THE SKYPLOT, AND WHY IT IS THIS AND NOT THE QUALITY BLOCK.
+ * core/gnssmgr reduces UBX-NAV-SAT to counts on purpose, so the quality block
+ * has `gnss_sv_used`/`gnss_sv_visible` and no records. The records live in
+ * platform/gnss.c's sky cache, published through sts_gnss_sky(), and that is
+ * the SAME cache the front panel's build_sky() renders from — which is what
+ * spec §336 ("the skyplot mirrors the local-UI renderer") and §371 ("identical
+ * data feeds the web skyplot so both views agree") require. Not a second
+ * source, not a second decoder.
+ *
+ * The three decisions on top of that cache — is the frame fresh, which records
+ * are worth serving, and what `detail_available` means — are net/sts_web_sky.h's
+ * and are host-tested there, including an assertion that the admission rule
+ * still matches the panel's. Read that header before changing anything here;
+ * in particular the staleness window is the net area's own number and must not
+ * be re-pointed at the ui area's.
+ *
+ * SURVEY-IN, STORED POSITION AND THE ANTENNA come from sts_gnss_detail(), the
+ * platform area's once-a-second publication of gnssmgr_svin() /
+ * gnssmgr_position() / gnssmgr_rf(). A gnssmgr_t belongs to the GNSS thread and
+ * is not internally synchronised, so those getters may not be called from here;
+ * the published snapshot is the only legal read. -ENODEV (no GNSS thread) is
+ * not an error for this document — the survey reads idle, the position invalid,
+ * and the antenna falls back to what the alarm mask alone can say.
+ *
+ * LOCKING. sts_gnss_sky() takes the sky cache's own 5 ms-bounded mutex and
+ * sts_gnss_detail() takes the snapshot mutex; NEITHER is a timing lock —
+ * ARCHITECTURE.md §10 invariant 10 is about the discipline loop's state, still
+ * reached only through sts_quality_snapshot(). Both are struct copies held for
+ * microseconds by threads that inherit this worker's priority. On -EBUSY from
+ * the sky cache the output is zeroed and this second's document reports no
+ * detail rather than waiting on a receiver mid-parse.
  */
 static int pv_gnss(void *u, rest_gnss_t *out)
 {
 	quality_block_t q;
+	sts_gnss_sky_t sky;
+	sts_gnss_detail_t detail;
+	bool have_detail;
 
 	ARG_UNUSED(u);
 	if (sts_quality_snapshot(&q) != 0) {
 		return -EIO;
 	}
 	memset(out, 0, sizeof(*out));
-	out->detail_available = false;
 	out->fix_type = q.gnss_fix;
 	out->sv_used = q.gnss_sv_used;
 	out->sv_visible = q.gnss_sv_visible;
@@ -236,10 +266,28 @@ static int pv_gnss(void *u, rest_gnss_t *out)
 	out->utc_valid = q.utc_valid;
 	out->leap_current_s = q.leap_current_s;
 	out->leap_pending = q.leap_pending;
-	out->survey_state = (uint8_t)REST_SURVEY_IDLE;
-	out->ant_state = (uint8_t)REST_ANT_UNKNOWN;
 	out->ant_bias_on = sts_net_cfg_bool(CFG_ID_GNSS_ANT_BIAS_EN, true);
-	out->n_sats = 0U;
+
+	/*
+	 * Stack, not static: the worker stacks are already reserved
+	 * (STS_WEB_WORKERS x STS_WEB_STACK_SIZE), every provider runs under
+	 * api_lock so at most one worker is ever in here, and a static would
+	 * add the same bytes to BSS for no gain. pv_health() builds a
+	 * comparably sized sts_health_t the same way. This is nowhere near the
+	 * 1 KB+ that made pv_fw_data()'s chunk buffer static.
+	 */
+	have_detail = (sts_gnss_detail(&detail) == 0);
+	sts_web_sky_survey(have_detail ? &detail : NULL, out);
+	out->ant_state = sts_web_ant_state(sts_alarms_active(), q.flags,
+					   have_detail && detail.ant_short_latched,
+					   out->ant_bias_on);
+
+	if (sts_gnss_sky(&sky) != 0) {
+		/* -EBUSY. sts_app.h zeroes the output; belt and braces, because
+		 * a partially written snapshot must not reach a client. */
+		memset(&sky, 0, sizeof(sky));
+	}
+	sts_web_sky_fill(&sky, sts_mono_ms(), out);
 	return 0;
 }
 

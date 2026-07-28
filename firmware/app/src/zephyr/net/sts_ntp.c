@@ -167,6 +167,22 @@ static uint16_t key_installed[STS_NTP_KEY_SLOTS];
 /** Set by sts_ntp_reload_keys(); drained by the NTP thread. */
 static atomic_t keys_reload_req;
 
+/**
+ * Set by sts_nts_rotate_now(); drained by the NTP thread beside the scheduled
+ * rotation.
+ *
+ * The keyring already rotates on its own — nts_keyring_tick() below fires every
+ * `nts.rotation.h` hours — so this is not what makes rotation happen. It is the
+ * *forced* rotation an operator needs after a suspected key compromise, when
+ * waiting up to a day for the schedule is the wrong answer.
+ *
+ * A request rather than a call for the same reason the key table is: the ring
+ * is read without a lock by this priority-8 thread while it seals and unseals
+ * cookies, and a management thread minting a key into it mid-unseal would fail
+ * a cookie that was perfectly valid.
+ */
+static atomic_t nts_rotate_req;
+
 static uint8_t rx_buf[NTP_PKT_MAX];
 static uint8_t tx_buf[NTP_PKT_MAX];
 
@@ -917,6 +933,23 @@ static void ntp_loop(void *a, void *b, void *c)
 		smear_annunciate();
 
 		if (nts_enabled) {
+			/*
+			 * Forced first, then the schedule. Rotating on the
+			 * operator's behalf resets the ring's own interval, so a
+			 * tick that ran afterwards would find nothing due — which
+			 * is correct, and the reverse order would occasionally
+			 * mint two keys for one request.
+			 */
+			if (atomic_set(&nts_rotate_req, 0) != 0) {
+				int rc = nts_keyring_rotate(sts_net_keyring(),
+							    (int64_t)sts_mono_ms());
+
+				sts_log((uint8_t)LOGR_SUB_SEC,
+					(rc == 0) ? (uint8_t)LOGR_NOTICE
+						  : (uint8_t)LOGR_ERR,
+					"NTS cookie key rotated on operator "
+					"request (rc %d)", rc);
+			}
 			(void)nts_keyring_tick(sts_net_keyring(),
 					       (int64_t)sts_mono_ms());
 		}
@@ -939,6 +972,18 @@ static void ntp_loop(void *a, void *b, void *c)
 /* ------------------------------------------------------------------------- */
 /* public                                                                    */
 /* ------------------------------------------------------------------------- */
+
+int sts_nts_rotate_now(void)
+{
+	if (!nts_enabled) {
+		return -ENOTSUP;
+	}
+	if (sts_net_keyring() == NULL) {
+		return -ENODEV;
+	}
+	atomic_set(&nts_rotate_req, 1);
+	return 0;
+}
 
 void sts_ntp_stats(sts_ntp_stats_t *out)
 {
