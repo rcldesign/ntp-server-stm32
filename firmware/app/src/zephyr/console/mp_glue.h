@@ -11,20 +11,23 @@
  * Mostly private to src/zephyr/console/, like sts_console.h — with one
  * deliberate exception, stated here so it is a contract rather than a leak. The
  * **byte tees and their arming predicates** (`sts_mp_tee_*`,
- * `sts_mp_gnss_tee_armed`, `sts_mp_ch_armed`, `sts_mp_tunnel_*_open`) are called
- * from the platform area, because that is where the bytes are:
- * platform/gnss.c owns the USART3 receive path and platform/rb_serial.c owns
- * UART7. sts_mp_mirror_publish() crosses the same seam in the other direction
- * and is declared in sts_app.h instead; these are not, because sts_app.h is not
- * this change's to extend. The dependency is made safe two ways:
+ * `sts_mp_gnss_tee_armed`, `sts_mp_ch_armed`, `sts_mp_tunnel_*_open`) and the
+ * **event producer** (`sts_mp_post_event`) are called from outside this area,
+ * because that is where the bytes and the edges are: platform/gnss.c owns the
+ * USART3 receive path, platform/rb_serial.c owns UART7, platform/io_scan.c owns
+ * the 1 kHz GPIOF/GPIOG scan, and sts_app.c's sts_alarm_set() is where an
+ * alarm's active state transitions. sts_mp_mirror_publish() crosses the same
+ * seam in the other direction and is declared in sts_app.h instead; these are
+ * not, because sts_app.h is not this change's to extend. The dependency is made
+ * safe two ways:
  *
  *   - src/zephyr/platform/sts_area_weak.c carries a __weak no-op for **every**
  *     function declared below, so CONFIG_STS1000_MP=n (which drops mp_glue.c
  *     and mp_tunnel.c from the build, app/CMakeLists.txt) still links;
- *   - every one of them is safe to call from a hot loop or an ISR: the tees do
- *     a bounded copy into a staging ring behind a spinlock and nothing else,
- *     and the predicates are one atomic read. Nothing on this path takes the
- *     engine mutex or touches the console UART.
+ *   - every one of them is safe to call from a hot loop or an ISR: the tees and
+ *     the event producer do a bounded copy into a staging ring behind a
+ *     spinlock and nothing else, and the predicates are one atomic read.
+ *     Nothing on this path takes the engine mutex or touches the console UART.
  *
  * Mode entry (FMT §2.3). MP shares the human console on CDC-ACM #0 rather than
  * taking a third endpoint, so entering it means taking the port away from the
@@ -343,6 +346,81 @@ void sts_mp_tunnel_drain(void);
  * it publishes the engine, i.e. before any producer can be armed.
  */
 void sts_mp_tunnel_init(void);
+
+/* ------------------------------------------------------- event channel 0x09 */
+
+/**
+ * Stage one record for the MP event channel (FMT §7.5).
+ *
+ * The producer half of mp_events.c, and the only way the board's own edges
+ * reach channel 0x09. Called from platform/io_scan.c for every debounced
+ * scan event sts_io_dispatch_plan() classifies (MP_EV_FAULT, MP_EV_BUTTON,
+ * MP_EV_PROX, MP_EV_TOUCH) and from sts_app.c's sts_alarm_set() for every
+ * alarm active-state transition (MP_EV_ALARM).
+ *
+ * **Safe from an ISR and from a priority-4 thread**, which is the whole point:
+ * a call is an arming test (one atomic read), then a bounded copy into a
+ * staging queue under a k_spinlock, then return. It never takes the engine
+ * mutex, never touches the console UART and never blocks — the framing happens
+ * later, on the console supervisor, out of sts_mp_tick(). Anything that does
+ * not fit is dropped and counted, and the count reaches both `mp status` and
+ * the host's own event record.
+ *
+ * @param kind     mp_ev_kind_t. Out of range is refused, not queued.
+ * @param sub      Kind-specific subtype; the fault_evt_type_t for scan events.
+ * @param id       fault_sig_t, or the fault_alarm_id_t for MP_EV_ALARM.
+ * @param edge     1 = assert/press, 0 = deassert/release.
+ * @param value    Kind-specific.
+ * @param mono_ms  When the event HAPPENED, not when it was posted — the drain
+ *                 runs up to a console pass later and the record has to stay
+ *                 correlatable with the log and with the other edges.
+ * @param text     Optional; copied, so a stack buffer is fine.
+ */
+void sts_mp_post_event(uint8_t kind, uint8_t sub, uint16_t id, uint8_t edge,
+		       int32_t value, uint32_t mono_ms, const char *text);
+
+/**
+ * Copy the oldest staged event without removing it.
+ *
+ * Console-internal; sts_mp_tick() drains with peek/post/pop so a record that
+ * the engine's own queue has no room for stays staged for the next pass rather
+ * than being discarded on the way in.
+ *
+ * @retval true   @p out written.
+ * @retval false  Nothing staged.
+ */
+bool sts_mp_event_peek(mp_ev_t *out);
+
+/** Discard the oldest staged event, once it has been handed to the engine. */
+void sts_mp_event_pop(void);
+
+/**
+ * Discard the staged backlog because nobody is subscribed to channel 0x09.
+ *
+ * Console-internal. Not counted as a loss — see mp_events.c: events staged in
+ * the window before the engine noticed an unsubscribe were never anyone's to
+ * receive, and reporting them as dropped would cry wolf on the one counter that
+ * exists to be believed.
+ */
+void sts_mp_event_purge(void);
+
+/**
+ * Staged events lost to overflow since the last call. Console-internal.
+ *
+ * The drain folds this into mp_stream_event_drop_note() so key 8 of the event
+ * record carries the total loss, staging queue and engine queue together. A
+ * gap the host cannot see is the defect this channel exists to prevent.
+ */
+uint32_t sts_mp_event_take_drops(void);
+
+/** Event staging counters, for `mp status`. Any may be NULL. */
+void sts_mp_event_stats(uint32_t *queued, uint32_t *staged, uint32_t *dropped);
+
+/**
+ * Bind the event staging queue. Console-internal; sts_mp_start() calls it
+ * before it publishes the engine, i.e. before any producer can be armed.
+ */
+void sts_mp_event_init(void);
 
 #ifdef __cplusplus
 }

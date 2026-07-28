@@ -6,11 +6,13 @@
 #     rsource "src/zephyr/console/Kconfig.mp"
 #
 # STS1000_MP is a switch, not documentation. app/CMakeLists.txt drops
-# src/zephyr/console/mp_glue.c and mp_tunnel.c from the build when it is n, and
-# src/zephyr/platform/sts_area_weak.c carries a __weak no-op for every function
-# console/mp_glue.h declares, so the image still links: sts_console.c calls
-# sts_mp_start()/sts_mp_tick() unconditionally and platform/gnss.c calls the
-# byte tees from the USART3 receive path.
+# src/zephyr/console/mp_glue.c, mp_tunnel.c and mp_events.c from the build when
+# it is n, and src/zephyr/platform/sts_area_weak.c carries a __weak no-op for
+# every function console/mp_glue.h declares, so the image still links:
+# sts_console.c calls sts_mp_start()/sts_mp_tick() unconditionally, platform/
+# gnss.c calls the byte tees from the USART3 receive path, and platform/
+# io_scan.c and sts_app.c call sts_mp_post_event() from the 1 kHz scan and from
+# sts_alarm_set().
 #
 # It exists because MP is a physical-access surface that answers at role `none`
 # before any credential is presented (FMT §5.3), so an operator deploying a
@@ -81,6 +83,29 @@ config STS1000_MP_TEE_RING
 
 	  Must be a power of two (core/util ring_init()); a build assertion
 	  enforces it.
+
+config STS1000_MP_EVQ_STAGE
+	int "MP event channel staging queue (records)"
+	default 32
+	range 32 128
+	help
+	  Records buffered between the board's event producers and the drain on
+	  sts_mp_tick(). The producers are the 1 kHz GPIOF/GPIOG scan
+	  (priority 11) and every caller of sts_alarm_set() — which includes the
+	  priority-4 discipline loop — none of which may take the engine mutex
+	  or push a COBS frame down the console UART; they do a bounded copy
+	  into this queue and the console supervisor drains it 250 ms later.
+
+	  The floor is core/fault's own FAULT_EVT_QUEUE_LEN (32) and a build
+	  assertion enforces it: one scan can commit all 32 signals at once — a
+	  board-wide brownout takes every power-good, every INA228 ALERT and
+	  every load-switch flag with it — and io_scan.c drains that whole burst
+	  inside the same millisecond. A shallower queue would drop exactly the
+	  cascade a technician most needs to see.
+
+	  Each record is one mp_ev_t (48 B), so the default costs 1536 B of RAM.
+	  Overflow drops the newest record and counts it in `mp status` and in
+	  key 8 of the event stream, so the host sees the gap.
 
 endif # STS1000_MP
 

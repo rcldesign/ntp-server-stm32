@@ -563,7 +563,7 @@ static void test_init_validation(void)
 	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_shell_byte(NULL, 0U));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_input(NULL, NULL, 0U));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_post_event(NULL, 0U, 0U, 0U, 0U, 0,
-						     NULL));
+						     0U, NULL));
 	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_veto(NULL, 0U, NULL));
 	TEST_ASSERT_EQUAL_INT(-EINVAL,
 			      mp_rpc_handle(NULL, NULL, 0U, NULL, NULL));
@@ -2020,7 +2020,7 @@ static void test_tick_pumps_subscribed_streams(void)
 	TEST_ASSERT_EQUAL_INT(0, logr_puts(&g_log, (uint8_t)LOGR_INFO,
 					   (uint8_t)LOGR_SUB_SYS, 1U, "hello"));
 	TEST_ASSERT_EQUAL_INT(0, mp_post_event(&g_c, (uint8_t)MP_EV_FAULT, 1U,
-					       23U, 1U, 0, "pg"));
+					       23U, 1U, 0, g_now, "pg"));
 
 	g_wire_len = 0U;
 	g_frames = 0U;
@@ -2890,7 +2890,7 @@ static void test_veto_and_event_feed(void)
 
 	TEST_ASSERT_EQUAL_INT(-ENOENT, mp_veto(&g_c, obj, NULL));
 	TEST_ASSERT_EQUAL_INT(0, mp_post_event(&g_c, (uint8_t)MP_EV_PROX, 0U,
-					       10U, 1U, 1, "door"));
+					       10U, 1U, 1, g_now, "door"));
 }
 
 /* ------------------------------------------------------- end to end frames */

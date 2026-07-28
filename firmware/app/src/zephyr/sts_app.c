@@ -26,8 +26,10 @@
 #include "zephyr/sts_cfg_applier.h"
 #include "zephyr/platform/platform.h"
 
+#include "console/mp_glue.h"
 #include "fault/fault.h"
 #include "mcp/mcp_wire.h"
+#include "mp/mp_stream.h"
 
 LOG_MODULE_REGISTER(sts_app, CONFIG_STS1000_LOG_LEVEL);
 
@@ -629,6 +631,9 @@ uint64_t sts_alarms_active(void)
 
 int sts_alarm_set(uint8_t alarm_id, bool active)
 {
+	const fault_alarm_t *a;
+	uint32_t now_ms;
+	bool changed;
 	int rc;
 
 	/*
@@ -640,10 +645,46 @@ int sts_alarm_set(uint8_t alarm_id, bool active)
 		return -EINVAL;
 	}
 
+	now_ms = k_uptime_get_32();
+
 	sts_fault_lock();
+	/*
+	 * The edge, decided here because this is where it is decided at all.
+	 * Almost every caller is a level evaluation on a periodic loop —
+	 * "gnss_lost is true again this second" — so the interesting event is
+	 * the TRANSITION, and core/fault records it (count, first_ms) without
+	 * announcing it. Reading `active` under the same lock as the write is
+	 * what makes the pair a transition rather than two racing samples.
+	 */
+	a = fault_alarm_get(sts_fault(), (fault_alarm_id_t)alarm_id);
+	changed = (a != NULL) && (a->active != active);
 	rc = fault_alarm_set(sts_fault(), (fault_alarm_id_t)alarm_id, active,
-			     k_uptime_get_32());
+			     now_ms);
 	sts_fault_unlock();
+
+	/*
+	 * MP_EV_ALARM on the Field Maintenance Tool's event channel, and
+	 * deliberately OUTSIDE the fault mutex: a caller may already hold
+	 * another lock (mp_tunnel.c raises TAMPER with the MP engine lock held),
+	 * so this path takes only mp_events.c's spinlock and never nests a
+	 * second mutex under this one. It costs one atomic read when no
+	 * technician is subscribed.
+	 *
+	 * Only the software-raised ids (>= 32) come through here, which is the
+	 * whole set that has no other producer. The scanned signals reach the
+	 * same channel as MP_EV_FAULT/BUTTON/PROX/TOUCH from io_scan.c, with the
+	 * same identity — fault_sig_t and fault_alarm_id_t are one numbering —
+	 * so raising MP_EV_ALARM for them as well would report one transition
+	 * twice under two kinds.
+	 *
+	 * A latch acknowledgement (sts_alarm_clear) is deliberately not an
+	 * event: it changes the historical record, not the board's state, and
+	 * the technician who sent it already knows.
+	 */
+	if ((rc == 0) && changed) {
+		sts_mp_post_event((uint8_t)MP_EV_ALARM, 0U, (uint16_t)alarm_id,
+				  active ? 1U : 0U, 0, now_ms, NULL);
+	}
 
 	return rc;
 }

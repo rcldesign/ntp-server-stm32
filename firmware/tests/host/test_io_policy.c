@@ -402,6 +402,116 @@ static void test_unknown_event_is_fully_zeroed(void)
 	TEST_ASSERT_EQUAL_STRING("", sts_io_msg_fmt(p.msg));
 }
 
+/* ------------------------------------------------ MP event channel (FMT 7.5) */
+
+/*
+ * The fourth consumer, and the one that had none at all: nothing staged an MP
+ * event, so a technician subscribed to channel 0x09 heard silence through a
+ * power-good drop, an INA228 alert, a button press and a door opening. These
+ * assert the decision; tests/host/test_mp_events.c drives it from a port sample
+ * all the way onto the wire.
+ */
+
+/** Every event type core/fault can commit must reach the event channel. */
+static void test_every_fault_event_type_is_staged(void)
+{
+	unsigned int t;
+
+	for (t = 0U; t < (unsigned int)FAULT_EVT_TYPE_COUNT; t++) {
+		sts_io_dispatch_t p =
+			plan_for((fault_evt_type_t)t, FAULT_SIG_BUTTON_1,
+				 FAULT_EDGE_ASSERT);
+
+		TEST_ASSERT_TRUE_MESSAGE(p.post_mp,
+					 "an event type reaches no MP consumer");
+		/* `sub` is what lets the host tell a press from a long-press and
+		 * a power-good loss from its recovery; a zero here would make
+		 * five of the nine types indistinguishable on the wire. */
+		TEST_ASSERT_EQUAL_UINT8((uint8_t)t, p.mp_sub);
+	}
+}
+
+/** Each type lands under the right kind. A drift makes a rail collapse arrive
+ *  at the tool as a button press. */
+static void test_event_types_map_to_the_right_kind(void)
+{
+	static const struct {
+		fault_evt_type_t type;
+		fault_sig_t sig;
+		uint8_t kind;
+	} k[] = {
+		{ FAULT_EVT_BUTTON, FAULT_SIG_BUTTON_1, STS_IO_MP_BUTTON },
+		{ FAULT_EVT_BUTTON_LONG, FAULT_SIG_BUTTON_1, STS_IO_MP_BUTTON },
+		{ FAULT_EVT_BUTTON_REPEAT, FAULT_SIG_ENC_BUTTON, STS_IO_MP_BUTTON },
+		{ FAULT_EVT_TOUCH, FAULT_SIG_TOUCH_INT, STS_IO_MP_TOUCH },
+		{ FAULT_EVT_PROX, FAULT_SIG_PROX_WAKE, STS_IO_MP_PROX },
+		{ FAULT_EVT_EN_FAULT, FAULT_SIG_V_ANT_EN_FAULT, STS_IO_MP_FAULT },
+		{ FAULT_EVT_PG_FAULT, FAULT_SIG_PG_POE, STS_IO_MP_FAULT },
+		{ FAULT_EVT_PG_RECOVER, FAULT_SIG_PG_POE, STS_IO_MP_FAULT },
+		{ FAULT_EVT_INA_ALERT, FAULT_SIG_INA_ALERT_OCXO, STS_IO_MP_FAULT },
+		{ FAULT_EVT_BKP_PG, FAULT_SIG_BKP_STM_PG, STS_IO_MP_FAULT },
+	};
+	unsigned int i;
+
+	for (i = 0U; i < (sizeof(k) / sizeof(k[0])); i++) {
+		sts_io_dispatch_t p =
+			plan_for(k[i].type, k[i].sig, FAULT_EDGE_ASSERT);
+
+		TEST_ASSERT_TRUE(p.post_mp);
+		TEST_ASSERT_EQUAL_UINT8(k[i].kind, p.mp_kind);
+	}
+}
+
+/**
+ * Both edges reach the channel, including the three the LOCAL consumers drop.
+ *
+ * The UI does not get a touch release and the log does not get an INA228 alert
+ * clearing or a power-good recovery at error level; the event channel gets all
+ * of them, because for a technician the missing half of a pair is the
+ * diagnosis — an alert that never clears is a rail still out of limits.
+ */
+static void test_both_edges_reach_the_event_channel(void)
+{
+	sts_io_dispatch_t p;
+
+	p = plan_for(FAULT_EVT_TOUCH, FAULT_SIG_TOUCH_INT, FAULT_EDGE_DEASSERT);
+	TEST_ASSERT_FALSE(p.post_ui);
+	TEST_ASSERT_TRUE(p.post_mp);
+	TEST_ASSERT_EQUAL_UINT8(0U, p.mp_edge);
+
+	p = plan_for(FAULT_EVT_INA_ALERT, FAULT_SIG_INA_ALERT_OCXO,
+		     FAULT_EDGE_DEASSERT);
+	TEST_ASSERT_FALSE(p.log);
+	TEST_ASSERT_FALSE(p.ina_reread);
+	TEST_ASSERT_TRUE(p.post_mp);
+	TEST_ASSERT_EQUAL_UINT8(0U, p.mp_edge);
+
+	p = plan_for(FAULT_EVT_PG_FAULT, FAULT_SIG_PG_POE, FAULT_EDGE_ASSERT);
+	TEST_ASSERT_TRUE(p.post_mp);
+	TEST_ASSERT_EQUAL_UINT8(1U, p.mp_edge);
+
+	p = plan_for(FAULT_EVT_PG_RECOVER, FAULT_SIG_PG_POE,
+		     FAULT_EDGE_DEASSERT);
+	TEST_ASSERT_TRUE(p.post_mp);
+	TEST_ASSERT_EQUAL_UINT8(0U, p.mp_edge);
+}
+
+/** An event type this dispatcher does not know stages nothing. */
+static void test_unknown_event_stages_no_mp_record(void)
+{
+	sts_io_dispatch_t p = plan_for((fault_evt_type_t)FAULT_EVT_TYPE_COUNT,
+				       FAULT_SIG_BUTTON_1, FAULT_EDGE_ASSERT);
+	uint8_t kind = 0xFFU;
+
+	TEST_ASSERT_FALSE(p.post_mp);
+	TEST_ASSERT_EQUAL_UINT8(0U, p.mp_kind);
+	TEST_ASSERT_EQUAL_UINT8(0U, p.mp_sub);
+	TEST_ASSERT_EQUAL_UINT8(0U, p.mp_edge);
+	TEST_ASSERT_FALSE(sts_io_mp_kind_for((uint8_t)FAULT_EVT_TYPE_COUNT,
+					     &kind));
+	TEST_ASSERT_EQUAL_UINT8(0xFFU, kind);
+}
+
 /* Every message template takes exactly one %s — io_scan.c passes exactly one
  * argument to all of them from a single call site. */
 static void test_every_message_takes_one_string_argument(void)
@@ -505,6 +615,11 @@ int main(void)
 	RUN_TEST(test_paired_events_keep_severity_and_wording_together);
 	RUN_TEST(test_power_events_all_land_in_the_pwr_subsystem);
 	RUN_TEST(test_unknown_event_is_fully_zeroed);
+
+	RUN_TEST(test_every_fault_event_type_is_staged);
+	RUN_TEST(test_event_types_map_to_the_right_kind);
+	RUN_TEST(test_both_edges_reach_the_event_channel);
+	RUN_TEST(test_unknown_event_stages_no_mp_record);
 	RUN_TEST(test_every_message_takes_one_string_argument);
 
 	RUN_TEST(test_overrun_allows_one_millisecond_of_slack);

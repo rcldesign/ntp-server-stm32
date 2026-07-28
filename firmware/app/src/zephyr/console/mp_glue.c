@@ -378,6 +378,15 @@ static void mp_armed_refresh(void)
 			(uint8_t)MP_CH_UBX,
 			(uint8_t)MP_CH_GNSS_PASS,
 			(uint8_t)MP_CH_RB_PASS,
+			/*
+			 * Not a tee, but the same problem: the event channel's
+			 * producers are the 1 kHz scan and every caller of
+			 * sts_alarm_set(), none of which may ask the engine —
+			 * under the lock — whether a technician is watching.
+			 * sts_mp_gnss_tee_armed() below tests a fixed mask, so
+			 * adding a channel here does not widen it.
+			 */
+			(uint8_t)MP_CH_EVENT,
 		};
 		size_t i;
 
@@ -1277,6 +1286,87 @@ static void mp_link_pending_apply_locked(void)
 	}
 }
 
+/* ------------------------------------------------- event channel 0x09 drain */
+
+/**
+ * Move staged board events into the engine. **Call with mp_lock held.**
+ *
+ * The consumer half of mp_events.c. It runs inside the wait sts_mp_tick()
+ * already spends rather than taking a lock of its own, which is why it costs
+ * the supervisor's pass budget nothing: sts_console.c's BUILD_ASSERT budgets
+ * exactly one *timed* lock wait per pass and this adds none. Contrast the
+ * passthrough drain, which cannot do this — its producers hand over whole COBS
+ * frames that go out through mp_stream_raw(), so it runs before the lock and
+ * refuses on contention.
+ *
+ * Called before mp_tick() so pump_events() puts this pass's events on the wire
+ * in this pass, not the next one.
+ *
+ * Subscription is read from the engine (mp_stream_is_sub) rather than from the
+ * lock-free armed mask, because here we hold the lock and can have the exact
+ * answer. With no subscriber the backlog is discarded: leaving it would fill
+ * the engine's queue with events nobody asked for and then deliver them, stale,
+ * to whoever subscribed next.
+ *
+ * Peek/post/pop rather than pop/post, so an event the engine's own queue has no
+ * room for stays staged for the next pass instead of being lost between two
+ * queues — the same shape as sts_mp_tunnel_drain().
+ */
+static void mp_event_drain_locked(void)
+{
+	unsigned int n;
+	uint32_t lost;
+
+	if (!mp_stream_is_sub(&mp.st, (uint8_t)MP_CH_EVENT)) {
+		sts_mp_event_purge();
+		return;
+	}
+
+	/*
+	 * The staging queue's overflow is the host's loss too, and key 8 of the
+	 * event record is the only field that says a gap happened. Folded before
+	 * the drain so the marker cannot arrive after the batch it belongs to.
+	 */
+	lost = sts_mp_event_take_drops();
+	if (lost != 0U) {
+		(void)mp_stream_event_drop_note(&mp.st, lost);
+	}
+
+	/*
+	 * MP_EVQ_LEN is the engine queue's depth and therefore the most this
+	 * loop could ever place there; the operative limits are the empty queue
+	 * and the engine's -ENOSPC. The cap is here so the work inside the lock
+	 * is bounded by a constant a reader can check rather than by two
+	 * conditions in the body.
+	 */
+	for (n = 0U; n < (unsigned int)MP_EVQ_LEN; n++) {
+		mp_ev_t ev;
+
+		/*
+		 * Room FIRST, and it is not an optimisation: mp_stream_event()
+		 * counts a drop on -ENOSPC, so offering an event to a full
+		 * engine queue and then keeping it staged would report a loss
+		 * to the host on key 8 for an event that was never lost. The
+		 * one counter a technician has to be able to believe is the one
+		 * that says "there is a gap here".
+		 */
+		if (mp_stream_event_count(&mp.st) >= (size_t)MP_EVQ_LEN) {
+			break;
+		}
+		if (!sts_mp_event_peek(&ev)) {
+			break;
+		}
+		if (mp_post_event(&mp, ev.kind, ev.sub, ev.id, ev.edge,
+				  ev.value, ev.mono_ms,
+				  (ev.text[0] != '\0') ? ev.text : NULL) != 0) {
+			/* Unreachable with the check above; if it ever happens,
+			 * stopping loses nothing that is not already counted. */
+			break;
+		}
+		sts_mp_event_pop();
+	}
+}
+
 /**
  * The shell bypass callback: every console byte, on the shell thread.
  *
@@ -1535,6 +1625,7 @@ void sts_mp_tick(void)
 	 * same leases one pass later for the weaker keepalive reason.
 	 */
 	mp_link_pending_apply_locked();
+	mp_event_drain_locked();
 	(void)mp_tick(&mp);
 	/*
 	 * The unconditional republication of the armed mask. Every other call
@@ -1700,6 +1791,29 @@ static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 	mp_engine_unlock();
 
 	{
+		uint32_t queued = 0U;
+		uint32_t staged = 0U;
+		uint32_t dropped = 0U;
+
+		sts_mp_event_stats(&queued, &staged, &dropped);
+		/*
+		 * The stage in front of the engine's queue: what the 1 kHz scan
+		 * and the alarm table handed over, and what would not fit.
+		 * Printed separately from the line above because they fail
+		 * separately — a non-zero `dropped` here means the board
+		 * produced edges faster than a 250 ms drain could move them,
+		 * which is a different diagnosis from an engine queue that
+		 * overflowed because the host stopped reading. Both are folded
+		 * into the number the host itself sees.
+		 */
+		shell_print(sh,
+			    "event stage  %u queued, %u staged, %u dropped "
+			    "(armed %u)",
+			    queued, staged, dropped,
+			    sts_mp_ch_armed((uint8_t)MP_CH_EVENT) ? 1U : 0U);
+	}
+
+	{
 		uint32_t gnss = 0U;
 		uint32_t rb = 0U;
 		uint32_t nmea = 0U;
@@ -1798,11 +1912,12 @@ int sts_mp_start(void)
 	fill_serial();
 
 	/*
-	 * The tee staging ring, before anything can be armed: the producers gate
+	 * The two staging rings, before anything can be armed: the producers gate
 	 * on sts_mp_ch_armed(), which stays 0 until mp_armed_refresh() runs under
-	 * the lock below, so binding it here cannot race a producer.
+	 * the lock below, so binding them here cannot race a producer.
 	 */
 	sts_mp_tunnel_init();
+	sts_mp_event_init();
 
 	for (i = 0U; i < 2U; i++) {
 		mp_reasm[i].buf = mp_reasm_buf[i];

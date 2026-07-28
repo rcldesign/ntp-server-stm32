@@ -413,6 +413,22 @@ module_deps(mp_telem mp pwrseq fault gnssmgr refsel ui web)
 # a downgrade there is exactly the change no reviewer would notice.
 module_deps(recovery_policy fault disc mp)
 
+# `mp_events` is the seam that puts the BOARD on MP channel 0x09: the 1 kHz
+# scan's edges and the alarm table's transitions. It exists because
+# `mp_stream` proved the encoder and `mp_rpc` proved mp_post_event(), and the
+# defect was upstream of both — nothing called mp_post_event() anywhere, so
+# --gc-sections dropped it and five of the channel's eight event kinds had no
+# producer in the image at all. A technician subscribed and heard silence
+# through a power-good drop, an alarm, a button press and a door opening.
+#
+# Every edge is a real one, no models. `fault` because each event starts as a
+# GPIOF/GPIOG word fed to fault_scan_input() and is debounced by the module that
+# owns the decision; `ina228` because sts_io_policy.h resolves an ALERT to its
+# monitor through ina228_rail_tbl[]; `mp` for the staging queue's record type,
+# the engine the drain feeds, the frame decoder that reads the wire back and the
+# CBOR reader that decodes it.
+module_deps(mp_events mp fault ina228 logring util)
+
 # ---------------------------------------------------------------------------
 # Dependency resolution
 # ---------------------------------------------------------------------------

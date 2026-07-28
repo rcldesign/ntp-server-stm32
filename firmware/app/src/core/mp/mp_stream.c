@@ -1098,6 +1098,24 @@ uint32_t mp_stream_event_dropped(const mp_stream_ctx_t *c)
 	return (c != NULL) ? c->evq_dropped : 0U;
 }
 
+int mp_stream_event_drop_note(mp_stream_ctx_t *c, uint32_t n)
+{
+	if (c == NULL) {
+		return -EINVAL;
+	}
+	if (n == 0U) {
+		return 0;
+	}
+	/* Saturate. See the header: the answer this counter gives is "were
+	 * events lost", and a wrap answers it wrongly. */
+	if (n > (UINT32_MAX - c->evq_dropped)) {
+		c->evq_dropped = UINT32_MAX;
+	} else {
+		c->evq_dropped += n;
+	}
+	return 0;
+}
+
 int mp_enc_events(mp_stream_ctx_t *c, uint32_t seq, uint64_t mono_ms,
 		  uint16_t max, uint8_t *buf, size_t cap)
 {

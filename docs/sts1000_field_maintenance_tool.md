@@ -439,9 +439,42 @@ bars, jamming/AGC indicators from MON-RF. The device renders the same skyplot lo
 
 ### 7.5 Log & event views (channels 4, 9)
 
-Live structured tail with subsystem/level filters, cursor-based history, export; the
-event channel carries edge-triggered faults, button presses, reed-switch changes,
-override vetoes, and diagnostic progress.
+Channel 4 is a live structured tail with subsystem/level filters, cursor-based history and
+export.
+
+Channel 9 is the edge stream. Each record is a CBOR batch of
+`[kind, sub, id, edge, value, mono_ms, text]` plus a `dropped` count (key 8). `edge` is
+1 for assert/press/enter and 0 for deassert/release/leave; `sub` is kind-specific and is
+what distinguishes a press from a long-press, or a power-good loss from its recovery.
+`mono_ms` is **when the edge happened**, not when the record was framed — the producers
+stage and the console supervisor drains up to 250 ms later, so the timestamps stay usable
+for ordering one event against another.
+
+| Kind | `id` | `sub` | Source |
+|---|---|---|---|
+| 0 `fault` | `fault_sig_t` | `fault_evt_type_t` — `EN_FAULT`, `PG_FAULT`, `PG_RECOVER`, `INA_ALERT`, `BKP_PG` | the 1 kHz GPIOF/GPIOG scan, after core/fault's per-class debounce |
+| 1 `button` | `fault_sig_t` (7 buttons + encoder switch) | `BUTTON`, `BUTTON_LONG`, `BUTTON_REPEAT` | same scan |
+| 2 `prox` | `PROX_WAKE` | `PROX` | reed switch, 50 ms debounce |
+| 3 `touch` | `TOUCH_INT` | `TOUCH` | touch controller INT. **Assert only** — core/fault does not raise a release event for the INT (`fault.c`, `FAULT_CLASS_TOUCH`), so there is none to carry |
+| 4 `alarm` | `fault_alarm_id_t` ≥ 32 | 0 | `sts_alarm_set()`, on a change of the alarm's active state. Ids 0–31 are the scanned signals and arrive as `fault` above, with the same numbering, so a transition is never reported twice |
+| 5 `override` | manifest object index | `mp_ovr_ev_t` — grant/release/expire/deadman | the override engine |
+| 6 `diag` | `(test << 8) \| step` | diag event | the diagnostic runner |
+| 7 `mode` | 0 | 0 | MP mode entered/left |
+
+Both edges of everything except `touch`. That is deliberate and is where the event view
+differs from the log: the log records an INA228 ALERT on assert only, and the panel UI is
+never told about a touch release, but for a technician the missing half of a pair *is* the
+diagnosis — an alert that never clears is a rail still out of limits.
+
+**Loss is always reported.** Producers stage into a bounded queue
+(`CONFIG_STS1000_MP_EVQ_STAGE`, 32 records) that the service tick drains; overflow drops
+the *newest* record — a cascade keeps its root cause — and the count is folded into key 8
+of the next batch, alongside the engine queue's own overflows. A gap on this channel is
+therefore never silent, which matters because the channel's whole value is that quiet
+means quiet. `mp status` prints both stages separately (`events`, `event stage`).
+
+The veto sub-kind of `override` is **not** currently raised: `mp_veto()` has no caller in
+the image.
 
 ---
 
@@ -671,16 +704,17 @@ code exists, is unit-tested on the host, and links into the signed image.
 | Manifest generator (build-time table → runtime JSON + content hash) | in tree |
 | Override engine (lease table, dead-man, revert hooks, veto reporting) | in tree |
 | Sessions + guard/interlock evaluation | in tree, authenticating through `sts_aaa_check()` so the credential store and lockout table are shared with the console and web planes; role floor enforced per §5.3, fail-closed at role `none` |
-| Streams (telemetry/PPS/log/event/mirror CBOR) | in tree. The **NMEA/UBX tees are not fed**: `sts_mp_tee_gnss/rb/nmea/ubx` have no producers — the calls belong in `platform/gnss.c` and `platform/rb_serial.c` and are not there yet, so a subscriber sees an open channel with no bytes |
+| Streams (telemetry/PPS/log/event/mirror CBOR) | in tree, and now **fed**. The NMEA/UBX/passthrough tees are driven from `platform/gnss.c` and `platform/rb_serial.c` (`sts_mp_tee_*`), and the event channel has producers for all five board-side kinds — see the row below |
+| Event channel 0x09 producers (§7.5) | in tree. `platform/io_scan.c` stages `fault`/`button`/`prox`/`touch` from the 1 kHz scan and `sts_app.c`'s `sts_alarm_set()` stages `alarm` on each active-state transition; `console/mp_events.c` is the bounded staging queue between them and the drain in `sts_mp_tick()`. Before this, **`mp_post_event()` had no caller and was absent from `zephyr.elf`** — five of the eight kinds could not be produced at all, and a subscriber heard silence through a power-good drop, an alarm, a button press and a door event. `touch` is assert-only because core/fault emits no release event; the `override` **veto** sub-kind is still unraisable (`mp_veto`/`mp_ovr_veto` have no caller) |
 | Tunnels (USART3) with firmware-suspend handshake | in tree. Opening the GNSS tunnel calls `sts_gnss_uart_suspend()`, so the receiver is genuinely stood down rather than merely alarmed about |
-| Tunnels (UART7, rubidium) | **not wired.** `rb_serial_tunnel_open()` exists (`platform/rb_serial.c:356`) but is private to the platform area and takes a mandatory **ISR-context** byte-sink callback; the only useful sink (`sts_mp_tee_rb` → `mp_stream_raw` → `uart_poll_out`) is not ISR-safe. Needs a ring plus a drain on `sts_mp_tick()`. Firmware still reads UART7 while the tunnel is "open" |
+| Tunnels (UART7, rubidium) | in tree, and the rubidium is **genuinely stood down**. The obstacle this row used to describe — `rb_serial_tunnel_open()` demands an **ISR-context** byte sink, and the only useful sink reached `uart_poll_out()` through a mutex — is what `console/mp_tunnel.c` was built to solve: the sink stages a bounded copy into a ring under a `k_spinlock` and `sts_mp_tick()` frames it on the console supervisor. While the tunnel holds UART7, `rb_serial_ops()`'s transmit path answers `-EBUSY` (`platform/rb_serial.c:316`), the RX ISR routes every octet to the tunnel sink instead of the parser ring (`:162`), and `rb_serial_set_mode()` refuses to throw the K1 relay (`:226`). Firmware is **not** a second reader or writer for the duration |
 | Diag runner + support bundle | in tree |
 | Multi-IC update orchestrator + inventory | in tree |
 | Capability manifest content | 91 objects (power 12, reference 7, gnss 5, panel 9, system 6, sensor 52); every object carries guard, caps, interlocks and its schematic designator |
 | Guard escalation | cumulative: G0 session → G1 `ack` → G2 typed device serial + interlocks → G3 phrase + hold |
 | Dead-man revert | keepalive TTL 5 s, checked by `sts_mp_tick()` on the **250 ms** console-supervisor loop (`sts_console.c:CONSOLE_PERIOD_MS`), so a keepalive that stops reverts in **≈5.25 s typical and ≤6.95 s worst case** — the earlier "100 ms tick, ≈5.1 s" described neither the tick nor the bound. The worst case is 5 s TTL plus the longest gap between two *successful* ticks, which `sts_console.c`'s `BUILD_ASSERT` pins at `(STS_MP_TICK_MISS_MAX + 1) × (250 + STS_MP_TICK_LOCK_MS) + STS_FWUPD_STEP_BUDGET_MS` = `6 × 300 + 150` = 1950 ms, inside `MP_TICK_MAX_MS` (2000). `session.close` and mode-exit revert **synchronously** on the request thread. **A link drop reverts synchronously when the engine is idle — the ordinary case — and otherwise within one tick**: `sts_mp_notify_link()` runs on the console supervisor, which shares its pass with `sts_mp_tick()`, and that pass has exactly one timed lock wait to spend, so the notification tries `K_NO_WAIT` and parks the transition rather than adding a second (which would take the worst case to 2250 ms and break the assertion it was meant to protect). `mp status` counts the deferrals. **BREAK does not revert anything, because no BREAK reaches this transport** (§2.1). 16 leases, no allocation |
 | Diag registry | 14 tests; a failing step does not abort the run (a technician wants the whole picture); verdicts rank PASS < SKIP < FAIL < ERROR |
-| Footprint | 53.1 KB flash, 23.0 KB RAM — **over the §11 aim** of 24 KB/12 KB. Structural to the scope (91 objects, 29 methods, 14 tests, 12 channels); the manifest's const string table is 13.2 KB and is the single biggest reduction lever (string pool, or the spec's optional gzip path) |
+| Footprint | 54.3 KB flash, 24.5 KB RAM — **over the §11 aim** of 24 KB/12 KB. Structural to the scope (91 objects, 29 methods, 14 tests, 12 channels); the manifest's const string table is 13.2 KB and is the single biggest reduction lever (string pool, or the spec's optional gzip path) |
 | Host application (§10) | **not started** — specified only |
 | SMP tunnel (ch 0x06) | framing implemented; **no MCUmgr binding yet** — frames arrive but are not dispatched |
 | `sec.attest` diag | present, returns not-supported until the ATECC binding is wired |
@@ -695,6 +729,15 @@ not. Verify a row by checking the symbol survives into `zephyr.elf`
 (`nm build/app/zephyr/zephyr.elf | grep -w <symbol>`), and treat a call chain that ends at
 a function nothing calls as **not** in tree. Anything the firmware has not landed is
 called out explicitly rather than implied.
+
+**When counting call sites in a disassembly, count `b`/`b.w` as well as `bl`.** A
+`return f(...)` compiles to a tail call — a branch, not a branch-with-link — so a scan
+that greps only for `bl` reports *zero* callers for live code. That nearly retired three
+correct rows of this table: `sts_mp_tee_rb`, `sts_mp_tunnel_set_rb` and
+`sts_mp_tunnel_set_gnss` are each reached only by `b.w`, and all three are present and
+called. An inlined callee leaves no relocation at all, so a missing call site is never on
+its own evidence of dead code — `nm` on the defining symbol is, which is why the rule
+above is written against the symbol table and not against the text.
 
 ---
 

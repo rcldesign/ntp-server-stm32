@@ -127,6 +127,8 @@ __weak void sts_store_note_log_cursor(uint32_t cursor)
  *   src/zephyr/console/sts_usb.c       sts_mp_notify_link(), from the VBUS/DTR
  *                                      sampler that is compiled either way
  *   src/zephyr/platform/gnss.c         the byte tees and their arming predicates
+ *   src/zephyr/platform/io_scan.c      sts_mp_post_event(), from the 1 kHz scan
+ *   src/zephyr/sts_app.c               sts_mp_post_event(), from sts_alarm_set()
  *
  * Same completeness rule as the storage set above, and the same reason: the set
  * below is complete against **every** function console/mp_glue.h declares, not
@@ -289,5 +291,61 @@ __weak void sts_mp_tunnel_drain(void)
 }
 
 __weak void sts_mp_tunnel_init(void)
+{
+}
+
+/*
+ * The event channel's producer and its drain. Same discipline as the tees: the
+ * producer drops the record (there is no engine to stage it for) and the
+ * counters report nothing rather than inventing activity, so `mp status` on a
+ * CONFIG_STS1000_MP=n build cannot claim a stream that does not exist.
+ */
+__weak void sts_mp_post_event(uint8_t kind, uint8_t sub, uint16_t id,
+			      uint8_t edge, int32_t value, uint32_t mono_ms,
+			      const char *text)
+{
+	ARG_UNUSED(kind);
+	ARG_UNUSED(sub);
+	ARG_UNUSED(id);
+	ARG_UNUSED(edge);
+	ARG_UNUSED(value);
+	ARG_UNUSED(mono_ms);
+	ARG_UNUSED(text);
+}
+
+__weak bool sts_mp_event_peek(mp_ev_t *out)
+{
+	ARG_UNUSED(out);
+	return false;
+}
+
+__weak void sts_mp_event_pop(void)
+{
+}
+
+__weak void sts_mp_event_purge(void)
+{
+}
+
+__weak uint32_t sts_mp_event_take_drops(void)
+{
+	return 0U;
+}
+
+__weak void sts_mp_event_stats(uint32_t *queued, uint32_t *staged,
+			       uint32_t *dropped)
+{
+	if (queued != NULL) {
+		*queued = 0U;
+	}
+	if (staged != NULL) {
+		*staged = 0U;
+	}
+	if (dropped != NULL) {
+		*dropped = 0U;
+	}
+}
+
+__weak void sts_mp_event_init(void)
 {
 }

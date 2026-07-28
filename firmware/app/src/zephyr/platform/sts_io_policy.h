@@ -25,10 +25,14 @@
  *      while the real fault goes unread.
  *
  *   2. What each debounced event turns into: a UI input, an I2C re-read
- *      request, a log line, or nothing. Two of those pairings are invertible in
- *      a way nothing would notice — an EN_FAULT recovery logged at ERR reads as
- *      a second failure, and a backup-rail "good" logged as "not good" is a
- *      field diagnosis pointed at the wrong end of the board.
+ *      request, a log line, an MP event-channel record, or nothing. Two of
+ *      those pairings are invertible in a way nothing would notice — an
+ *      EN_FAULT recovery logged at ERR reads as a second failure, and a
+ *      backup-rail "good" logged as "not good" is a field diagnosis pointed at
+ *      the wrong end of the board. And one of them was simply MISSING: nothing
+ *      staged an MP event at all, so a technician subscribed to channel 0x09
+ *      sat in silence through a power-good drop, an INA228 alert, a button
+ *      press and a door opening, with silence indistinguishable from health.
  *
  *   3. When a dropped-event burst is worth annunciating. The queue drops the
  *      newest event and counts it (fault.h); the counter is cleared once the
@@ -184,6 +188,31 @@ typedef enum {
 } sts_io_ui_type_t;
 
 /**
+ * MP event-channel kinds this dispatcher can raise (FMT §7.5, channel 0x09).
+ *
+ * Numerically identical to core/mp's mp_ev_kind_t and duplicated for the same
+ * reason the UI types above are: this header stays free of the cross-area API
+ * and of core/mp, whose stream header drags in the frame layer and core/quality
+ * for types nothing here uses. io_scan.c carries BUILD_ASSERTs against the real
+ * enum, so the copy cannot drift.
+ *
+ * The four kinds below are the ones a *scanned signal* can produce. MP_EV_ALARM
+ * is deliberately absent: an alarm is the debounced signal's entry in the alarm
+ * table, not the edge itself, and its assert/clear transition is decided in
+ * sts_alarm_set() — which is also the only producer of the software-raised ids
+ * (>= 32) that have no scanned signal at all. Raising it here as well would
+ * report the same transition twice under two kinds, and would do it without the
+ * expected-off masking that decides whether a scanned signal is a fault or a
+ * rail firmware deliberately gated off.
+ */
+typedef enum {
+	STS_IO_MP_FAULT = 0,  /**< PG drop/recover, INA alert, EN fault, BKP PG */
+	STS_IO_MP_BUTTON = 1, /**< panel button / encoder switch */
+	STS_IO_MP_PROX = 2,   /**< reed switch (door/magnet) */
+	STS_IO_MP_TOUCH = 3,  /**< touch controller INT */
+} sts_io_mp_kind_t;
+
+/**
  * Which log line an event produces.
  *
  * The wording is part of the decision, not decoration. "load switch X faulted"
@@ -232,7 +261,81 @@ typedef struct {
 	uint8_t log_level;
 	/** sts_io_msg_t; only with @p log. */
 	uint8_t msg;
+
+	/**
+	 * Stage a record on the MP event channel (FMT §7.5).
+	 *
+	 * Separate from @p post_ui and @p log because the three consumers want
+	 * different things and have historically been conflated:
+	 *
+	 *   - the UI wants only what it can act on, which is why a touch INT
+	 *     *release* is not posted to it (the FIFO has just been drained, so
+	 *     re-entering the touch path would read nothing);
+	 *   - the log wants the failures, which is why an INA228 ALERT is logged
+	 *     on assert only;
+	 *   - the event channel is an OBSERVATION stream for a technician with a
+	 *     Field Maintenance Tool attached, and for it the missing half of a
+	 *     pair is diagnosis: an ALERT that never clears is a rail still out
+	 *     of limits, and a power-good that never recovers is a rail that is
+	 *     gone rather than glitching. So it carries every edge core/fault
+	 *     hands over, both directions, for every event type.
+	 *
+	 * ONE ASYMMETRY IS NOT THIS DISPATCHER'S TO FIX, and it is stated here
+	 * so nobody documents an event the wire cannot carry: core/fault never
+	 * *emits* a touch release. fault.c's FAULT_CLASS_TOUCH dispatch pushes
+	 * an event only on the assert ("its release says nothing"), so
+	 * MP_EV_TOUCH is assert-only on the wire — not because the mapping below
+	 * suppresses it, but because there is nothing to map. The DEASSERT arm
+	 * of the mapping is correct and would carry a release the day core/fault
+	 * produces one; until then a stuck-low INT is diagnosed from the absence
+	 * of further assertions rather than from a missing release.
+	 */
+	bool post_mp;
+	/** sts_io_mp_kind_t; only with @p post_mp. */
+	uint8_t mp_kind;
+	/** mp_ev_t::sub — the fault_evt_type_t that produced it. */
+	uint8_t mp_sub;
+	/** mp_ev_t::edge; 1 = assert/press, 0 = deassert/release. */
+	uint8_t mp_edge;
 } sts_io_dispatch_t;
+
+/**
+ * Which MP event kind a debounced fault event belongs to.
+ *
+ * A total map over fault_evt_type_t, written as one switch with no default so
+ * that adding an event type to core/fault is a compiler diagnostic here rather
+ * than a signal that silently stops reaching the technician's tool. That is the
+ * exact failure this whole seam exists to fix.
+ *
+ * @retval true   @p out holds an sts_io_mp_kind_t.
+ * @retval false  @p type is not a scanned-signal event; nothing is staged.
+ */
+static inline bool sts_io_mp_kind_for(uint8_t type, uint8_t *out)
+{
+	switch ((fault_evt_type_t)type) {
+	case FAULT_EVT_BUTTON:
+	case FAULT_EVT_BUTTON_LONG:
+	case FAULT_EVT_BUTTON_REPEAT:
+		*out = (uint8_t)STS_IO_MP_BUTTON;
+		return true;
+	case FAULT_EVT_TOUCH:
+		*out = (uint8_t)STS_IO_MP_TOUCH;
+		return true;
+	case FAULT_EVT_PROX:
+		*out = (uint8_t)STS_IO_MP_PROX;
+		return true;
+	case FAULT_EVT_EN_FAULT:
+	case FAULT_EVT_PG_FAULT:
+	case FAULT_EVT_PG_RECOVER:
+	case FAULT_EVT_INA_ALERT:
+	case FAULT_EVT_BKP_PG:
+		*out = (uint8_t)STS_IO_MP_FAULT;
+		return true;
+	case FAULT_EVT_TYPE_COUNT:
+		break;
+	}
+	return false;
+}
 
 /**
  * Decide what a debounced fault event turns into.
@@ -337,6 +440,29 @@ static inline void sts_io_dispatch_plan(uint8_t type, uint8_t id, uint8_t edge,
 
 	default:
 		break;
+	}
+
+	/*
+	 * The MP event-channel decision, deliberately outside the switch above.
+	 *
+	 * Everything the scan debounces goes to the technician's tool, both
+	 * edges, with the fault_evt_type_t carried in `sub` so the host can tell
+	 * a press from a long-press from an auto-repeat and a power-good loss
+	 * from its recovery. The switch above is where the three *local*
+	 * consumers disagree with each other; there is no such disagreement
+	 * here, and expressing "all of them" as nine more identical case labels
+	 * would be nine more places for one to be forgotten — which is precisely
+	 * how four of this channel's eight event kinds came to have no producer.
+	 */
+	{
+		uint8_t kind = 0U;
+
+		if (sts_io_mp_kind_for(type, &kind)) {
+			out->post_mp = true;
+			out->mp_kind = kind;
+			out->mp_sub = type;
+			out->mp_edge = assert_edge ? 1U : 0U;
+		}
 	}
 }
 

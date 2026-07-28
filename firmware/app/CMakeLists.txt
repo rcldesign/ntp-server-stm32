@@ -193,13 +193,14 @@ if(CONFIG_STS1000_CONSOLE)
   # (src/zephyr/console/Kconfig.mp). It is an unauthenticated-to-role-`none`
   # physical-access surface, so CONFIG_STS1000_MP=n has to actually remove it
   # from the image rather than leave it compiled and merely unused — which
-  # means naming its two files here, because the area glob above would
-  # otherwise pull them back in. Their call sites resolve to the __weak no-ops
-  # in src/zephyr/platform/sts_area_weak.c.
+  # means naming its files here, because the area glob above would otherwise
+  # pull them back in. Their call sites resolve to the __weak no-ops in
+  # src/zephyr/platform/sts_area_weak.c.
   if(NOT CONFIG_STS1000_MP)
     list(REMOVE_ITEM sts1000_glue_console
          ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/console/mp_glue.c
-         ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/console/mp_tunnel.c)
+         ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/console/mp_tunnel.c
+         ${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/console/mp_events.c)
   endif()
   list(APPEND sts1000_glue_sources ${sts1000_glue_console})
 endif()

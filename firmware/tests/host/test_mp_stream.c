@@ -974,6 +974,44 @@ static void test_event_queue_and_drain(void)
 	}
 }
 
+/*
+ * Loss that happened BEFORE the queue still has to reach the host.
+ *
+ * The glue stages platform events (the 1 kHz scan, the alarm table) in a queue
+ * of its own because their producers may not take the engine lock, and that
+ * queue can overflow too. Key 8 is the only field on the wire that says a gap
+ * happened, so the drain folds its own losses into this counter — otherwise a
+ * technician sees a gap indistinguishable from a quiet board, which is the
+ * failure the whole channel exists to prevent.
+ */
+static void test_drop_note_reaches_the_wire(void)
+{
+	int len;
+
+	TEST_ASSERT_EQUAL_INT(-EINVAL, mp_stream_event_drop_note(NULL, 3U));
+	/* Nothing lost is not an event. */
+	TEST_ASSERT_EQUAL_INT(0, mp_stream_event_drop_note(&g_st, 0U));
+	TEST_ASSERT_EQUAL_UINT32(0U, mp_stream_event_dropped(&g_st));
+
+	TEST_ASSERT_EQUAL_INT(0, mp_stream_event_drop_note(&g_st, 3U));
+	TEST_ASSERT_EQUAL_INT(0, mp_stream_event_drop_note(&g_st, 4U));
+	TEST_ASSERT_EQUAL_UINT32(7U, mp_stream_event_dropped(&g_st));
+
+	/* Saturating, not wrapping: "were events lost" must not answer 0 at the
+	 * moment it matters most. */
+	TEST_ASSERT_EQUAL_INT(0, mp_stream_event_drop_note(&g_st, UINT32_MAX));
+	TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, mp_stream_event_dropped(&g_st));
+
+	/* And it is published with the batch, then cleared with it. */
+	g_st.evq_dropped = 5U;
+	TEST_ASSERT_EQUAL_INT(0, mp_stream_eventf(&g_st, (uint8_t)MP_EV_FAULT,
+						  0U, 1U, 1U, 0, 10U, NULL));
+	len = mp_enc_events(&g_st, 1U, 1U, 0U, g_buf, sizeof(g_buf));
+	TEST_ASSERT_TRUE(len > 0);
+	TEST_ASSERT_EQUAL_UINT64(5U, get_u(g_buf, (size_t)len, 8U));
+	TEST_ASSERT_EQUAL_UINT32(0U, mp_stream_event_dropped(&g_st));
+}
+
 static void test_event_queue_drops_the_newest(void)
 {
 	uint16_t i;
@@ -1524,6 +1562,7 @@ int main(void)
 	RUN_TEST(test_event_kind_names);
 	RUN_TEST(test_event_queue_and_drain);
 	RUN_TEST(test_event_queue_drops_the_newest);
+	RUN_TEST(test_drop_note_reaches_the_wire);
 	RUN_TEST(test_event_batch_shrinks_to_fit);
 	RUN_TEST(test_event_argument_validation);
 

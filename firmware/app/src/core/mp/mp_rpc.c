@@ -3924,12 +3924,13 @@ int mp_stream_raw(mp_ctx_t *c, uint8_t ch, const uint8_t *data, size_t len)
 }
 
 int mp_post_event(mp_ctx_t *c, uint8_t kind, uint8_t sub, uint16_t id,
-		  uint8_t edge, int32_t value, const char *text)
+		  uint8_t edge, int32_t value, uint32_t mono_ms,
+		  const char *text)
 {
 	if (c == NULL) {
 		return -EINVAL;
 	}
-	return mp_stream_eventf(&c->st, kind, sub, id, edge, value, mp_now(c),
+	return mp_stream_eventf(&c->st, kind, sub, id, edge, value, mono_ms,
 				text);
 }
 

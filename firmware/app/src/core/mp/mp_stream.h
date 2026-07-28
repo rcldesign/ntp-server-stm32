@@ -446,6 +446,27 @@ size_t mp_stream_event_count(const mp_stream_ctx_t *c);
 uint32_t mp_stream_event_dropped(const mp_stream_ctx_t *c);
 
 /**
+ * Account for @p n events that were lost *before* they reached this queue.
+ *
+ * The platform-side producers of MP_EV_FAULT/BUTTON/PROX/TOUCH/ALARM run on
+ * threads that may not take the engine lock (a 1 kHz scan, the discipline loop),
+ * so the glue stages them in a bounded queue of its own and drains it here. A
+ * staging overflow is, from the host's point of view, exactly the same loss as
+ * an overflow of this queue — and key 8 of the event record is the only field
+ * that says a loss happened at all. Without this the host would see a gap
+ * indistinguishable from a quiet board, which is the failure the whole channel
+ * exists to prevent.
+ *
+ * Saturating rather than wrapping: the counter answers "were events lost", and
+ * a wrap to a small number (or to zero) would answer it wrongly at exactly the
+ * moment it matters most.
+ *
+ * @retval 0        Recorded.
+ * @retval -EINVAL  @p c is NULL.
+ */
+int mp_stream_event_drop_note(mp_stream_ctx_t *c, uint32_t n);
+
+/**
  * Drain up to @p max queued events into one CBOR record.
  *
  * Events are only removed from the queue once they are encoded, so a buffer too

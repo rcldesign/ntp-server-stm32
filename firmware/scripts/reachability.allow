@@ -305,7 +305,6 @@ auth_stats_reset                       # TODO: wire it up or give it a reason
 cfg_get_f32                            # TODO: wire it up or give it a reason
 cfg_set_migrations                     # TODO: wire it up or give it a reason
 disc_state                             # TODO: wire it up or give it a reason
-fault_alarm_get                        # TODO: wire it up or give it a reason
 fault_evt_count                        # TODO: wire it up or give it a reason
 fault_expected_off_mask                # TODO: wire it up or give it a reason
 fault_relay_disqualify_mask            # TODO: wire it up or give it a reason
@@ -340,7 +339,6 @@ mp_mirror_dirty                        # TODO: wire it up or give it a reason
 mp_obj_count_in                        # TODO: wire it up or give it a reason
 mp_ovr_set_phrase                      # TODO: wire it up or give it a reason
 mp_ovr_veto                            # TODO: wire it up or give it a reason
-mp_post_event                          # TODO: wire it up or give it a reason
 mp_shell_byte                          # no-caller. The MP_MAGIC_ENTER matcher. Its one in-app caller is sts_mp_shell_tap(), which is itself absent for the structural reason recorded on that entry below; the two live or die together and test_mp_rpc.c is the sole exerciser
 mp_veto                                # TODO: wire it up or give it a reason
 ntp_ef_iter_init                       # TODO: wire it up or give it a reason

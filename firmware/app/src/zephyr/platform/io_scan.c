@@ -37,6 +37,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#include "console/mp_glue.h"
+#include "mp/mp_stream.h"
 #include "zephyr/platform/platform.h"
 #include "zephyr/platform/sts_io_policy.h"
 #include "zephyr/sts_app.h"
@@ -57,6 +59,17 @@ BUILD_ASSERT((int)STS_IO_UI_BUTTON_LONG == (int)STS_INPUT_BUTTON_LONG);
 BUILD_ASSERT((int)STS_IO_UI_BUTTON_REPEAT == (int)STS_INPUT_BUTTON_REPEAT);
 BUILD_ASSERT((int)STS_IO_UI_TOUCH == (int)STS_INPUT_TOUCH);
 BUILD_ASSERT((int)STS_IO_UI_PROX == (int)STS_INPUT_PROX);
+
+/*
+ * The same guard for the MP event kinds, which sts_io_policy.h mirrors for the
+ * same reason. A drift here would not fail: it would report every power-good
+ * drop to the Field Maintenance Tool as a button press, on a channel whose
+ * whole purpose is telling a technician which of those happened.
+ */
+BUILD_ASSERT((int)STS_IO_MP_FAULT == (int)MP_EV_FAULT);
+BUILD_ASSERT((int)STS_IO_MP_BUTTON == (int)MP_EV_BUTTON);
+BUILD_ASSERT((int)STS_IO_MP_PROX == (int)MP_EV_PROX);
+BUILD_ASSERT((int)STS_IO_MP_TOUCH == (int)MP_EV_TOUCH);
 
 static const struct device *const gpiof = DEVICE_DT_GET(DT_NODELABEL(gpiof));
 static const struct device *const gpiog = DEVICE_DT_GET(DT_NODELABEL(gpiog));
@@ -202,6 +215,25 @@ static void io_scan_dispatch(const fault_evt_t *evt)
 		 */
 		sts_log(plan.log_sub, plan.log_level, sts_io_msg_fmt(plan.msg),
 			fault_sig_name((fault_sig_t)evt->id));
+	}
+
+	if (plan.post_mp) {
+		/*
+		 * The Field Maintenance Tool's event channel (FMT §7.5). This
+		 * costs one atomic read when no technician is subscribed and a
+		 * ~48-byte copy under a spinlock when one is: mp_glue.h's
+		 * contract is that the call never takes the engine mutex, never
+		 * touches the console UART and never blocks, which is what lets
+		 * it sit inside a 1 ms scan slot at all.
+		 *
+		 * evt->mono_ms, not "now": the drain runs on the console
+		 * supervisor up to 250 ms later, and an event stream whose
+		 * timestamps are drain times cannot be used to order a button
+		 * press against the rail collapse it was a response to.
+		 */
+		sts_mp_post_event(plan.mp_kind, plan.mp_sub, evt->id,
+				  plan.mp_edge, 0, evt->mono_ms,
+				  fault_sig_name((fault_sig_t)evt->id));
 	}
 }
 

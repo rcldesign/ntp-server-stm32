@@ -618,11 +618,27 @@ int mp_tick(mp_ctx_t *c);
 int mp_stream_raw(mp_ctx_t *c, uint8_t ch, const uint8_t *data, size_t len);
 
 /**
- * Post an event onto channel 0x09. Events are queued and drained by mp_tick(),
- * so this is safe from a scan or housekeeping context.
+ * Post an event onto channel 0x09. Events are queued and drained by mp_tick().
+ *
+ * @p mono_ms is the moment the event HAPPENED, not the moment it was posted,
+ * and it is a parameter for that reason. The producers of the five platform
+ * event kinds — the 1 kHz GPIOF/GPIOG scan, the discipline loop, housekeeping —
+ * run on threads that may not take the engine lock, so the glue stages their
+ * events and drains them here up to a console-supervisor pass later. Stamping
+ * the record at post time would put a 250 ms-wide uncertainty on every edge and
+ * make the one thing this channel is for — correlating a button press with a
+ * rail collapse, or an alarm with the log line that explains it — unreliable.
+ *
+ * Everything else is as mp_stream_eventf(): the event is copied, so no argument
+ * has to outlive the call.
+ *
+ * @retval 0        Queued.
+ * @retval -EINVAL  @p c is NULL, or @p kind is not an mp_ev_kind_t.
+ * @retval -ENOSPC  The queue is full; the new event is dropped and counted.
  */
 int mp_post_event(mp_ctx_t *c, uint8_t kind, uint8_t sub, uint16_t id,
-		  uint8_t edge, int32_t value, const char *text);
+		  uint8_t edge, int32_t value, uint32_t mono_ms,
+		  const char *text);
 
 /**
  * Firmware veto of an override (FMT §5.4). Reverts the lease and reports it on
