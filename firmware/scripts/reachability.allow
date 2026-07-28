@@ -156,7 +156,6 @@ atecc_random                           # deferred: ATECC-backed TLS key is a per
 atecc_sha256                           # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
 atecc_sign                             # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
 atecc_sleep                            # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_stats_get                        # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
 atecc_verify_extern                    # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
 atecc_write_zone                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
 sts_atecc_ecdh                         # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
@@ -164,7 +163,6 @@ sts_atecc_present                      # deferred: ATECC-backed TLS key is a per
 sts_atecc_pubkey                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
 sts_atecc_random                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
 sts_atecc_sign                         # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-sts_atecc_stats                        # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
 sts_atecc_verify                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
 ldap_build_starttls                    # deferred: StartTLS needs an in-place socket upgrade Zephyr's TLS type cannot do
 

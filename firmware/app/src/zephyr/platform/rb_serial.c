@@ -73,6 +73,7 @@
 
 #include "fwupd/rb_fwupd.h"
 #include "zephyr/platform/platform.h"
+#include "zephyr/platform/sts_rbguard.h"
 #include "zephyr/sts_app.h"
 
 LOG_MODULE_REGISTER(sts_rb_serial, CONFIG_STS1000_LOG_LEVEL);
@@ -92,6 +93,9 @@ static const struct gpio_dt_spec rb_lock =
 	GPIO_DT_SPEC_GET(ZEPHYR_USER, rb_lock_gpios);
 static const struct gpio_dt_spec rb_pwr_en =
 	GPIO_DT_SPEC_GET(ZEPHYR_USER, rb_pwr_en_gpios);
+/* Read-only here; pwrseq_exec.c owns driving it. See rb_serial_rail_up(). */
+static const struct gpio_dt_spec rb_vcc_gate =
+	GPIO_DT_SPEC_GET(ZEPHYR_USER, rb_vcc_gate_gpios);
 
 /* ------------------------------------------------------------------ state -- */
 
@@ -246,15 +250,38 @@ uint8_t rb_serial_mode(void)
 	return rb.mode;
 }
 
+/*
+ * "Can the FE-5680A answer right now?" — and that is BOTH pins, not one.
+ *
+ * RB_PWR_EN (pwrseq step 8.12) brings up the buck. RB_VCC_GATE (step 8.14) is
+ * what actually connects VCC_RB to the FE, and between them sit the soft-start
+ * delay, the rail-safety window, two digipot write/verify rows with up to two
+ * retries each, and the operating-rail ramp — see pwrseq.c:920-993. Throughout
+ * all of that the buck is live and the rubidium is not connected.
+ *
+ * Testing RB_PWR_EN alone therefore answered "yes" during a window in which
+ * nothing could possibly reply, and rb_fwupd_probe() takes that as licence to
+ * conclude RB_CAP_NONE — "absent, check the cable" — and latch it for the rest
+ * of the uptime, because cap returns to UNKNOWN only in rb_fwupd_init().
+ *
+ * 6fe50ca closed the RB_PWR_EN-low half of that and its commit message claimed
+ * the whole of it. It did not: this half is the longer one, and an
+ * unauthenticated G0 `fw.inventory` lands in it during ordinary bring-up.
+ * Found by an adversarial reviewer refuting the fix, not by the fix's tests.
+ *
+ * Gating on both pins also keeps the probe one-shot. While the gate is shut the
+ * probe declines immediately (-EHOSTDOWN, no bus traffic); once it is open,
+ * silence is a real verdict worth latching. Without that, a probe that never
+ * latched would let one unauthenticated inventory hold the MP engine lock for
+ * rb_fwupd's full 1 s reply timeout, repeatably.
+ */
 bool rb_serial_rail_up(void)
 {
-	int v;
-
 	if (!rb.ready) {
 		return false;
 	}
-	v = gpio_pin_get_dt(&rb_pwr_en);
-	return (v == 1);
+	return sts_rb_serial_rail_up(gpio_pin_get_dt(&rb_pwr_en),
+				     gpio_pin_get_dt(&rb_vcc_gate));
 }
 
 bool rb_serial_locked(void)

@@ -266,6 +266,51 @@ static inline bool sts_rb_lock_from_level(int level, bool active_low)
 	return active_low ? (level == 0) : (level == 1);
 }
 
+/**
+ * Whether the FE-5680A can answer on UART7 right now — BOTH pins, not one.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THIS IS A FUNCTION AND NOT TWO gpio_pin_get_dt() CALLS IN rb_serial.c
+ * ---------------------------------------------------------------------------
+ *
+ * RB_PWR_EN (pwrseq step 8.12, pwrseq.c:920) brings up the buck. RB_VCC_GATE
+ * (step 8.14, pwrseq.c:986) is what connects VCC_RB to the FE. Between them sit
+ * the soft-start delay, the rail-safety window, two digipot write/verify rows
+ * with up to two retries each, and the operating-rail ramp. The buck is live
+ * throughout and the rubidium is not connected.
+ *
+ * rb_serial_rail_up() tested RB_PWR_EN alone, so it answered "yes" during a
+ * window in which nothing could reply — and rb_fwupd_probe() takes a rail-up
+ * silence as licence to conclude RB_CAP_NONE, "absent, check the cable", and
+ * latch it for the rest of the uptime (cap returns to UNKNOWN only in
+ * rb_fwupd_init()). An unauthenticated G0 `fw.inventory` lands in that window
+ * during ordinary bring-up.
+ *
+ * A previous fix closed the RB_PWR_EN-low half of this and its commit message
+ * claimed all of it. It did not — this half is the longer one. An adversarial
+ * reviewer found that by reading pwrseq's step table against the predicate;
+ * no test could have, because the predicate lived in Zephyr glue and the core
+ * test fixture models the ANSWER (a single `rail` bool) rather than the pins.
+ * That is why the decision now lives here, where a host test can hold it.
+ *
+ * Gating on both pins also keeps the probe one-shot, which matters: while the
+ * gate is shut the probe declines with no bus traffic at all, and once it is
+ * open, silence is a real verdict worth latching. A probe that merely stopped
+ * latching would leave one unauthenticated inventory able to hold the MP engine
+ * lock for rb_fwupd's full 1 s reply timeout, repeatably.
+ *
+ * @param pwr_en_level    gpio_pin_get_dt(RB_PWR_EN): 0, 1, or negative.
+ * @param vcc_gate_level  gpio_pin_get_dt(RB_VCC_GATE): 0, 1, or negative.
+ *
+ * A read error on either pin is NOT up, for the same reason a read error is not
+ * locked above: concluding "the rubidium is absent" from a pin nobody could
+ * read is a verdict this code has no business reaching.
+ */
+static inline bool sts_rb_serial_rail_up(int pwr_en_level, int vcc_gate_level)
+{
+	return (pwr_en_level == 1) && (vcc_gate_level == 1);
+}
+
 #ifdef __cplusplus
 }
 #endif

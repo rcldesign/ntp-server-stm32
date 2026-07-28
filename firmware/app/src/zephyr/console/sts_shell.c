@@ -1944,6 +1944,41 @@ static int cmd_cal_tempco_fit(const struct shell *sh, size_t argc, char **argv)
 /* sec — AAA lockouts and the NTS cookie keyring                             */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * The ATECC608B's own transport counters.
+ *
+ * This exists because conf/security.conf declines CONFIG_I2C_STATS on the
+ * stated grounds that "core/atecc already counts wakes, retries, CRC errors and
+ * bus errors itself (atecc_stats_t), and sts_atecc_stats() surfaces them —
+ * which is the same information without the system-wide cost". That trade was
+ * false: sts_atecc_stats() had no caller, so it was dropped from the image and
+ * the information was available nowhere. Either the justification or this
+ * command had to exist; the command is the cheaper of the two, and it is the
+ * one an operator debugging a marginal I2C1 pull-up actually wants.
+ */
+static int cmd_sec_atecc(const struct shell *sh, size_t argc, char **argv)
+{
+	atecc_stats_t s;
+	int rc;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	rc = sts_atecc_stats(&s);
+	if (rc != 0) {
+		shell_error(sh, "secure element not available (%d)", rc);
+		return rc;
+	}
+
+	shell_print(sh, "commands      %u", s.commands);
+	shell_print(sh, "retries       %u", s.retries);
+	shell_print(sh, "crc errors    %u", s.crc_errors);
+	shell_print(sh, "status errors %u", s.status_errors);
+	shell_print(sh, "wakes         %u  (failed %u)", s.wakes, s.wake_fails);
+	shell_print(sh, "bus errors    %u", s.bus_errors);
+	return 0;
+}
+
 static int cmd_sec_aaa(const struct shell *sh, size_t argc, char **argv)
 {
 	auth_stats_t s;
@@ -2080,6 +2115,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(
 		      cmd_sec_passwd, 2, 0),
 	SHELL_CMD_ARG(attest, NULL, "secure-element report and anti-rollback state",
 		      cmd_sec_attest, 1, 0),
+	SHELL_CMD_ARG(atecc, NULL, "ATECC608B transport counters (wakes, retries, CRC)",
+		      cmd_sec_atecc, 1, 0),
 	SHELL_CMD_ARG(aaa, NULL, "AAA counters (checks, lockouts, per-backend)",
 		      cmd_sec_aaa, 1, 0),
 	SHELL_CMD_ARG(unlock, NULL, "unlock <user> - clear a brute-force lockout",

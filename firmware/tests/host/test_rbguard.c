@@ -351,6 +351,74 @@ static void test_a_read_error_is_never_locked(void)
 
 /* -------------------------------------------------------------------- main - */
 
+/* ===================================================================== *
+ *  "Can the FE answer" is BOTH pins
+ *
+ *  CLAUDE.md states the order: "assert RB_PWR_EN (PB7) -> soft-start ->
+ *  verify VCC_RB on INA228 U44 (0x47) -> then assert RB_VCC_GATE (PB1) to
+ *  connect the FE". So there is a window in which the buck is live and the
+ *  rubidium is not attached, and rb_serial_rail_up() used to report that
+ *  window as "up" because it read RB_PWR_EN alone.
+ *
+ *  Why that mattered: rb_fwupd_probe() treats rail-up silence as a verdict
+ *  and latches RB_CAP_NONE — "absent, check the cable" — for the rest of
+ *  the uptime, since cap returns to UNKNOWN only in rb_fwupd_init(). An
+ *  unauthenticated G0 `fw.inventory` lands in that window during ordinary
+ *  bring-up.
+ *
+ *  A previous commit fixed the RB_PWR_EN-low half and claimed the whole of
+ *  it. No test could have caught the rest: the predicate lived in Zephyr
+ *  glue and test_rb_fwupd.c's fixture models the ANSWER (one `rail` bool)
+ *  rather than the pins. That is why the decision moved here.
+ * ===================================================================== */
+
+static void test_the_rail_is_up_only_when_both_pins_are(void)
+{
+	/* The whole defect in one row: buck on, FE not yet connected. */
+	TEST_ASSERT_FALSE_MESSAGE(
+		sts_rb_serial_rail_up(1, 0),
+		"RB_PWR_EN high with RB_VCC_GATE low is the pwrseq window "
+		"between steps 8.12 and 8.14 — the FE cannot answer");
+
+	TEST_ASSERT_TRUE(sts_rb_serial_rail_up(1, 1));
+	TEST_ASSERT_FALSE(sts_rb_serial_rail_up(0, 0));
+	TEST_ASSERT_FALSE(sts_rb_serial_rail_up(0, 1));
+}
+
+static void test_an_unreadable_pin_is_never_up(void)
+{
+	/*
+	 * Same reasoning as test_a_read_error_is_never_locked: concluding "the
+	 * rubidium is absent" from a pin nobody could read is a verdict this
+	 * code has no business reaching. gpio_pin_get_dt() returns negative on
+	 * error.
+	 */
+	TEST_ASSERT_FALSE(sts_rb_serial_rail_up(-EIO, 1));
+	TEST_ASSERT_FALSE(sts_rb_serial_rail_up(1, -EIO));
+	TEST_ASSERT_FALSE(sts_rb_serial_rail_up(-EIO, -EIO));
+	/* Not "non-zero means asserted" — a negative errno is not a level. */
+	TEST_ASSERT_FALSE(sts_rb_serial_rail_up(-1, -1));
+}
+
+static void test_no_input_but_both_asserted_reports_up(void)
+{
+	/* Exhaustive over the plausible domain, so a future "clever" encoding
+	 * cannot sneak a third truthy value through. */
+	int probes[] = { -2, -1, 0, 1, 2, 7 };
+	size_t i, j;
+
+	for (i = 0U; i < (sizeof(probes) / sizeof(probes[0])); i++) {
+		for (j = 0U; j < (sizeof(probes) / sizeof(probes[0])); j++) {
+			bool want = (probes[i] == 1) && (probes[j] == 1);
+
+			TEST_ASSERT_EQUAL_MESSAGE(
+				want,
+				sts_rb_serial_rail_up(probes[i], probes[j]),
+				"only level 1 on both pins is 'up'");
+		}
+	}
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -380,6 +448,10 @@ int main(void)
 
 	RUN_TEST(test_rb_lock_polarity_is_configurable_both_ways);
 	RUN_TEST(test_a_read_error_is_never_locked);
+
+	RUN_TEST(test_the_rail_is_up_only_when_both_pins_are);
+	RUN_TEST(test_an_unreadable_pin_is_never_up);
+	RUN_TEST(test_no_input_but_both_asserted_reports_up);
 
 	return UNITY_END();
 }
