@@ -62,6 +62,10 @@
 
 #include "host_sha256.h"
 
+#ifndef STS_APP_SRC_DIR
+#error "STS_APP_SRC_DIR must be defined by tests/host/CMakeLists.txt"
+#endif
+
 #define SERIAL "STS1000-000042"
 
 #define ADMIN_USER "root"
@@ -229,6 +233,33 @@ static fwupd_target_ops_t ops_readonly(fake_t *t)
 /* ========================================================================= */
 /* The mp_fwupd_t port — the same shape as fwupd_glue.c's                    */
 /* ========================================================================= */
+
+/*
+ * What these shims are, and what they are not.
+ *
+ * They are the PORT CONTRACT: everything mp_rpc.c's `fw.*` handlers are
+ * entitled to assume of any mp_fwupd_t, written out as a working
+ * implementation. Paged inventory with snapshot semantics, a duplicate flag
+ * that separates a discarded retransmit from a write, a chunk ceiling that is
+ * the smaller of the orchestrator's and the target's. Everything below this
+ * block tests mp_rpc.c against that contract, and a handler that leans on
+ * something the contract does not promise fails here.
+ *
+ * They are NOT fwupd_glue.c. The shipped port is a Zephyr translation unit —
+ * k_mutex, k_uptime_get(), the MCUboot image API — so it cannot be linked into
+ * a host suite, and three of its decisions are therefore re-implemented here.
+ * A shim that drifted from the shipped one would leave this whole file testing
+ * an implementation that does not exist. Section 9 closes that: it reads
+ * fwupd_glue.c and asserts its CONFORMANCE to the same three decisions, so the
+ * pair — contract here, conformance there — covers the seam from both sides.
+ *
+ * What neither pins is the locking. fw_lock()/fw_unlock() wrap every shipped
+ * mpfw_* body, and the reason mpfw_data() decides `duplicate` at the seam at
+ * all is that reading `done` and writing it must happen inside ONE acquisition.
+ * There is no host seam for a Zephyr mutex, so that ordering is reviewed rather
+ * than tested — the source scan can see that the two calls are adjacent and in
+ * order, not that they are mutually exclusive with another thread.
+ */
 
 static fwupd_ctx_t g_fw;
 static fwupd_inv_row_t g_inv[FWUPD_COMP__COUNT];
@@ -2593,6 +2624,272 @@ static void test_a_wired_port_never_answers_notsup(void)
 	}
 }
 
+/* ========================================================================= */
+/* 9. the shipped port conforms to the contract the shims above describe      */
+/* ========================================================================= */
+
+#define GLUE_SRC "zephyr/console/fwupd_glue.c"
+
+/**
+ * fwupd_glue.c, read once.
+ *
+ * Three of the decisions this suite drives are made on the far side of the
+ * port, in a Zephyr translation unit no host suite can link, and are
+ * re-implemented by the mpfw_* shims above. Testing a shim against itself is a
+ * closed loop, so the shipped source is read instead — the way test_web_sky.c
+ * reads ui/sts_ui.c for a define it cannot include.
+ *
+ * Absent, truncated or duplicated is a FAILURE and never a tolerated default: a
+ * scan that cannot find its subject must not report agreement with it.
+ */
+static const char *glue_src(size_t *len)
+{
+	static char src[256U * 1024U];
+	static size_t n;
+	static bool loaded;
+
+	if (!loaded) {
+		char path[512];
+		FILE *f;
+
+		(void)snprintf(path, sizeof(path), "%s/%s", STS_APP_SRC_DIR,
+			       GLUE_SRC);
+		f = fopen(path, "rb");
+		TEST_ASSERT_NOT_NULL_MESSAGE(f, path);
+		n = fread(src, 1U, sizeof(src) - 1U, f);
+		(void)fclose(f);
+		/* A file that exactly filled the buffer was probably truncated,
+		 * and a short span cannot be told from a decision that moved. */
+		TEST_ASSERT_TRUE_MESSAGE(n < (sizeof(src) - 1U),
+					 GLUE_SRC " did not fit the scan buffer");
+		TEST_ASSERT_TRUE_MESSAGE(n > 4096U,
+					 GLUE_SRC " is implausibly small");
+		src[n] = '\0';
+		loaded = true;
+	}
+	*len = n;
+	return src;
+}
+
+/** A half-open [begin, end) octet range of glue_src(). */
+typedef struct {
+	size_t begin;
+	size_t end;
+} glue_span_t;
+
+static unsigned int count_in(const glue_span_t *s, const char *needle)
+{
+	size_t n = 0U;
+	const char *src = glue_src(&n);
+	size_t k = strlen(needle);
+	unsigned int hits = 0U;
+	size_t i;
+
+	for (i = s->begin; (k != 0U) && ((i + k) <= s->end); i++) {
+		if (memcmp(&src[i], needle, k) == 0) {
+			hits++;
+		}
+	}
+	return hits;
+}
+
+/** Offset of the first @p needle in @p s; callers assert the count first. */
+static size_t offset_in(const glue_span_t *s, const char *needle)
+{
+	size_t n = 0U;
+	const char *src = glue_src(&n);
+	size_t k = strlen(needle);
+	size_t i;
+
+	for (i = s->begin; (i + k) <= s->end; i++) {
+		if (memcmp(&src[i], needle, k) == 0) {
+			return i;
+		}
+	}
+	TEST_FAIL_MESSAGE(needle);
+	return 0U;
+}
+
+/**
+ * The body of the function whose definition begins with @p sig, as a span.
+ *
+ * Scoped on purpose. `out->chunk_max = FWUPD_CHUNK_MAX;` occurring anywhere
+ * else in the file must not satisfy a claim about mpfw_status(), or the scan
+ * would go on agreeing after the decision had been moved out from under it.
+ *
+ * Braces inside comments and string literals are skipped: one of those would
+ * close the body early, silently shrinking the span until the decision fell
+ * outside it — the same false green by a different route.
+ */
+static glue_span_t glue_fn_body(const char *sig)
+{
+	size_t n = 0U;
+	const char *src = glue_src(&n);
+	size_t k = strlen(sig);
+	glue_span_t s = { 0U, 0U };
+	size_t at = 0U;
+	unsigned int hits = 0U;
+	int depth = 0;
+	size_t i;
+	char msg[192];
+
+	(void)snprintf(msg, sizeof(msg),
+		       "cannot locate the body of `%s` in " GLUE_SRC " — fix "
+		       "this scan, do not delete the assertion it feeds",
+		       sig);
+
+	for (i = 0U; (i + k) <= n; i++) {
+		if (memcmp(&src[i], sig, k) == 0) {
+			hits++;
+			at = i;
+		}
+	}
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, hits, msg);
+
+	while ((at < n) && (src[at] != '{')) {
+		at++;
+	}
+	TEST_ASSERT_TRUE_MESSAGE(at < n, msg);
+	s.begin = at + 1U;
+
+	for (i = at; i < n; i++) {
+		char ch = src[i];
+
+		if ((ch == '/') && ((i + 1U) < n) && (src[i + 1U] == '*')) {
+			i += 2U;
+			while (((i + 1U) < n) && !((src[i] == '*') &&
+						   (src[i + 1U] == '/'))) {
+				i++;
+			}
+			i++; /* the loop's own i++ then steps past the '/' */
+			continue;
+		}
+		if ((ch == '/') && ((i + 1U) < n) && (src[i + 1U] == '/')) {
+			while ((i < n) && (src[i] != '\n')) {
+				i++;
+			}
+			continue;
+		}
+		if ((ch == '"') || (ch == '\'')) {
+			while (++i < n) {
+				if (src[i] == '\\') {
+					i++;
+				} else if (src[i] == ch) {
+					break;
+				}
+			}
+			continue;
+		}
+		if (ch == '{') {
+			depth++;
+		} else if (ch == '}') {
+			depth--;
+			if (depth == 0) {
+				s.end = i;
+				break;
+			}
+		}
+	}
+	TEST_ASSERT_TRUE_MESSAGE(s.end > s.begin, msg);
+	return s;
+}
+
+/**
+ * The shipped glue takes its inventory snapshot on the same condition.
+ *
+ * test_inventory_reads_each_component_once_per_walk() proves mp_rpc.c pages a
+ * snapshot rather than re-probing — but only of mpfw_inventory() in THIS file.
+ * A shipped glue that re-probed per page would triple the bus traffic on four
+ * buses and cost three UBX round trips per page of a list nobody is acting on,
+ * and this suite would stay green throughout.
+ */
+static void test_the_glue_probes_the_board_once_per_walk_too(void)
+{
+	glue_span_t b = glue_fn_body("static int mpfw_inventory(");
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "if ((first == 0U) || (g.inv_n == 0U)) {"),
+		"fwupd_glue.c mpfw_inventory() no longer snapshots on exactly "
+		"`first == 0 || the snapshot is empty`, so mpfw_inventory() in "
+		"this file — which every inventory test above runs against — no "
+		"longer describes the shipped port. Update the shim to match, "
+		"then fix this scan; do not delete the assertion it feeds");
+}
+
+/**
+ * The shipped glue still decides `duplicate` from a `done` read BEFORE the write.
+ *
+ * fwupd_data() returns 0 both for a chunk it wrote and for a retransmit it
+ * discarded, and `next_off` is identical in the two cases. Only "did `done`
+ * move" separates them, so reading it afterwards would make every write look
+ * like a duplicate and every duplicate like a write — a tool would be told its
+ * retransmits landed. The ORDER is the decision, which is why the offsets are
+ * compared: a scan that only proved both statements exist would pass on a
+ * version that read `done` after the write.
+ */
+static void test_the_glue_reads_done_before_the_write_it_compares_it_with(void)
+{
+	glue_span_t b = glue_fn_body("static int mpfw_data(");
+	const char *progress = "(void)fwupd_progress(&g.fw, &before);";
+	const char *write = "fwupd_data(&g.fw,";
+	const char *decide = "*duplicate = (*next_off == before.done);";
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, progress),
+		"fwupd_glue.c mpfw_data() no longer samples fwupd_progress() "
+		"into `before`; mpfw_data() in this file still does, so the "
+		"duplicate-flag tests above no longer describe the shipped "
+		"port. Update the shim to match, then fix this scan");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, write),
+		"fwupd_glue.c mpfw_data() no longer calls fwupd_data() exactly "
+		"once, so this scan cannot order it against the `done` read. "
+		"Update mpfw_data() in this file to match, then fix this scan");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, decide),
+		"fwupd_glue.c mpfw_data() no longer derives `duplicate` from "
+		"`*next_off == before.done`; mpfw_data() in this file still "
+		"does. Update the shim to match, then fix this scan");
+
+	TEST_ASSERT_TRUE_MESSAGE(
+		offset_in(&b, progress) < offset_in(&b, write),
+		"fwupd_glue.c mpfw_data() now reads `done` AFTER fwupd_data() "
+		"has moved it, so every write reads as a duplicate and every "
+		"duplicate as a write. Either that is a defect in the shipped "
+		"glue, or mpfw_data() in this file has to be reordered to "
+		"match it — decide which before touching this scan");
+}
+
+/**
+ * The shipped glue still advertises the smaller of the two chunk ceilings.
+ *
+ * FWUPD_CHUNK_MAX is the orchestrator's outer bound; a target may have a
+ * tighter one. Publishing the outer bound when a target is narrower tells a
+ * tool it may send chunks that will be refused, which reads as a flaky link
+ * rather than as a limit — and dropping the clamp entirely leaves the port
+ * advertising a ceiling that the transfer does not enforce.
+ */
+static void test_the_glue_clamps_chunk_max_to_the_narrower_target(void)
+{
+	glue_span_t b = glue_fn_body("static int mpfw_status(");
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "out->chunk_max = FWUPD_CHUNK_MAX;"),
+		"fwupd_glue.c mpfw_status() no longer starts from "
+		"FWUPD_CHUNK_MAX; mpfw_status() in this file does, so "
+		"test_the_mp_layers_own_chunk_ceiling() is testing a ceiling "
+		"the board does not publish. Update the shim to match, then "
+		"fix this scan; do not delete the assertion it feeds");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "if ((m != 0U) && (m < out->chunk_max)) {"),
+		"fwupd_glue.c mpfw_status() no longer takes the MINIMUM of the "
+		"orchestrator's ceiling and the target's; mpfw_status() in this "
+		"file does, so "
+		"test_a_targets_own_chunk_ceiling_is_advertised_and_enforced() "
+		"no longer describes the shipped port. Update the shim to "
+		"match, then fix this scan");
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -2650,6 +2947,10 @@ int main(void)
 	RUN_TEST(test_the_restore_ledger_balances_on_every_exit);
 	RUN_TEST(test_an_unwired_port_answers_notsup_on_every_method);
 	RUN_TEST(test_a_wired_port_never_answers_notsup);
+
+	RUN_TEST(test_the_glue_probes_the_board_once_per_walk_too);
+	RUN_TEST(test_the_glue_reads_done_before_the_write_it_compares_it_with);
+	RUN_TEST(test_the_glue_clamps_chunk_max_to_the_narrower_target);
 
 	return UNITY_END();
 }

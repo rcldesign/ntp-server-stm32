@@ -665,9 +665,27 @@ static void test_orient_true_north_from_a_site_declination(void)
 	TEST_ASSERT_TRUE(hd.valid);
 	TEST_ASSERT_EQUAL_INT16(hd.heading_ddeg, o.heading_ddeg);
 
-	/* A verified orientation is what makes the renderer actually rotate. */
-	TEST_ASSERT_EQUAL_INT32(sky_rotation_ddeg(&o),
-				sky_rotation_ddeg(&o)); /* stable */
+	/*
+	 * The sample is named for what it is: the board faces north, so the
+	 * tilt-compensated heading is 0.0 degrees, exactly. Pinning the literal
+	 * is the point — a heading that had drifted off north would mean either
+	 * this helper is misnamed or the e-compass maths moved, and both are
+	 * findings rather than something to absorb into a tolerance.
+	 */
+	TEST_ASSERT_EQUAL_INT16(0, o.heading_ddeg);
+
+	/*
+	 * A verified orientation is what makes the renderer actually rotate:
+	 * true north goes to the top of the plot, so the plot turns by
+	 * -(heading + declination) folded into [0, 3600). Facing north with a
+	 * -10.5 degree declination, that is +10.5 degrees.
+	 *
+	 * Written as the literal 105 rather than as sky_rotation_ddeg()'s own
+	 * expression, because a copy of the formula agrees with whatever the
+	 * formula becomes — including with a sign error that would spin the
+	 * plot 21 degrees the wrong way.
+	 */
+	TEST_ASSERT_EQUAL_INT32(105, sky_rotation_ddeg(&o));
 	TEST_ASSERT_TRUE(sky_rotation_ddeg(&o) >= 0);
 	TEST_ASSERT_TRUE(sky_rotation_ddeg(&o) < 3600);
 }
@@ -1024,6 +1042,20 @@ static void test_band_mask_clamps_an_overhanging_hint(void)
 	h = hint((uint8_t)UI_HINT_SKYPLOT, 18u, 0u, 10u);
 	TEST_ASSERT_EQUAL_UINT32(((uint32_t)1u << 18) | ((uint32_t)1u << 19),
 				 sts_sky_band_mask(&h, 20u));
+
+	/*
+	 * A surface with more rows than the mask has bits. `rows` is a uint8_t,
+	 * so this is representable and a taller panel would reach it — and it is
+	 * the only case where the `r < 32u` guard is load-bearing: in both cases
+	 * above `rows <= 32`, so `r < rows` stops the loop first and dropping
+	 * the shift guard leaves them green while `1u << 32` is undefined.
+	 */
+	h = hint((uint8_t)UI_HINT_SKYPLOT, 30u, 0u, 40u);
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		((uint32_t)1u << 30) | ((uint32_t)1u << 31),
+		sts_sky_band_mask(&h, 40u),
+		"rows at or past bit 31 must be dropped, not shifted out of a "
+		"32-bit word");
 }
 
 static void sig_sv(ui_sv_t *sv, uint8_t sys, uint8_t id, int8_t el,
@@ -1250,6 +1282,20 @@ static void test_no_compass_still_draws_the_plot(void)
 	 * badge, NOT refuse to draw.
 	 */
 	static uint8_t px[AB_MAX_SIDE * AB_MAX_SIDE];
+	/*
+	 * The three real satellites, in the order sv[] is filled below, each
+	 * with the palette entry it must paint. sky_colour_for_sys() is static
+	 * to skyplot.c, so this table is an independent statement of the
+	 * mapping rather than a copy of the one under test.
+	 */
+	static const struct {
+		uint8_t sys;
+		uint8_t colour;
+	} want[3] = {
+		{ (uint8_t)UI_GNSS_GPS, (uint8_t)SKY_C_GPS },
+		{ (uint8_t)UI_GNSS_GALILEO, (uint8_t)SKY_C_GALILEO },
+		{ (uint8_t)UI_GNSS_GLONASS, (uint8_t)SKY_C_GLONASS },
+	};
 	sts_sky_layout_t l;
 	sts_sky_orient_in_t in;
 	sky_orient_t o;
@@ -1257,8 +1303,9 @@ static void test_no_compass_still_draws_the_plot(void)
 	ui_sv_t sv[4];
 	uint8_t n = 0u;
 	uint8_t reason;
-	uint32_t markers = 0u;
+	uint32_t markers[3] = { 0u, 0u, 0u };
 	uint32_t badge = 0u;
+	unsigned int k;
 	int32_t x;
 	int32_t y;
 
@@ -1305,15 +1352,64 @@ static void test_no_compass_still_draws_the_plot(void)
 
 				if (v == (uint8_t)SKY_C_BADGE) {
 					badge++;
-				} else if (v == (uint8_t)SKY_C_GPS ||
-					   v == (uint8_t)SKY_C_GALILEO ||
-					   v == (uint8_t)SKY_C_GLONASS) {
-					markers++;
+					continue;
+				}
+				for (k = 0u; k < 3u; k++) {
+					if (v == want[k].colour) {
+						markers[k]++;
+					}
 				}
 			}
 		}
 	}
-	TEST_ASSERT_TRUE(markers > 0u);
+	/*
+	 * Per constellation, not as one total. Three GPS markers and no Galileo
+	 * satisfies a single count just as well as one of each, and "the Galileo
+	 * satellites stopped being drawn" is precisely the silent loss an
+	 * operator reads as a poor sky rather than as a rendering fault. No
+	 * pixel area is asserted: how many pixels a marker occupies is
+	 * rasterisation detail, and test_skyplot.c owns it against goldens.
+	 */
+	TEST_ASSERT_TRUE_MESSAGE(markers[0] > 0u, "no GPS marker was drawn");
+	TEST_ASSERT_TRUE_MESSAGE(markers[1] > 0u, "no Galileo marker was drawn");
+	TEST_ASSERT_TRUE_MESSAGE(markers[2] > 0u, "no GLONASS marker was drawn");
+
+	/*
+	 * And each is where the receiver put it, in its own colour — a count
+	 * cannot tell three markers in the right places from three in the wrong
+	 * ones, nor a palette whose constellations have been transposed.
+	 *
+	 * Filled versus hollow is §6.3's "contributing to the timing solution"
+	 * distinction, so the two used satellites are read at their centre and
+	 * the unused one on its rim: its centre is background BY DESIGN, and
+	 * asserting the colour there would be asserting the bug.
+	 */
+	for (k = 0u; k < 3u; k++) {
+		int32_t rad = sky_marker_radius(sv[k].cno_dbhz);
+		char msg[72];
+
+		TEST_ASSERT_EQUAL_UINT8(want[k].sys, sv[k].sys);
+		TEST_ASSERT_EQUAL_INT(0, sky_place(&c, sv[k].elev_deg,
+						   sv[k].azim_deg,
+						   sky_rotation_ddeg(&o), &x,
+						   &y));
+		(void)snprintf(msg, sizeof(msg),
+			       "sv[%u] (sys %u) is not on the canvas in its own "
+			       "colour",
+			       k, (unsigned int)sv[k].sys);
+		if (sv[k].used) {
+			TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+				want[k].colour, sky_canvas_get(&c, x, y), msg);
+		} else {
+			TEST_ASSERT_EQUAL_UINT8_MESSAGE(
+				want[k].colour,
+				sky_canvas_get(&c, x + rad, y), msg);
+			TEST_ASSERT_NOT_EQUAL_UINT8_MESSAGE(
+				want[k].colour, sky_canvas_get(&c, x, y),
+				"a satellite that is not in the solution must "
+				"be drawn hollow");
+		}
+	}
 
 	/* And the badge is up. */
 	TEST_ASSERT_EQUAL_UINT32(2u * (uint32_t)c.w, badge);

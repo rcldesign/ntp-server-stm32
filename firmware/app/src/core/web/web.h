@@ -269,7 +269,7 @@ int web_json_bool(const web_json_val_t *v, bool *out);
  * Copy a STR value out, resolving escapes, NUL-terminated.
  *
  * \uXXXX is decoded to UTF-8; a lone surrogate is rejected (-EILSEQ) rather
- * than emitted, and an embedded NUL ( ) is rejected for the same reason a
+ * than emitted, and an embedded NUL (U+0000) is rejected for the same reason a
  * NUL in a header is: it makes the string mean two different things to two
  * different consumers.
  *
