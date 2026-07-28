@@ -76,6 +76,29 @@ extern "C" {
  * whose frame and COBS buffers are ~2.1 KB of locals on their own. 8 KB keeps a
  * comfortable margin over the ~4 KB that chain needs; a stack overflow on the
  * management path would be a crash on a security-relevant route.
+ *
+ * Measured statically against the linked image (call-graph walk over
+ * objdump -d, summing push/vpush/sub-sp along the deepest path), rooted
+ * separately at each edge the walk cannot cross:
+ *
+ *   worker_loop -> handle_conn -> serve_request -> wss_accept_key -> sha1_block
+ *                                                            1220 B
+ *   pv_gnss -> sts_net_cfg_bool -> cfg_get -> schema_lower_bound
+ *                                                             656 B  (indirect,
+ *                                                     via the provider table)
+ *   mbedtls_ssl_handshake -> ... -> mbedtls_psa_mac_compute
+ *                                                            1464 B  (indirect,
+ *                                                     via the socket vtable)
+ *
+ * An HTTPS request that runs the handshake and then the deepest provider is
+ * therefore on the order of 2.5-3 KiB against 8192. The ~4 KB estimate above
+ * came from the MCP-bridge chain and remains the larger of the two; neither is
+ * close to the limit.
+ *
+ * The method follows resolved direct `bl` only, so it excludes exception
+ * frames and any indirect edge not hand-rooted above — a lower bound produced
+ * by an upper-bound technique. It says 8192 is not arbitrary; it does not say
+ * it is sufficient. CONFIG_THREAD_ANALYZER on hardware is what settles that.
  */
 #ifndef STS_WEB_STACK_SIZE
 #define STS_WEB_STACK_SIZE 8192

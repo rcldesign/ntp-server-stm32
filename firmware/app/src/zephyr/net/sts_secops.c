@@ -77,6 +77,31 @@ BUILD_ASSERT(STS_AAA_WORKER_STACK >= 8192,
 #endif
 
 /*
+ * The measurement that assert asked for, so 8192 is no longer precedent.
+ *
+ * Static bound by call-graph analysis over the linked image (objdump -d,
+ * summing push/vpush/sub-sp per frame along the deepest path). Two roots,
+ * because the deep half is reached through Zephyr's socket vtable and no
+ * direct-call walk crosses it:
+ *
+ *   aaa_worker ... sts_aaa_check -> sts_log -> vsnprintf -> __dtoa_engine
+ *                                                            652 B
+ *   mbedtls_ssl_handshake ... -> psa_mac_compute -> mbedtls_psa_mac_compute
+ *                                                           1464 B
+ *
+ * An LDAPS bind runs both on this stack, so ~2.1 KiB against 8192 — a little
+ * under 4x margin. The plain-LDAP/RADIUS/TACACS+ path is the 652 B half alone
+ * plus ldap_bind's 496 B, well inside the 3072 the non-TLS build uses.
+ *
+ * WHAT THIS IS NOT. It follows resolved direct `bl` only, so it excludes
+ * exception frames, any indirect call I have not hand-rooted, and alloca or
+ * VLA growth. It is therefore a LOWER bound made from an upper-bound method:
+ * good enough to say 8192 is not arbitrary, not good enough to say it is
+ * sufficient. CONFIG_THREAD_ANALYZER against a live bind on hardware is still
+ * what settles it, and that remains on the bench list.
+ */
+
+/*
  * Priority 14 — the console/housekeeping band (ARCHITECTURE.md §6). Below the
  * web workers (12) so a login lookup never preempts a request that is already
  * being served, and never anywhere near the timing path.
