@@ -2739,14 +2739,23 @@ static int m_fw_data(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 		 * `progress.state` reports.
 		 */
 		mp_fail(c, code, (rc == -EPROTO) ? "offset" : "chunk");
-		if ((rc != -EINVAL) && (rc != -EPROTO) && (rc != -ENOSPC) &&
-		    (rc != -EPERM)) {
+		if ((rc != -EINVAL) && (rc != -EPROTO) && (rc != -ENOSPC)) {
 			/*
+			 * Everything except the three recoverable refusals ends
+			 * the ownership record.
+			 *
 			 * A target error or a hash-stream failure has already run
 			 * finish(), so the session is over and no further chunk can
-			 * be accepted. The recoverable refusals — a bad length, a
-			 * gap, a chunk past the end — leave the transfer open at
-			 * `next_off` so the tool can rewind.
+			 * be accepted. -EPERM belongs on that side too, and used to
+			 * be excluded by mistake: fwupd_data() answers it when the
+			 * state is no longer TRANSFER or the target has gone, which
+			 * is precisely "the session you owned has ended" — holding
+			 * `fw_sid` afterwards makes the tool the owner of nothing.
+			 *
+			 * The three that survive — a bad length, a gap, a chunk past
+			 * the end — leave the transfer open at `next_off` so the tool
+			 * can rewind, which is the whole reason the refusal still
+			 * carries it.
 			 */
 			fw_forget(c);
 		}

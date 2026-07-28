@@ -46,6 +46,7 @@
 #include "cfg/cfg.h"
 #include "console/mp_glue.h"
 #include "console/sts_console.h"
+#include "console/sts_fwupd_seam_policy.h"
 #include "logring/logring.h"
 #include "storage/sts_store.h"
 #include "zephyr/sts_app.h"
@@ -82,20 +83,41 @@ LOG_MODULE_REGISTER(sts_console, CONFIG_STS1000_LOG_LEVEL);
  * ticks is (STS_MP_TICK_MISS_MAX + 1) whole loop passes, each of which can run
  * long by the lock timeout. That interval is what MP_TICK_MAX_MS bounds.
  *
- * As built: (5 + 1) * (250 + 50) = 1800 <= 2000 ms.
+ * THE PREMISE HAS TWO HALVES, and both are load-bearing:
  *
- * ONE lock wait per pass is the premise, and sts_mp_tick() has two things that
- * want the engine: the passthrough drain and the tick proper. That is why
- * sts_mp_stream_raw() — the drain's only route in — tries with K_NO_WAIT rather
- * than a timeout. If it is ever given one, this becomes
- * (5 + 1) * (250 + 50 + 50) = 2100 ms and the dead-man's revert deadline is no
- * longer met; change the numbers here in the same edit or do not make it.
+ *   ONE LOCK WAIT PER PASS. sts_mp_tick() has two things that want the engine:
+ *   the passthrough drain and the tick proper. That is why sts_mp_stream_raw()
+ *   — the drain's only route in — tries with K_NO_WAIT rather than a timeout,
+ *   and why sts_fwupd_step() does the same with the orchestrator's mutex. If
+ *   either is ever given a timeout instead, this becomes
+ *   (5 + 1) * (250 + 50 + 50) + 150 = 2250 ms and the dead-man's revert
+ *   deadline is no longer met; change the numbers here in the same edit or do
+ *   not make it.
+ *
+ *   BOUNDED WORK PER PASS. Not waiting on a lock does not make a call short. A
+ *   pass runs long if anything in it blocks, sleeps or writes flash, and
+ *   sts_fwupd_step() can do the last two: fwupd_step() fires the step and
+ *   transfer-idle timeouts, which reach finish() -> t->restore(). Reachable
+ *   today, with the allow bitmap as it is: `fw.begin` for the STM32 image
+ *   followed by silence puts an internal-flash trailer erase and write on this
+ *   thread 60 s later. Not reachable today, but one allow bit away: the GNSS
+ *   restore path holds two GPIO pulses with 20 ms of k_msleep. So the budget
+ *   carries an explicit work term rather than pretending the pass is free, and
+ *   fwupd_glue.c measures the real figure and complains above it. A k_msleep()
+ *   inside anything called from this loop is the thing to look for.
+ *
+ * The work term is added once rather than per pass, because core/fwupd runs
+ * restore() exactly once per prepared session; STS_FWUPD_PASS_BUDGET_MS's own
+ * comment argues that choice where it can be challenged.
+ *
+ * As built: (5 + 1) * (250 + 50) + 150 = 1950 <= 2000 ms.
  */
-BUILD_ASSERT(((STS_MP_TICK_MISS_MAX + 1U) *
-	      ((unsigned int)CONSOLE_PERIOD_MS + STS_MP_TICK_LOCK_MS)) <=
+BUILD_ASSERT(STS_FWUPD_PASS_BUDGET_MS(CONSOLE_PERIOD_MS, STS_MP_TICK_LOCK_MS,
+				      STS_MP_TICK_MISS_MAX,
+				      STS_FWUPD_STEP_BUDGET_MS) <=
 		     MP_TICK_MAX_MS,
-	     "console period + MP tick-miss budget exceeds the override dead-man "
-	     "deadline (MP_TICK_MAX_MS)");
+	     "console period + MP tick-miss budget + the fwupd step's bounded "
+	     "work exceeds the override dead-man deadline (MP_TICK_MAX_MS)");
 
 static struct k_thread console_thread;
 static K_THREAD_STACK_DEFINE(console_stack, CONSOLE_STACK);
@@ -197,12 +219,18 @@ static void console_thread_entry(void *p1, void *p2, void *p3)
 		/*
 		 * The orchestrator's pump: what advances a transfer whose
 		 * target needs time (an erase, a receiver reboot, a VERIFY)
-		 * rather than answering inline. It does NOT spend the pass's one
-		 * lock wait — sts_fwupd_step() takes the fwupd mutex with
-		 * K_NO_WAIT and returns on contention, because contention here
-		 * means a request is inside the orchestrator right now, which is
-		 * exactly when nothing needs pumping. So the BUILD_ASSERT above
-		 * still holds with sts_mp_tick() as the only waiter.
+		 * rather than answering inline, and what fires its timeouts.
+		 *
+		 * It does NOT spend the pass's one lock wait — sts_fwupd_step()
+		 * takes the fwupd mutex with K_NO_WAIT and returns on
+		 * contention, because contention here means a request is inside
+		 * the orchestrator right now, which is exactly when nothing
+		 * needs pumping. So sts_mp_tick() remains the only waiter.
+		 *
+		 * It can still run long, though: a fired timeout reaches
+		 * restore(), which writes internal flash. That is the second
+		 * term in the BUILD_ASSERT above, STS_FWUPD_STEP_BUDGET_MS, and
+		 * sts_fwupd_step() measures itself against it.
 		 */
 		(void)sts_fwupd_step();
 

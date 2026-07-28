@@ -217,7 +217,23 @@ typedef struct {
 	 * left sitting in safeboot.
 	 */
 	int (*restore)(void *user, bool after_failure);
-	/** Poll a long-running step: 0 done, -EAGAIN busy, negative on error. */
+	/**
+	 * Poll a long-running step: 0 done, -EAGAIN busy, negative on error.
+	 *
+	 * **No target on this board defines it, and that is the intended state.**
+	 * All four vtables in console/fwupd_glue.c answer their prepare(),
+	 * transfer() and verify() calls inline: the MCUboot slot engine and the
+	 * two serial clients block for the milliseconds they need rather than
+	 * returning -EAGAIN. So fwupd_step()'s poll branch and fwupd_begin()'s
+	 * "stay in PREPARE" branch are unreachable in this image.
+	 *
+	 * Kept, rather than deleted, because it is the only shape that lets a
+	 * future target with a genuinely long step — a receiver erase measured
+	 * in tens of seconds — avoid parking the console supervisor for the
+	 * duration, and removing it would mean rebuilding the PREPARE/VERIFY
+	 * states around it later. Both branches are covered by tests/host, which
+	 * is what stops them rotting while nothing in the image uses them.
+	 */
 	int (*poll)(void *user);
 	/** Largest chunk this target accepts; 0 means FWUPD_CHUNK_MAX. */
 	uint32_t (*chunk_max)(void *user);

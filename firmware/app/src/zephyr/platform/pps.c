@@ -347,6 +347,27 @@ BUILD_ASSERT(STS_GNSS_PULSE_OBS >= 2,
 	     "history; see sts_app.h sts_gnss_pulse_evidence_t");
 
 /*
+ * The depth above is only half the requirement, and the other half lives in
+ * another file.
+ *
+ * Depth 2 is sufficient BECAUSE platform/gnss.c republishes `evidence` at least
+ * once per receiver message. It is a sample, not a queue: each publish
+ * overwrites both slots with the newest two records gnssmgr holds. Publish more
+ * slowly than 1 Hz and the record that was in force at a capture can be evicted
+ * before it is ever published, at which point disc_name_pulse() finds no
+ * candidate on the correct side, epoch_valid stays false, and pulses go unnamed
+ * — which is exactly the symptom this history was added to cure, returning with
+ * nothing failing anywhere.
+ *
+ * STS_GNSS_EVIDENCE_MAX_PERIOD_MS states the bound in terms of the depth, and
+ * gnss.c BUILD_ASSERTs its tick against it, so a cadence change is a compile
+ * error there rather than a silent regression here.
+ */
+BUILD_ASSERT(STS_GNSS_EVIDENCE_MAX_PERIOD_MS >= STS_GNSS_EVIDENCE_SRC_PERIOD_MS,
+	     "the pulse-naming history is too shallow for the receiver's "
+	     "message rate; see sts_app.h STS_GNSS_EVIDENCE_MAX_PERIOD_MS");
+
+/*
  * Name the pulse a capture belongs to, and the sawtooth that belongs to it.
  *
  * The rule is core/disc's disc_name_pulse() — the same positive ToW match the

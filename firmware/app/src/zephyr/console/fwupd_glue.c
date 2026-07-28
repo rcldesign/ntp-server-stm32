@@ -13,37 +13,55 @@
  *                       reimplemented.
  *   RB_FE5680A       -> core/fwupd/rb_fwupd over rb_serial_ops() (UART7).
  *   GNSS_ZED_F9T     -> core/fwupd/ubx_fwupd over USART3. **See the seam note
- *                       below: the transport binding is not wired yet.**
+ *                       below: the transport is wired, the opcodes are not
+ *                       verified, and the allow bitmap is shut.**
  *   read-only parts  -> identity reads, where a bus is reachable from here.
  *
  * ---------------------------------------------------------------------------
- * The USART3 seam (the one thing not finished, stated plainly)
+ * The USART3 seam, as built
  * ---------------------------------------------------------------------------
  *
  * ubx_fwupd needs exclusive raw byte access to USART3 plus GPS_SAFEBOOT_N and
  * GPS_RST_N. USART3 is owned by src/zephyr/platform/gnss.c: it holds the ISR,
  * the parser and the gnssmgr instance. Handing the port to a firmware update
- * therefore needs a suspend/resume pair *in that file*, which is outside this
- * change's file boundary.
- *
- * Rather than reach into another area's file, the seam is declared here as four
- * __weak hooks that default to -ENOTSUP. The image links today, the GNSS row is
- * inventoried (its version is read through the ordinary gnssmgr path), and
- * fwupd_begin(FWUPD_COMP_GNSS_ZED_F9T) returns -ENOTSUP with an explicit log
- * line rather than half-driving a receiver.
- *
- * To finish it, platform/gnss.c implements these four and nothing else changes:
+ * therefore needs a suspend/resume pair *in that file*, so the seam is declared
+ * here as five __weak hooks that default to -ENOTSUP and platform/gnss.c
+ * overrides them:
  *
  *   int sts_gnss_uart_suspend(void)      stop the ISR/parser, drop gnssmgr into
  *                                        GNSSMGR_ST_FW_UPDATE via
  *                                        gnssmgr_fw_enter()
  *   int sts_gnss_uart_resume(void)       restart, and gnssmgr_fw_exit() to
  *                                        re-run the configuration walk
- *   int sts_gnss_uart_raw_tx(buf, len)   poll-out bytes
+ *   int sts_gnss_uart_raw_tx(buf, len)   poll-out bytes; returns the COUNT
  *   int sts_gnss_uart_raw_rx(buf, cap)   drain received bytes, non-blocking
+ *   int sts_gnss_uart_set_baud(baud)     reconfigure USART3
  *
- * gnssmgr_fw_enter()/gnssmgr_fw_exit() already exist in core (this change added
- * them) and already do the config-restore half of spec §8.5.
+ * **All five are implemented** (platform/gnss.c, "USART3 seam" section). The
+ * weak defaults survive only for builds without the platform area, and
+ * gnss_transport() below is what tells the two cases apart at runtime.
+ *
+ * What is still shut is one layer up: ubx_fwupd_cfg_t::opcodes_verified is
+ * false (the loader protocol is a reconstruction, see ubx_fwupd.h) AND
+ * FWUPD_COMP_GNSS_ZED_F9T is absent from the allow bitmap. Either gate alone
+ * refuses fwupd_begin(); see sts_fwupd_init() for why neither is opened here
+ * and why there is no runtime path that opens them.
+ *
+ * ---------------------------------------------------------------------------
+ * Two transmit conventions meet here, and this file is where they are reconciled
+ * ---------------------------------------------------------------------------
+ *
+ * core/fwupd's ubx_fwupd_ops_t::tx is specified "0 on success". The platform
+ * sink is sts_gnss_uart_raw_tx(), which returns the OCTET COUNT — and has to
+ * keep returning it, because mp_tunnel.c's host->device path reports that count
+ * to the maintenance host (mp_tunnel.c already documents the disagreement from
+ * its own side). The conversion therefore belongs at the adapter, and it is
+ * sts_fwupd_seam_policy.h's sts_fwupd_tx_from_count().
+ *
+ * The rubidium side does NOT need it: rb_serial.c's op_tx() already answers 0
+ * on success, which is what rb_fwupd_ops_t::tx is specified to do. Stated so
+ * that the asymmetry between ubx_op_tx() and rb_serial_ops() below reads as a
+ * decision rather than an oversight.
  *
  * ---------------------------------------------------------------------------
  * Threading: one mutex, and why it has to be here
@@ -71,6 +89,12 @@
  * lock wait per supervisor pass (sts_mp_tick()'s), and adding a second would
  * push the override dead-man's worst-case revert past MP_TICK_MAX_MS. A skipped
  * step costs 250 ms against timeouts measured in tens of seconds.
+ *
+ * Spending no lock wait is only half of what that assert needs, though: a pass
+ * can also run long without waiting for anything, because fwupd_step() fires the
+ * step and transfer-idle timeouts and those reach finish() -> t->restore(). The
+ * second half of the premise is therefore a bounded-work budget,
+ * STS_FWUPD_STEP_BUDGET_MS, which sts_fwupd_step() measures against and reports.
  */
 
 #include <errno.h>
@@ -83,7 +107,9 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/toolchain.h>
 
+#include "console/mp_glue.h"
 #include "console/sts_console.h"
+#include "console/sts_fwupd_seam_policy.h"
 #include "console/sts_rollback.h"
 #include "fwupd/fwupd.h"
 #include "mp/mp.h"
@@ -132,15 +158,28 @@ __weak int sts_gnss_uart_set_baud(uint32_t baud)
 	return -ENOTSUP;
 }
 
-/** True once platform/gnss.c provides a real transport. */
-static bool gnss_transport_available(void)
+/**
+ * What the USART3 raw transport can do right now.
+ *
+ * Probing rather than a compile-time test: the strong symbols may be linked in
+ * without this file knowing, and a zero-length read is harmless to ask.
+ *
+ * The three-way classification matters. `!= -ENOTSUP` — which is what this used
+ * to be — folds "the hooks are absent" together with "the hooks are there and
+ * the GNSS thread has not started", and the second answers -ENODEV. That made
+ * the probe report a usable transport before platform/gnss.c had run, which
+ * turned gnss_prepare()'s documented fail-safe into a refusal that could never
+ * fire and made the boot log claim a wiring state it had not established.
+ */
+static sts_fwupd_xport_t gnss_transport(void)
 {
-	/*
-	 * Probing rather than a compile-time test: the strong symbols may be
-	 * linked in without this file knowing. A suspend that reports -ENOTSUP is
-	 * the definitive answer, and it is harmless to ask.
-	 */
-	return sts_gnss_uart_raw_rx(NULL, 0U) != -ENOTSUP;
+	return sts_fwupd_xport_classify(sts_gnss_uart_raw_rx(NULL, 0U));
+}
+
+/** True only when raw access to USART3 is possible in this pass. */
+static bool gnss_transport_ready(void)
+{
+	return gnss_transport() == STS_FWUPD_XPORT_READY;
 }
 
 /* ===================================================================== *
@@ -346,7 +385,16 @@ static uint32_t stm_chunk_max(void *user)
 static int ubx_op_tx(void *user, const uint8_t *d, size_t len)
 {
 	ARG_UNUSED(user);
-	return sts_gnss_uart_raw_tx(d, len);
+
+	/*
+	 * The one place the two transmit conventions meet (see the file header).
+	 * ubx_fwupd_ops_t::tx is "0 on success"; sts_gnss_uart_raw_tx() returns
+	 * the octet count and must keep doing so for mp_tunnel.c's sake. Passing
+	 * the count straight through made ubx_fwupd.c read every successful frame
+	 * as a failure — and then propagate the byte count as if it were an
+	 * errno, so a caller checking for -EPERM saw 8.
+	 */
+	return sts_fwupd_tx_from_count(sts_gnss_uart_raw_tx(d, len), len);
 }
 
 static int ubx_op_rx(void *user, uint8_t *d, size_t cap)
@@ -411,6 +459,8 @@ static const ubx_fwupd_ops_t ubx_ops = {
 
 static int gnss_query(void *user, char *out, size_t cap)
 {
+	sts_fwupd_query_act_t act;
+
 	ARG_UNUSED(user);
 
 	if (cap > 0U) {
@@ -419,18 +469,37 @@ static int gnss_query(void *user, char *out, size_t cap)
 
 	/*
 	 * A MON-VER poll needs the raw byte path, because the gnss thread's own
-	 * parser feeds gnssmgr and not us. When the transport is wired, ask the
-	 * receiver directly; ubx_fwupd_query_version() refuses while a session is
-	 * open, so this cannot disturb an update in progress.
+	 * parser feeds gnssmgr and not us. That raw path is shared, and this
+	 * function is reachable at G0 through `fw.inventory` — FMT §5.1 makes
+	 * observation free, correctly, but observation must not mean "writes to
+	 * a port another session owns".
 	 *
-	 * When it is not wired, report an empty version with rc 0 — "present,
-	 * nothing to read" — which the maintenance tool renders differently from
+	 * So the poll is gated on both halves of "may I drive USART3 right now":
+	 * the transport has to be usable, and no passthrough tunnel may hold the
+	 * port. Without the second test an unauthenticated `fw.inventory` injects
+	 * an 8-octet UBX-MON-VER poll into the middle of a technician's session —
+	 * possibly into a receiver's bootloader — and then spends its 2 s reply
+	 * budget draining that session's bytes out of the tee ring.
+	 *
+	 * Either refusal reports an empty version with rc 0 — "present, nothing
+	 * to read" — which the maintenance tool renders differently from
 	 * "absent". Inventing a version string would be worse than admitting the
-	 * gap. TODO: publish the decoded UBX-MON-VER in sts_gnss_snap_t so this is
+	 * gap.
+	 *
+	 * A GNSS update session needs no test here: ubx_fwupd_query_version()
+	 * answers -EBUSY while one is open, which lands on the same empty row.
+	 *
+	 * TODO: publish the decoded UBX-MON-VER in sts_gnss_snap_t so this is
 	 * readable without touching the UART at all; that field belongs to
-	 * platform/gnss.c.
+	 * platform/gnss.c, and it is what would finally give the row a value —
+	 * the poll below can only succeed while the port is suspended, which is
+	 * exactly the state this function refuses to work in.
 	 */
-	if (!gnss_transport_available()) {
+	act = sts_fwupd_query_decide(gnss_transport_ready(),
+				     sts_mp_tunnel_gnss_open());
+	if (act != STS_FWUPD_QUERY_POLL) {
+		LOG_DBG("gnss fw: inventory read skipped (%s)",
+			sts_fwupd_query_act_name(act));
 		return 0;
 	}
 	if (ubx_fwupd_query_version(&g.ubx, out, cap) != 0) {
@@ -447,10 +516,22 @@ static int gnss_prepare(void *user, uint32_t size)
 
 	ARG_UNUSED(user);
 
-	if (!gnss_transport_available()) {
-		LOG_ERR("gnss fw: USART3 raw transport not wired "
-			"(platform/gnss.c hooks absent) — refusing");
+	if (!gnss_transport_ready()) {
+		LOG_ERR("gnss fw: USART3 raw transport not usable (%s) — refusing",
+			sts_fwupd_xport_name(gnss_transport()));
 		return -ENOTSUP;
+	}
+	if (sts_mp_tunnel_gnss_open()) {
+		/*
+		 * A passthrough tunnel already stood the receiver down and the
+		 * host owns the byte path. Suspending again is a no-op, but
+		 * resuming at the end of the session would hand USART3 back to
+		 * gnssmgr underneath a tunnel that still believes it holds it —
+		 * two writers on one UART, which is the condition FMT §5.5
+		 * exists to prevent.
+		 */
+		LOG_ERR("gnss fw: a passthrough tunnel holds USART3 — refusing");
+		return -EBUSY;
 	}
 
 	/*
@@ -551,7 +632,35 @@ static uint32_t gnss_chunk_max(void *user)
 
 static int rb_query(void *user, char *out, size_t cap)
 {
+	sts_fwupd_query_act_t act;
+
 	ARG_UNUSED(user);
+
+	if (cap > 0U) {
+		out[0] = '\0';
+	}
+
+	/*
+	 * The same G0 hazard as gnss_query(), on the other UART, and it bites
+	 * even though rb_serial.c's op_tx() already answers -EBUSY under a
+	 * tunnel: rb_fwupd_identify() probes when the capability class is still
+	 * UNKNOWN, and rb_fwupd_probe() LATCHES RB_CAP_NONE when nothing answers.
+	 * A single unauthenticated `fw.inventory` taken while a technician holds
+	 * UART7 would therefore pin the rubidium at "nothing answered — check the
+	 * cable" for the rest of the uptime, with no re-probe path.
+	 *
+	 * `transport_ready` is true unconditionally because there is no probe
+	 * hook on this side: rb_serial.c owns UART7 directly and its ops answer
+	 * -ENODEV for themselves when the port or the Rb rail is down. What this
+	 * seam knows, and rb_serial.c deliberately does not (see its header),
+	 * is that a tunnel is a reason not to ask at all.
+	 */
+	act = sts_fwupd_query_decide(true, sts_mp_tunnel_rb_open());
+	if (act != STS_FWUPD_QUERY_POLL) {
+		LOG_DBG("rb fw: inventory read skipped (%s)",
+			sts_fwupd_query_act_name(act));
+		return 0;
+	}
 	return rb_fwupd_identify(&g.rb, out, cap);
 }
 
@@ -714,10 +823,25 @@ int sts_fwupd_init(void)
 	/* --- the orchestrator ------------------------------------------- */
 	fwupd_cfg_defaults(&cfg);
 	/*
-	 * Only the STM32 application image is permitted out of the box. That is
-	 * the one path with a signature check and an automatic revert behind it
-	 * (MCUboot); the GNSS and Rb paths destroy a peripheral with no way back,
-	 * so an operator has to enable them explicitly.
+	 * Only the STM32 application image is permitted, and — stated plainly,
+	 * because it is a product decision and not an unfinished edge —
+	 * **there is no runtime path that widens this.**
+	 *
+	 * fwupd_set_cfg() is the only way to replace the bitmap after
+	 * fwupd_init(), and nothing calls it: not the shell, not `fw.*`, not the
+	 * config registry. That is deliberate. The STM32 path is the one with a
+	 * signature check and an automatic revert behind it (MCUboot). The GNSS
+	 * and Rb paths destroy a peripheral with no way back — and on the GNSS
+	 * side the loader opcodes are an informed reconstruction rather than a
+	 * specification (ubx_fwupd.h) — so widening the bitmap must be a
+	 * recompile by somebody who has read both files, not an operator action
+	 * reachable from a maintenance session. The FMT advertises the G3 guard
+	 * those components would need if the bitmap were ever opened; today the
+	 * bitmap is the outer gate and it is shut.
+	 *
+	 * If that is ever revisited, the widening path is a config key plus a
+	 * fwupd_set_cfg() call under g.lock — and it needs the GNSS opcode table
+	 * verified first, or fwupd_begin() will refuse anyway.
 	 */
 	(void)fwupd_cfg_allow(&cfg, (uint8_t)FWUPD_COMP_STM32_APP, true);
 
@@ -782,12 +906,18 @@ int sts_fwupd_init(void)
 	}
 
 	g.ready = true;
+	/*
+	 * The transport state is reported as the probe found it, not as a
+	 * boolean. main() starts the platform area before the console one, so
+	 * "wired" is the expected answer here and "wired, area not started"
+	 * means sts_gnss_start() failed — which is worth seeing in the boot log
+	 * rather than being rounded to the same word as "absent".
+	 */
 	LOG_INF("fwupd ready: %d components, STM32 app updatable, "
-		"GNSS %s, Rb %s",
+		"GNSS transport %s (opcodes unverified, allow bit shut), "
+		"Rb not field-updatable",
 		(int)FWUPD_COMP__COUNT,
-		gnss_transport_available() ? "transport wired but opcodes unverified"
-					  : "transport not wired",
-		"not field-updatable");
+		sts_fwupd_xport_name(gnss_transport()));
 	return 0;
 }
 
@@ -801,8 +931,19 @@ rb_ctx_t *sts_fwupd_rb_ctx(void)
 	return g.ready ? &g.rb : NULL;
 }
 
+/**
+ * Longest sts_fwupd_step() seen so far, milliseconds.
+ *
+ * Written and read only by the console supervisor, which is the only caller, so
+ * it needs no lock — and it is deliberately outside `g`, whose members all
+ * belong to g.lock.
+ */
+static uint32_t step_worst_ms;
+
 int sts_fwupd_step(void)
 {
+	uint64_t t0;
+	uint32_t spent;
 	int rc;
 
 	/*
@@ -816,8 +957,33 @@ int sts_fwupd_step(void)
 	if (rc != 0) {
 		return rc;
 	}
-	rc = fwupd_step(&g.fw, (uint64_t)k_uptime_get());
+	t0 = (uint64_t)k_uptime_get();
+	rc = fwupd_step(&g.fw, t0);
+	spent = (uint32_t)((uint64_t)k_uptime_get() - t0);
 	fw_unlock();
+
+	/*
+	 * The other half of the same BUILD_ASSERT's premise, made falsifiable.
+	 *
+	 * Not spending a lock wait does not make a pass short: fwupd_step()'s
+	 * timeout paths call finish() -> t->restore(), which is an internal-flash
+	 * trailer write for the STM32 target (reachable today: `fw.begin` then
+	 * silence for the 60 s transfer-idle timeout) and, once the GNSS allow bit
+	 * is ever opened, 20 ms of k_msleep inside ubx_fwupd_recover().
+	 *
+	 * Reported at error level on each new high-water above the budget, so it
+	 * is bounded and so the first bench run that exceeds it says so by name
+	 * rather than showing up as an unexplained dead-man revert.
+	 */
+	if (spent > step_worst_ms) {
+		step_worst_ms = spent;
+		if (spent > STS_FWUPD_STEP_BUDGET_MS) {
+			LOG_ERR("fwupd step ran %u ms, over the %u ms supervisor "
+				"budget (sts_console.c BUILD_ASSERT)",
+				(unsigned int)spent,
+				(unsigned int)STS_FWUPD_STEP_BUDGET_MS);
+		}
+	}
 	return rc;
 }
 

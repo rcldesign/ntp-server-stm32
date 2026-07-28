@@ -83,8 +83,27 @@ LOG_MODULE_REGISTER(sts_gnss, CONFIG_STS1000_LOG_LEVEL);
  * Wake rate. gnssmgr.h asks for gnssmgr_step() at least every ~100 ms so an ACK
  * timeout is not reported late; the same rate keeps the receive ring drained well
  * inside its own depth at 460800 baud.
+ *
+ * It is ALSO the publish period — gnss_publish() runs unconditionally once per
+ * tick — and that makes it the cadence sts_pps_epoch_get()'s pulse naming
+ * depends on. See the assert below before changing it.
  */
 #define GNSS_TICK_MS    50
+
+/*
+ * The publish cadence is load-bearing for something two files away.
+ *
+ * gnss_publish() is the ONLY writer of `evidence`, and each publish overwrites
+ * both history slots with a fresh sample of gnssmgr's newest two records. A
+ * publish period longer than STS_GNSS_EVIDENCE_MAX_PERIOD_MS lets a record be
+ * born and evicted between two publishes, at which point platform/pps.c's
+ * depth-STS_GNSS_PULSE_OBS pairing can no longer find a candidate on the correct
+ * side of a capture and pulses go unnamed — silently, with epoch_valid simply
+ * staying false. sts_app.h derives the bound; this is where it binds.
+ */
+BUILD_ASSERT((unsigned int)GNSS_TICK_MS <= STS_GNSS_EVIDENCE_MAX_PERIOD_MS,
+	     "the GNSS publish period no longer covers STS_GNSS_PULSE_OBS: "
+	     "pulse naming in platform/pps.c would fail silently");
 
 #define GNSS_RX_RING_SZ CONFIG_STS1000_GNSS_UART_RX_RING
 

@@ -185,6 +185,37 @@ uint32_t sts_pps_counter_now(void);
 /** History depth. Two: the record in force at the pulse, plus its successor. */
 #define STS_GNSS_PULSE_OBS 2
 
+/**
+ * Period of the receiver messages the history above is built from.
+ *
+ * NAV-PVT and UBX-TIM-TP are both configured at 1 Hz (spec §3.7), so a new
+ * record of each kind lands once a second.
+ */
+#define STS_GNSS_EVIDENCE_SRC_PERIOD_MS 1000U
+
+/**
+ * Longest publish period STS_GNSS_PULSE_OBS still covers.
+ *
+ * THE DEPTH AND THE CADENCE ARE ONE ASSUMPTION, NOT TWO. The snapshot is a
+ * SAMPLE of gnssmgr's retained records, not a queue: each publish overwrites
+ * both slots with whatever the two newest records are at that instant. Depth 2
+ * is sufficient only because a publish happens at least as often as a new
+ * record arrives, so no record can be born and evicted between two publishes.
+ *
+ * Let the publish period be P and the message period S. Between publishes
+ * floor(P/S) new records land; the snapshot keeps N of them, so the record that
+ * was in force at a pulse survives to be published only while P <= (N-1)*S.
+ * With N = 2 that is one second. Raise the publish period past it and pulses
+ * silently stop being named — the exact symptom sts_gnss_pulse_evidence_t was
+ * introduced to cure, returning without a single failing assertion.
+ *
+ * platform/gnss.c holds a BUILD_ASSERT against this, next to the tick it
+ * publishes on, so changing the cadence is a compile error rather than a
+ * regression found on a scope.
+ */
+#define STS_GNSS_EVIDENCE_MAX_PERIOD_MS \
+	(((unsigned int)STS_GNSS_PULSE_OBS - 1U) * STS_GNSS_EVIDENCE_SRC_PERIOD_MS)
+
 /** One NAV-PVT arrival: which epoch it named, and when it was decoded. */
 typedef struct {
 	uint32_t itow_ms;    /* NAV-PVT iTOW, GPS ToW milliseconds */

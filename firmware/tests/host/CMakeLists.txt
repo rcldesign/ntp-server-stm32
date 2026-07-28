@@ -270,6 +270,15 @@ module_deps(mp_fw       mp)
 # empty dependency list.
 module_deps(mp_tunnel_policy)
 
+# `fwupd_seam_policy` (app/src/zephyr/console/sts_fwupd_seam_policy.h) is the
+# firmware-update seam's four decisions: converting the platform's count-returning
+# transmit onto core/fwupd's "0 on success" contract, telling an absent raw
+# transport from one whose area has not started, refusing a G0 identity read on a
+# port a passthrough tunnel owns, and the supervisor-pass budget the MP dead-man
+# BUILD_ASSERT is built from. All four are silent when wrong and three have been.
+# Zephyr-free by construction, hence the empty dependency list.
+module_deps(fwupd_seam_policy)
+
 # `ptp` is split by layer: the wire codecs, the best-master algorithm and the
 # port state machine are independent enough to fail independently.
 # core/web (Wave 4b): the web management plane. One module directory, four

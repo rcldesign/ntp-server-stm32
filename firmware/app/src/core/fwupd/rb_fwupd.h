@@ -232,6 +232,19 @@ const char *rb_cap_name(uint8_t cap);
  * ===================================================================== */
 
 typedef struct {
+	/**
+	 * Queue @p len octets for transmission. **0 on success**, negative errno
+	 * otherwise — a COUNT is not a success value here.
+	 *
+	 * Said explicitly because the board's two serial sinks disagree and the
+	 * disagreement is invisible at the call site: rb_serial.c's op_tx()
+	 * answers 0 and matches this directly, while platform/gnss.c's
+	 * sts_gnss_uart_raw_tx() returns the octet count (mp_tunnel.c reports
+	 * that count to the host) and has to be converted at its adapter. A sink
+	 * bound here that returns a count makes exchange() read every successful
+	 * frame as a failure and then hand the byte count back as if it were an
+	 * errno.
+	 */
 	int (*tx)(void *user, const uint8_t *data, size_t len);
 	/** Non-blocking read; count, 0 for none, or negative. */
 	int (*rx)(void *user, uint8_t *data, size_t cap);
