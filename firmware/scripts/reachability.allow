@@ -1,0 +1,286 @@
+# Reachability allow-list — symbols the application defines that are
+# deliberately (or, for now, knowingly) absent from the linked image.
+#
+# Read scripts/reachability.sh first for the mechanism. This file is the
+# policy, and the policy is a BASELINE FREEZE, not a blessing:
+#
+#   * every symbol here is absent from zephyr.elf today;
+#   * a NEW absence — a function added with no caller — is not here, so the
+#     build fails and someone has to decide;
+#   * an entry that stops being absent is also an error, so this file cannot
+#     rot into a rubber stamp.
+#
+# WHY A FREEZE RATHER THAN A CLEAN SHEET. This project shipped, in one
+# session, a firmware-update orchestrator, a skyplot renderer, PTP Annex-P
+# integrity, the whole Rb serial layer and about fourteen operator recovery
+# actions — all written, all tested, all documented as delivered, and all
+# discarded by --gc-sections because nothing called them. Host tests cannot
+# see it: they link core/ directly and never touch the target image. Wiring
+# them up took the absent count from 320 to 220. The remaining 220 are not
+# all fine, and pretending otherwise by inventing a category for each would
+# reproduce the exact failure this file exists to stop. So the ones with a
+# defensible reason carry it, and the rest say TODO and are honest backlog.
+#
+# THE CATEGORIES, each verified rather than assumed:
+#
+#   fmt         enum->string formatters. The device logs numeric codes; the
+#               names are for the host tool and for test failure messages.
+#   decode      pure register/unit decoders. The device writes raw registers
+#               and the HOST interprets them, so the decode direction is
+#               genuinely host- and test-side.
+#   oracle      the CBOR *reader*. This device is a CBOR writer — telemetry
+#               goes device->host, the control plane is JSON-RPC. The reader
+#               is how test_mp_stream.c and test_mp_mirror.c decode what the
+#               writer produced and prove the round trip.
+#   inlined     GCC inlined it into its only caller within the same
+#               translation unit, so the instructions ship and only the
+#               separately-addressable copy is collected. Confirmed per
+#               symbol by disassembling the linked image or by objdump -r
+#               showing no relocation from any allocatable section.
+#   deferred    a feature deliberately not enabled in this image, with the
+#               reason recorded at the point of deferral.
+#   superseded  a base variant whose _profile twin is what the engine calls.
+#               Verified present in the image.
+#
+#   TODO        no decision yet. A standing action. Most of these are status
+#               accessors that an operator surface arguably should be
+#               reporting and does not — which is a gap, not a category.
+#
+# To regenerate the absent set after a build:
+#   scripts/reachability.sh --update
+# and then justify, or wire up, whatever it marks TODO.
+
+# image. See scripts/reachability.sh for the rules and the failure mode this
+# guards against.
+
+# --- formatters -----------------------------------------------------
+atecc_status_name                      # fmt: enum->string; device logs the code, host renders the name
+fwupd_comp_desc                        # fmt: enum->string; device logs the code, host renders the name
+fwupd_end_reason                       # fmt: enum->string; device logs the code, host renders the name
+ina228_cause_str                       # fmt: enum->string; device logs the code, host renders the name
+ldap_result_name                       # fmt: enum->string; device logs the code, host renders the name
+mp_cbor_rd_text                        # fmt: enum->string; device logs the code, host renders the name
+mp_diag_ev_name                        # fmt: enum->string; device logs the code, host renders the name
+mp_ev_kind_name                        # fmt: enum->string; device logs the code, host renders the name
+mp_ilk_reason                          # fmt: enum->string; device logs the code, host renders the name
+ptp_msg_type_name                      # fmt: enum->string; device logs the code, host renders the name
+ptp_port_state_name                    # fmt: enum->string; device logs the code, host renders the name
+ptp_profile_deviation_text             # fmt: enum->string; device logs the code, host renders the name
+ptp_recommended_name                   # fmt: enum->string; device logs the code, host renders the name
+pwrseq_action_name                     # fmt: enum->string; device logs the code, host renders the name
+pwrseq_alarm_name                      # fmt: enum->string; device logs the code, host renders the name
+refsel_action_name                     # fmt: enum->string; device logs the code, host renders the name
+ubx_fwupd_state_name                   # fmt: enum->string; device logs the code, host renders the name
+ui_sky_view_name                       # fmt: enum->string; device logs the code, host renders the name
+ui_surface_row_text                    # fmt: enum->string; device logs the code, host renders the name
+
+# --- pure decoders --------------------------------------------------
+aes_cmac                               # decode: pure decode/size helper; the device writes, the host interprets
+cobs_decode_max                        # decode: pure decode/size helper; the device writes, the host interprets
+cobs_encode_max                        # decode: pure decode/size helper; the device writes, the host interprets
+http_path_decode                       # decode: pure decode/size helper; the device writes, the host interprets
+http_span_eq                           # decode: pure decode/size helper; the device writes, the host interprets
+http_span_eq_ci                        # decode: pure decode/size helper; the device writes, the host interprets
+ina228_adc_config_decode               # decode: pure decode/size helper; the device writes, the host interprets
+ina228_avg_samples                     # decode: pure decode/size helper; the device writes, the host interprets
+ina228_bus_code                        # decode: pure decode/size helper; the device writes, the host interprets
+ina228_charge_nc                       # decode: pure decode/size helper; the device writes, the host interprets
+ina228_config_decode                   # decode: pure decode/size helper; the device writes, the host interprets
+ina228_conv_interval_us                # decode: pure decode/size helper; the device writes, the host interprets
+ina228_ct_us                           # decode: pure decode/size helper; the device writes, the host interprets
+ina228_current_na                      # decode: pure decode/size helper; the device writes, the host interprets
+ina228_current_ua                      # decode: pure decode/size helper; the device writes, the host interprets
+ina228_device_id_die                   # decode: pure decode/size helper; the device writes, the host interprets
+ina228_device_id_rev                   # decode: pure decode/size helper; the device writes, the host interprets
+ina228_diag_cause                      # decode: pure decode/size helper; the device writes, the host interprets
+ina228_diag_encode                     # decode: pure decode/size helper; the device writes, the host interprets
+ina228_diag_is_fault                   # decode: pure decode/size helper; the device writes, the host interprets
+ina228_dietemp_mc                      # decode: pure decode/size helper; the device writes, the host interprets
+ina228_energy_uj                       # decode: pure decode/size helper; the device writes, the host interprets
+ina228_fs_current_ua                   # decode: pure decode/size helper; the device writes, the host interprets
+ina228_power_code                      # decode: pure decode/size helper; the device writes, the host interprets
+ina228_power_nw                        # decode: pure decode/size helper; the device writes, the host interprets
+ina228_rail_by_addr                    # decode: pure decode/size helper; the device writes, the host interprets
+ina228_rail_sovl_default               # decode: pure decode/size helper; the device writes, the host interprets
+ina228_raw20_signed                    # decode: pure decode/size helper; the device writes, the host interprets
+ina228_raw40                           # decode: pure decode/size helper; the device writes, the host interprets
+ina228_raw40_signed                    # decode: pure decode/size helper; the device writes, the host interprets
+ina228_reg_width                       # decode: pure decode/size helper; the device writes, the host interprets
+ina228_shunt_code                      # decode: pure decode/size helper; the device writes, the host interprets
+ina228_shunt_code_ma                   # decode: pure decode/size helper; the device writes, the host interprets
+ina228_shunt_code_to_ua                # decode: pure decode/size helper; the device writes, the host interprets
+ina228_temp_code                       # decode: pure decode/size helper; the device writes, the host interprets
+ina228_vbus_mv                         # decode: pure decode/size helper; the device writes, the host interprets
+ina228_vbus_uv                         # decode: pure decode/size helper; the device writes, the host interprets
+ina228_vshunt_nv                       # decode: pure decode/size helper; the device writes, the host interprets
+ntp_short_from_q16                     # decode: pure decode/size helper; the device writes, the host interprets
+ptp_ts_to_ns                           # decode: pure decode/size helper; the device writes, the host interprets
+ring_cap                               # decode: pure decode/size helper; the device writes, the host interprets
+ring_empty                             # decode: pure decode/size helper; the device writes, the host interprets
+ring_full                              # decode: pure decode/size helper; the device writes, the host interprets
+snmp_rd_done                           # decode: pure decode/size helper; the device writes, the host interprets
+snmp_rd_uint                           # decode: pure decode/size helper; the device writes, the host interprets
+snmp_val_ip                            # decode: pure decode/size helper; the device writes, the host interprets
+snmp_wr_rewind                         # decode: pure decode/size helper; the device writes, the host interprets
+ubx_checksum                           # decode: pure decode/size helper; the device writes, the host interprets
+web_b64_decode                         # decode: pure decode/size helper; the device writes, the host interprets
+wss_sha1                               # decode: pure decode/size helper; the device writes, the host interprets
+
+# --- CBOR read direction --------------------------------------------
+mp_cbor_map_find                       # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+mp_cbor_peek_major                     # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+mp_cbor_rd_arr                         # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+mp_cbor_rd_bool                        # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+mp_cbor_rd_bytes                       # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+mp_cbor_rd_f32                         # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+mp_cbor_rd_init                        # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+mp_cbor_rd_int                         # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+mp_cbor_rd_map                         # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+mp_cbor_rd_uint                        # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+mp_cbor_skip                           # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+
+# --- deliberately deferred features ---------------------------------
+ntske_exporter_context                 # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
+ntske_handle                           # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
+ntske_init                             # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
+ntske_rec_parse                        # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
+ntske_rec_put                          # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
+ntske_rec_put_u16                      # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
+atecc_ecdh                             # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_genkey_private                   # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_hmac                             # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_lock                             # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_nonce_passthrough                # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_present                          # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_random                           # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_sha256                           # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_sign                             # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_sleep                            # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_stats_get                        # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_verify_extern                    # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+atecc_write_zone                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+sts_atecc_ecdh                         # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+sts_atecc_present                      # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+sts_atecc_pubkey                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+sts_atecc_random                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+sts_atecc_sign                         # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+sts_atecc_stats                        # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+sts_atecc_verify                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+ldap_build_starttls                    # deferred: StartTLS needs an in-place socket upgrade Zephyr's TLS type cannot do
+
+rb_serial_mode                         # inlined: GCC inlined it into its only caller in the same TU; verified by objdump
+sky_colour_for_sys                     # inlined: GCC inlined it into its only caller in the same TU; verified by objdump
+# --- superseded base variants ---------------------------------------
+ptp_bmca_compare                       # superseded: the _profile twin is what ptp_port.c's run_bmca() calls; verified present
+ptp_bmca_state_decision                # superseded: the _profile twin is what ptp_port.c's run_bmca() calls; verified present
+ptp_foreign_best                       # superseded: the _profile twin is what ptp_port.c's run_bmca() calls; verified present
+
+# --- everything else ------------------------------------------------
+auth_is_locked                         # TODO: wire it up or give it a reason
+auth_stats_reset                       # TODO: wire it up or give it a reason
+cfg_get_f32                            # TODO: wire it up or give it a reason
+cfg_set_migrations                     # TODO: wire it up or give it a reason
+disc_state                             # TODO: wire it up or give it a reason
+fault_alarm_get                        # TODO: wire it up or give it a reason
+fault_evt_count                        # TODO: wire it up or give it a reason
+fault_expected_off_mask                # TODO: wire it up or give it a reason
+fault_relay_disqualify_mask            # TODO: wire it up or give it a reason
+fault_relay_set_disqualify_mask        # TODO: wire it up or give it a reason
+fault_sig_class                        # TODO: wire it up or give it a reason
+fwupd_component                        # TODO: wire it up or give it a reason
+fwupd_set_cfg                          # TODO: wire it up or give it a reason
+fwupd_state                            # TODO: wire it up or give it a reason
+gnssmgr_fw_active                      # TODO: wire it up or give it a reason
+gnssmgr_leap_indicator                 # TODO: wire it up or give it a reason
+gnssmgr_txready_trusted                # TODO: wire it up or give it a reason
+ldap_parse_search_entry                # TODO: wire it up or give it a reason
+ldap_role_from_group                   # TODO: wire it up or give it a reason
+logr_level_get                         # TODO: wire it up or give it a reason
+logr_reset                             # TODO: wire it up or give it a reason
+mcp_authenticated                      # TODO: wire it up or give it a reason
+mcp_session_role                       # TODO: wire it up or give it a reason
+mp_diag_progress                       # TODO: wire it up or give it a reason
+mp_diag_test                           # TODO: wire it up or give it a reason
+mp_frame_rx_input                      # TODO: wire it up or give it a reason
+mp_json_arr_at                         # TODO: wire it up or give it a reason
+mp_json_count                          # TODO: wire it up or give it a reason
+mp_json_has                            # TODO: wire it up or give it a reason
+mp_json_i32_range                      # TODO: wire it up or give it a reason
+mp_mirror_dirty                        # TODO: wire it up or give it a reason
+mp_obj_count_in                        # TODO: wire it up or give it a reason
+mp_ovr_set_phrase                      # TODO: wire it up or give it a reason
+mp_ovr_veto                            # TODO: wire it up or give it a reason
+mp_post_event                          # TODO: wire it up or give it a reason
+mp_shell_byte                          # TODO: wire it up or give it a reason
+mp_veto                                # TODO: wire it up or give it a reason
+ntp_ef_iter_init                       # TODO: wire it up or give it a reason
+ntp_ef_iter_next                       # TODO: wire it up or give it a reason
+ntp_stats_reset                        # TODO: wire it up or give it a reason
+nts_keyring_export                     # TODO: wire it up or give it a reason
+nts_keyring_install                    # TODO: wire it up or give it a reason
+ptp_c37238_find                        # TODO: wire it up or give it a reason
+ptp_c37238_value_decode                # TODO: wire it up or give it a reason
+ptp_delay_resp_decode                  # TODO: wire it up or give it a reason
+ptp_foreign_clear                      # TODO: wire it up or give it a reason
+ptp_foreign_dataset                    # TODO: wire it up or give it a reason
+ptp_icv_key_clear                      # TODO: wire it up or give it a reason
+ptp_port_fault                         # TODO: wire it up or give it a reason
+ptp_port_fault_reset                   # TODO: wire it up or give it a reason
+ptp_tsmsg_decode                       # TODO: wire it up or give it a reason
+pwrseq_action_count                    # TODO: wire it up or give it a reason
+pwrseq_alarms                          # TODO: wire it up or give it a reason
+pwrseq_ocxo_is_warming                 # TODO: wire it up or give it a reason
+pwrseq_ov_latched                      # TODO: wire it up or give it a reason
+pwrseq_rb_auto_retries                 # TODO: wire it up or give it a reason
+pwrseq_rb_fault                        # TODO: wire it up or give it a reason
+pwrseq_shed_level                      # TODO: wire it up or give it a reason
+pwrseq_stage                           # TODO: wire it up or give it a reason
+pwrseq_status                          # TODO: wire it up or give it a reason
+pwrseq_wdt_armed                       # TODO: wire it up or give it a reason
+quality_holdover_time_to_ns            # TODO: wire it up or give it a reason
+rb_capability                          # TODO: wire it up or give it a reason
+rb_fwupd_feed                          # TODO: wire it up or give it a reason
+rb_fwupd_status                        # TODO: wire it up or give it a reason
+rb_fwupd_trim                          # TODO: wire it up or give it a reason
+snmp_mib_check                         # TODO: wire it up or give it a reason
+snmp_mib_node                          # TODO: wire it up or give it a reason
+snmp_mib_node_count                    # TODO: wire it up or give it a reason
+snmp_notify_suppressed                 # TODO: wire it up or give it a reason
+snmp_stats_reset                       # TODO: wire it up or give it a reason
+snmp_v3_get_boots                      # TODO: wire it up or give it a reason
+snmp_v3_get_engine_id                  # TODO: wire it up or give it a reason
+snmp_v3_set_boots                      # TODO: wire it up or give it a reason
+snmp_v3_set_engine_id                  # TODO: wire it up or give it a reason
+snmp_v3_stats_reset                    # TODO: wire it up or give it a reason
+snmp_v3_user_clear                     # TODO: wire it up or give it a reason
+snmp_v3_user_level                     # TODO: wire it up or give it a reason
+snmp_v3_users_clear                    # TODO: wire it up or give it a reason
+sts_digipot_set_nv                     # TODO: wire it up or give it a reason
+sts_fwupd_ctx                          # TODO: wire it up or give it a reason
+sts_fwupd_inventory                    # TODO: wire it up or give it a reason
+sts_fwupd_query                        # TODO: wire it up or give it a reason
+sts_fwupd_rb_ctx                       # TODO: wire it up or give it a reason
+sts_fwupd_status                       # TODO: wire it up or give it a reason
+sts_mp_active                          # TODO: wire it up or give it a reason
+sts_mp_notify_break                    # TODO: wire it up or give it a reason
+sts_mp_notify_link                     # TODO: wire it up or give it a reason
+sts_mp_shell_tap                       # TODO: wire it up or give it a reason
+sts_pfi_fired                          # TODO: wire it up or give it a reason
+sts_ptpclk_dev                         # TODO: wire it up or give it a reason
+sts_supervisor_counters                # TODO: wire it up or give it a reason
+sts_syslog_stats                       # TODO: wire it up or give it a reason
+sts_txts_stats                         # TODO: wire it up or give it a reason
+sts_web_running                        # TODO: wire it up or give it a reason
+tacacs_build_authen_continue           # TODO: wire it up or give it a reason
+ubx_cfg_key_group                      # TODO: wire it up or give it a reason
+ubx_fwupd_abort                        # TODO: wire it up or give it a reason
+ubx_fwupd_state                        # TODO: wire it up or give it a reason
+ubx_fwupd_step                         # TODO: wire it up or give it a reason
+ubx_parser_stats                       # TODO: wire it up or give it a reason
+ubx_valset_add_u8                      # TODO: wire it up or give it a reason
+ui_action_clear_dropped                # TODO: wire it up or give it a reason
+ui_action_count                        # TODO: wire it up or give it a reason
+ui_action_dropped                      # TODO: wire it up or give it a reason
+ui_display_ready                       # TODO: wire it up or give it a reason
+web_role_parse                         # TODO: wire it up or give it a reason
+wss_txq_count                          # TODO: wire it up or give it a reason

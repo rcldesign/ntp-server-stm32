@@ -7,6 +7,7 @@
 #   scripts/build.sh [-p] [-d BUILD_DIR] [-- <extra west build args>]
 #
 #   -p            pristine build (west build -p always)
+#   -n            skip the reachability gate (see the note at the end)
 #   -d BUILD_DIR  output directory (default: <repo>/firmware/build)
 #
 # Produces, per ARCHITECTURE.md §9:
@@ -26,6 +27,7 @@ firmware_dir=$(dirname -- "${script_dir}")
 app_dir="${firmware_dir}/app"
 
 pristine=
+skip_reach=
 build_dir="${firmware_dir}/build"
 
 usage() {
@@ -37,6 +39,10 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	-p|--pristine)
 		pristine="always"
+		shift
+		;;
+	-n|--no-reachability)
+		skip_reach=1
 		shift
 		;;
 	-d|--build-dir)
@@ -88,3 +94,26 @@ do
 		printf '  MISSING: %s\n' "${artifact}" >&2
 	fi
 done
+
+# ---------------------------------------------------------------------------
+# Reachability gate.
+#
+# A successful link is not the same as a shipped feature. --gc-sections drops
+# any function whose only reference is its own prototype: it costs no flash,
+# raises no warning, and passes every host test, because the host suites link
+# core/ directly and never see the target image. This project lost an entire
+# firmware-update orchestrator, the skyplot renderer, PTP Annex-P integrity and
+# the whole Rb serial layer that way, each of them written, tested and
+# documented as delivered.
+#
+# So it runs here, on the artifact, and its exit status is this script's. Skip
+# it with -n while mid-refactor if you must; do not skip it in CI.
+# ---------------------------------------------------------------------------
+if [ -n "${skip_reach}" ]; then
+	echo
+	echo "reachability: SKIPPED (-n)"
+	exit 0
+fi
+
+echo
+"${script_dir}/reachability.sh" -d "${build_dir}"
