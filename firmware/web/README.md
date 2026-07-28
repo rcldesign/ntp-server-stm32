@@ -134,8 +134,8 @@ All nine pages are implemented against live data — none is a placeholder.
 4. **GNSS** — fix/SV/time-accuracy/leap/antenna/survey tiles; the large polar
    skyplot; survey-in with start/stop and progress bars against
    `gnss.survey.acc` and `gnss.survey.dur`; stored ECEF position with a manual
-   set form; antenna supervisor and receiver versions; a C/N0-sorted satellite
-   table; the `gnss.*` key editor.
+   set form; antenna supervisor, satellite-frame age and receiver versions; a
+   C/N0-sorted satellite table; the `gnss.*` key editor.
 5. **Network** — interface/IP/DHCP/MAC/hostname state; PTP engine and MAC-clock
    servo state (port state mapped to its 1588 name); service enable/disable for
    ntp, nts, ptp, snmp and syslog; the `net.*`, `ntp.*`, `nts.*` and `ptp.*`
@@ -230,8 +230,12 @@ Hand-drawn on `<canvas>`, mirroring the local-UI renderer:
   to the rim instead of reflecting through the centre; a missing azimuth is
   treated as 0.
 - Redrawn on every telemetry frame, and on resize, at `devicePixelRatio`.
-- When `detail_available` is false it draws the empty sky with an explicit
-  "no receiver detail" note — never a spinner and never an error.
+- Three distinct empty states, because they mean different things. A fresh list
+  with nothing in it draws "no satellites reported" — a real measurement from a
+  unit with no sky. `detail_available` false with a `sat_age_ms` draws "no
+  current satellite data / last frame N ago" — the receiver has stopped
+  talking. `detail_available` false with `sat_age_ms` null draws "the GNSS
+  receiver has not reported yet". Never a spinner and never an error.
 
 ---
 

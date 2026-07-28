@@ -335,6 +335,30 @@ On GNSS loss (no fix / PPS outliers / antenna fault):
 
 Every real-time element on Dashboard/Timing/GNSS reads the §3.8 quality block via WSS; the skyplot mirrors the local-UI renderer (§6.3).
 
+**Skyplot data path (as-built).** The quality block carries SV *counts* only — core/gnssmgr
+reduces UBX-NAV-SAT to a summary and keeps no per-satellite records. The markers therefore come
+from the GNSS thread's NAV-SAT cache (`sts_gnss_sky()`), which is the same cache the panel
+renders from; the admission rule (drop a record with C/N0 0 that is not in the solution, fold
+azimuth into 0–359) is also the panel's, and `net/sts_web_sky.h` restates it in the REST shape
+because the net area may not include a ui-private header. The two are pinned together by
+`tests/host/test_web_sky.c` over the whole input space.
+
+`detail_available` distinguishes **no satellites visible** (true, empty array — what an indoor
+unit legitimately reports) from **no data** (false — never received, or aged out). The document
+also carries `sat_age_ms` (null when the receiver has never reported) so a remote client may
+apply a stricter policy than the server's. The staleness window is the **web plane's own**
+constant (`STS_WEB_SKY_STALE_MS`, 5 s), derived from its own consumer rate — 1 Hz NAV-SAT plus
+a 1 Hz SPA poll plus transport — and deliberately not shared with the panel's, so a change to
+one view's render cadence cannot silently redefine the other's contract. It coincides with the
+panel's 5 s today, which is what makes §6.3's "both views agree" hold at the same age.
+
+Survey-in progress, the stored ECEF position and the antenna verdict come from
+`sts_gnss_detail()`, the platform area's 1 Hz publication of `gnssmgr_svin()` /
+`gnssmgr_position()` / `gnssmgr_rf()`. UBX reports accuracy in 0.1 mm and the REST contract
+carries millimetres. The antenna verdict uses the **debounced** supervisor outputs — the two
+alarms plus the short latch — never the raw MON-RF antStatus bits, so the web badge cannot flap
+on transients the alarm page and the panel both ride out.
+
 ### 5.3 SNMP agent (Zabbix-ready)
 
 - **SNMPv3** (USM: SHA-256 auth, AES-128/256 priv) primary; SNMPv2c optional behind ACL.
@@ -368,7 +392,14 @@ Every real-time element on Dashboard/Timing/GNSS reads the §3.8 quality block v
 
 - Polar plot, zenith center, horizon edge; per-SV marker placed by az/el from UBX-NAV-SAT, colored by constellation, sized/labelled by CNR, hollow = visible-not-used, filled = used in solution.
 - **True-north orientation:** rotate the plot by the magnetometer heading (IIS2MDC), corrected by hard/soft-iron calibration (§10.4) and by **magnetic declination computed from the GPS fix** (WMM/IGRF); tilt-compensate with the accelerometer (LIS2DH12) — mandatory given the vertical board mount. If the compass is uncalibrated/disturbed, fall back to “GNSS-north” (az as reported) with a clear “north unverified” badge.
-- Identical data feeds the web skyplot (§5.2) so both views agree.
+- Identical data feeds the web skyplot (§5.2) so both views agree: one cache
+  (`sts_gnss_sky()`), one admission rule, one satellite bound (`UI_MAX_SV` = `REST_SAT_MAX` =
+  `STS_GNSS_SKY_MAX_SV` = 32). The two renderers keep **separate staleness constants** —
+  different consumers at different rates — currently equal at 5 s, so they blank at the same
+  age; a change to either is a change to this clause. Residual differences, both in the web's
+  favour and neither affecting which markers are drawn: the web document also carries the frame
+  age, and its antenna badge decodes the two supervisor alarms plus the short latch, where the
+  panel still approximates from the GNSS time-lock flag alone.
 
 ### 6.4 Touch / proximity wake & RGB
 
