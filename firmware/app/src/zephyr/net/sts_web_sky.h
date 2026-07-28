@@ -76,7 +76,9 @@
  * does not see one view showing satellites the other has already blanked. If a
  * future argument moves either constant, §371 is what has to be re-argued —
  * tests/host/test_web_sky.c states that dependency as an assertion rather than
- * leaving it to a comment.
+ * leaving it to a comment, and it does so by PARSING SKY_STALE_MS out of
+ * ui/sts_ui.c. A restated copy of the number would only compare this constant
+ * against itself and would sit green through exactly the drift it is named for.
  *
  * The document also carries the AGE, which the panel cannot: an HTTP client is
  * remote and entitled to apply its own policy on top of this one. See
@@ -455,14 +457,14 @@ static inline void sts_web_sky_survey(const sts_gnss_detail_t *d,
 	 * the position actually IN FORCE is the stored position's — reporting
 	 * the last survey's number for a position seeded from NVS or set by an
 	 * operator would attribute an accuracy to it that nothing measured.
+	 *
+	 * Both directions of that one selection are pinned in tests/host: a
+	 * running survey that has not yet reported a meanAcc gets 0 rather than
+	 * the stored figure, and a finished survey does not lend its number to a
+	 * seeded position.
 	 */
 	out->survey_acc_mm = sts_web_0p1mm_to_mm(
 		d->svin_active ? d->svin_acc_0p1mm : d->pos_acc_0p1mm);
-	if (d->svin_active && (d->svin_acc_0p1mm == 0U)) {
-		/* A survey that has not yet produced a meanAcc: fall back to the
-		 * survey block rather than reporting the stale stored figure. */
-		out->survey_acc_mm = 0U;
-	}
 
 	out->position_valid = d->pos_valid;
 	out->ecef_x_cm = (int64_t)d->pos_x_cm;

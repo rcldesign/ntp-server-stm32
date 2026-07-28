@@ -373,17 +373,34 @@ static void test_a_truncated_or_absent_block_is_refused(void)
  * An embedded NUL makes the file and the parse disagree: mbedTLS finds the PEM
  * framing with strstr(), so it would see only the prefix while /lfs stored the
  * whole blob.
+ *
+ * WHERE the NUL goes is the whole test. Put it in the BEGIN line and the
+ * framing search fails on its own account, so sts_ldap_ca_check() answers
+ * MALFORMED down the *framing* path with or without the memchr() guard — the
+ * assertion stays green with the guard deleted, which is a tick for the one
+ * defect it names. In the base64 BODY the framing is intact, so the same blob
+ * is OK without the guard and MALFORMED with it. The OK assertion below is the
+ * control that pins that: remove it and this test is back to proving nothing in
+ * particular.
  */
 static void test_an_embedded_nul_is_refused(void)
 {
 	char buf[sizeof(ONE_CERT) + 8U];
 	size_t n = strlen(ONE_CERT);
+	/* ONE_CERT is BEGIN + '\n' + CERT_BODY + END, so the base64 starts one
+	 * past the BEGIN line — sizeof() counts the NUL, which stands in for it. */
+	size_t body = sizeof(STS_LDAP_CA_BEGIN);
 
 	memcpy(buf, ONE_CERT, n);
 	memcpy(&buf[n], "trail", 5U);
 	n += 5U;
-	buf[4] = '\0'; /* inside the BEGIN line */
 
+	/* The premise: `body` really is the first byte of the base64, and the
+	 * blob is otherwise a well-framed anchor. */
+	TEST_ASSERT_EQUAL_INT((int)CERT_BODY[0], (int)buf[body]);
+	TEST_ASSERT_EQUAL_INT(STS_LDAP_CA_OK, sts_ldap_ca_check(buf, n));
+
+	buf[body + 4U] = '\0'; /* inside the base64, not the framing */
 	TEST_ASSERT_EQUAL_INT(STS_LDAP_CA_MALFORMED, sts_ldap_ca_check(buf, n));
 }
 

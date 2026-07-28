@@ -2391,7 +2391,10 @@ static void fw_forget(mp_ctx_t *c)
 /**
  * Abandon any open transfer, from a path that is not `fw.revert`.
  *
- * Leaving MP mode, closing the session and a dead-man link drop all land here.
+ * Leaving MP mode, closing the session and a dead-man link drop all land here —
+ * the last of those via mp_tick(), which watches for the override session going
+ * away under an open transfer, because mp_ovr_tick()'s dead-man branch has no
+ * view of the firmware-update session and cannot call this itself.
  * A tool that walks away mid-flash must not leave a component in the state
  * PREPARE put it in — that is the same property `mp_ovr_revert_all()` gives
  * overrides, and core/fwupd's finish() guarantees RESTORE runs exactly once.
@@ -3826,6 +3829,32 @@ int mp_tick(mp_ctx_t *c)
 		}
 	} else {
 		(void)mp_ovr_tick(&c->ovr, NULL, now);
+	}
+
+	/*
+	 * The dead-man does not reach fw_abandon() by itself.
+	 *
+	 * mp_ovr_tick()'s dead-man branch (mp_override.c:903-913) reverts every
+	 * lease and zeroes c->ovr.sess, then returns. It has no view of the
+	 * firmware-update session, so a tool that walked away mid-transfer left
+	 * c->fw_sid set and core/fwupd sitting in TRANSFER until its own 60 s
+	 * idle timeout — up to a minute AFTER every override had already been
+	 * reverted underneath it.
+	 *
+	 * fw_abandon()'s own docstring claimed "a dead-man link drop" landed
+	 * there. It did not; the only call sites were session.open,
+	 * session.close and mp_mode_exit. Found by an adversarial reviewer
+	 * checking the three call sites against the sentence.
+	 *
+	 * The exactly-once invariant was never at risk — finish() guards on
+	 * c->prepared either way — but the delay is not harmless everywhere.
+	 * For the STM32 target it is slot-1 staging and costs nothing. On the
+	 * GNSS path, which fwupd_glue.c documents as one allow bit away, it is
+	 * 60 s of a receiver held in safeboot after the operator's link died,
+	 * which is the precise thing the override dead-man exists to prevent.
+	 */
+	if ((c->fw_sid != 0U) && (c->ovr.sess.id == 0U)) {
+		fw_abandon(c);
 	}
 
 	if (c->mode != (uint8_t)MP_MODE_MP) {

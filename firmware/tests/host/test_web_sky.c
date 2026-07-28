@@ -67,6 +67,10 @@
 #include "zephyr/net/sts_web_sky.h" /* the unit under test */
 #include "zephyr/ui/sts_sky_policy.h" /* the panel's rule, for the §371 pin */
 
+#ifndef STS_APP_SRC_DIR
+#error "STS_APP_SRC_DIR must be defined by tests/host/CMakeLists.txt"
+#endif
+
 /* ===================================================================== */
 /* fixtures                                                              */
 /* ===================================================================== */
@@ -81,6 +85,24 @@ static void sky_reset(void)
 {
 	memset(&g_sky, 0, sizeof(g_sky));
 	memset(&g_out, 0, sizeof(g_out));
+}
+
+/*
+ * File-scope and mutable, so setUp() has to clear them rather than leaving it to
+ * every test to remember. sky_add() uses g_sky.count as its append index, so a
+ * frame left over from the previous test does not merely add noise — it shifts
+ * every index the assertions name, and the suite reads as if it were testing
+ * something else. This suite happened to be correct by convention; a static that
+ * was reset by convention is exactly what once left every later test in another
+ * suite wired to the previous one's fixture.
+ */
+void setUp(void)
+{
+	sky_reset();
+}
+
+void tearDown(void)
+{
 }
 
 /* Append one measurable satellite. Returns its index. */
@@ -673,6 +695,93 @@ static void test_both_views_hold_the_same_number_of_satellites(void)
 			       (unsigned int)REST_SAT_MAX);
 }
 
+#define UI_SRC "zephyr/ui/sts_ui.c"
+#define PANEL_STALE_DEFINE "#define SKY_STALE_MS"
+
+/**
+ * The panel's staleness window, READ OUT OF ui/sts_ui.c.
+ *
+ * SKY_STALE_MS is a #define private to a Zephyr translation unit, so it cannot
+ * be included — and a local `const unsigned int panel_sky_stale_ms = 5000U;`
+ * with the provenance in a comment is not a substitute. That compares
+ * STS_WEB_SKY_STALE_MS against a copy of itself: change the panel's define to
+ * 3000 and the assertion stays green while the two views blank their satellites
+ * two seconds apart, which is the one drift §371 needs this to catch.
+ *
+ * So the define is parsed out of the source, the same way
+ * test_factory_policy.c and test_smear_isolation.c read the tree they cannot
+ * link. Absent, duplicated or unparseable is a FAILURE and never a default: a
+ * scan that cannot find its subject must not report agreement with it.
+ */
+static unsigned long panel_sky_stale_ms(void)
+{
+	static char src[256U * 1024U];
+	char path[512];
+	FILE *f;
+	size_t n;
+	size_t i;
+	size_t at = 0U;
+	size_t tag = sizeof(PANEL_STALE_DEFINE) - 1U;
+	unsigned int hits = 0U;
+	unsigned long v = 0UL;
+	bool digits = false;
+
+	(void)snprintf(path, sizeof(path), "%s/%s", STS_APP_SRC_DIR, UI_SRC);
+	f = fopen(path, "rb");
+	TEST_ASSERT_NOT_NULL_MESSAGE(f, path);
+	n = fread(src, 1U, sizeof(src) - 1U, f);
+	(void)fclose(f);
+	/* A file that exactly filled the buffer was probably truncated. */
+	TEST_ASSERT_TRUE_MESSAGE(n < (sizeof(src) - 1U),
+				 UI_SRC " did not fit the scan buffer");
+	TEST_ASSERT_TRUE_MESSAGE(n > 4096U, UI_SRC " is implausibly small");
+	src[n] = '\0';
+
+	for (i = 0U; (i + tag + 1U) <= n; i++) {
+		if (memcmp(&src[i], PANEL_STALE_DEFINE, tag) != 0) {
+			continue;
+		}
+		/* Whole macro name: `#define SKY_STALE_MS_X` is a different one. */
+		if ((src[i + tag] != ' ') && (src[i + tag] != '\t')) {
+			continue;
+		}
+		hits++;
+		at = i + tag;
+	}
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, hits,
+		"expected exactly one `" PANEL_STALE_DEFINE "` in " UI_SRC
+		"; the panel's staleness window cannot be read, so the "
+		"agreement spec §371 requires cannot be checked — fix this "
+		"scan, do not delete the assertion it feeds");
+
+	while ((at < n) && ((src[at] == ' ') || (src[at] == '\t'))) {
+		at++;
+	}
+	while ((at < n) && (src[at] >= '0') && (src[at] <= '9')) {
+		v = (v * 10UL) + (unsigned long)(src[at] - '0');
+		digits = true;
+		at++;
+	}
+	TEST_ASSERT_TRUE_MESSAGE(digits,
+				 PANEL_STALE_DEFINE " in " UI_SRC
+				 " is not a decimal literal");
+	/* Only an integer suffix may follow: an expression would mean the number
+	 * read here is not the number the panel compiles. */
+	while ((at < n) && ((src[at] == 'u') || (src[at] == 'U') ||
+			    (src[at] == 'l') || (src[at] == 'L'))) {
+		at++;
+	}
+	TEST_ASSERT_TRUE_MESSAGE((at < n) && ((src[at] == '\n') ||
+					      (src[at] == '\r') ||
+					      (src[at] == ' ') ||
+					      (src[at] == '\t') ||
+					      (src[at] == '/')),
+				 PANEL_STALE_DEFINE " in " UI_SRC
+				 " is not a plain integer literal");
+	return v;
+}
+
 static void test_the_two_staleness_windows_are_independent_but_agree(void)
 {
 	/*
@@ -681,18 +790,21 @@ static void test_the_two_staleness_windows_are_independent_but_agree(void)
 	 * the two independently derived numbers still coincide. If a future
 	 * change moves either one, §371 has to be re-argued, and this is where
 	 * that argument gets forced.
-	 *
-	 * The panel's number is a #define private to ui/sts_ui.c and cannot be
-	 * included, so it is restated here with its provenance.
 	 */
-	const unsigned int panel_sky_stale_ms = 5000U; /* ui/sts_ui.c */
+	unsigned long panel = panel_sky_stale_ms();
 
-	TEST_ASSERT_EQUAL_UINT(panel_sky_stale_ms,
-			       (unsigned int)STS_WEB_SKY_STALE_MS);
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		(unsigned int)panel, (unsigned int)STS_WEB_SKY_STALE_MS,
+		"ui/sts_ui.c SKY_STALE_MS and net/sts_web_sky.h "
+		"STS_WEB_SKY_STALE_MS have drifted apart: the panel and the web "
+		"skyplot would blank their satellites at different ages, which "
+		"is exactly what spec §371 forbids. Re-argue §371 — do not "
+		"re-baseline this number");
 
-	/* And it must clear the floor its own derivation sets: one NAV-SAT
+	/* And both must clear the floor the web's derivation sets: one NAV-SAT
 	 * period (1 s) plus one SPA poll (1 s) plus transport slack. */
 	TEST_ASSERT_TRUE((unsigned int)STS_WEB_SKY_STALE_MS >= 3000U);
+	TEST_ASSERT_TRUE(panel >= 3000UL);
 }
 
 /* ===================================================================== */
@@ -894,6 +1006,34 @@ static void test_a_stored_position_is_fixed_mode(void)
 	TEST_ASSERT_EQUAL_INT64(333333333, g_out.ecef_z_cm);
 	/* The figure in force is the stored position's, not the last survey's. */
 	TEST_ASSERT_EQUAL_UINT32(16u, g_out.survey_acc_mm);
+}
+
+/**
+ * And the mirror case: a survey that has not yet produced a meanAcc must not
+ * borrow the stored position's figure.
+ *
+ * It is the same one-line ternary that serves the test below, read in the other
+ * direction, and it is the case sts_web_sky_survey() used to restate as a
+ * follow-up `if` — a branch that could only ever assign 0 over a 0 the line
+ * above had already written. Pinned here so deleting that no-op is a change
+ * with a test behind it rather than a change nothing describes.
+ */
+static void test_a_survey_with_no_accuracy_yet_does_not_borrow_the_stored_one(void)
+{
+	sts_gnss_detail_t d;
+
+	memset(&d, 0, sizeof(d));
+	d.svin_seen = true;
+	d.svin_active = true;
+	d.svin_acc_0p1mm = 0U;   /* NAV-SVIN has not reported meanAcc yet */
+	d.pos_valid = true;
+	d.pos_acc_0p1mm = 12345U; /* the stored figure, which is NOT in force */
+
+	memset(&g_out, 0, sizeof(g_out));
+	sts_web_sky_survey(&d, &g_out);
+	TEST_ASSERT_EQUAL_UINT((unsigned int)REST_SURVEY_ACTIVE,
+			       g_out.survey_state);
+	TEST_ASSERT_EQUAL_UINT32(0u, g_out.survey_acc_mm);
 }
 
 static void test_a_finished_survey_does_not_lend_its_accuracy_to_a_seed(void)
@@ -1111,6 +1251,7 @@ int main(void)
 	RUN_TEST(test_a_running_survey_reports_its_own_progress);
 	RUN_TEST(test_a_survey_outranks_a_position_still_on_file);
 	RUN_TEST(test_a_stored_position_is_fixed_mode);
+	RUN_TEST(test_a_survey_with_no_accuracy_yet_does_not_borrow_the_stored_one);
 	RUN_TEST(test_a_finished_survey_does_not_lend_its_accuracy_to_a_seed);
 	RUN_TEST(test_nothing_stored_and_nothing_running_is_idle);
 	RUN_TEST(test_the_accuracy_unit_conversion_is_tenths_of_a_millimetre);

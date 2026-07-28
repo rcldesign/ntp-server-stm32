@@ -394,7 +394,6 @@ static logr_t g_log;
 static logr_rec_t g_log_slots[16];
 
 static size_t g_wire_len;
-static bool g_fwupd_wired = true;
 
 static unsigned int g_confirm_n;
 static unsigned int g_revert_n;
@@ -552,10 +551,52 @@ static void arm_targets(void)
 					       &o));
 }
 
+/**
+ * Bring up the MP engine, with or without the firmware-update port.
+ *
+ * @p with_fwupd is the ONE difference between a wired image and an image built
+ * without the orchestrator, and it is a parameter rather than a file-scope flag
+ * so that both settings are actually reachable — a `g_fwupd_wired` that setUp()
+ * sets true and nothing ever sets false makes `w.fwupd` unconditional and the
+ * MP_E_NOTSUP branch untested scaffolding.
+ *
+ * Everything else stays identical across the two, which matters: with the port
+ * out and the cfg, log and image ports out with it, an `fw.*` refusal proves
+ * only that SOMETHING was missing. Holding the rest of the wiring fixed makes
+ * the refusal attributable to the absent port alone.
+ */
+static void wire(bool with_fwupd)
+{
+	mp_wiring_t w;
+
+	(void)memset(&w, 0, sizeof(w));
+	w.tx = tx_cb;
+	w.mono_ms = clock_cb;
+	w.model = "STS1000";
+	w.serial = SERIAL;
+	w.fw_version = "1.2.3";
+	w.boot_version = "0.9.0";
+	w.board_id = "0011223344556677";
+	w.apply = apply_cb;
+	w.obj_read = obj_read_cb;
+	w.auth = auth_cb;
+	w.img = &g_img;
+	w.fwupd = with_fwupd ? &g_port : NULL;
+	w.cfg = &g_cfg;
+	w.log = &g_log;
+	w.scratch = g_scratch;
+	w.scratch_len = sizeof(g_scratch);
+	w.reasm = g_slots;
+	w.reasm_n = 2U;
+
+	TEST_ASSERT_EQUAL_INT(0, mp_init(&g_c, &w));
+	TEST_ASSERT_EQUAL_INT(0, mp_set_link(&g_c, true));
+	TEST_ASSERT_EQUAL_INT(0, mp_mode_enter(&g_c));
+}
+
 void setUp(void)
 {
 	fwupd_cfg_t cfg;
-	mp_wiring_t w;
 	uint8_t digest[32];
 	unsigned int i;
 
@@ -568,7 +609,6 @@ void setUp(void)
 	g_prepares_ok = 0U;
 	g_restores = 0U;
 	g_inv_n = 0U;
-	g_fwupd_wired = true;
 
 	(void)memset(g_tgt, 0, sizeof(g_tgt));
 	(void)memset(g_inv, 0, sizeof(g_inv));
@@ -600,29 +640,7 @@ void setUp(void)
 	TEST_ASSERT_EQUAL_INT(0, cfg_init(&g_cfg, NULL));
 	TEST_ASSERT_EQUAL_INT(0, logr_init(&g_log, g_log_slots, 16U));
 
-	(void)memset(&w, 0, sizeof(w));
-	w.tx = tx_cb;
-	w.mono_ms = clock_cb;
-	w.model = "STS1000";
-	w.serial = SERIAL;
-	w.fw_version = "1.2.3";
-	w.boot_version = "0.9.0";
-	w.board_id = "0011223344556677";
-	w.apply = apply_cb;
-	w.obj_read = obj_read_cb;
-	w.auth = auth_cb;
-	w.img = &g_img;
-	w.fwupd = g_fwupd_wired ? &g_port : NULL;
-	w.cfg = &g_cfg;
-	w.log = &g_log;
-	w.scratch = g_scratch;
-	w.scratch_len = sizeof(g_scratch);
-	w.reasm = g_slots;
-	w.reasm_n = 2U;
-
-	TEST_ASSERT_EQUAL_INT(0, mp_init(&g_c, &w));
-	TEST_ASSERT_EQUAL_INT(0, mp_set_link(&g_c, true));
-	TEST_ASSERT_EQUAL_INT(0, mp_mode_enter(&g_c));
+	wire(true);
 }
 
 void tearDown(void)
@@ -2261,6 +2279,45 @@ static void test_leaving_mp_mode_abandons_an_open_transfer(void)
 	assert_ledger("mp_mode_exit");
 }
 
+/**
+ * And so must the dead-man, which is the case the docstring claimed and the
+ * code did not do.
+ *
+ * mp_ovr_tick()'s dead-man branch reverts every lease and zeroes the override
+ * session, but it has no view of the firmware-update session — so a tool whose
+ * link died mid-transfer left fw_sid set and core/fwupd in TRANSFER until its
+ * own 60 s idle timeout, up to a minute after every override had already gone.
+ * fw_abandon()'s comment said "a dead-man link drop" landed there; its only
+ * call sites were session.open, session.close and mp_mode_exit.
+ *
+ * The exactly-once invariant was never at risk — finish() guards on
+ * c->prepared either way — so `assert_ledger()` passed throughout and nothing
+ * here went red. What was wrong was the timing, and only a test that advances
+ * the clock past the keepalive can see it.
+ */
+static void test_a_dead_man_link_drop_abandons_an_open_transfer(void)
+{
+	uint32_t sid = session();
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_chunk(sid, 0U, 512U);
+	TEST_ASSERT_EQUAL_UINT(0U, g_tgt[FWUPD_COMP_STM32_APP].restore_n);
+
+	/*
+	 * Walk the clock past the session TTL without a keepalive and tick. No
+	 * fw.* call is made — the point is that the transfer is torn down by the
+	 * dead-man alone, not by anything the vanished tool does next.
+	 */
+	g_now += MP_KEEPALIVE_TTL_MS + 1000U;
+	(void)mp_tick(&g_c);
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, g_tgt[FWUPD_COMP_STM32_APP].restore_n,
+		"the dead-man reverted the overrides and left the firmware "
+		"transfer open behind them");
+	assert_ledger("dead-man link drop");
+}
+
 /** So must closing the session that authorised it. */
 static void test_closing_the_session_abandons_an_open_transfer(void)
 {
@@ -2470,50 +2527,69 @@ static void test_the_restore_ledger_balances_on_every_exit(void)
 /* 8. the port is optional                                                    */
 /* ========================================================================= */
 
+/* The six FMT §9 methods, in a form each answers without needing a session. */
+static const char *const g_fw_methods[] = {
+	"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.inventory\","
+	"\"params\":{\"from\":0}}",
+	"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.begin\","
+	"\"params\":{\"target\":0,\"size\":16}}",
+	"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.data\","
+	"\"params\":{\"off\":0,\"data\":\"AAAA\"}}",
+	"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.end\",\"params\":{}}",
+	"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.confirm\","
+	"\"params\":{\"target\":0}}",
+	"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.revert\","
+	"\"params\":{\"target\":0}}",
+};
+
+#define FW_METHOD_N (sizeof(g_fw_methods) / sizeof(g_fw_methods[0]))
+
 /**
  * A build with no orchestrator answers MP_E_NOTSUP on all six rather than
  * crashing, so a partially wired image is diagnosable instead of dead.
+ *
+ * Re-wired through the same wire() setUp() uses, with the port and NOTHING ELSE
+ * removed. The refusal is then attributable: it is the missing fwupd port, not
+ * a missing cfg, log or image port keeping it company.
  */
 static void test_an_unwired_port_answers_notsup_on_every_method(void)
 {
-	static const char *const reqs[] = {
-		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.inventory\","
-		"\"params\":{\"from\":0}}",
-		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.begin\","
-		"\"params\":{\"target\":0,\"size\":16}}",
-		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.data\","
-		"\"params\":{\"off\":0,\"data\":\"AAAA\"}}",
-		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.end\","
-		"\"params\":{}}",
-		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.confirm\","
-		"\"params\":{\"target\":0}}",
-		"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"fw.revert\","
-		"\"params\":{\"target\":0}}",
-	};
-	mp_wiring_t w;
 	size_t i;
 
-	(void)memset(&w, 0, sizeof(w));
-	w.tx = tx_cb;
-	w.mono_ms = clock_cb;
-	w.model = "STS1000";
-	w.serial = SERIAL;
-	w.apply = apply_cb;
-	w.obj_read = obj_read_cb;
-	w.auth = auth_cb;
-	w.fwupd = NULL;
-	w.scratch = g_scratch;
-	w.scratch_len = sizeof(g_scratch);
-	w.reasm = g_slots;
-	w.reasm_n = 2U;
-	TEST_ASSERT_EQUAL_INT(0, mp_init(&g_c, &w));
-	TEST_ASSERT_EQUAL_INT(0, mp_set_link(&g_c, true));
-	TEST_ASSERT_EQUAL_INT(0, mp_mode_enter(&g_c));
+	wire(false);
 
-	for (i = 0U; i < (sizeof(reqs) / sizeof(reqs[0])); i++) {
-		(void)call(reqs[i]);
+	for (i = 0U; i < FW_METHOD_N; i++) {
+		(void)call(g_fw_methods[i]);
 		TEST_ASSERT_EQUAL_INT64_MESSAGE(MP_E_NOTSUP, err_code(),
-						reqs[i]);
+						g_fw_methods[i]);
+	}
+}
+
+/**
+ * …and the identical six requests are NOT refused when the port is there.
+ *
+ * The control for the test above, and the reason the wiring is a parameter. A
+ * `w.fwupd` that no test can set to NULL makes MP_E_NOTSUP unreachable and the
+ * test above vacuous; a refusal that every request earns anyway would make it
+ * vacuous in the other direction. Each of the six is asserted to answer as
+ * SOMETHING other than "this build cannot do that" — most of them a G1/G2 or
+ * state refusal, since none carries a session — which is only interesting
+ * against the sweep above, and only true because the two share one wiring.
+ */
+static void test_a_wired_port_never_answers_notsup(void)
+{
+	size_t i;
+
+	for (i = 0U; i < FW_METHOD_N; i++) {
+		int r;
+
+		(void)call(g_fw_methods[i]);
+		r = mp_json_obj_get(&g_rp, 0, "result");
+		if (r >= 0) {
+			continue; /* fw.inventory: observation is free */
+		}
+		TEST_ASSERT_TRUE_MESSAGE(err_code() != MP_E_NOTSUP,
+					 g_fw_methods[i]);
 	}
 }
 
@@ -2564,6 +2640,7 @@ int main(void)
 	RUN_TEST(test_abort_mid_transfer_runs_restore);
 	RUN_TEST(test_revert_after_end_unstages_the_pending_swap);
 	RUN_TEST(test_leaving_mp_mode_abandons_an_open_transfer);
+	RUN_TEST(test_a_dead_man_link_drop_abandons_an_open_transfer);
 	RUN_TEST(test_closing_the_session_abandons_an_open_transfer);
 	RUN_TEST(test_a_session_takeover_abandons_an_open_transfer);
 	RUN_TEST(test_a_failed_prepare_owes_no_restore);
@@ -2572,6 +2649,7 @@ int main(void)
 
 	RUN_TEST(test_the_restore_ledger_balances_on_every_exit);
 	RUN_TEST(test_an_unwired_port_answers_notsup_on_every_method);
+	RUN_TEST(test_a_wired_port_never_answers_notsup);
 
 	return UNITY_END();
 }

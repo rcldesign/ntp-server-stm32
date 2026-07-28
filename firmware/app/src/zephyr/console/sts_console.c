@@ -85,14 +85,34 @@ LOG_MODULE_REGISTER(sts_console, CONFIG_STS1000_LOG_LEVEL);
  *
  * THE PREMISE HAS TWO HALVES, and both are load-bearing:
  *
- *   ONE LOCK WAIT PER PASS. sts_mp_tick() has two things that want the engine:
- *   the passthrough drain and the tick proper. That is why sts_mp_stream_raw()
- *   — the drain's only route in — tries with K_NO_WAIT rather than a timeout,
- *   and why sts_fwupd_step() does the same with the orchestrator's mutex. If
- *   either is ever given a timeout instead, this becomes
- *   (5 + 1) * (250 + 50 + 50) + 150 = 2250 ms and the dead-man's revert
+ *   ONE *TIMED* LOCK WAIT PER PASS. sts_mp_tick() has two things that want the
+ *   engine: the passthrough drain and the tick proper. That is why
+ *   sts_mp_stream_raw() — the drain's only route in — tries with K_NO_WAIT
+ *   rather than a timeout, and why sts_fwupd_step() does the same with the
+ *   orchestrator's mutex. If either is ever given a timeout instead, this
+ *   becomes (5 + 1) * (250 + 50 + 50) + 150 = 2250 ms and the dead-man's revert
  *   deadline is no longer met; change the numbers here in the same edit or do
  *   not make it.
+ *
+ *   THIS IS NOT THE SAME AS "no other lock is ever waited on", and an earlier
+ *   version of this comment said it was. sts_fwupd_step()'s timeout branches
+ *   reach stm_restore() -> img->request_revert() -> sts_dfu.c's
+ *   dfu_request_revert(), which takes dfu_lock K_FOREVER three times over
+ *   (dfu_open, dfu_erase_trailer, the stream reset). dfu_lock is genuinely
+ *   multi-threaded — MCP binds it at prio 14, the shell at 14, and the WEB
+ *   WORKERS AT PRIO 12, above this thread — and dfu_staging_write() holds it
+ *   across an erase-plus-program. Zephyr hands a released mutex to the
+ *   highest-priority already-pending waiter, so a REST firmware upload
+ *   streaming chunks back-to-back outranks this supervisor on every handoff.
+ *
+ *   Each individual wait is one flash operation (single-digit ms on an 8 KB
+ *   H5 sector), so the 150 ms work term below is very likely still enough —
+ *   but "likely" is the honest word, and the accumulation is not bounded by
+ *   anything the compiler can check. That is exactly what fwupd_glue.c's
+ *   step_worst_ms high-water instrument is for, and settling it means running
+ *   a REST upload concurrently with a stale MP transfer's idle timeout on a
+ *   board. If the bench shows it matters, the fix is a bounded-timeout variant
+ *   of dfu_request_revert() for this path — not a bigger number here.
  *
  *   BOUNDED WORK PER PASS. Not waiting on a lock does not make a call short. A
  *   pass runs long if anything in it blocks, sleeps or writes flash, and
