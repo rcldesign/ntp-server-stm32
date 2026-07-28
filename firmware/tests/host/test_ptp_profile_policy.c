@@ -260,6 +260,258 @@ static void test_a_commissioned_unit_keeps_what_the_operator_typed(void)
 	TEST_ASSERT_EQUAL_INT32(-3, sync);
 }
 
+/* ===================================================================== *
+ *  An override the profile forbids — the case that used to cost the
+ *  operator their whole profile
+ * ===================================================================== */
+
+/*
+ * G.8275.1's real ranges (core/ptp/ptp_profile.c desc_g8275_1), against the
+ * real schema defaults. Most are single values, which is exactly why the old
+ * behaviour was not a corner case.
+ *
+ *   field           schema default   profile default   profile range
+ *   domain                       0                24         24..43
+ *   priority1                  128               128       128..128
+ *   log_announce                 1                -3         -3..-3
+ *   log_sync                     0                -4         -4..-4
+ */
+#define G82751_DOMAIN_LO 24U
+#define G82751_DOMAIN_HI 43U
+#define SCHEMA_LOG_ANNOUNCE 1
+#define G82751_LOG_ANNOUNCE (-3)
+
+static void test_an_out_of_profile_domain_is_refused_not_fatal(void)
+{
+	sts_ptp_pick_t how = STS_PTP_PICK_OPERATOR;
+	/* Operator set domain 5: differs from the schema default, so under the
+	 * old rule it won — and then failed validation, and took G.8275.1 with
+	 * it. Now the field alone loses and the profile survives. */
+	uint64_t v = sts_ptp_prof_pick_u64_r(5U, SCHEMA_DOMAIN, G82751_DOMAIN,
+					     G82751_DOMAIN_LO, G82751_DOMAIN_HI,
+					     &how);
+
+	TEST_ASSERT_EQUAL_UINT64(G82751_DOMAIN, v);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_REFUSED, how);
+	TEST_ASSERT_TRUE(sts_ptp_pick_notable(how));
+}
+
+static void test_an_in_profile_domain_is_still_the_operators(void)
+{
+	sts_ptp_pick_t how = STS_PTP_PICK_REFUSED;
+	uint64_t v = sts_ptp_prof_pick_u64_r(30U, SCHEMA_DOMAIN, G82751_DOMAIN,
+					     G82751_DOMAIN_LO, G82751_DOMAIN_HI,
+					     &how);
+
+	TEST_ASSERT_EQUAL_UINT64(30U, v);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_OPERATOR, how);
+	TEST_ASSERT_FALSE(sts_ptp_pick_notable(how));
+}
+
+static void test_the_range_is_inclusive_at_both_ends(void)
+{
+	TEST_ASSERT_EQUAL_UINT64(24U, sts_ptp_prof_pick_u64_r(
+					      24U, SCHEMA_DOMAIN, G82751_DOMAIN,
+					      G82751_DOMAIN_LO,
+					      G82751_DOMAIN_HI, NULL));
+	TEST_ASSERT_EQUAL_UINT64(43U, sts_ptp_prof_pick_u64_r(
+					      43U, SCHEMA_DOMAIN, G82751_DOMAIN,
+					      G82751_DOMAIN_LO,
+					      G82751_DOMAIN_HI, NULL));
+	/* One past each end goes to the profile. */
+	TEST_ASSERT_EQUAL_UINT64(G82751_DOMAIN,
+				 sts_ptp_prof_pick_u64_r(23U, SCHEMA_DOMAIN,
+							 G82751_DOMAIN,
+							 G82751_DOMAIN_LO,
+							 G82751_DOMAIN_HI,
+							 NULL));
+	TEST_ASSERT_EQUAL_UINT64(G82751_DOMAIN,
+				 sts_ptp_prof_pick_u64_r(44U, SCHEMA_DOMAIN,
+							 G82751_DOMAIN,
+							 G82751_DOMAIN_LO,
+							 G82751_DOMAIN_HI,
+							 NULL));
+}
+
+static void test_a_single_value_range_refuses_everything_else(void)
+{
+	sts_ptp_pick_t how = STS_PTP_PICK_OPERATOR;
+	/* log_announce: schema default 1, profile demands exactly -3. A unit
+	 * commissioned under the Default profile, where the interval is free,
+	 * hits this the moment somebody selects G.8275.1. */
+	int32_t v = sts_ptp_prof_pick_i32_r(0, SCHEMA_LOG_ANNOUNCE,
+					    G82751_LOG_ANNOUNCE,
+					    G82751_LOG_ANNOUNCE,
+					    G82751_LOG_ANNOUNCE, &how);
+
+	TEST_ASSERT_EQUAL_INT32(G82751_LOG_ANNOUNCE, v);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_REFUSED, how);
+
+	/* The one permitted value is accepted as the operator's. */
+	v = sts_ptp_prof_pick_i32_r(G82751_LOG_ANNOUNCE, SCHEMA_LOG_ANNOUNCE,
+				    G82751_LOG_ANNOUNCE, G82751_LOG_ANNOUNCE,
+				    G82751_LOG_ANNOUNCE, &how);
+	TEST_ASSERT_EQUAL_INT32(G82751_LOG_ANNOUNCE, v);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_OPERATOR, how);
+}
+
+static void test_an_untouched_key_is_never_reported_as_refused(void)
+{
+	sts_ptp_pick_t how = STS_PTP_PICK_REFUSED;
+
+	/* Schema default 0 is outside G.8275.1's 24..43, but the operator never
+	 * set it — reporting that as a refusal would put a warning in every
+	 * boot log of every correctly-configured unit. */
+	(void)sts_ptp_prof_pick_u64_r(SCHEMA_DOMAIN, SCHEMA_DOMAIN,
+				      G82751_DOMAIN, G82751_DOMAIN_LO,
+				      G82751_DOMAIN_HI, &how);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_PROFILE, how);
+	TEST_ASSERT_FALSE(sts_ptp_pick_notable(how));
+}
+
+static void test_the_substituted_value_always_satisfies_the_profile(void)
+{
+	/*
+	 * The property that makes this safe: whatever branch is taken, the
+	 * result is inside the profile's range, so ptp_cfg_validate() accepts it
+	 * by construction and this can never mask an invalid configuration.
+	 */
+	uint64_t probes[] = { 0U, 1U, 23U, 24U, 33U, 43U, 44U, 255U, UINT64_MAX };
+	size_t i;
+
+	for (i = 0U; i < (sizeof(probes) / sizeof(probes[0])); i++) {
+		uint64_t v = sts_ptp_prof_pick_u64_r(probes[i], SCHEMA_DOMAIN,
+						     G82751_DOMAIN,
+						     G82751_DOMAIN_LO,
+						     G82751_DOMAIN_HI, NULL);
+
+		TEST_ASSERT_TRUE_MESSAGE(v >= G82751_DOMAIN_LO &&
+						 v <= G82751_DOMAIN_HI,
+					 "pick returned a value the profile "
+					 "forbids");
+	}
+}
+
+static void test_a_null_how_is_accepted(void)
+{
+	TEST_ASSERT_EQUAL_UINT64(G82751_DOMAIN,
+				 sts_ptp_prof_pick_u64_r(5U, SCHEMA_DOMAIN,
+							 G82751_DOMAIN,
+							 G82751_DOMAIN_LO,
+							 G82751_DOMAIN_HI,
+							 NULL));
+	TEST_ASSERT_EQUAL_INT32(G82751_LOG_SYNC,
+				sts_ptp_prof_pick_i32_r(2, SCHEMA_LOG_SYNC,
+							G82751_LOG_SYNC,
+							G82751_LOG_SYNC,
+							G82751_LOG_SYNC, NULL));
+}
+
+/* --- transport: a mask, not a range --------------------------------- */
+
+/* PTP_TRANSPORT_UDP_IPV4 = 0, UDP_IPV6 = 1, L2 = 2 (core/ptp/ptp.h). */
+#define XPORT_L2 2U
+#define XPORT_UDP4 0U
+#define MASK_L2_ONLY (1U << XPORT_L2)
+
+static void test_a_transport_the_profile_forbids_is_refused(void)
+{
+	sts_ptp_pick_t how = STS_PTP_PICK_OPERATOR;
+	/* G.8275.1 is L2-only; an operator carrying UDPv6 from the Default
+	 * profile must not silently demote the unit. */
+	uint64_t v = sts_ptp_prof_pick_xport(1U, XPORT_UDP4, XPORT_L2,
+					     MASK_L2_ONLY, &how);
+
+	TEST_ASSERT_EQUAL_UINT64(XPORT_L2, v);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_REFUSED, how);
+}
+
+static void test_a_permitted_transport_is_kept(void)
+{
+	sts_ptp_pick_t how = STS_PTP_PICK_REFUSED;
+	uint64_t v = sts_ptp_prof_pick_xport(XPORT_L2, XPORT_UDP4, XPORT_L2,
+					     MASK_L2_ONLY | (1U << XPORT_UDP4),
+					     &how);
+
+	TEST_ASSERT_EQUAL_UINT64(XPORT_L2, v);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_OPERATOR, how);
+}
+
+static void test_a_transport_index_past_the_mask_cannot_shift_out_of_range(void)
+{
+	sts_ptp_pick_t how = STS_PTP_PICK_OPERATOR;
+
+	/* 32 and above would be undefined behaviour as a shift count. The width
+	 * test has to come first, and this is what says so. */
+	TEST_ASSERT_EQUAL_UINT64(XPORT_L2,
+				 sts_ptp_prof_pick_xport(32U, XPORT_UDP4,
+							 XPORT_L2, MASK_L2_ONLY,
+							 &how));
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_REFUSED, how);
+	TEST_ASSERT_EQUAL_UINT64(XPORT_L2,
+				 sts_ptp_prof_pick_xport(UINT64_MAX, XPORT_UDP4,
+							 XPORT_L2, MASK_L2_ONLY,
+							 NULL));
+}
+
+static void test_an_out_of_range_transport_does_not_alias_onto_a_valid_one(void)
+{
+	sts_ptp_pick_t how = STS_PTP_PICK_OPERATOR;
+	/*
+	 * The case that distinguishes a width GUARD from a width MASK. With the
+	 * mask permitting UDPv4 (bit 0), a stored 32 masked to 5 bits becomes
+	 * bit 0 and would be accepted as a valid transport — 32 is not a
+	 * transport at all. `stored & 31` is a plausible-looking way to make the
+	 * shift defined and it is wrong; refusing outright is right.
+	 *
+	 * Written after a mutation that replaced the guard with `& 31U`
+	 * survived every other test in this file.
+	 */
+	uint64_t v = sts_ptp_prof_pick_xport(32U, XPORT_L2, XPORT_L2,
+					     (1U << XPORT_UDP4), &how);
+
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_REFUSED, how);
+	TEST_ASSERT_EQUAL_UINT64(XPORT_L2, v);
+
+	/* 64 aliases to bit 0 as well; 33 would alias to bit 1. */
+	how = STS_PTP_PICK_OPERATOR;
+	(void)sts_ptp_prof_pick_xport(64U, XPORT_L2, XPORT_L2,
+				      (1U << XPORT_UDP4), &how);
+	TEST_ASSERT_EQUAL_INT(STS_PTP_PICK_REFUSED, how);
+}
+
+static void test_an_empty_transport_mask_refuses_every_override(void)
+{
+	TEST_ASSERT_EQUAL_UINT64(XPORT_L2,
+				 sts_ptp_prof_pick_xport(1U, XPORT_UDP4,
+							 XPORT_L2, 0U, NULL));
+}
+
+static void test_the_commissioned_g82751_unit_now_stays_on_g82751(void)
+{
+	/*
+	 * End to end on the scenario that motivated all of this. A unit
+	 * commissioned under Default with priority1 128, log_announce 0 and
+	 * UDPv6, switched to G.8275.1. Under the old code every one of those
+	 * survived the pick, ptp_cfg_validate() then returned -ERANGE, and the
+	 * unit came up on the Default profile. Now each offending field loses
+	 * individually and the profile stands.
+	 */
+	int32_t ann = sts_ptp_prof_pick_i32_r(0, SCHEMA_LOG_ANNOUNCE,
+					      G82751_LOG_ANNOUNCE,
+					      G82751_LOG_ANNOUNCE,
+					      G82751_LOG_ANNOUNCE, NULL);
+	uint64_t xport = sts_ptp_prof_pick_xport(1U, XPORT_UDP4, XPORT_L2,
+						 MASK_L2_ONLY, NULL);
+	uint64_t dom = sts_ptp_prof_pick_u64_r(SCHEMA_DOMAIN, SCHEMA_DOMAIN,
+					       G82751_DOMAIN, G82751_DOMAIN_LO,
+					       G82751_DOMAIN_HI, NULL);
+
+	TEST_ASSERT_EQUAL_INT32(G82751_LOG_ANNOUNCE, ann);
+	TEST_ASSERT_EQUAL_UINT64(XPORT_L2, xport);
+	TEST_ASSERT_EQUAL_UINT64(G82751_DOMAIN, dom);
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -286,6 +538,21 @@ int main(void)
 
 	RUN_TEST(test_a_fresh_unit_selecting_g82751_gets_g82751);
 	RUN_TEST(test_a_commissioned_unit_keeps_what_the_operator_typed);
+
+	RUN_TEST(test_an_out_of_profile_domain_is_refused_not_fatal);
+	RUN_TEST(test_an_in_profile_domain_is_still_the_operators);
+	RUN_TEST(test_the_range_is_inclusive_at_both_ends);
+	RUN_TEST(test_a_single_value_range_refuses_everything_else);
+	RUN_TEST(test_an_untouched_key_is_never_reported_as_refused);
+	RUN_TEST(test_the_substituted_value_always_satisfies_the_profile);
+	RUN_TEST(test_a_null_how_is_accepted);
+
+	RUN_TEST(test_a_transport_the_profile_forbids_is_refused);
+	RUN_TEST(test_a_permitted_transport_is_kept);
+	RUN_TEST(test_a_transport_index_past_the_mask_cannot_shift_out_of_range);
+	RUN_TEST(test_an_out_of_range_transport_does_not_alias_onto_a_valid_one);
+	RUN_TEST(test_an_empty_transport_mask_refuses_every_override);
+	RUN_TEST(test_the_commissioned_g82751_unit_now_stays_on_g82751);
 
 	return UNITY_END();
 }

@@ -2722,6 +2722,10 @@ static int h_sec_ldap_ca_get(rest_ctx_t *c, const http_req_t *req,
 			    "cannot be used");
 	}
 	if (rc != 0) {
+		/* -EBUSY lands here and 503 is the right answer for it: the
+		 * provider bounds its wait for the AAA exchange mutex rather
+		 * than parking a web worker behind an in-flight directory bind
+		 * (sts_aaa.c LDAP_CA_INFO_WAIT_MS). "Try again" — not 500. */
 		return fail(c, r, 503, "unavailable", NULL);
 	}
 	web_jw_init(&w, r->body, r->body_cap);

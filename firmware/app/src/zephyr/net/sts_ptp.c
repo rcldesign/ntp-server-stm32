@@ -1136,6 +1136,47 @@ static int32_t schema_def_i32(uint16_t id)
 	return (k != NULL) ? k->def.i : INT32_MIN;
 }
 
+/*
+ * The two picks, as macros purely so the log line can name the cfg key without
+ * every call site repeating it. Each expands to one sts_ptp_prof_pick_*_r()
+ * plus the warning that used to be missing: an override the profile forbids is
+ * dropped for that field alone, rather than failing validation and taking the
+ * whole profile down with it. See sts_ptp_profile_policy.h.
+ */
+#define PICK_U64(id, prof_val, range, keyname)                                 \
+	({                                                                     \
+		sts_ptp_pick_t how_;                                           \
+		uint64_t v_ = sts_ptp_prof_pick_u64_r(                         \
+			sts_net_cfg_u64((id), (uint64_t)(prof_val)),           \
+			schema_def_u64(id), (uint64_t)(prof_val),              \
+			(uint64_t)(range).min, (uint64_t)(range).max, &how_);  \
+		if (sts_ptp_pick_notable(how_)) {                              \
+			LOG_WRN("%s is outside profile %s (%u..%u); using %u",  \
+				(keyname),                                     \
+				ptp_profile_name(requested_profile),           \
+				(unsigned int)(range).min,                     \
+				(unsigned int)(range).max,                     \
+				(unsigned int)v_);                             \
+		}                                                              \
+		v_;                                                            \
+	})
+
+#define PICK_I32(id, prof_val, range, keyname)                                 \
+	({                                                                     \
+		sts_ptp_pick_t how_;                                           \
+		int32_t v_ = sts_ptp_prof_pick_i32_r(                          \
+			sts_net_cfg_i32((id), (int32_t)(prof_val)),            \
+			schema_def_i32(id), (int32_t)(prof_val),               \
+			(int32_t)(range).min, (int32_t)(range).max, &how_);    \
+		if (sts_ptp_pick_notable(how_)) {                              \
+			LOG_WRN("%s is outside profile %s (%d..%d); using %d",  \
+				(keyname),                                     \
+				ptp_profile_name(requested_profile),           \
+				(int)(range).min, (int)(range).max, (int)v_);   \
+		}                                                              \
+		v_;                                                            \
+	})
+
 int sts_ptp_start(void)
 {
 	uint8_t requested_profile;
@@ -1169,36 +1210,51 @@ int sts_ptp_start(void)
 	 * read from the schema rather than repeated here, so adding a key or
 	 * changing a default cannot leave a second copy behind.
 	 */
-	port_cfg.domain = (uint8_t)sts_ptp_prof_pick_u64(
-		sts_net_cfg_u64(CFG_ID_PTP_DOMAIN, port_cfg.domain),
-		schema_def_u64(CFG_ID_PTP_DOMAIN), port_cfg.domain);
-	port_cfg.priority1 = (uint8_t)sts_ptp_prof_pick_u64(
-		sts_net_cfg_u64(CFG_ID_PTP_PRIORITY1, port_cfg.priority1),
-		schema_def_u64(CFG_ID_PTP_PRIORITY1), port_cfg.priority1);
-	port_cfg.priority2 = (uint8_t)sts_ptp_prof_pick_u64(
-		sts_net_cfg_u64(CFG_ID_PTP_PRIORITY2, port_cfg.priority2),
-		schema_def_u64(CFG_ID_PTP_PRIORITY2), port_cfg.priority2);
-	port_cfg.log_announce_interval = (int8_t)sts_ptp_prof_pick_i32(
-		sts_net_cfg_i32(CFG_ID_PTP_LOG_ANNOUNCE,
-				port_cfg.log_announce_interval),
-		schema_def_i32(CFG_ID_PTP_LOG_ANNOUNCE),
-		port_cfg.log_announce_interval);
-	port_cfg.log_sync_interval = (int8_t)sts_ptp_prof_pick_i32(
-		sts_net_cfg_i32(CFG_ID_PTP_LOG_SYNC, port_cfg.log_sync_interval),
-		schema_def_i32(CFG_ID_PTP_LOG_SYNC), port_cfg.log_sync_interval);
-	port_cfg.log_min_delay_req_interval = (int8_t)sts_ptp_prof_pick_i32(
-		sts_net_cfg_i32(CFG_ID_PTP_LOG_DELAYREQ,
-				port_cfg.log_min_delay_req_interval),
-		schema_def_i32(CFG_ID_PTP_LOG_DELAYREQ),
-		port_cfg.log_min_delay_req_interval);
+	{
+		const ptp_profile_desc_t *d = ptp_profile_desc(requested_profile);
 
-	transport = (uint8_t)sts_ptp_prof_pick_u64(
-		sts_net_cfg_u64(CFG_ID_PTP_TRANSPORT, (uint64_t)port_cfg.transport),
-		schema_def_u64(CFG_ID_PTP_TRANSPORT), (uint64_t)port_cfg.transport);
-	if (transport >= (uint8_t)PTP_TRANSPORT_COUNT) {
-		transport = (uint8_t)PTP_TRANSPORT_UDP_IPV4;
+		port_cfg.domain = (uint8_t)PICK_U64(
+			CFG_ID_PTP_DOMAIN, port_cfg.domain, d->domain_range,
+			"ptp.domain");
+		port_cfg.priority1 = (uint8_t)PICK_U64(
+			CFG_ID_PTP_PRIORITY1, port_cfg.priority1,
+			d->priority1_range, "ptp.priority1");
+		port_cfg.priority2 = (uint8_t)PICK_U64(
+			CFG_ID_PTP_PRIORITY2, port_cfg.priority2,
+			d->priority2_range, "ptp.priority2");
+		port_cfg.log_announce_interval = (int8_t)PICK_I32(
+			CFG_ID_PTP_LOG_ANNOUNCE, port_cfg.log_announce_interval,
+			d->log_announce_range, "ptp.log.announce");
+		port_cfg.log_sync_interval = (int8_t)PICK_I32(
+			CFG_ID_PTP_LOG_SYNC, port_cfg.log_sync_interval,
+			d->log_sync_range, "ptp.log.sync");
+		port_cfg.log_min_delay_req_interval = (int8_t)PICK_I32(
+			CFG_ID_PTP_LOG_DELAYREQ,
+			port_cfg.log_min_delay_req_interval,
+			d->log_min_delay_req_range, "ptp.log.delayreq");
+
+		/* Transport carries a bit mask rather than a range. */
+		{
+			sts_ptp_pick_t how;
+
+			transport = (uint8_t)sts_ptp_prof_pick_xport(
+				sts_net_cfg_u64(CFG_ID_PTP_TRANSPORT,
+						(uint64_t)port_cfg.transport),
+				schema_def_u64(CFG_ID_PTP_TRANSPORT),
+				(uint64_t)port_cfg.transport,
+				d->transport_mask, &how);
+			if (sts_ptp_pick_notable(how)) {
+				LOG_WRN("ptp.transport is not permitted by "
+					"profile %s; using %u instead",
+					ptp_profile_name(requested_profile),
+					(unsigned int)transport);
+			}
+		}
+		if (transport >= (uint8_t)PTP_TRANSPORT_COUNT) {
+			transport = (uint8_t)PTP_TRANSPORT_UDP_IPV4;
+		}
+		port_cfg.transport = (ptp_transport_t)transport;
 	}
-	port_cfg.transport = (ptp_transport_t)transport;
 
 	rc = ptp_cfg_validate(&port_cfg);
 	if (rc != 0) {

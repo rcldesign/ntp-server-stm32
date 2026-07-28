@@ -829,6 +829,28 @@ static bool ldap_ca_ready(void)
 	return g_ca_ready;
 }
 
+/**
+ * How long a read-only CA query will wait for the exchange mutex.
+ *
+ * NOT K_FOREVER, and the difference matters. g_lock is held for the WHOLE of
+ * do_ldap() — resolve, connect, TLS handshake, bind, three membership searches —
+ * bounded only by `sec.ldap.tmo.ms` per exchange. sts_aaa_ldap_ca_info()'s only
+ * caller is a REST provider (sts_web.c:990) running on one of two web workers
+ * at priority 12, so a K_FOREVER here lets a single slow or hostile directory
+ * server park a worker for the length of a bind, and two status polls wedge the
+ * management plane outright.
+ *
+ * That is precisely the availability failure the AAA serialisation gate was
+ * built to prevent, and it would have walked straight back in through a status
+ * query — which needs none of the exchange state it was queueing behind.
+ *
+ * 200 ms is far longer than any legitimate holder of this mutex outside an
+ * in-flight exchange (the longest is ldap_ca_adopt(), a parse and a memcpy over
+ * at most 3 KiB), so a timeout means "an authentication is running", which is
+ * exactly what -EBUSY tells the operator.
+ */
+#define LDAP_CA_INFO_WAIT_MS 200
+
 int sts_aaa_ldap_ca_info(sts_aaa_ldap_ca_t *out)
 {
 	if (out == NULL) {
@@ -836,7 +858,9 @@ int sts_aaa_ldap_ca_info(sts_aaa_ldap_ca_t *out)
 	}
 	memset(out, 0, sizeof(*out));
 
-	k_mutex_lock(&g_lock, K_FOREVER);
+	if (k_mutex_lock(&g_lock, K_MSEC(LDAP_CA_INFO_WAIT_MS)) != 0) {
+		return -EBUSY;
+	}
 	out->present = ldap_ca_ready();
 	out->persisted = g_ca_persisted;
 	(void)web_span_copy(out->subject, sizeof(out->subject), g_ca_subject,

@@ -94,6 +94,145 @@ static inline int32_t sts_ptp_prof_pick_i32(int32_t stored, int32_t schema_def,
 	return (stored != schema_def) ? stored : profile_val;
 }
 
+/* ------------------------------------------------- overrides vs the profile */
+
+/**
+ * How a profile-owned field got the value it has.
+ *
+ * Exists so the caller can log the third case, which used to be
+ * indistinguishable from the second and cost the operator their whole profile.
+ */
+typedef enum {
+	STS_PTP_PICK_PROFILE = 0, /**< operator never moved it off the default */
+	STS_PTP_PICK_OPERATOR,    /**< operator's value, inside the profile */
+	STS_PTP_PICK_REFUSED,     /**< operator's value is outside the profile */
+} sts_ptp_pick_t;
+
+/**
+ * Pick a profile-owned field, refusing an override the profile forbids.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY REFUSING ONE FIELD BEATS REJECTING THE CONFIGURATION
+ * ---------------------------------------------------------------------------
+ *
+ * ptp_cfg_validate() checks every profile-owned field against the descriptor's
+ * normative range and returns -ERANGE if any single one is outside it
+ * (ptp_port.c:141-157). sts_ptp_start()'s only answer to -ERANGE is
+ * ptp_cfg_defaults(), which erases `.profile` — so ONE stale operator key
+ * demotes a G.8275.1 grandmaster to the Default profile.
+ *
+ * That is not a corner case. G.8275.1's ranges are mostly single values:
+ * priority1 {128,128}, log_announce {-3,-3}, log_sync {-4,-4}. Any commissioned
+ * unit that ever had a log interval or priority1 set — for the Default profile,
+ * where those are free — hits it the moment somebody selects the telecom
+ * profile. The unit then serves Default while the operator believes it is
+ * serving G.8275.1: for a telecom deployment, the wrong domain on the wrong
+ * transport at the wrong rate.
+ *
+ * So an override the profile forbids is dropped, that one field takes the
+ * profile's value, and the caller names the field in a log line. A
+ * standards-conformant grandmaster plus a message beats a conformant
+ * grandmaster of the wrong standard plus a message about "defaults".
+ *
+ * This cannot mask a genuinely invalid configuration. Every value substituted
+ * comes from the profile descriptor, so ptp_cfg_validate() accepts it by
+ * construction; anything still rejected afterwards is a field this function
+ * does not own — portNumber, the SDO ids, the C37.238 payload — and the
+ * fallback for those is unchanged.
+ *
+ * @param how  Receives which of the three cases applied. May be NULL.
+ */
+static inline uint64_t sts_ptp_prof_pick_u64_r(uint64_t stored,
+					       uint64_t schema_def,
+					       uint64_t profile_val, uint64_t lo,
+					       uint64_t hi, sts_ptp_pick_t *how)
+{
+	sts_ptp_pick_t verdict;
+	uint64_t out;
+
+	if (stored == schema_def) {
+		verdict = STS_PTP_PICK_PROFILE;
+		out = profile_val;
+	} else if ((stored < lo) || (stored > hi)) {
+		verdict = STS_PTP_PICK_REFUSED;
+		out = profile_val;
+	} else {
+		verdict = STS_PTP_PICK_OPERATOR;
+		out = stored;
+	}
+
+	if (how != NULL) {
+		*how = verdict;
+	}
+	return out;
+}
+
+/** Signed form of sts_ptp_prof_pick_u64_r(), for the three log intervals. */
+static inline int32_t sts_ptp_prof_pick_i32_r(int32_t stored, int32_t schema_def,
+					      int32_t profile_val, int32_t lo,
+					      int32_t hi, sts_ptp_pick_t *how)
+{
+	sts_ptp_pick_t verdict;
+	int32_t out;
+
+	if (stored == schema_def) {
+		verdict = STS_PTP_PICK_PROFILE;
+		out = profile_val;
+	} else if ((stored < lo) || (stored > hi)) {
+		verdict = STS_PTP_PICK_REFUSED;
+		out = profile_val;
+	} else {
+		verdict = STS_PTP_PICK_OPERATOR;
+		out = stored;
+	}
+
+	if (how != NULL) {
+		*how = verdict;
+	}
+	return out;
+}
+
+/**
+ * Transport form: a profile carries a bit MASK, not a range.
+ *
+ * @param mask  ptp_profile_desc_t::transport_mask, one bit per transport.
+ */
+static inline uint64_t sts_ptp_prof_pick_xport(uint64_t stored,
+					       uint64_t schema_def,
+					       uint64_t profile_val,
+					       uint32_t mask,
+					       sts_ptp_pick_t *how)
+{
+	sts_ptp_pick_t verdict;
+	uint64_t out;
+
+	if (stored == schema_def) {
+		verdict = STS_PTP_PICK_PROFILE;
+		out = profile_val;
+	} else if ((stored >= 32U) ||
+		   ((mask & (1UL << (unsigned int)stored)) == 0UL)) {
+		/* The width test comes first on purpose: shifting by >= the
+		 * width of the type is undefined behaviour, and `stored` is a
+		 * configuration value an operator picks. */
+		verdict = STS_PTP_PICK_REFUSED;
+		out = profile_val;
+	} else {
+		verdict = STS_PTP_PICK_OPERATOR;
+		out = stored;
+	}
+
+	if (how != NULL) {
+		*how = verdict;
+	}
+	return out;
+}
+
+/** Whether this outcome is worth a log line. */
+static inline bool sts_ptp_pick_notable(sts_ptp_pick_t how)
+{
+	return how == STS_PTP_PICK_REFUSED;
+}
+
 /**
  * Whether a stored `ptp.profile` is one the engine knows.
  *

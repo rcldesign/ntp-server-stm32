@@ -1077,6 +1077,7 @@ static void test_inventory_past_the_end_is_a_range_error(void)
 static void test_inventory_reads_each_component_once_per_walk(void)
 {
 	unsigned int after_first;
+	unsigned int pages = 1U;
 	int64_t from;
 
 	inventory(0U);
@@ -1091,6 +1092,11 @@ static void test_inventory_reads_each_component_once_per_walk(void)
 	while (!res_b("done")) {
 		inventory((uint32_t)from);
 		from = res_i("next");
+		pages++;
+		/* Bounded, so a `done` flag that never latches fails here with
+		 * its own name rather than as a 120-second CTest timeout. */
+		TEST_ASSERT_TRUE_MESSAGE(pages <= (unsigned int)FWUPD_COMP__COUNT,
+					 "inventory paging did not terminate");
 	}
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
 		after_first,
@@ -1148,9 +1154,20 @@ static void test_inventory_separates_updatable_from_allowed(void)
 
 	/* The read-only part is on the list on purpose: "updatable: no" next to
 	 * what CAN be read is what stops the question being asked again. */
-	inventory(0U);
-	while (comp_row((uint8_t)FWUPD_COMP_PHY_LAN8742) < 0) {
-		inventory((uint32_t)res_i("next"));
+	{
+		unsigned int pages = 1U;
+
+		inventory(0U);
+		while (comp_row((uint8_t)FWUPD_COMP_PHY_LAN8742) < 0) {
+			TEST_ASSERT_FALSE_MESSAGE(res_b("done"),
+						  "the read-only PHY is not in "
+						  "the inventory at all");
+			inventory((uint32_t)res_i("next"));
+			pages++;
+			TEST_ASSERT_TRUE_MESSAGE(
+				pages <= (unsigned int)FWUPD_COMP__COUNT,
+				"inventory paging did not terminate");
+		}
 	}
 	row = comp_row((uint8_t)FWUPD_COMP_PHY_LAN8742);
 	TEST_ASSERT_FALSE(row_b(row, "updatable"));
