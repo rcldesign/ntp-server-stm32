@@ -7,15 +7,16 @@
  *
  * WHAT THIS IS FOR
  * ----------------
- * mp_telem_t declares keys 46-51 — the power sequencer's stage/shed/alarms, the
- * GNSS manager's state and antenna verdict, survey progress, and the reference
- * bitmap with EXTREF_MON's frequency — and mp_stream.c dutifully encodes all of
- * them onto the wire. For the whole life of the record so far, nothing wrote
- * any of them. prov_telem() memset the struct and filled the timing and health
- * halves, and the rest went out as zeros: a Field Maintenance Tool showed a
- * power sequencer permanently at stage 0 with no alarms and no shed level, and
- * a receiver permanently in state 0 with no survey progress, on every unit,
- * including the ones that were in trouble.
+ * mp_telem_t declares keys 45-51 — core/fault's debounced signal bitmap, the
+ * power sequencer's stage/shed/alarms, the GNSS manager's state and antenna
+ * verdict, survey progress, and the reference bitmap with EXTREF_MON's
+ * frequency — and mp_stream.c dutifully encodes all of them onto the wire. For
+ * the whole life of the record so far, nothing wrote any of them. prov_telem()
+ * memset the struct and filled the timing and health halves, and the rest went
+ * out as zeros: a Field Maintenance Tool showed a power sequencer permanently
+ * at stage 0 with no alarms and no shed level, and a receiver permanently in
+ * state 0 with no survey progress, on every unit, including the ones that were
+ * in trouble.
  *
  * The gap was never in the encoder or in the platform's state — it was in the
  * BINDING, which is one flat assignment block and therefore exactly the kind of
@@ -24,17 +25,9 @@
  * through it, encodes a record and decodes it back. A test that only proved an
  * accessor returned something would have passed against the defect.
  *
- * WHAT IS DELIBERATELY NOT BOUND, and why it is not a zero by accident:
- *
- *   scan_state (key 45)    core/fault's debounced asserted bitmap. Reachable
- *                          only as fault_state(sts_fault()) under the platform
- *                          area's fault lock; sts_app.h publishes the ALARM
- *                          view (sts_alarms_active / sts_alarms_latched, keys
- *                          43/44, both bound) but not the raw signal bitmap.
- *                          Needs a platform-area accessor; until then it is
- *                          zero and this comment is the record of that.
- *
- * Every other key of the record is bound, here or in prov_telem().
+ * Every key of the record is now bound, here or in prov_telem(). `scan_state`
+ * (key 45) was the last hold-out and it is bound below; what it is and why it
+ * arrives through the sequencer's snapshot is stated on that assignment.
  */
 
 #ifndef STS1000_ZEPHYR_CONSOLE_STS_MP_TELEM_H_
@@ -81,7 +74,7 @@ static inline uint8_t sts_mp_telem_refsel(uint8_t active_ref)
 }
 
 /**
- * Bind keys 46 and 49-51 from the power sequencer's published view.
+ * Bind keys 45, 46 and 49-51 from the power sequencer's published view.
  *
  * @param t           Record under construction; only the fields named below are
  *                    touched, so this composes with prov_telem()'s other fills.
@@ -90,6 +83,30 @@ static inline uint8_t sts_mp_telem_refsel(uint8_t active_ref)
  *                    sequencer fields zero, which is the truth for an image
  *                    whose sequencer is not running.
  * @param active_ref  quality_block_t::active_ref, for key 51 only.
+ *
+ * KEY 45 (scan_state) AND WHY IT COMES FROM THE SEQUENCER
+ * ------------------------------------------------------
+ * It is core/fault's debounced asserted bitmap — bit n = fault_sig_t n, so the
+ * seven panel buttons, the encoder switch, touch and proximity, the three
+ * RT9742 nFLG flags, the two backup power-goods, the eight rail power-goods and
+ * the nine INA228 ALERTs, all in one word. Keys 43/44 carry the ALARM view of
+ * the same evidence, which is not a substitute: alarms are aggregated, latched
+ * and suppressed by the expected-off mask, so a rail firmware has deliberately
+ * gated off vanishes from key 43 while still reading asserted here. Telling
+ * "off because we switched it off" from "off because it failed" needs both.
+ *
+ * The bitmap lives behind the platform's fault lock and this header is
+ * Zephyr-free, so it could not be read from here directly. It does not need to
+ * be: the sequencer pass already reads it once per 4 Hz tick under that lock —
+ * pwrseq_in_t::pg_mask and ::supercaps_charged are derived from it — and now
+ * publishes it in the snapshot's observed half. No second accessor, no second
+ * lock acquisition, and the bitmap a technician reads is provably the one the
+ * stage machine decided from on that tick rather than a later scan that merely
+ * arrived at the same time.
+ *
+ * `started` gates it with the rest of the observed half: an unstarted sequencer
+ * publishes no observation at all, and a bitmap with no tick behind it would be
+ * indistinguishable from "every signal clear".
  *
  * RB_LOCK AND EXTREF, AND WHY THEY ARE NOT active_ref
  * ---------------------------------------------------
@@ -126,6 +143,8 @@ static inline void sts_mp_telem_bind_pwrseq(mp_telem_t *t,
 	if ((p == NULL) || !p->started) {
 		return;
 	}
+
+	t->scan_state = p->scan_state;
 
 	t->pwrseq_stage = p->stage;
 	t->pwrseq_shed = p->shed;

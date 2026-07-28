@@ -373,14 +373,20 @@ an empty alarm word, receiver state 0 and no survey progress. They are now bound
 platform's published snapshots (`sts_pwrseq_snapshot()`, `sts_gnss_detail()`); the
 enumerations go out in core's own encodings (`pwrseq_stage_t`, `pwrseq_shed_level_t`,
 `pwrseq_alarm_t`, `gnssmgr_state_t`, `gnssmgr_ant_state_t`, `refsel_state_t`) and the host
-renders the names. Two things the table above used to claim are still **not** on the wire,
-and are listed here rather than left to be discovered:
+renders the names. One thing the table above used to claim is still **not** on the wire,
+and is listed here rather than left to be discovered:
 
-- **`scan_state` (key 45), the 1 kHz GPIOF/GPIOG debounced signal bitmap.** The alarm view
-  of the same evidence *is* carried (keys 43/44); the raw per-signal bitmap needs a
-  platform-area accessor for `fault_state()` and has none.
 - **NCP1095 negotiated class and NCM/NCL/LCF.** `poe_class` encodes 0/unknown: the pins are
   wired and pulled up but not decoded (`hk.c`).
+
+`scan_state` (key 45) — the 1 kHz GPIOF/GPIOG debounced signal bitmap — **was** on that
+list and no longer is. It rides the power sequencer's publication: `pwrseq_exec.c` already
+reads `fault_state()` under the fault lock once per 4 Hz tick to decide from, so the word
+is published beside the `pg_mask` derived from that same scan rather than re-read later.
+The alarm view of the same evidence is carried separately in keys 43/44, and the
+distinction is load-bearing — a signal masked by `expected_off` is absent from the alarm
+view and present in `scan_state`, which is what tells "we switched it off" from "it
+failed".
 
 `rb_lock` is the opto (PB13) with the per-unit polarity bit applied. There is no serial
 cross-check against the FE's own lock word in the record, and no Rb warm-up timer.

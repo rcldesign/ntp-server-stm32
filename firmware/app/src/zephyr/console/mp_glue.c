@@ -431,8 +431,15 @@ static void fill_health(mp_health_t *h, const sts_health_t *s)
  * thread behind a producer, nor a producer behind it — which is the rule that
  * put snapshots in this architecture in the first place (ARCHITECTURE.md §10).
  *
- * What is NOT filled, and why, is stated in sts_mp_telem.h rather than here, so
- * the list sits beside the binding it qualifies.
+ * Note what is NOT in that list: sts_fault_lock(). `scan_state` (key 45) is
+ * core/fault's debounced bitmap, and taking the fault mutex from the console
+ * thread to read it would put this provider on the io_scan thread's path for a
+ * word the housekeeping thread already reads every tick. It arrives inside
+ * sts_pwrseq_snapshot() instead — see sts_mp_telem.h.
+ *
+ * How each key is filled, and from which half of which snapshot, is stated in
+ * sts_mp_telem.h rather than here, so the reasoning sits beside the binding it
+ * qualifies.
  */
 static int prov_telem(void *user, mp_telem_t *out)
 {
@@ -630,7 +637,17 @@ static int prov_bundle(void *user, mp_bundle_t *out)
 	ARG_UNUSED(user);
 	memset(out, 0, sizeof(*out));
 
+	/*
+	 * Both words, not just the live one. `fault_active` answers "what is
+	 * wrong now"; `fault_latched` (key 11) is the sticky record of what has
+	 * gone wrong since boot, and it is the half a support bundle exists for —
+	 * a transient that has already cleared appears in the latched word and
+	 * nowhere else. Filling only `fault_active` after the memset left key 11
+	 * shipping a constant zero, which reads as "nothing has ever faulted"
+	 * rather than as "not collected".
+	 */
 	out->fault_active = sts_alarms_active();
+	out->fault_latched = sts_alarms_latched();
 	if (sts_diag_i2c_scan(i2c_map) >= 0) {
 		out->i2c_scan = i2c_map;
 	}

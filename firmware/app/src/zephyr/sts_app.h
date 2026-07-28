@@ -879,6 +879,26 @@ typedef struct {
 	uint32_t extref_hz;        /* EXTREF_MON (PB14/TIM12) measurement */
 	bool     extref_valid;     /* that measurement is fresh and trustworthy */
 	bool     extref_in_band;   /* ...and inside the 10 MHz acceptance band */
+	/*
+	 * core/fault's debounced asserted bitmap, bit n = fault_sig_t n: every
+	 * button, every rail power-good and every INA228 ALERT as the 1 kHz
+	 * GPIOF/GPIOG scan last committed them.
+	 *
+	 * It rides here rather than behind a fault accessor of its own because
+	 * this is where it already was. The sequencer pass reads it once per tick
+	 * under sts_fault_lock() — it is what pwrseq_in_t::pg_mask and
+	 * ::supercaps_charged are derived from — so the publisher has the value
+	 * in hand, on the right thread, at the right moment. A second accessor
+	 * would take the lock again for a word already read and would answer from
+	 * a *later* scan than the pg_mask published beside it, so a reader
+	 * comparing the two would be comparing different instants.
+	 *
+	 * Consequently this is a 4 Hz sample of a 1 kHz signal. Levels (rails,
+	 * ALERTs, a held button) are what it is for; a momentary press between
+	 * two ticks is not guaranteed to appear and the UI event stream, not
+	 * this, is what catches those.
+	 */
+	uint32_t scan_state;
 	uint32_t tick_mono_ms;     /* when this observation was taken */
 } sts_pwrseq_snap_t;
 

@@ -121,9 +121,18 @@ static inline void sts_pwrseq_snap_from_status(sts_pwrseq_snap_t *out,
  * Additive: it does not clear the decided half, so the call order is
  * sts_pwrseq_snap_from_status() then this.
  *
- * @param in            The pwrseq_in_t just handed to pwrseq_step().
+ * @param in            The pwrseq_in_t just handed to pwrseq_step(). NULL
+ *                      leaves the whole observed half at whatever
+ *                      sts_pwrseq_snap_from_status() left it — zero — which is
+ *                      how a snapshot published before any tick says "no
+ *                      observation yet". That is all-or-nothing on purpose:
+ *                      `tick_mono_ms` timestamps the *set*, so no member of it
+ *                      may be filled from a different instant than the rest.
  * @param extref_hz     EXTREF_MON's measured frequency (sts_extref_mon_read()).
  * @param extref_valid  Whether that measurement is fresh and trustworthy.
+ * @param scan_state    core/fault's debounced asserted bitmap as the same tick
+ *                      read it (fault_state() under sts_fault_lock()). Ignored
+ *                      when @p in is NULL, per the all-or-nothing rule above.
  *
  * pwrseq_in_t carries only the in-band VERDICT, because that is all the stage
  * machine needs to decide with. The measurement itself is what a technician
@@ -131,11 +140,18 @@ static inline void sts_pwrseq_snap_from_status(sts_pwrseq_snap_t *out,
  * external reference reads 9.9994 MHz" are different sentences — so it is
  * passed alongside rather than recovered from the verdict, which cannot be
  * done.
+ *
+ * `scan_state` is passed for the mirror-image reason: pwrseq_in_t keeps only
+ * the DERIVATIONS the stage machine decides with (pg_mask, supercaps_charged),
+ * and the 32-signal bitmap they came from cannot be recovered from them. The
+ * caller already holds it, so it is threaded in rather than re-read — re-reading
+ * would answer from a later 1 kHz scan than the pg_mask published beside it.
  */
 static inline void sts_pwrseq_snap_observe(sts_pwrseq_snap_t *out,
 					   const pwrseq_in_t *in,
 					   uint32_t extref_hz,
-					   bool extref_valid)
+					   bool extref_valid,
+					   uint32_t scan_state)
 {
 	if ((out == NULL) || (in == NULL)) {
 		return;
@@ -147,6 +163,7 @@ static inline void sts_pwrseq_snap_observe(sts_pwrseq_snap_t *out,
 	out->extref_hz = extref_hz;
 	out->extref_valid = extref_valid;
 	out->extref_in_band = in->extref_in_band;
+	out->scan_state = scan_state;
 	out->tick_mono_ms = in->mono_ms;
 }
 

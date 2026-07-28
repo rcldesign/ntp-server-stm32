@@ -377,11 +377,15 @@ module_deps(web_sky web)
 # Every edge is a real one, no models. `pwrseq` because the suite drives a real
 # pwrseq_ctx_t through pwrseq_step()/pwrseq_shed_step()/pwrseq_ov_observe() and
 # reads it with pwrseq_status() — a hand-set ctx would still pass against a
-# status accessor that had stopped reading the field. `mp` for the encoder and
-# the CBOR reader that decodes what it produced. `gnssmgr` and `refsel` for the
-# enumerations the record carries raw. `ui` and `web` because the survey-accuracy
-# rule is shared by three planes and is pinned across all three here.
-module_deps(mp_telem mp pwrseq gnssmgr refsel ui web)
+# status accessor that had stopped reading the field. `fault` for the same
+# reason on key 45: the scan bitmap is produced by feeding real GPIOF/GPIOG
+# words to fault_scan_input() and letting the debounce commit them, so the word
+# that reaches the wire was computed by the module that owns it rather than
+# poked into a struct. `mp` for the encoder and the CBOR reader that decodes
+# what it produced. `gnssmgr` and `refsel` for the enumerations the record
+# carries raw. `ui` and `web` because the survey-accuracy rule is shared by
+# three planes and is pinned across all three here.
+module_deps(mp_telem mp pwrseq fault gnssmgr refsel ui web)
 
 # `recovery_policy` (app/src/zephyr/console/sts_recovery_policy.h) is the
 # operator-recovery surface's three decisions: which latch may be acknowledged

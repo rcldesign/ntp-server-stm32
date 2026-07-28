@@ -3,10 +3,11 @@
  *
  * WHAT DEFECT THIS SUITE EXISTS FOR
  *
- * mp_telem_t declared the power sequencer's stage, shed level and alarm word,
- * the GNSS manager's state and antenna verdict, and the survey progress.
- * mp_stream.c encoded all of them. core/pwrseq and core/gnssmgr computed all of
- * them. Nothing joined the two, so every unit in the field reported stage 0,
+ * mp_telem_t declared core/fault's debounced signal bitmap, the power
+ * sequencer's stage, shed level and alarm word, the GNSS manager's state and
+ * antenna verdict, and the survey progress. mp_stream.c encoded all of them.
+ * core/fault, core/pwrseq and core/gnssmgr computed all of them. Nothing joined
+ * the two, so every unit in the field reported an empty scan bitmap, stage 0,
  * shed 0, no alarms, receiver state 0 and no survey — for the whole life of the
  * record. tests/host/test_mp_stream.c passed throughout, because it filled
  * mp_telem_t by hand and round-tripped it: it proved the wire, and the defect
@@ -14,9 +15,10 @@
  *
  * So this suite starts from platform state and finishes at decoded CBOR:
  *
- *     real pwrseq_ctx_t, driven by pwrseq_step()
- *       -> pwrseq_status()
- *       -> sts_pwrseq_snap_from_status() / _observe()   (sts_pwrseq_pub.h)
+ *     real fault_ctx_t, driven by fault_scan_input()  --.
+ *     real pwrseq_ctx_t, driven by pwrseq_step()        |
+ *       -> pwrseq_status()                              |
+ *       -> sts_pwrseq_snap_from_status() / _observe() <-'  (sts_pwrseq_pub.h)
  *       -> seqlock publish + read                       (sts_pwrseq_pub.h)
  *       -> sts_mp_telem_bind_pwrseq() / _bind_gnss()    (sts_mp_telem.h)
  *       -> mp_enc_telem()
@@ -37,6 +39,7 @@
 
 #include "unity.h"
 
+#include "fault/fault.h"
 #include "gnssmgr/gnssmgr.h"
 #include "ina228/ina228.h"
 #include "mp/mp_stream.h"
@@ -210,6 +213,64 @@ static void drive_sequencer(pwrseq_ctx_t *ctx, pwrseq_in_t *in)
 	TEST_ASSERT_EQUAL_INT(0, pwrseq_shed_step(ctx, ms));
 }
 
+/* ------------------------------------------------------- a real 1 kHz scan */
+
+/*
+ * Three signals, chosen so the word that reaches the wire cannot be produced by
+ * any of the ways this binding can be wrong.
+ *
+ *   BUTTON_3 (PF2)             GPIOF, low bits, button debounce class
+ *   PG_OCXO_LDO (PG1)          GPIOG, PG class — a rail, not an input device
+ *   INA_ALERT_VCC_RB (PG15)    GPIOG bit 15 => bitmap bit 31, the sign bit
+ *
+ * = 0x80020004. Bit 31 set catches a signed narrowing anywhere along the chain
+ * (CBOR would emit a negative integer, and the decode asserts an unsigned).
+ * Spanning both ports catches a 16-bit truncation, and the value is not
+ * palindromic under a halfword swap (0x00048002 != 0x80020004) so a GPIOF/GPIOG
+ * transposition fails rather than passing by symmetry.
+ */
+#define SCAN_SIG_A FAULT_SIG_BUTTON_3
+#define SCAN_SIG_B FAULT_SIG_PG_OCXO_LDO
+#define SCAN_SIG_C FAULT_SIG_INA_ALERT_VCC_RB
+
+#define SCAN_EXPECT                                                            \
+	(FAULT_SIG_BIT(SCAN_SIG_A) | FAULT_SIG_BIT(SCAN_SIG_B) |               \
+	 FAULT_SIG_BIT(SCAN_SIG_C))
+
+/**
+ * Drive @p ctx with real GPIOF/GPIOG words until the debounce commits.
+ *
+ * Every one of the 32 signals is active LOW, so idle is all-ones and asserting
+ * one CLEARS its bit — building the words the other way round would pass
+ * against an inverted implementation. 60 scans at 1 kHz clears the slowest
+ * class in play here (button, 25 ms) and stays well under long_press_ms (800),
+ * so no repeat machinery runs.
+ *
+ * @return fault_state(), i.e. exactly what pwrseq_fault_snapshot() hands the
+ *         sequencer pass on the board.
+ */
+static uint32_t drive_scan(fault_ctx_t *ctx)
+{
+	uint16_t f = 0xFFFFU;
+	uint16_t g = 0xFFFFU;
+	uint32_t ms;
+
+	TEST_ASSERT_EQUAL_INT(0, fault_init(ctx, NULL));
+
+	f = (uint16_t)(f & ~(uint16_t)(1U << (unsigned int)SCAN_SIG_A));
+	g = (uint16_t)(g & ~(uint16_t)(1U << ((unsigned int)SCAN_SIG_B - 16U)));
+	g = (uint16_t)(g & ~(uint16_t)(1U << ((unsigned int)SCAN_SIG_C - 16U)));
+
+	for (ms = 0U; ms < 60U; ms++) {
+		TEST_ASSERT_EQUAL_INT(0, fault_scan_input(ctx, f, g, ms));
+	}
+
+	/* The module really did commit them — otherwise the rest of the suite
+	 * could pass against a bitmap that happened to be 0. */
+	TEST_ASSERT_EQUAL_HEX32(SCAN_EXPECT, fault_state(ctx));
+	return fault_state(ctx);
+}
+
 /** The receiver detail the gnss thread publishes, mid-survey. */
 static void detail_surveying(sts_gnss_detail_t *d)
 {
@@ -241,6 +302,8 @@ static void test_pwrseq_and_gnss_reach_the_wire(void)
 	pwrseq_ctx_t ctx;
 	pwrseq_in_t in;
 	pwrseq_status_t st;
+	fault_ctx_t fctx;
+	uint32_t scan;
 	sts_pwrseq_pub_t pub;
 	sts_pwrseq_snap_t snap;
 	sts_pwrseq_snap_t got;
@@ -251,6 +314,7 @@ static void test_pwrseq_and_gnss_reach_the_wire(void)
 
 	drive_sequencer(&ctx, &in);
 	detail_surveying(&detail);
+	scan = drive_scan(&fctx);
 
 	/* The sequencer really did leave the zero state. Without this the rest
 	 * of the suite could pass against a stage that happened to be 0. */
@@ -260,15 +324,22 @@ static void test_pwrseq_and_gnss_reach_the_wire(void)
 	TEST_ASSERT_NOT_EQUAL(0U, st.alarms);
 	TEST_ASSERT_TRUE(st.ov_latched);
 
-	/* Publish exactly as pwrseq_exec.c's pwrseq_publish() does. */
+	/*
+	 * Publish exactly as pwrseq_exec.c's pwrseq_publish() does — including
+	 * the fault bitmap, which that function receives from the same tick that
+	 * built `in` rather than re-reading it. Passing the value the scan
+	 * actually produced is what makes the key-45 assertion below a statement
+	 * about the binding instead of about a literal.
+	 */
 	memset(&pub, 0, sizeof(pub));
 	sts_pwrseq_snap_from_status(&snap, &st);
-	sts_pwrseq_snap_observe(&snap, &in, 9999994U, true);
+	sts_pwrseq_snap_observe(&snap, &in, 9999994U, true, scan);
 	sts_pwrseq_pub_publish(&pub, &snap);
 
 	/* ...and read it back exactly as sts_pwrseq_snapshot() does. */
 	TEST_ASSERT_EQUAL_INT(0, sts_pwrseq_pub_read(&pub, &got));
 	TEST_ASSERT_TRUE(got.started);
+	TEST_ASSERT_EQUAL_HEX32(SCAN_EXPECT, got.scan_state);
 
 	/* Bind exactly as prov_telem() does. */
 	memset(&t, 0, sizeof(t));
@@ -278,6 +349,17 @@ static void test_pwrseq_and_gnss_reach_the_wire(void)
 	len = mp_enc_telem(&t, g_buf, sizeof(g_buf));
 	TEST_ASSERT_TRUE(len > 0);
 	n = (size_t)len;
+
+	/* --- key 45: scan_state ------------------------------------------- */
+	/*
+	 * The whole point, asserted on the decoded bytes: the word core/fault
+	 * committed from real GPIOF/GPIOG scans is the word on the wire. Bit 31
+	 * is set, so this also pins that the value survives as an unsigned 32-bit
+	 * quantity all the way through CBOR rather than arriving as -2147352572.
+	 */
+	TEST_ASSERT_NOT_EQUAL(0U, get_u(n, 45U));
+	TEST_ASSERT_EQUAL_UINT64((uint64_t)SCAN_EXPECT, get_u(n, 45U));
+	TEST_ASSERT_EQUAL_UINT64((uint64_t)fault_state(&fctx), get_u(n, 45U));
 
 	/* --- key 46: pwrseq [stage, shed, alarms] ------------------------- */
 	TEST_ASSERT_NOT_EQUAL(0U, get_arr_u(n, 46U, 3U, 0U));
@@ -338,6 +420,7 @@ static void test_nothing_published_is_all_zero(void)
 	TEST_ASSERT_TRUE(len > 0);
 	n = (size_t)len;
 
+	TEST_ASSERT_EQUAL_UINT64(0U, get_u(n, 45U));
 	TEST_ASSERT_EQUAL_UINT64(0U, get_arr_u(n, 46U, 3U, 0U));
 	TEST_ASSERT_EQUAL_UINT64(0U, get_arr_u(n, 46U, 3U, 2U));
 	TEST_ASSERT_EQUAL_UINT64(0U, get_arr_u(n, 47U, 2U, 0U));
@@ -359,12 +442,76 @@ static void test_unstarted_sequencer_binds_nothing(void)
 	snap.started = false;
 	snap.stage = 9U; /* stale bytes must not leak through */
 	snap.rb_lock_pin = true;
+	snap.scan_state = 0xDEADBEEFU;
 
 	memset(&t, 0, sizeof(t));
 	sts_mp_telem_bind_pwrseq(&t, &snap, (uint8_t)QUALITY_REF_OCXO);
 
 	TEST_ASSERT_EQUAL_UINT8(0U, t.pwrseq_stage);
 	TEST_ASSERT_FALSE(t.rb_lock);
+	/* A bitmap with no tick behind it is indistinguishable from "every
+	 * signal clear", so it must not be published at all. */
+	TEST_ASSERT_EQUAL_HEX32(0U, t.scan_state);
+}
+
+/* ============================================== scan_state vs the alarms == */
+
+/**
+ * Key 45 is the SIGNAL bitmap; keys 43/44 are the ALARM view. Not the same
+ * evidence, and the difference is the diagnosis.
+ *
+ * fault_alarms() suppresses any scanned signal pwrseq has marked expected-off —
+ * a rail firmware deliberately gated is not a fault, which is why an OCXO-only
+ * unit does not sit red with its rubidium power-good low. fault_state() does
+ * not: it is the level, whatever the reason.
+ *
+ * So on a unit with a deferred rubidium, the VCC_RB alert and the Rb PSU
+ * power-good are ASSERTED in key 45 and ABSENT from key 43. A technician
+ * needs both words to tell "off because we switched it off" from "off because
+ * it failed" — and if key 45 were bound to the alarm mask instead, or to
+ * anything derived from it, that distinction would be gone with nothing saying
+ * so. This test fails if the two are ever made the same word.
+ */
+static void test_scan_state_is_the_signal_not_the_alarm_view(void)
+{
+	fault_ctx_t fctx;
+	sts_pwrseq_snap_t snap;
+	mp_telem_t t;
+	uint32_t scan;
+	uint64_t alarms;
+	int len;
+	size_t n;
+
+	scan = drive_scan(&fctx);
+
+	/* pwrseq gated the Rb rail: its INA alert is expected, not a fault. */
+	TEST_ASSERT_EQUAL_INT(
+		0, fault_set_expected_off(&fctx, SCAN_SIG_C, true));
+	alarms = fault_alarms(&fctx);
+
+	/* The premise, asserted rather than assumed: the two words differ, and
+	 * they differ in exactly the expected-off bit. */
+	TEST_ASSERT_TRUE((scan & FAULT_SIG_BIT(SCAN_SIG_C)) != 0U);
+	TEST_ASSERT_TRUE((alarms & FAULT_ALARM_BIT(SCAN_SIG_C)) == 0U);
+	TEST_ASSERT_TRUE((alarms & FAULT_ALARM_BIT(SCAN_SIG_B)) != 0U);
+
+	/* Bind both halves the way prov_telem() does: key 43 straight from
+	 * sts_alarms_active() (= fault_alarms), key 45 through the sequencer. */
+	memset(&snap, 0, sizeof(snap));
+	snap.started = true;
+	snap.scan_state = scan;
+
+	memset(&t, 0, sizeof(t));
+	t.alarms = alarms;
+	sts_mp_telem_bind_pwrseq(&t, &snap, (uint8_t)QUALITY_REF_OCXO);
+
+	len = mp_enc_telem(&t, g_buf, sizeof(g_buf));
+	TEST_ASSERT_TRUE(len > 0);
+	n = (size_t)len;
+
+	TEST_ASSERT_EQUAL_UINT64((uint64_t)scan, get_u(n, 45U));
+	TEST_ASSERT_EQUAL_UINT64(alarms, get_u(n, 43U));
+	TEST_ASSERT_NOT_EQUAL(get_u(n, 43U), get_u(n, 45U));
 }
 
 /* =================================================== RB_LOCK vs active_ref */
@@ -470,11 +617,15 @@ static void test_pub_round_trip(void)
 	in.alarms = 0xDEADU;
 	in.rb_lock_pin = true;
 	in.extref_hz = 9999999U;
+	in.scan_state = 0x80020004U;
 	in.tick_mono_ms = 777U;
 
 	sts_pwrseq_pub_publish(&pub, &in);
 	TEST_ASSERT_EQUAL_INT(0, sts_pwrseq_pub_read(&pub, &out));
 	TEST_ASSERT_EQUAL_MEMORY(&in, &out, sizeof(in));
+	/* EQUAL_MEMORY would also pass if the field were absent from the struct;
+	 * naming it is what makes its removal a failure here. */
+	TEST_ASSERT_EQUAL_HEX32(0x80020004U, out.scan_state);
 }
 
 /**
@@ -514,7 +665,7 @@ static void test_pub_null_arguments(void)
 	sts_pwrseq_pub_publish(NULL, &out);
 	sts_pwrseq_pub_publish(&pub, NULL);
 	sts_pwrseq_snap_from_status(NULL, NULL);
-	sts_pwrseq_snap_observe(NULL, NULL, 0U, false);
+	sts_pwrseq_snap_observe(NULL, NULL, 0U, false, 0U);
 }
 
 /** A failed status read must not leave the previous tick's beliefs behind. */
@@ -527,6 +678,7 @@ static void test_snap_from_status_clears_first(void)
 	TEST_ASSERT_FALSE(s.started);
 	TEST_ASSERT_EQUAL_UINT8(0U, s.stage);
 	TEST_ASSERT_EQUAL_UINT32(0U, s.alarms);
+	TEST_ASSERT_EQUAL_HEX32(0U, s.scan_state);
 }
 
 /** ...and the observation half must be additive, not clearing. */
@@ -546,13 +698,41 @@ static void test_snap_observe_is_additive(void)
 	in.mono_ms = 4242U;
 
 	sts_pwrseq_snap_from_status(&s, &st);
-	sts_pwrseq_snap_observe(&s, &in, 10000001U, true);
+	sts_pwrseq_snap_observe(&s, &in, 10000001U, true, 0x80020004U);
 
 	TEST_ASSERT_EQUAL_UINT8((uint8_t)PWRSEQ_STAGE_9_ARM, s.stage);
 	TEST_ASSERT_EQUAL_UINT32(0x40U, s.alarms);
 	TEST_ASSERT_TRUE(s.rb_lock_pin);
 	TEST_ASSERT_EQUAL_UINT32(10000001U, s.extref_hz);
+	TEST_ASSERT_EQUAL_HEX32(0x80020004U, s.scan_state);
 	TEST_ASSERT_EQUAL_UINT32(4242U, s.tick_mono_ms);
+}
+
+/**
+ * The observed half is timestamped AS A SET, so a NULL input must leave all of
+ * it alone — including the bitmap, which is the one member whose value reaches
+ * this function from a source other than @p in.
+ *
+ * This is the contract sts_pwrseq_start()'s pwrseq_publish(NULL, 0, false, 0)
+ * relies on: a bitmap published against tick_mono_ms == 0 would be a word a
+ * reader cannot date, sitting beside a pg_mask and an EXTREF reading that are
+ * genuinely absent.
+ */
+static void test_snap_observe_ignores_scan_state_without_a_tick(void)
+{
+	pwrseq_status_t st;
+	sts_pwrseq_snap_t s;
+
+	memset(&st, 0, sizeof(st));
+	st.stage = (pwrseq_stage_t)PWRSEQ_STAGE_9_ARM;
+
+	sts_pwrseq_snap_from_status(&s, &st);
+	sts_pwrseq_snap_observe(&s, NULL, 10000001U, true, 0x80020004U);
+
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)PWRSEQ_STAGE_9_ARM, s.stage);
+	TEST_ASSERT_EQUAL_HEX32(0U, s.scan_state);
+	TEST_ASSERT_EQUAL_UINT32(0U, s.tick_mono_ms);
+	TEST_ASSERT_EQUAL_UINT32(0U, s.extref_hz);
 }
 
 /* ============================================ one rule, three planes ====== */
@@ -690,6 +870,7 @@ int main(void)
 	RUN_TEST(test_pwrseq_and_gnss_reach_the_wire);
 	RUN_TEST(test_nothing_published_is_all_zero);
 	RUN_TEST(test_unstarted_sequencer_binds_nothing);
+	RUN_TEST(test_scan_state_is_the_signal_not_the_alarm_view);
 	RUN_TEST(test_rb_lock_is_the_pin_not_the_selection);
 	RUN_TEST(test_extref_is_the_measurement_not_the_selection);
 	RUN_TEST(test_refsel_recovery_is_total);
@@ -699,6 +880,7 @@ int main(void)
 	RUN_TEST(test_pub_null_arguments);
 	RUN_TEST(test_snap_from_status_clears_first);
 	RUN_TEST(test_snap_observe_is_additive);
+	RUN_TEST(test_snap_observe_ignores_scan_state_without_a_tick);
 	RUN_TEST(test_the_three_planes_report_the_same_survey_accuracy);
 	RUN_TEST(test_panel_antenna_map_is_not_a_cast);
 	RUN_TEST(test_panel_rb_block_is_the_hardware_not_the_selection);

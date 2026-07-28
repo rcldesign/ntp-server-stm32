@@ -204,9 +204,20 @@ static bool pwrseq_service_requests(uint32_t now_ms);
  * reference reads 9.9994 MHz" are different sentences and only one of them is
  * actionable. Reading TIM12 a second time in the publish path would be a second
  * gate interval and a different instant, so it is threaded through instead.
+ *
+ * @p out_faults hands back the debounced fault bitmap for the same reason and
+ * with a sharper edge on it. pwrseq_in_t keeps only what the stage machine
+ * decides with — pg_mask and supercaps_charged, both derived from the bitmap by
+ * sts_rb_pg_mask() / sts_rb_supercaps_charged() — and neither derivation is
+ * invertible, so the 32-signal picture a technician needs is unrecoverable from
+ * the input struct. Calling pwrseq_fault_snapshot() again in the publish path
+ * would take the fault lock a second time for a word already in hand AND answer
+ * from a later 1 kHz scan than the pg_mask published beside it, so the two
+ * halves of one snapshot could disagree within a single tick.
  */
 static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms,
-			       uint32_t *out_extref_hz, bool *out_extref_valid)
+			       uint32_t *out_extref_hz, bool *out_extref_valid,
+			       uint32_t *out_faults)
 {
 	sts_hk_snapshot_t hk;
 	quality_block_t q;
@@ -221,6 +232,7 @@ static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms,
 	in->mono_ms = now_ms;
 
 	faults = pwrseq_fault_snapshot();
+	*out_faults = faults;
 
 	(void)sts_hk_read(&hk);
 	(void)sts_quality_snapshot(&q);
@@ -556,11 +568,18 @@ static void pwrseq_drain(void)
  * publishing only on the happy path would freeze the view at the last good tick
  * with nothing saying so.
  *
+ * Publishing after the drain does not stale @p scan_state: the actions this
+ * file executes reach GPIO outputs, the digipot and the expected-off mask, and
+ * none of them writes fault_ctx_t::stable — only the io_scan thread does. So the
+ * bitmap taken at build-input time is still the observation this tick decided
+ * from, which is the one worth publishing. Re-reading it here would be a
+ * *different*, later scan sitting beside a pg_mask derived from the earlier one.
+ *
  * @p in may be NULL at start, before any observation exists; the observed half
  * then stays zero and `tick_mono_ms` stays 0, which reads as "no tick yet".
  */
 static void pwrseq_publish(const pwrseq_in_t *in, uint32_t extref_hz,
-			   bool extref_valid)
+			   bool extref_valid, uint32_t scan_state)
 {
 	sts_pwrseq_snap_t s;
 	pwrseq_status_t st;
@@ -570,7 +589,7 @@ static void pwrseq_publish(const pwrseq_in_t *in, uint32_t extref_hz,
 	}
 
 	sts_pwrseq_snap_from_status(&s, &st);
-	sts_pwrseq_snap_observe(&s, in, extref_hz, extref_valid);
+	sts_pwrseq_snap_observe(&s, in, extref_hz, extref_valid, scan_state);
 	sts_pwrseq_pub_publish(&pwrseq_pub, &s);
 }
 
@@ -592,6 +611,7 @@ void sts_pwrseq_step(uint32_t now_ms)
 	pwrseq_in_t in;
 	uint32_t extref_hz = 0;
 	bool extref_valid = false;
+	uint32_t faults = 0;
 	bool operator_acted;
 
 	if (!pwrseq_started) {
@@ -603,7 +623,7 @@ void sts_pwrseq_step(uint32_t now_ms)
 	 * late. */
 	operator_acted = pwrseq_service_requests(now_ms);
 
-	pwrseq_build_input(&in, now_ms, &extref_hz, &extref_valid);
+	pwrseq_build_input(&in, now_ms, &extref_hz, &extref_valid, &faults);
 
 	if (pwrseq_step(&pwrseq, &in) != 0) {
 		/* The sequencer refused its input, but an operator action has
@@ -612,12 +632,12 @@ void sts_pwrseq_step(uint32_t now_ms)
 		if (operator_acted) {
 			pwrseq_drain();
 		}
-		pwrseq_publish(&in, extref_hz, extref_valid);
+		pwrseq_publish(&in, extref_hz, extref_valid, faults);
 		return;
 	}
 
 	pwrseq_drain();
-	pwrseq_publish(&in, extref_hz, extref_valid);
+	pwrseq_publish(&in, extref_hz, extref_valid, faults);
 
 	sts_liveness_feed(pwrseq_liveness_id);
 }
@@ -877,8 +897,20 @@ int sts_pwrseq_start(uint32_t now_ms)
 	 * window between here and the first 4 Hz tick would report stage 0 with
 	 * everything false, which is the exact class of untruth this snapshot
 	 * exists to end. No observation has been taken yet, hence NULL.
+	 *
+	 * `scan_state` goes out as an explicit 0, and it is a *chosen* zero, not
+	 * a forgotten one. io_scan has in fact been running since platform.c's
+	 * bring-up step several hundred milliseconds ago, so a real bitmap could
+	 * be fetched here — but the observed half is timestamped as a set by
+	 * `tick_mono_ms`, which is 0 on this path. Publishing a live bitmap
+	 * against a zero timestamp would hand a reader a word it cannot date,
+	 * sitting beside a pg_mask and an EXTREF reading that are genuinely
+	 * absent. One tick (<= 250 ms) of honest zero beats a number nobody can
+	 * place in time. sts_pwrseq_snap_observe() enforces this by ignoring the
+	 * argument whenever @p in is NULL; passing 0 states the intent at the
+	 * call site as well.
 	 */
-	pwrseq_publish(NULL, 0U, false);
+	pwrseq_publish(NULL, 0U, false, 0U);
 
 	LOG_INF("pwrseq up: rb_vmax %u mV, op code %u, safe code %u", cfg.rb_vmax_mv,
 		cfg.digipot_operating_code, cfg.digipot_safe_code);

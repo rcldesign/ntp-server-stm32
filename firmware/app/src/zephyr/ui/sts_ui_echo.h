@@ -23,11 +23,18 @@
  * concludes the panel has a stuck button. The same lost edge strands the lamp
  * test on.
  *
- * There is no second opinion available inside this area. core/fault holds the
- * debounced level bitmap that would settle it (fault_state()), but it lives
- * behind the platform's fault mutex and sts_app.h exposes no getter for it, so
- * the echo cannot simply be read from the source of truth. Until one exists,
- * the reconstruction is made *fail-safe* rather than pretending to be exact:
+ * There is no second opinion available inside this area that would settle it.
+ * core/fault holds the debounced level bitmap (fault_state()) behind the
+ * platform's fault mutex; sts_pwrseq_snap_t::scan_state now republishes that
+ * word lock-free, so a reader does exist — but it is a **4 Hz sample of a 1 kHz
+ * signal**, taken on the sequencer's tick. A 60 ms press falls between two
+ * samples entirely, so substituting it would trade this reconstruction's
+ * self-correcting false negative for a sampling one that no drop counter can
+ * even detect. Reconciling the two — edges from the event stream, the snapshot
+ * consulted only to clear bits after a drop — is a real option and a separate
+ * change; it is not what this header does today.
+ *
+ * So the reconstruction is made *fail-safe* rather than pretending to be exact:
  * the producer counts every event it had to drop, the consumer folds that count
  * in before it publishes, and any advance clears the echo to "nothing held".
  *
