@@ -159,15 +159,7 @@ enumerated in `sts_cert.c`); Argon2id credential stretching (plumbed via `auth_k
 but switching it is a coordinated flag day with MCP because the 48-byte envelope cannot
 record which KDF produced the tag); FE-5680A firmware update (no loader protocol is
 documented anywhere reachable — reported as `NOT_SUPPORTED` rather than attempted, and
-the only item on this list that no amount of work closes); **NTS-KE** (`sts_ntske.c` is a
-complete TLS 1.3 key-exchange server driving mbedTLS directly, because Zephyr's TLS socket
-layer exposes no RFC 8446 exporter — but its whole body compiles only under
-`MBEDTLS_SSL_KEYING_MATERIAL_EXPORT`, which Zephyr's mbedTLS config omits and offers no
-Kconfig for. `sts_ntske_supported()` therefore returns false, `sts_ntp.c:1058` gates
-`nts_enabled` on it, and the appliance advertises what the build can actually do rather
-than NAKing cookies no client could have been issued. The three enabling steps —
-a `zephyr_include_directories()` line for `sts_mbedtls_user.h`, the two user-config
-Kconfigs, the TLS 1.3 block — are written out and commented in `app/conf/net.conf`);
+the only item on this list that no amount of work closes);
 an **ATECC-backed TLS server key** (the HTTPS identity is still a software PEM on NOR —
 routing it to the secure element needs an mbedTLS `PK_OPAQUE`/PSA driver over
 CryptoAuthLib, which is a driver, not wiring; the part is already the root for the SNMP
@@ -183,8 +175,29 @@ zeroization on factory reset (every `CFG_F_SECRET` blob, each subsystem's RAM co
 applier fan-out, the web plane's sessions through a volatile pointer, and the persisted TLS
 identity — the reboot is load-bearing, not a convenience, since it is what clears
 RAM-only key material and mints the replacement identity); the **MP UART7/rubidium tunnel**
-and the **NMEA/UBX tee producers**; and **anti-rollback**, which was never on this list
-because nobody had noticed it was absent — see `app/conf/rollback.conf`.
+and the **NMEA/UBX tee producers**; **anti-rollback**, which was never on this list
+because nobody had noticed it was absent — see `app/conf/rollback.conf`; and **NTS-KE**.
+
+NTS-KE is worth the extra paragraph, because it was the only feature in the tree that was
+written, tested, documented and *switched off*. `sts_ntske.c` had always been a complete
+TLS 1.3 key-exchange server driving mbedTLS directly (Zephyr's TLS socket layer exposes no
+RFC 8446 exporter), but its whole body compiled only under
+`MBEDTLS_SSL_KEYING_MATERIAL_EXPORT`, which Zephyr's mbedTLS config omits and offers no
+Kconfig for — so `sts_ntske_supported()` returned false and `sts_ntp.c` gated `nts_enabled`
+on it. It is now enabled: `app/CMakeLists.txt` puts `src/zephyr/net/` on the mbedTLS
+library's include path so `sts_mbedtls_user.h` can define that macro, and `app/conf/net.conf`
+selects the user-config header and adds `MBEDTLS_SSL_ALPN` (the one mbedTLS feature NTS-KE
+needs that nothing else turned on; RFC 8915 §4 requires the `ntske/1` protocol id). The cost
+was **+5,040 B flash and +29,320 B SRAM** (737,560 → 742,600 and 533,880 → 563,200), the
+latter dominated by a +16 KB raise of the shared `MBEDTLS_HEAP_SIZE` for the fourth
+concurrent TLS session and the listener's 8 KB stack. Two notes for anyone re-treading it: the `zephyr_include_directories()` line must come
+**after** `find_package(Zephyr)`, not before as the old comments said (the command does not
+exist until then); and the heap raise had to move to `web.conf`, which merges last and would
+otherwise have silently overridden it. Verified in the image, not in the source —
+`sts_ntske_supported()` disassembles to `movs r0,#1`, and `ntske_handle`/`ntske_init`/
+`ntske_rec_parse`/`ntske_rec_put`/`ntske_rec_put_u16` all appear in `zephyr.elf`. The
+reachability gate is what proved it: those five had been allow-listed as "deferred" and it
+failed on them as stale the moment the feature came on.
 
 > **Reachability is a build property, not a source property.** `--gc-sections` silently
 > discards any function nothing calls, so an entry point with no caller produces code that
@@ -210,6 +223,7 @@ Per spec §1.2 (priorities as listed there). Static threads, static stacks:
 | `ntp_server` | 8 | UDP 123 RX loop; HW timestamps via MAC PTP clock |
 | `net_mgmt` | 10 | DHCP/mDNS/link events |
 | `io_scan` | 11 | 1 kHz k_timer → GPIOF/GPIOG IDR read → `fault_scan_input` |
+| `ntske` | 12 | TCP 4460 accept loop; one TLS 1.3 handshake at a time, mbedTLS driven directly for the RFC 8446 exporter. Per-connection budget is `LIVENESS_DEADLINE_MS/3` and it feeds liveness from inside its own loops, so a stalled peer cannot wedge the watchdog |
 | `snmp` | 12 | UDP 161 + traps |
 | `console`/`mcp` | 14 | CDC-ACM #0 shell (Zephyr shell); CDC-ACM #1 binary MCP |
 | `housekeeping` | 14 | 1–4 Hz I²C sensor sweep, `pwrseq_step`, `thermal_step`, supervisor + WDT kick |

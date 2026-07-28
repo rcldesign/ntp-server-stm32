@@ -512,9 +512,34 @@ int sts_cfg_factory_reset(void)
  * as fatal as one that is too late (docs/sts1000_external_wdt.md). The
  * supervisor therefore needs to know not only that everyone is alive but that
  * nobody has gone quiet, which is what the per-participant deadline gives it.
+ *
+ * STS_LIVENESS_MAX must be >= the number of sts_liveness_register() call sites
+ * that can run, because overflowing it is SILENT in the direction that matters:
+ * register() returns -ENOSPC, the caller stores a negative id, every feed
+ * becomes a no-op, and that participant is simply never watched again. Nothing
+ * logs it and the board still kicks the watchdog. That inverts the policy in
+ * platform/sts_super_policy.h, which exists to make "a single late participant
+ * must withhold the kick" true.
+ *
+ * It was 12 against 15 live registrants, so three were already being dropped;
+ * enabling NTS-KE (conf/net.conf) added a 16th and would have dropped a fourth.
+ * The registrants today, by area:
+ *
+ *   platform  io_scan, housekeeping, discipline, gnss, pwrseq          (5)
+ *   console   console, mcp, logger                                     (3)
+ *   net       ptp, ntp, net_mgmt, ntske, snmp, syslog, web             (7)
+ *   ui        ui                                                       (1)
+ *
+ * 20 leaves four spare. The ceiling is 32, not this constant: the mask returned
+ * by sts_liveness_stale_mask() is a uint32_t of BIT(i), so a 33rd participant
+ * would be undefined rather than merely unwatched. Do not raise this past 32
+ * without widening that mask and sts_super_wdt_liveness() with it.
  */
-#define STS_LIVENESS_MAX 12
+#define STS_LIVENESS_MAX 20
 #define STS_LIVENESS_DEADLINE_MS CONFIG_STS1000_LIVENESS_DEADLINE_MS
+
+BUILD_ASSERT(STS_LIVENESS_MAX <= 32,
+	     "sts_liveness_stale_mask() returns BIT(i) in a uint32_t");
 
 struct sts_liveness_entry {
 	const char *name;

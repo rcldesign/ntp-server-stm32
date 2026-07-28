@@ -30,15 +30,28 @@ Requires Zephyr SDK 0.17.2 (`arm-zephyr-eabi`); Zephyr v4.2.2 is pinned in `west
 
 ## Current build figures
 
-Measured on a pristine sysbuild at commit `ad62268`. Re-measure rather than
-trust this table — it has been stale before, and by a margin that mattered: it
-read 46 % / 45 % while the image was at 81 % / 81 %, which is the difference
-between "plenty of room" and "budget the next feature".
+Measured on a pristine sysbuild with NTS-KE enabled. Absolute bytes, not
+rounded KB — re-measure rather than trust this table, which has been stale
+before by a margin that mattered: it read 46 % / 45 % while the image was at
+81 % / 81 %, the difference between "plenty of room" and "budget the next
+feature".
 
 | Image | FLASH | RAM |
 |---|---|---|
-| Application (slot 0) | 736 KB / 901 KB (**81.7 %**) | 533 KB / 640 KB (**81.4 %**) |
-| MCUboot | 51 KB / 128 KB (39 %) | — |
+| Application (slot 0) | 742,600 B / 900,970 B (**82.4 %**) | 563,200 B / 655,360 B (**85.9 %**) |
+| MCUboot | 51,068 B / 131,072 B (39.0 %) | — |
+
+The application's FLASH region is 900,970 B, not the full 896 KiB slot0
+(917,504 B): MCUboot's header and image trailer take the difference. Against
+raw slot0 the application is **80.9 %**.
+
+Enabling NTS-KE cost **+5,040 B flash** and **+29,320 B SRAM** — measured as
+the difference between this image and the one immediately before it
+(737,560 B / 533,880 B), both pristine builds of the same tree. The SRAM is
+mostly two lines: `MBEDTLS_HEAP_SIZE` 32768 → 49152 in `app/conf/web.conf` (a
+fourth concurrent TLS 1.3 session) and the listener's 8 KiB thread stack.
+Raising `STS_LIVENESS_MAX` 12 → 20 in `app/src/zephyr/sts_app.c` adds a further
+72 B of SRAM on top.
 
 Host tests: **69 suites, all passing**. Core line coverage: **96 %** (gate: 80 %).
 
@@ -119,7 +132,7 @@ in `ARCHITECTURE.md` §7 and `app/src/core/mcp/mcp_wire.h`.
 `app/src/core/**` is platform-neutral and fully host-testable — that is where the
 correctness-critical logic lives (timing loop, protocol codecs, state machines, power
 sequencing). `scripts/coverage.sh` enforces ≥ 80 % line coverage over it; the tree is
-currently at 98 %. Protocol modules are pinned to published test vectors (RFC 5297
+currently at 96 % (24,579 of 25,552 lines). Protocol modules are pinned to published test vectors (RFC 5297
 AES-SIV, RFC 4493 CMAC, RFC 4231 HMAC, FIPS-197/180-4, IEEE 1588 §13 layouts, u-blox
 UBX frames) rather than self-round-trips.
 

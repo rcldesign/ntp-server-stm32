@@ -27,7 +27,7 @@
 # audit reached, and what it did not:
 #
 #   AUDITED per symbol, against the linked image and the source:
-#     inlined (10)     each one located in zephyr.elf — method below
+#     inlined (11)     each one located in zephyr.elf — method below
 #     no-caller (42)   reference set established for each; see that block
 #     ATECC (18)       regrouped; the old blanket reason explained five of them
 #     superseded (3)   the _profile twins confirmed present in the image
@@ -41,10 +41,16 @@
 #                      had been filed under fmt purely because it sorts between
 #                      two formatters, which is how the alphabetical-block
 #                      mistake was caught in the first place.
-#     ntske_* (6)      the deferral itself is verified (ARCHITECTURE.md §5,
-#                      conf/net.conf); that these six are the complete set was
-#                      not re-derived.
 #     TODO (108)       declared backlog. Nothing to audit — that is the point.
+#
+#   The `ntske_* (6)` line that used to sit in this block is gone, and how it
+#   went is worth keeping: it said the *deferral* was verified but that "these
+#   six are the complete set was not re-derived". Enabling NTS-KE settled both
+#   halves at once. Five of the six went into the image and this gate caught
+#   them as stale; the sixth was not deferred at all, it was inlined, and it is
+#   now in the inlined block with the disassembly that proves it. The
+#   unre-derived claim was the accurate part: the set was six because the
+#   feature was off, not because anyone had checked what six meant.
 #
 # THE CATEGORIES:
 #
@@ -128,6 +134,18 @@ ntp_short_from_q16                     # inlined(b): saturating cast at ntp.c:13
 snmp_rd_done                           # inlined(b): snmp.c:1614 inside snmp__parse_pdu() @0x08093cbc
 snmp_wr_rewind                         # inlined(b): snmp.c:1383/1401/1433/1461 inside snmp__emit_response() @0x08031a58
 ina228_device_id_die                   # inlined(b): ina228.c:739 inside ina228_id_matches() @0x0808c35c, which disassembles to `lsrs r0, r1, #4` — the >>4 extract, no call
+# ntske_exporter_context was in the "deferred" block until NTS-KE was enabled.
+# It is not deferred and it is not uncalled: it is the only one of the six that
+# the compiler swallowed whole. Every reference to it in libapp.a is in
+# .debug_{info,line,frame,aranges,loc,ranges} — no .text section relocates
+# against it — and its two call sites (nts.c:904/911, in static ntske_derive(),
+# itself inlined) are in ntske_handle @0x08030fc8, which IS in the image.
+# Its three stores are visible there: `mov.w sl,#0x0f000000` + `str.w sl,[sp,#108]`
+# is bytes_put_be16(out[0], proto NTPV4=0) and bytes_put_be16(out[2], aead 15
+# = AES-SIV-CMAC-256); `strb.w r3,[sp,#112]` with r3=0 then r3=1 is
+# `out[4] = c2s ? 0x00 : 0x01`. The 5-byte buffer is then passed as (r2, r3=5)
+# to the exporter with r1 = 0x080c0262 = "EXPORTER-network-time-security".
+ntske_exporter_context                 # inlined(b): nts.c:904/911 via static ntske_derive() inside ntske_handle() @0x08030fc8; only .debug_* relocs name it
 
 # --- no production caller -------------------------------------------
 # INA228 first. The old reason claimed "the device writes, the host interprets";
@@ -196,12 +214,12 @@ mp_cbor_rd_uint                        # oracle: device is a CBOR writer; the re
 mp_cbor_skip                           # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
 
 # --- deliberately deferred features ---------------------------------
-ntske_exporter_context                 # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
-ntske_handle                           # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
-ntske_init                             # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
-ntske_rec_parse                        # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
-ntske_rec_put                          # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
-ntske_rec_put_u16                      # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
+# NTS-KE is no longer one of them. Five of the six ntske_* entries that stood
+# here — ntske_handle, ntske_init, ntske_rec_parse, ntske_rec_put and
+# ntske_rec_put_u16 — are in the image now that conf/net.conf enables the
+# exporter, and this gate is what proved it: it failed on all five as stale the
+# first time the feature was switched on. The sixth moved up to the inlined
+# block, where its evidence is. Nothing else changed category.
 ldap_build_starttls                    # deferred: StartTLS needs an in-place socket upgrade Zephyr's TLS type cannot do
 
 # --- ATECC608B ------------------------------------------------------

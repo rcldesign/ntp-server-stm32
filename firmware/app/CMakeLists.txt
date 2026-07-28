@@ -45,6 +45,41 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(sts1000_meridian LANGUAGES C)
 
 # ---------------------------------------------------------------------------
+# mbedTLS user-config header (NTS-KE)
+#
+# CONFIG_MBEDTLS_USER_CONFIG_FILE="sts_mbedtls_user.h" makes Zephyr's
+# configs/config-mbedtls.h end with `#include "sts_mbedtls_user.h"` (that file,
+# line 552). The header therefore has to be findable from every translation unit
+# that pulls the mbedTLS configuration in — which is the whole mbedTLS module,
+# not just this application, because the module is compiled with its own include
+# paths and knows nothing about app/. Without this line the mbedTLS library
+# fails to compile with "sts_mbedtls_user.h: No such file or directory"; with it,
+# MBEDTLS_SSL_KEYING_MATERIAL_EXPORT reaches the library and the application
+# identically, which is the only way the exporter can be both compiled into
+# ssl_tls.c and visible to the `#if` in src/zephyr/net/sts_ntske.c.
+#
+# PLACEMENT: this must come AFTER find_package(Zephyr), not before it, and the
+# note that used to say otherwise (in sts_mbedtls_user.h and conf/net.conf) was
+# wrong — `zephyr_include_directories` is defined by cmake/modules/extensions.cmake
+# and operates on the `zephyr_interface` target, and neither exists until
+# find_package(Zephyr) runs kernel.cmake's add_subdirectory(${ZEPHYR_BASE}).
+# Placed earlier the configure step dies with
+#     CMake Error: Unknown CMake command "zephyr_include_directories".
+# Placing it after is not a workaround: zephyr_include_directories() appends to
+# an INTERFACE target's INTERFACE_INCLUDE_DIRECTORIES, and CMake resolves usage
+# requirements at generate time, so every zephyr_library() — including the four
+# the mbedTLS module defines — picks it up even though those targets were
+# created during find_package(Zephyr).
+#
+# Scope note: this puts src/zephyr/net/ on the include path of every Zephyr
+# library in the image, not only mbedTLS. That is safe because every header in
+# that directory is `sts_`-prefixed, so none can shadow a Zephyr, mbedTLS or
+# libc header. Keep it that way — an unprefixed header added there would be
+# picked up by upstream code.
+# ---------------------------------------------------------------------------
+zephyr_include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/zephyr/net)
+
+# ---------------------------------------------------------------------------
 # Anti-rollback: the SIGNED security counter must equal the COMPILED-IN epoch
 #
 # Two symbols carry one number (app/conf/rollback.conf explains why Kconfig

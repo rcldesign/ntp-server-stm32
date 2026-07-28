@@ -50,8 +50,20 @@
  * every build. So the TLS blocks below are compiled in today — the `#if` is a
  * guard for a hypothetical HTTPS-less build, not a description of the shipped
  * one. (An older comment here claimed the opposite, and pointed at the
- * commented-out block at the end of conf/net.conf; that block is NTS-KE's
- * mbedTLS *user-config header*, which is a separate and still-open item.)
+ * then-commented-out block at the end of conf/net.conf. That block is NTS-KE's
+ * mbedTLS *user-config header*; it is a separate concern from these two
+ * symbols, and it is no longer open — NTS-KE is enabled.)
+ *
+ * What NTS-KE going live did and did not change for this file: it added
+ * MBEDTLS_SSL_KEYING_MATERIAL_EXPORT and MBEDTLS_SSL_ALPN globally, and raised
+ * the shared MBEDTLS_HEAP_SIZE to 49152. It did NOT touch the cipher suites,
+ * the curve set or the TLS version — every other symbol conf/net.conf lists was
+ * already set to the same value by web.conf. LDAPS negotiates exactly what it
+ * negotiated before; ALPN is inert here because this file never sets
+ * TLS_ALPN_LIST, and mbedTLS ignores a client's ALPN extension when the config
+ * carries no protocol list. The outbound LDAPS socket still draws one of
+ * web.conf's four NET_SOCKETS_TLS_MAX_CONTEXTS — NTS-KE takes none, because it
+ * opens IPPROTO_TCP and runs mbedTLS over it itself.
  *
  * LDAPS therefore needs a trust anchor, not a Kconfig change. The whole
  * decision — which transport, and what is missing when there is none — is in
