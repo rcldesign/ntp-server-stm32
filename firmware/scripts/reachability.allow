@@ -16,27 +16,72 @@
 # actions — all written, all tested, all documented as delivered, and all
 # discarded by --gc-sections because nothing called them. Host tests cannot
 # see it: they link core/ directly and never touch the target image. Wiring
-# them up took the absent count from 320 to 220. The remaining 220 are not
+# them up took the absent count from 320 to 218. The remaining 218 are not
 # all fine, and pretending otherwise by inventing a category for each would
 # reproduce the exact failure this file exists to stop. So the ones with a
 # defensible reason carry it, and the rest say TODO and are honest backlog.
 #
-# THE CATEGORIES, each verified rather than assumed:
+# AUDIT STATUS — WHICH REASONS HAVE BEEN CHECKED AND WHICH HAVE NOT.
+# The first version of this file assigned reasons in alphabetical blocks, and
+# several of them were false. An adversarial audit went through it. What that
+# audit reached, and what it did not:
+#
+#   AUDITED per symbol, against the linked image and the source:
+#     inlined (10)     each one located in zephyr.elf — method below
+#     no-caller (42)   reference set established for each; see that block
+#     ATECC (18)       regrouped; the old blanket reason explained five of them
+#     superseded (3)   the _profile twins confirmed present in the image
+#
+#   NOT INDEPENDENTLY AUDITED — the reason on each line is asserted, not
+#   checked, and should be read as an untested claim:
+#     fmt (18 of 18)   nobody has confirmed these are unreachable *because*
+#                      they are host-side formatters rather than for some
+#                      other reason. Plausible, unverified.
+#     oracle (11 of 12) same. The twelfth, mp_cbor_rd_text, WAS checked — it
+#                      had been filed under fmt purely because it sorts between
+#                      two formatters, which is how the alphabetical-block
+#                      mistake was caught in the first place.
+#     ntske_* (6)      the deferral itself is verified (ARCHITECTURE.md §5,
+#                      conf/net.conf); that these six are the complete set was
+#                      not re-derived.
+#     TODO (108)       declared backlog. Nothing to audit — that is the point.
+#
+# THE CATEGORIES:
 #
 #   fmt         enum->string formatters. The device logs numeric codes; the
 #               names are for the host tool and for test failure messages.
-#   decode      pure register/unit decoders. The device writes raw registers
-#               and the HOST interprets them, so the decode direction is
-#               genuinely host- and test-side.
+#               NOT INDEPENDENTLY AUDITED.
 #   oracle      the CBOR *reader*. This device is a CBOR writer — telemetry
 #               goes device->host, the control plane is JSON-RPC. The reader
 #               is how test_mp_stream.c and test_mp_mirror.c decode what the
-#               writer produced and prove the round trip.
-#   inlined     GCC inlined it into its only caller within the same
-#               translation unit, so the instructions ship and only the
-#               separately-addressable copy is collected. Confirmed per
-#               symbol by disassembling the linked image or by objdump -r
-#               showing no relocation from any allocatable section.
+#               writer produced and prove the round trip. NOT INDEPENDENTLY
+#               AUDITED except mp_cbor_rd_text.
+#   inlined     the instructions SHIP; only the separately-addressable global
+#               entry point was collected. This is a strictly stronger claim
+#               than any other category here — the others say "nothing calls
+#               it", this one says "the code is in the image, at this address".
+#               It is earned one of two ways and every line says which:
+#                 (a) a .part/.isra/.constprop clone located at an address in
+#                     zephyr.elf and called from a function that is itself in
+#                     the image (GCC partial inlining); or
+#                 (b) full inlining — a call site exists in the source, NO
+#                     relocation anywhere in libapp.a names the symbol, and the
+#                     enclosing caller is in the image; confirmed by
+#                     disassembling that caller where the callee's work is
+#                     small enough to recognise.
+#               The caller-in-image check in (b) is the load-bearing one: it is
+#               what separates "inlined into live code" from "referenced only
+#               by other dead code", and dropping it is what would let a whole
+#               dead subtree pose as shipped.
+#   no-caller   the reference set has been established and it contains no
+#               production caller: no relocation anywhere in libapp.a names the
+#               symbol and no call site exists under app/ — or the only call
+#               sites are inside functions that are themselves absent. The
+#               named host suite is the sole exerciser. This is a FINDING, not
+#               an absolution. It blesses nothing that TODO does not; several
+#               of these are things an operator surface arguably ought to be
+#               calling. What it buys over TODO is that the next reader does
+#               not have to repeat the search.
 #   deferred    a feature deliberately not enabled in this image, with the
 #               reason recorded at the point of deferral.
 #   superseded  a base variant whose _profile twin is what the engine calls.
@@ -50,16 +95,13 @@
 #   scripts/reachability.sh --update
 # and then justify, or wire up, whatever it marks TODO.
 
-# image. See scripts/reachability.sh for the rules and the failure mode this
-# guards against.
-
 # --- formatters -----------------------------------------------------
+# NOT INDEPENDENTLY AUDITED — see AUDIT STATUS above.
 atecc_status_name                      # fmt: enum->string; device logs the code, host renders the name
 fwupd_comp_desc                        # fmt: enum->string; device logs the code, host renders the name
 fwupd_end_reason                       # fmt: enum->string; device logs the code, host renders the name
 ina228_cause_str                       # fmt: enum->string; device logs the code, host renders the name
 ldap_result_name                       # fmt: enum->string; device logs the code, host renders the name
-mp_cbor_rd_text                        # fmt: enum->string; device logs the code, host renders the name
 mp_diag_ev_name                        # fmt: enum->string; device logs the code, host renders the name
 mp_ev_kind_name                        # fmt: enum->string; device logs the code, host renders the name
 mp_ilk_reason                          # fmt: enum->string; device logs the code, host renders the name
@@ -74,59 +116,72 @@ ubx_fwupd_state_name                   # fmt: enum->string; device logs the code
 ui_sky_view_name                       # fmt: enum->string; device logs the code, host renders the name
 ui_surface_row_text                    # fmt: enum->string; device logs the code, host renders the name
 
-# --- pure decoders --------------------------------------------------
-aes_cmac                               # decode: pure decode/size helper; the device writes, the host interprets
-cobs_decode_max                        # decode: pure decode/size helper; the device writes, the host interprets
-cobs_encode_max                        # decode: pure decode/size helper; the device writes, the host interprets
-http_path_decode                       # decode: pure decode/size helper; the device writes, the host interprets
-http_span_eq                           # decode: pure decode/size helper; the device writes, the host interprets
-http_span_eq_ci                        # decode: pure decode/size helper; the device writes, the host interprets
-ina228_adc_config_decode               # decode: pure decode/size helper; the device writes, the host interprets
-ina228_avg_samples                     # decode: pure decode/size helper; the device writes, the host interprets
-ina228_bus_code                        # decode: pure decode/size helper; the device writes, the host interprets
-ina228_charge_nc                       # decode: pure decode/size helper; the device writes, the host interprets
-ina228_config_decode                   # decode: pure decode/size helper; the device writes, the host interprets
-ina228_conv_interval_us                # decode: pure decode/size helper; the device writes, the host interprets
-ina228_ct_us                           # decode: pure decode/size helper; the device writes, the host interprets
-ina228_current_na                      # decode: pure decode/size helper; the device writes, the host interprets
-ina228_current_ua                      # decode: pure decode/size helper; the device writes, the host interprets
-ina228_device_id_die                   # decode: pure decode/size helper; the device writes, the host interprets
-ina228_device_id_rev                   # decode: pure decode/size helper; the device writes, the host interprets
-ina228_diag_cause                      # decode: pure decode/size helper; the device writes, the host interprets
-ina228_diag_encode                     # decode: pure decode/size helper; the device writes, the host interprets
-ina228_diag_is_fault                   # decode: pure decode/size helper; the device writes, the host interprets
-ina228_dietemp_mc                      # decode: pure decode/size helper; the device writes, the host interprets
-ina228_energy_uj                       # decode: pure decode/size helper; the device writes, the host interprets
-ina228_fs_current_ua                   # decode: pure decode/size helper; the device writes, the host interprets
-ina228_power_code                      # decode: pure decode/size helper; the device writes, the host interprets
-ina228_power_nw                        # decode: pure decode/size helper; the device writes, the host interprets
-ina228_rail_by_addr                    # decode: pure decode/size helper; the device writes, the host interprets
-ina228_rail_sovl_default               # decode: pure decode/size helper; the device writes, the host interprets
-ina228_raw20_signed                    # decode: pure decode/size helper; the device writes, the host interprets
-ina228_raw40                           # decode: pure decode/size helper; the device writes, the host interprets
-ina228_raw40_signed                    # decode: pure decode/size helper; the device writes, the host interprets
-ina228_reg_width                       # decode: pure decode/size helper; the device writes, the host interprets
-ina228_shunt_code                      # decode: pure decode/size helper; the device writes, the host interprets
-ina228_shunt_code_ma                   # decode: pure decode/size helper; the device writes, the host interprets
-ina228_shunt_code_to_ua                # decode: pure decode/size helper; the device writes, the host interprets
-ina228_temp_code                       # decode: pure decode/size helper; the device writes, the host interprets
-ina228_vbus_mv                         # decode: pure decode/size helper; the device writes, the host interprets
-ina228_vbus_uv                         # decode: pure decode/size helper; the device writes, the host interprets
-ina228_vshunt_nv                       # decode: pure decode/size helper; the device writes, the host interprets
-ntp_short_from_q16                     # decode: pure decode/size helper; the device writes, the host interprets
-ptp_ts_to_ns                           # decode: pure decode/size helper; the device writes, the host interprets
-ring_cap                               # decode: pure decode/size helper; the device writes, the host interprets
-ring_empty                             # decode: pure decode/size helper; the device writes, the host interprets
-ring_full                              # decode: pure decode/size helper; the device writes, the host interprets
-snmp_rd_done                           # decode: pure decode/size helper; the device writes, the host interprets
-snmp_rd_uint                           # decode: pure decode/size helper; the device writes, the host interprets
-snmp_val_ip                            # decode: pure decode/size helper; the device writes, the host interprets
-snmp_wr_rewind                         # decode: pure decode/size helper; the device writes, the host interprets
-ubx_checksum                           # decode: pure decode/size helper; the device writes, the host interprets
-web_b64_decode                         # decode: pure decode/size helper; the device writes, the host interprets
-wss_sha1                               # decode: pure decode/size helper; the device writes, the host interprets
+# --- inlined: the code ships, only the global entry point was collected ---
+# Addresses are from the audited build. They will move; the shape will not.
+rb_serial_mode                         # inlined(b): sts_rb_serial_status() @0x08041d90 calls it at rb_serial.c:509; no reloc in libapp.a names it
+sky_colour_for_sys                     # inlined(b): sky_render() @0x08096136 calls it at skyplot.c:784; no reloc in libapp.a names it
+wss_sha1                               # inlined(a): wss_sha1.part.0 @0x0803b558, called from wss_accept_key @0x0803b63c (bl at 0x0803b684); the 8-byte global is a guard+tail-jump thunk
+ubx_checksum                           # inlined(a): ubx_checksum.part.0 @0x08094f3e, called from ubx_frame @0x08094f68 and ubx_valset_end @0x080957e8 — the checksum runs on every frame
+http_span_eq                           # inlined(b): one-line forwarder onto web_span_eq() @0x08098282; http_parse_request @0x08035be8 relocates against the forwardee, not this
+http_span_eq_ci                        # inlined(b): same, onto web_span_eq_ci() @0x0809823e; ~20 call sites in http_parse_request, every one resolved to the forwardee
+ntp_short_from_q16                     # inlined(b): saturating cast at ntp.c:1325-1326 inside ntp_handle_request() @0x080303c4
+snmp_rd_done                           # inlined(b): snmp.c:1614 inside snmp__parse_pdu() @0x08093cbc
+snmp_wr_rewind                         # inlined(b): snmp.c:1383/1401/1433/1461 inside snmp__emit_response() @0x08031a58
+ina228_device_id_die                   # inlined(b): ina228.c:739 inside ina228_id_matches() @0x0808c35c, which disassembles to `lsrs r0, r1, #4` — the >>4 extract, no call
+
+# --- no production caller -------------------------------------------
+# INA228 first. The old reason claimed "the device writes, the host interprets";
+# the opposite is true. hk_read_ina() converts on-board (hk.c:590-615) using
+# ina228_raw16/raw20_unsigned/raw24 with ina228_current_lsb_pa() and
+# ina228_power_lsb_nw(). These entries are the *alternative* one-shot unit
+# conversions and the register-encode inverses, which that path never calls.
+ina228_current_ua                      # no-caller: test_ina228.c only
+ina228_current_na                      # no-caller: reached only from ina228_current_ua() (ina228.c:521), itself absent
+ina228_raw20_signed                    # no-caller: reached only from ina228_current_na()/ina228_vshunt_nv(), both absent
+ina228_raw40                           # no-caller: reached only from ina228_energy_uj()/ina228_raw40_signed(), both absent
+ina228_raw40_signed                    # no-caller: reached only from ina228_charge_nc() (ina228.c:559), itself absent
+ina228_vbus_uv                         # no-caller: reached only from ina228_vbus_mv() (ina228.c:493), itself absent
+ina228_vbus_mv                         # no-caller: hk.c:415 does the 195.3125 uV scaling inline instead
+ina228_vshunt_nv                       # no-caller: test_ina228.c only
+ina228_power_nw                        # no-caller: hk.c uses ina228_power_lsb_nw() + ina228_raw24() instead
+ina228_energy_uj                       # no-caller: test_ina228.c only
+ina228_charge_nc                       # no-caller: test_ina228.c only
+ina228_dietemp_mc                      # no-caller: test_ina228.c only
+ina228_config_decode                   # no-caller: the encode direction ships (ina228_config_encode); this inverse is the round-trip oracle
+ina228_adc_config_decode               # no-caller: same, inverse of ina228_adc_config_encode()
+ina228_diag_encode                     # no-caller: the decode direction ships (ina228_diag_decode); this inverse is the round-trip oracle
+ina228_diag_cause                      # no-caller: hk.c reads flags via ina228_diag_decode() at hk.c:640
+ina228_diag_is_fault                   # no-caller: hk.c uses ina228_diag_fault_mask() at hk.c:667
+ina228_bus_code                        # no-caller: test_ina228.c only
+ina228_shunt_code                      # no-caller: reached only from ina228_shunt_code_ma()/ina228_rail_sovl_default(), both absent
+ina228_shunt_code_ma                   # no-caller: test_ina228.c only
+ina228_shunt_code_to_ua                # no-caller: test_ina228.c only
+ina228_temp_code                       # no-caller: test_ina228.c only
+ina228_power_code                      # no-caller: test_ina228.c only
+ina228_reg_width                       # no-caller: hk.c passes the width per register at each ina_read()
+ina228_avg_samples                     # no-caller: reached only from ina228_conv_interval_us() (ina228.c:244), itself absent
+ina228_ct_us                           # no-caller: reached only from ina228_conv_interval_us() (ina228.c:235/238/241), itself absent
+ina228_conv_interval_us                # no-caller: test_ina228.c only
+ina228_fs_current_ua                   # no-caller: test_ina228.c only
+ina228_device_id_rev                   # no-caller: ina228_id_matches() gates on the die code, not the revision
+ina228_rail_by_addr                    # no-caller: hk.c indexes ina228_rail_tbl[] by ina228_rail_t, never by I2C address
+ina228_rail_sovl_default               # no-caller: test_ina228.c only; hk.c programs no SOVL threshold
+# The rest: no relocation in libapp.a names it and no call site exists under
+# app/. The named suite is the only exerciser.
+aes_cmac                               # no-caller: public one-shot that only test_aes_siv.c calls — AES-SIV's s2v() drives cmac_begin/update/final directly (aes_siv.c:209,219,229); it is a CMAC primitive, not a decoder
+cobs_encode_max                        # no-caller: test_cobs.c only; mp_frame.c:79 sizes with sizeof(tx->enc)
+cobs_decode_max                        # no-caller: test_cobs.c only; same
+http_path_decode                       # no-caller: test_http_parse.c only; http_pct_decode() @0x08097880 is the live entry point
+ptp_ts_to_ns                           # no-caller: test_ptp_msg.c only; ptp_ts_from_ns() @0x08021f08 is the live direction — a grandmaster writes timestamps
+ring_cap                               # no-caller: test_ring.c only; the live path uses ring_len()/ring_free()
+ring_empty                             # no-caller: test_ring.c only; same
+ring_full                              # no-caller: test_ring.c only; same
+snmp_rd_uint                           # no-caller: test_snmp.c only; the live decoder uses snmp_rd_int() @0x0809347a
+snmp_val_ip                            # no-caller: test_snmp.c only; no IpAddress-typed OID in the shipped MIB — sts_snmp.c builds every value with snmp_val_int()/snmp_val_str()
+web_b64_decode                         # no-caller: test_rest.c only; the web plane only encodes (the WSS accept key), and the MP plane carries its own mp_b64_decode() @0x0802b0bc
 
 # --- CBOR read direction --------------------------------------------
+# NOT INDEPENDENTLY AUDITED except mp_cbor_rd_text — see AUDIT STATUS above.
 mp_cbor_map_find                       # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
 mp_cbor_peek_major                     # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
 mp_cbor_rd_arr                         # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
@@ -136,38 +191,55 @@ mp_cbor_rd_f32                         # oracle: device is a CBOR writer; the re
 mp_cbor_rd_init                        # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
 mp_cbor_rd_int                         # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
 mp_cbor_rd_map                         # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
+mp_cbor_rd_text                        # oracle: VERIFIED — mp_stream.c:444 is a CBOR reader, not a formatter; only test_mp_stream.c calls it
 mp_cbor_rd_uint                        # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
 mp_cbor_skip                           # oracle: device is a CBOR writer; the reader is the tests' round-trip oracle
 
 # --- deliberately deferred features ---------------------------------
-ntske_exporter_context                 # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
-ntske_handle                           # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
-ntske_init                             # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
-ntske_rec_parse                        # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
-ntske_rec_put                          # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
-ntske_rec_put_u16                      # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block)
-atecc_ecdh                             # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_genkey_private                   # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_hmac                             # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_lock                             # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_nonce_passthrough                # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_present                          # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_random                           # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_sha256                           # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_sign                             # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_sleep                            # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_verify_extern                    # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-atecc_write_zone                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-sts_atecc_ecdh                         # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-sts_atecc_present                      # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-sts_atecc_pubkey                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-sts_atecc_random                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-sts_atecc_sign                         # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
-sts_atecc_verify                       # deferred: ATECC-backed TLS key is a permanently-open item (spec 15.2)
+ntske_exporter_context                 # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
+ntske_handle                           # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
+ntske_init                             # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
+ntske_rec_parse                        # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
+ntske_rec_put                          # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
+ntske_rec_put_u16                      # deferred: NTS-KE TLS is not enabled in this image (conf/net.conf tail block; ARCHITECTURE.md §5)
 ldap_build_starttls                    # deferred: StartTLS needs an in-place socket upgrade Zephyr's TLS type cannot do
 
-rb_serial_mode                         # inlined: GCC inlined it into its only caller in the same TU; verified by objdump
-sky_colour_for_sys                     # inlined: GCC inlined it into its only caller in the same TU; verified by objdump
+# --- ATECC608B ------------------------------------------------------
+# The old blanket reason — "ATECC-backed TLS key is a permanently-open item
+# (spec 15.2)" — was wrong twice over. The citation resolved to nothing:
+# software_spec §15.2 lists three open items and none of them is this. The
+# record is ARCHITECTURE.md §5. And the reason was stretched across eighteen
+# symbols when it explains five. Each group below carries what is true for it.
+#
+# What the part IS the root for, and what is therefore NOT absent:
+# sts_atecc_serial(), sts_atecc_device_unique(), sts_atecc_attest(),
+# sts_atecc_counter_increment() and atecc_pubkey() are all in the image.
+#
+# The deferral proper: routing the HTTPS / NTS-KE server identity to the secure
+# element needs an mbedTLS PK_OPAQUE / PSA driver over CryptoAuthLib. These are
+# exactly the key-slot operations that driver would consume, and nothing else
+# reaches them.
+sts_atecc_sign                         # deferred: ATECC-backed TLS server key (ARCHITECTURE.md §5) — the PK_OPAQUE sign entry; zero callers anywhere
+sts_atecc_pubkey                       # deferred: ATECC-backed TLS server key (ARCHITECTURE.md §5); zero callers anywhere
+sts_atecc_ecdh                         # deferred: ATECC-backed TLS server key (ARCHITECTURE.md §5); zero callers anywhere
+atecc_sign                             # deferred: same; reached only from sts_atecc_sign() at sts_atecc.c:350
+atecc_ecdh                             # deferred: same; reached only from sts_atecc_ecdh() at sts_atecc.c:403
+atecc_nonce_passthrough                # intra-TU only: sole callers are atecc_sign() (atecc.c:699) and atecc_verify_extern() (atecc.c:721), both themselves absent — it dies with them
+# The rest are NOT explained by that deferral. Checked one at a time: the TRNG,
+# status accessors, power management, crypto offload, provisioning.
+atecc_random                           # TODO: NOT the device CSPRNG — sys_csrand_get() on the H5 RNG peripheral is (portz_crypto.c:137); reached only from sts_atecc_random(), itself uncalled
+sts_atecc_random                       # TODO: zero callers anywhere; wire it up as an entropy source or delete it. ARCHITECTURE.md §5 used to claim the part was the TRNG root; it is not
+atecc_present                          # TODO: status accessor; reached only from sts_atecc_present() at sts_atecc.c:258
+sts_atecc_present                      # TODO: status accessor, zero callers; no operator surface reports whether the part is fitted
+atecc_sleep                            # TODO: power management, zero callers; the glue idles instead — atecc_idle() at sts_atecc.c:217 and :464
+sts_atecc_verify                       # TODO: external-signature verify offload, zero callers; verification runs in software
+atecc_verify_extern                    # TODO: reached only from sts_atecc_verify() at sts_atecc.c:384, itself uncalled
+atecc_sha256                           # TODO: hash offload, zero callers
+atecc_hmac                             # TODO: HMAC offload, zero callers
+atecc_lock                             # TODO: provisioning command, zero callers; the firmware never locks a zone
+atecc_write_zone                       # TODO: provisioning command, zero callers
+atecc_genkey_private                   # TODO: provisioning command, zero callers; the key is expected to be pre-provisioned
+
 # --- superseded base variants ---------------------------------------
 ptp_bmca_compare                       # superseded: the _profile twin is what ptp_port.c's run_bmca() calls; verified present
 ptp_bmca_state_decision                # superseded: the _profile twin is what ptp_port.c's run_bmca() calls; verified present

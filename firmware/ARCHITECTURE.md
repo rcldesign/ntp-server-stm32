@@ -159,11 +159,21 @@ enumerated in `sts_cert.c`); Argon2id credential stretching (plumbed via `auth_k
 but switching it is a coordinated flag day with MCP because the 48-byte envelope cannot
 record which KDF produced the tag); FE-5680A firmware update (no loader protocol is
 documented anywhere reachable — reported as `NOT_SUPPORTED` rather than attempted, and
-the only item on this list that no amount of work closes); an **ATECC-backed TLS server
-key** (the HTTPS identity is still a software PEM on NOR — routing it to the secure
-element needs an mbedTLS `PK_OPAQUE`/PSA driver over CryptoAuthLib, which is a driver,
-not wiring; the part is already the root for the SNMP engine id, attestation, the TRNG
-and the anti-rollback counters).
+the only item on this list that no amount of work closes); **NTS-KE** (`sts_ntske.c` is a
+complete TLS 1.3 key-exchange server driving mbedTLS directly, because Zephyr's TLS socket
+layer exposes no RFC 8446 exporter — but its whole body compiles only under
+`MBEDTLS_SSL_KEYING_MATERIAL_EXPORT`, which Zephyr's mbedTLS config omits and offers no
+Kconfig for. `sts_ntske_supported()` therefore returns false, `sts_ntp.c:1058` gates
+`nts_enabled` on it, and the appliance advertises what the build can actually do rather
+than NAKing cookies no client could have been issued. The three enabling steps —
+a `zephyr_include_directories()` line for `sts_mbedtls_user.h`, the two user-config
+Kconfigs, the TLS 1.3 block — are written out and commented in `app/conf/net.conf`);
+an **ATECC-backed TLS server key** (the HTTPS identity is still a software PEM on NOR —
+routing it to the secure element needs an mbedTLS `PK_OPAQUE`/PSA driver over
+CryptoAuthLib, which is a driver, not wiring; the part is already the root for the SNMP
+engine id, attestation and the anti-rollback counters. It is **not** the entropy source:
+the CSPRNG is `sys_csrand_get()` on the STM32H5 RNG peripheral (`portz_crypto.c:137`).
+`sts_atecc_random()` exists, works, and has no caller — see `scripts/reachability.allow`).
 
 **No longer deferred** — struck from the list above as they landed, recorded here because
 a deferral list that quietly loses entries is indistinguishable from one nobody maintains:
