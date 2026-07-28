@@ -232,6 +232,27 @@ typedef struct {
 	uint32_t rx_total;
 	uint32_t announce_timeouts;
 	uint32_t followup_missed;
+
+	/*
+	 * Profile conformance disclosure.
+	 *
+	 * core/ptp documents two profile features it does not implement —
+	 * C37.238's peer-delay mechanism and G.8275.2's unicast negotiation —
+	 * and calls them "reported" deviations. They were not: the engine raised
+	 * PTP_ALARM_PROFILE_UNSUPPORTED and every plane emitted the alarm word as
+	 * an undecoded integer, so an operator who selected C37.238 saw
+	 * `"alarms": 8` and nothing else. These four fields are that report.
+	 *
+	 * @p profile_name and @p deviation_text point at string literals with
+	 * static storage duration (ptp_profile.c returns constants; it holds no
+	 * buffer), so the encoder may keep them past the provider call. NULL is
+	 * legal and renders as "" — a provider with no PTP engine bound is not
+	 * required to invent names.
+	 */
+	uint8_t     profile;        /**< ptp_profile_t */
+	uint16_t    deviations;     /**< PTP_DEV_* bitmask */
+	const char *profile_name;   /**< ptp_profile_name(), or NULL */
+	const char *deviation_text; /**< ptp_profile_deviation_text(), or NULL */
 } rest_ptp_t;
 
 /** Service counters for the Dashboard. */
@@ -384,6 +405,19 @@ typedef struct {
 	uint64_t (*alarms_latched)(void *u);
 	/** Human name for alarm bit @p bit, or NULL for "report the number". */
 	const char *(*alarm_name)(void *u, uint8_t bit);
+	/**
+	 * Human name for PTP alarm bit @p bit of @ref rest_ptp_t::alarms, or
+	 * NULL when that bit has no name.
+	 *
+	 * A *second* name hook rather than a reuse of @ref alarm_name because the
+	 * two bitmasks are disjoint namespaces over the same small integers:
+	 * bit 3 is FAULT_SIG_ANTENNA_SHORT in one and PTP_ALARM_PROFILE_UNSUPPORTED
+	 * in the other. Naming PTP bits through the fault renderer would produce
+	 * confident, wrong names — worse than the bare integer this replaces.
+	 * NULL callback means "emit no names", which is what a provider with no
+	 * PTP engine should do.
+	 */
+	const char *(*ptp_alarm_name)(void *u, uint8_t bit);
 
 	/* control */
 	int (*gnss_survey)(void *u, bool start);

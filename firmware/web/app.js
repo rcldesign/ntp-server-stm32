@@ -41,6 +41,15 @@
 		5: 'PRE_MASTER', 6: 'MASTER', 7: 'PASSIVE', 8: 'UNCALIBRATED', 9: 'SLAVE'
 	};
 	var PTP_TRANSPORT = { 0: 'UDP/IPv4', 1: 'UDP/IPv6', 2: 'L2 (0x88F7)' };
+	/*
+	 * PTP alarm bits are their OWN namespace, disjoint from the fault ids the
+	 * /status/alarms page renders — bit 3 is PROFILE_UNSUPPORTED here and
+	 * ANTENNA_SHORT there. This is the fallback only: the device now sends
+	 * `alarm_names` and that is preferred, so a bit added to firmware is named
+	 * correctly by an SPA that predates it.
+	 */
+	var PTP_ALARM = ['NOT_BEST_MASTER', 'FAULTY', 'TX_ERROR',
+		'PROFILE_UNSUPPORTED', 'ICV_FAILED', 'DISPLACED_WHILE_LOCKED'];
 	var ACME_STATE = ['disabled', 'idle', 'account', 'order', 'challenge',
 		'finalize', 'issued', 'failed'];
 	var DFU_STATE = ['idle', 'query', 'prepare', 'transfer', 'verify',
@@ -268,6 +277,38 @@
 	function maskHex(v) {
 		if (!isNum(v)) { return '—'; }
 		return '0x' + Math.floor(v).toString(16);
+	}
+
+	/*
+	 * PTP alarms, decoded. This used to be a bare maskHex(), which meant an
+	 * operator whose unit had raised PROFILE_UNSUPPORTED saw "0x8" and had
+	 * nothing anywhere — not this SPA, not the REST body, not meridian_ctl.py
+	 * — that could tell them what the 8 meant.
+	 *
+	 * Prefers the device's own `alarm_names`, falling back to the local table
+	 * so an older device still decodes. The hex is kept alongside because the
+	 * raw value is what an operator quotes in a bug report.
+	 */
+	function ptpAlarmTxt(pt) {
+		var names = [], i;
+		if (!pt || !isNum(pt.alarms)) { return null; }
+		if (pt.alarms === 0) { return 'none'; }
+		if (pt.alarm_names && pt.alarm_names.length) {
+			names = pt.alarm_names.slice();
+		} else {
+			for (i = 0; i < PTP_ALARM.length; i++) {
+				if (pt.alarms & (1 << i)) { names.push(PTP_ALARM[i]); }
+			}
+		}
+		if (!names.length) { return maskHex(pt.alarms); }
+		return names.join(', ') + ' (' + maskHex(pt.alarms) + ')';
+	}
+
+	/* Profile name from the device, falling back to the numeric selector. */
+	function ptpProfileTxt(pt) {
+		if (!pt) { return null; }
+		if (pt.profile_name) { return pt.profile_name; }
+		return isNum(pt.profile) ? String(pt.profile) : null;
 	}
 
 	/* Masks can exceed 32 bits, so no bitwise operators here. */
@@ -1997,8 +2038,18 @@
 					['clock class', pt.clock_class],
 					['accuracy', isNum(pt.clock_accuracy) ? maskHex(pt.clock_accuracy) : null],
 					['domain', pt.domain],
-					['alarms', isNum(pt.alarms) ? maskHex(pt.alarms) : null,
-						pt.alarms ? 'crit' : null]
+					['profile', ptpProfileTxt(pt)],
+					['alarms', ptpAlarmTxt(pt), pt.alarms ? 'crit' : null],
+					/*
+					 * The conformance disclosure. Selecting C37.238 configures
+					 * the profile's domain, intervals, transport and TLV but
+					 * leaves the delay mechanism at E2E, which the profile
+					 * mandates as peer-delay. The device says so in
+					 * deviation_text; showing only the alarm mask here is what
+					 * made that disclosure invisible.
+					 */
+					pt.deviation_text ? ['deviations', pt.deviation_text,
+						(pt.alarms & 0x8) ? 'warn' : 'dim'] : null
 				]));
 			}
 
@@ -2719,13 +2770,23 @@
 					['clock accuracy', pt && isNum(pt.clock_accuracy) ? maskHex(pt.clock_accuracy) : null],
 					['domain', pt ? pt.domain : null],
 					['transport', pt ? (PTP_TRANSPORT[pt.transport] || pt.transport) : null],
+					['profile', ptpProfileTxt(pt)],
+					/*
+					 * Both PTP surfaces carry the conformance disclosure. This is
+					 * the detailed one, so it also shows the raw PTP_DEV_* mask
+					 * an engineer would quote.
+					 */
+					pt && pt.deviation_text
+						? ['deviations', pt.deviation_text + (isNum(pt.deviations)
+							? ' (' + maskHex(pt.deviations) + ')' : ''),
+							(pt.alarms & 0x8) ? 'warn' : 'dim']
+						: null,
 					['tx / rx', pt ? fint(pt.tx_total) + ' / ' + fint(pt.rx_total) : null],
 					['announce timeouts', pt ? fint(pt.announce_timeouts) : null,
 						(pt && pt.announce_timeouts) ? 'warn' : null],
 					['follow-up missed', pt ? fint(pt.followup_missed) : null,
 						(pt && pt.followup_missed) ? 'warn' : null],
-					['alarms', pt && isNum(pt.alarms) ? maskHex(pt.alarms) : null,
-						(pt && pt.alarms) ? 'crit' : null],
+					['alarms', ptpAlarmTxt(pt), (pt && pt.alarms) ? 'crit' : null],
 					['— MAC clock —', ''],
 					['present', pc ? boolTxt(pc.present) : null, (pc && pc.present) ? 'ok' : 'dim'],
 					['synced', pc ? boolTxt(pc.synced) : null, (pc && pc.synced) ? 'ok' : 'warn'],

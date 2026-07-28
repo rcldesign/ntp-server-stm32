@@ -973,6 +973,7 @@ static void publish_stats_locked(void)
 	s.alarms = ptp_port_alarms(&port);
 	s.domain = port_cfg.domain;
 	s.transport = transport;
+	s.profile = (uint8_t)port_cfg.profile;
 
 	/*
 	 * Annex-P integrity. The counters are the only way an operator can tell
@@ -1395,6 +1396,41 @@ int sts_ptp_start(void)
 		if (rc != 0) {
 			LOG_ERR("ptp_port_init: %d", rc);
 			return rc;
+		}
+	}
+
+	/*
+	 * Disclose the profile's documented deviations into the boot record.
+	 *
+	 * ptp.h and ptp_profile.h both promise that the two *material* gaps —
+	 * C37.238's peer-delay requirement and G.8275.2's unicast negotiation —
+	 * are "reported" rather than hidden. ptp_port_init() raises
+	 * PTP_ALARM_PROFILE_UNSUPPORTED for them, but an alarm bit is not a
+	 * report: nothing on this box renders a PTP_ALARM_* by name, so the
+	 * whole disclosure used to leave the unit as the digit 8. This line is
+	 * the part of it that survives in an audit log without a management
+	 * client attached.
+	 *
+	 * Read from the *effective* configuration, after the ptp_cfg_validate()
+	 * fallback above may have replaced the operator's selection with
+	 * Default, so the log agrees with what the engine runs. Gated on the
+	 * alarm the engine actually raised rather than on a second evaluation of
+	 * PTP_DEV_MATERIAL, so the severity here can never disagree with the bit
+	 * a client polls.
+	 */
+	{
+		uint8_t eff = (uint8_t)port_cfg.profile;
+
+		if ((ptp_port_alarms(&port) & PTP_ALARM_PROFILE_UNSUPPORTED) !=
+		    0U) {
+			LOG_WRN("ptp profile %s is parameterised, NOT conformant"
+				" — unimplemented: %s",
+				ptp_profile_name(eff),
+				ptp_profile_deviation_text(eff));
+		} else {
+			LOG_INF("ptp profile %s; documented deviations: %s",
+				ptp_profile_name(eff),
+				ptp_profile_deviation_text(eff));
 		}
 	}
 

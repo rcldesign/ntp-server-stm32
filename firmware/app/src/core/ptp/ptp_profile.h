@@ -39,15 +39,22 @@
  *    PTP_PROFILE_POWER_C37_238 therefore configures the profile's domain,
  *    intervals, transport and Announce TLV, and leaves the delay mechanism at
  *    E2E. That is a *documented deviation*, not conformance, and it is reported:
- *    the descriptor's @ref ptp_profile_desc_t::deviations field names it and
- *    ptp_profile_deviation_text() renders it for the operator.
+ *    the descriptor's @ref ptp_profile_desc_t::deviations field names it,
+ *    ptp_profile_deviation_text() renders it, and the glue is what puts the
+ *    rendering in front of an operator — sts_ptp.c logs profile + deviation text
+ *    once at start, and REST `/api/v1/status/ptp` carries `profile`,
+ *    `profile_name`, `deviations` and `deviation_text`. SNMP does not carry it;
+ *    that surface is still open. PTP_DEV_E2E_ONLY is in PTP_DEV_MATERIAL, so it
+ *    also raises PTP_ALARM_PROFILE_UNSUPPORTED (ptp.h), whose bit
+ *    ptp_alarm_name() renders.
  *
  * 2. **G.8275.2 is a unicast profile** and unicast message negotiation
  *    (Signaling REQUEST/GRANT_UNICAST_TRANSMISSION, §16.1) is not implemented.
  *    The descriptor marks the profile unicast so the glue opens unicast sockets
  *    and the engine answers unicast Delay_Req, but a peer that expects to
- *    negotiate its Announce/Sync grants will not be served. Also reported as a
- *    deviation.
+ *    negotiate its Announce/Sync grants will not be served. Reported by the same
+ *    two surfaces as note 1, and also material, so it too raises
+ *    PTP_ALARM_PROFILE_UNSUPPORTED.
  *
  * 3. **The alternate BMCA's localPriority is implemented; notSlave is
  *    structural.** G.8275.1 §6.3 replaces priority1 with localPriority as a
@@ -327,10 +334,30 @@ const ptp_profile_desc_t *ptp_profile_desc(uint8_t profile);
 const char *ptp_profile_name(uint8_t profile);
 
 /**
+ * Longest string ptp_profile_deviation_text() can return, excluding the NUL.
+ *
+ * This exists so a consumer that has to *budget* for the text can do so without
+ * calling into this module. The one that must is core/web: the REST encoder
+ * emits `deviation_text` into a fixed STS_WEB_RESP_SIZE response buffer shared
+ * with the rest of a worker's state, and test_rest.c sizes its worst-case
+ * telemetry measurement against exactly this bound. Without it that test would
+ * measure whatever profile its fake happened to name — which it did, and the
+ * measurement understated the real frame by the whole difference between
+ * "two-step only; grandmaster-only" and the C37.238 string.
+ *
+ * Kept honest from both sides by test_ptp_profile.c: it asserts that no
+ * profile's text exceeds this, AND that at least one profile reaches it, so the
+ * bound cannot quietly become slack after a string is shortened.
+ */
+#define PTP_PROFILE_DEVIATION_TEXT_MAX 71U
+
+/**
  * Human-readable list of @p profile's documented deviations.
  *
  * Returns "none" when the profile is implemented as published. The string is
- * static storage owned by this module; it is stable for the life of the program.
+ * static storage owned by this module; it is stable for the life of the program
+ * — see the re-entrancy note at the implementation. At most
+ * PTP_PROFILE_DEVIATION_TEXT_MAX characters.
  */
 const char *ptp_profile_deviation_text(uint8_t profile);
 

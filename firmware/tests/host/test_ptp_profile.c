@@ -391,6 +391,51 @@ static void test_deviation_text(void)
 	TEST_ASSERT_NOT_NULL(strstr(
 		ptp_profile_deviation_text((uint8_t)PTP_PROFILE_TELECOM_G8275_2),
 		"unicast"));
+
+	/*
+	 * Default and G.8275.1 have no *material* gap, so they raise no alarm —
+	 * but they still disclose the two deviations every profile here carries.
+	 * "none" would be a lie: this engine is two-step and grandmaster-only
+	 * under every profile it offers.
+	 */
+	TEST_ASSERT_EQUAL_STRING(
+		"two-step only; grandmaster-only",
+		ptp_profile_deviation_text((uint8_t)PTP_PROFILE_DEFAULT));
+	TEST_ASSERT_EQUAL_STRING(
+		"two-step only; grandmaster-only",
+		ptp_profile_deviation_text((uint8_t)PTP_PROFILE_TELECOM_G8275_1));
+
+	/* An out-of-range selector degrades with the descriptor, not to NULL. */
+	TEST_ASSERT_EQUAL_STRING(
+		ptp_profile_deviation_text((uint8_t)PTP_PROFILE_DEFAULT),
+		ptp_profile_deviation_text(0xFFU));
+}
+
+/*
+ * PTP_PROFILE_DEVIATION_TEXT_MAX is a *budget* other modules spend: core/web
+ * emits this string into the fixed STS_WEB_RESP_SIZE response buffer, and
+ * test_rest.c sizes its worst-case telemetry measurement against exactly this
+ * constant. So the bound is checked from both ends — no profile may exceed it
+ * (or the REST measurement understates the real frame), and at least one profile
+ * must reach it (or the bound has gone slack and the measurement overstates,
+ * which wastes guard band and hides the next regression).
+ */
+static void test_deviation_text_length_bound_is_tight(void)
+{
+	size_t longest = 0U;
+	unsigned int p;
+
+	for (p = 0U; p < (unsigned int)PTP_PROFILE_COUNT; p++) {
+		size_t n = strlen(ptp_profile_deviation_text((uint8_t)p));
+
+		TEST_ASSERT_LESS_OR_EQUAL_size_t(
+			(size_t)PTP_PROFILE_DEVIATION_TEXT_MAX, n);
+		if (n > longest) {
+			longest = n;
+		}
+	}
+	TEST_ASSERT_EQUAL_size_t((size_t)PTP_PROFILE_DEVIATION_TEXT_MAX,
+				 longest);
 }
 
 static void test_apply_profile_produces_valid_cfg(void)
@@ -1571,6 +1616,7 @@ int main(void)
 	RUN_TEST(test_c37238_parameters);
 	RUN_TEST(test_out_of_range_profile_degrades_to_default);
 	RUN_TEST(test_deviation_text);
+	RUN_TEST(test_deviation_text_length_bound_is_tight);
 	RUN_TEST(test_apply_profile_produces_valid_cfg);
 	RUN_TEST(test_apply_profile_preserves_site_settings);
 	RUN_TEST(test_profile_ranges_are_enforced_only_off_default);

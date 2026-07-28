@@ -338,6 +338,15 @@ static int pv_ptp(void *u, rest_ptp_t *out)
 	out->domain = ps.domain;
 	out->transport = ps.transport;
 	out->alarms = ps.alarms;
+	/*
+	 * The profile conformance disclosure. Both strings are core/ptp
+	 * constants with static storage duration, so handing the pointers to the
+	 * encoder is safe past the end of this call and needs no copy.
+	 */
+	out->profile = ps.profile;
+	out->deviations = ptp_profile_desc(ps.profile)->deviations;
+	out->profile_name = ptp_profile_name(ps.profile);
+	out->deviation_text = ptp_profile_deviation_text(ps.profile);
 	for (i = 0U; i < PTP_MSG_TYPE_COUNT; i++) {
 		out->tx_total += ps.counters.tx[i];
 		out->rx_total += ps.counters.rx[i];
@@ -433,6 +442,18 @@ static const char *pv_alarm_name(void *u, uint8_t bit)
 		return soft[bit - 32U];
 	}
 	return NULL;
+}
+
+/*
+ * PTP alarm bits are a namespace of their own — core/ptp's, not core/fault's —
+ * so they get their own renderer rather than being passed through pv_alarm_name()
+ * above, which would name bit 3 "ANTENNA_SHORT" when it means
+ * PTP_ALARM_PROFILE_UNSUPPORTED.
+ */
+static const char *pv_ptp_alarm_name(void *u, uint8_t bit)
+{
+	ARG_UNUSED(u);
+	return ptp_alarm_name(bit);
 }
 
 /*
@@ -1077,6 +1098,7 @@ static void providers_bind(void)
 	providers.services = pv_services;
 	providers.alarms = pv_alarms;
 	providers.alarm_name = pv_alarm_name;
+	providers.ptp_alarm_name = pv_ptp_alarm_name;
 	providers.gnss_survey = pv_gnss_survey;
 	providers.gnss_fixed = pv_gnss_fixed;
 	providers.ref_override = pv_ref_override;

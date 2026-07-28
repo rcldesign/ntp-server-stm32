@@ -17,8 +17,11 @@
  *    rather than hidden: C37.238's peer-delay mechanism (this engine is E2E
  *    only, note 4 below) and G.8275.2's unicast message negotiation. Selecting
  *    either of those two raises PTP_ALARM_PROFILE_UNSUPPORTED, and
- *    ptp_profile_deviation_text() names the gap. Default and G.8275.1 raise
- *    nothing.
+ *    ptp_profile_deviation_text() names the gap — reaching an operator through
+ *    sts_ptp.c's start-up log line and the REST `/api/v1/status/ptp` object.
+ *    Default and G.8275.1 raise no alarm; their deviation text is still
+ *    published, because "two-step, grandmaster-only" is a disclosure even when
+ *    it is not a fault.
  *
  * 2. **Ordinary clock, grandmaster-only.** This appliance is a GNSS-disciplined
  *    grandmaster; it never slaves to another clock. BMCA still runs in full, but
@@ -138,11 +141,20 @@ extern "C" {
  * Raised at ptp_port_init() when the selected profile's descriptor carries a
  * deviation in PTP_DEV_MATERIAL — currently C37.238's peer-delay requirement and
  * G.8275.2's unicast message negotiation. Default and G.8275.1 do not raise it.
- * ptp_profile_deviation_text() renders the reason for the operator.
+ *
+ * The bit on its own says only "something is missing". What is missing comes
+ * from ptp_profile_deviation_text(), and the glue is what carries it to an
+ * operator: sts_ptp.c logs profile name + deviation text once at start (WRN when
+ * this bit is set, INF otherwise), and the REST `/api/v1/status/ptp` object
+ * carries `profile`, `profile_name`, `deviations`, `deviation_text` and
+ * `alarm_names` on every poll. SNMP does NOT: enterprise .1.6 still emits this
+ * word as a bare Gauge32 with no name and no deviation object.
  *
  * The two deviations every profile shares here (two-step Sync, grandmaster-only)
  * deliberately do *not* raise it: an alarm that is always on tells nobody
- * anything. They are documented in the scope note at the top of this file.
+ * anything. They are still *disclosed* — they are in the deviation text for
+ * every profile, Default included — just not alarmed. They are documented in the
+ * scope note at the top of this file.
  */
 #define PTP_ALARM_PROFILE_UNSUPPORTED 0x00000008U
 /** A received PDU failed the Annex-P integrity policy; see ptp_icv_counters(). */
@@ -163,6 +175,28 @@ extern "C" {
  * Without it, treat it as unauthenticated and see ptp_cfg_t::never_yield.
  */
 #define PTP_ALARM_DISPLACED_WHILE_LOCKED 0x00000020U
+
+/** Every bit defined above, so a consumer can tell "unknown bit" from "clear". */
+#define PTP_ALARM_ALL                                                          \
+	(PTP_ALARM_NOT_BEST_MASTER | PTP_ALARM_FAULTY | PTP_ALARM_TX_ERROR |   \
+	 PTP_ALARM_PROFILE_UNSUPPORTED | PTP_ALARM_ICV_FAILED |                \
+	 PTP_ALARM_DISPLACED_WHILE_LOCKED)
+
+/**
+ * Name of the PTP_ALARM_* bit at index @p bit, or NULL when nothing is defined
+ * there.
+ *
+ * This exists because ptp_port_alarms() leaves the box as a bare integer on
+ * every plane that carries it — REST `"alarms": 8`, SNMP Gauge32 8, the SPA's
+ * `0x8` — and none of those planes could decode it. The fault namespace has had
+ * fault_sig_name() for exactly this reason since it existed; PTP_ALARM_* is a
+ * second, disjoint namespace (core/fault does not contain these bits) and needs
+ * its own renderer rather than borrowing one that would name the wrong thing.
+ *
+ * Bit *index*, not mask, so it composes with a `for (bit = 0; bit < 32; bit++)`
+ * loop the way core/web's alarm encoder already works.
+ */
+const char *ptp_alarm_name(uint8_t bit);
 
 /* ------------------------------------------------------------ enums, cfg -- */
 

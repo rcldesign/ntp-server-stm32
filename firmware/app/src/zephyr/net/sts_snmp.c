@@ -664,6 +664,31 @@ static int getter(void *ctx, uint16_t obj, uint16_t inst, snmp_value_t *out)
 				      ps.counters.announce_timeouts);
 			break;
 		case SNMP_OBJ_PTP_ALARMS:
+			/*
+			 * DEFERRED, deliberately: this Gauge32 is the only PTP
+			 * alarm reporting SNMP has, and a poller cannot decode
+			 * it — the shipped artefact is a Zabbix template that
+			 * maps by OID, not a MIB that maps enums. So a C37.238
+			 * unit reports `8` for PTP_ALARM_PROFILE_UNSUPPORTED and
+			 * nothing explains it. The boot log and REST
+			 * /api/v1/status/ptp both carry the full disclosure
+			 * (profile, deviations, deviation_text, alarm_names);
+			 * SNMP does not, and ptp.h/ptp_profile.h say so rather
+			 * than implying coverage.
+			 *
+			 * To close it: add `.1.6.9 ptpProfile` and
+			 * `.1.6.10 ptpDeviations` as SNMP_TAG_OCTET_STRING —
+			 * strings, not a bitmask, for the no-MIB reason above —
+			 * to snmp_obj_t (core/snmp/snmp.h), to the mib[] table
+			 * (core/snmp/snmp.c, beside o_ptp_alarms), and here from
+			 * ptp_profile_name(ps.profile) /
+			 * ptp_profile_deviation_text(ps.profile). ps.profile is
+			 * already published for exactly this. Then add both rows
+			 * to firmware/snmp/Template_NTP_Server.yaml, which
+			 * enumerates every OID — without it the objects exist on
+			 * the wire but nothing polls them.
+			 * See ntp_server_software_spec.md §15.2.
+			 */
 			snmp_val_uint(out, SNMP_TAG_GAUGE32, ps.alarms);
 			break;
 		default:

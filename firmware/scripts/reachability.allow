@@ -27,21 +27,24 @@
 # audit reached, and what it did not:
 #
 #   AUDITED per symbol, against the linked image and the source:
-#     inlined (11)     each one located in zephyr.elf — method below
+#     inlined (12)     each one located in zephyr.elf — method below
 #     no-caller (42)   reference set established for each; see that block
 #     ATECC (18)       regrouped; the old blanket reason explained five of them
 #     superseded (3)   the _profile twins confirmed present in the image
+#     oracle (12)      11 of 11 held, plus the already-checked mp_cbor_rd_text.
+#                      See that block for what the audit established.
+#     fmt (15)         audited one at a time, and the blanket reason is GONE:
+#                      it was wrong for seven of the eighteen. One was not
+#                      absent-by-design at all but a real operability gap and
+#                      is now BOUND (ptp_profile_deviation_text, removed from
+#                      this file); one was not a formatter and is now in
+#                      `inlined` (fwupd_comp_desc); one is an accessor and is
+#                      now TODO (fwupd_end_reason); five kept the conclusion
+#                      but lost a false premise. See that block.
 #
 #   NOT INDEPENDENTLY AUDITED — the reason on each line is asserted, not
 #   checked, and should be read as an untested claim:
-#     fmt (18 of 18)   nobody has confirmed these are unreachable *because*
-#                      they are host-side formatters rather than for some
-#                      other reason. Plausible, unverified.
-#     oracle (11 of 12) same. The twelfth, mp_cbor_rd_text, WAS checked — it
-#                      had been filed under fmt purely because it sorts between
-#                      two formatters, which is how the alphabetical-block
-#                      mistake was caught in the first place.
-#     TODO (108)       declared backlog. Nothing to audit — that is the point.
+#     TODO (110)       declared backlog. Nothing to audit — that is the point.
 #
 #   The `ntske_* (6)` line that used to sit in this block is gone, and how it
 #   went is worth keeping: it said the *deferral* was verified but that "these
@@ -54,14 +57,32 @@
 #
 # THE CATEGORIES:
 #
-#   fmt         enum->string formatters. The device logs numeric codes; the
-#               names are for the host tool and for test failure messages.
-#               NOT INDEPENDENTLY AUDITED.
+#   fmt         enum->string formatters with no device-side caller. AUDITED,
+#               and the single blanket reason that used to stand here — "device
+#               logs the code, host renders the name" — is deliberately not
+#               replaced by another one, because it was false for seven of the
+#               eighteen entries and no single sentence is true of the rest.
+#               Every line now carries its own reason. The standing
+#               qualification on the ones that DO say "host renders the name":
+#               that half rests on the out-of-tree FMT GUI (docs/
+#               sts1000_field_maintenance_tool.md §10). tools/meridian_ctl.py,
+#               the in-tree host tool, carries name tables for CMD/ERR/CAP/
+#               SLOT/GROUPS/TYPE/CFG_FLAG/LEVELS/SUBSYS and for NONE of these
+#               enums — so for anything meridian_ctl.py can reach, the name is
+#               rendered nowhere at all today.
 #   oracle      the CBOR *reader*. This device is a CBOR writer — telemetry
 #               goes device->host, the control plane is JSON-RPC. The reader
 #               is how test_mp_stream.c and test_mp_mirror.c decode what the
-#               writer produced and prove the round trip. NOT INDEPENDENTLY
-#               AUDITED except mp_cbor_rd_text.
+#               writer produced and prove the round trip. AUDITED, 11 of 11 (the
+#               twelfth, mp_cbor_rd_text, had already been checked): `grep -rln
+#               "mp_cbor_rd" app/src/` returns only mp_stream.h and mp_stream.c,
+#               so nothing on the device reads CBOR; the mirror builds with the
+#               writer API and mp_mirror_encode is in the image at 0x080217f0.
+#               Eight are named by no relocation anywhere in libapp.a. The three
+#               that ARE named — mp_cbor_skip from mp_cbor_map_find at
+#               mp_stream.c:596, and the rest of that group — form a closed dead
+#               subtree: mp_cbor_map_find is itself absent from zephyr.elf, so
+#               its callees die with it.
 #   inlined     the instructions SHIP; only the separately-addressable global
 #               entry point was collected. This is a strictly stronger claim
 #               than any other category here — the others say "nothing calls
@@ -102,23 +123,34 @@
 # and then justify, or wire up, whatever it marks TODO.
 
 # --- formatters -----------------------------------------------------
-# NOT INDEPENDENTLY AUDITED — see AUDIT STATUS above.
-atecc_status_name                      # fmt: enum->string; device logs the code, host renders the name
-fwupd_comp_desc                        # fmt: enum->string; device logs the code, host renders the name
-fwupd_end_reason                       # fmt: enum->string; device logs the code, host renders the name
-ina228_cause_str                       # fmt: enum->string; device logs the code, host renders the name
-ldap_result_name                       # fmt: enum->string; device logs the code, host renders the name
+# AUDITED per symbol. The old blanket reason is gone; see AUDIT STATUS above for
+# why it is not replaced with another one.
+#
+# ptp_profile_deviation_text is no longer here. It was not a host-side formatter
+# and it was not deliberately absent: ptp.h, ptp_profile.h and ptp_profile.c all
+# promised it "reports the deviation to the operator" while it was called from
+# nothing but three lines of test_ptp_profile.c. It now has production callers
+# (sts_ptp.c's start-up log line, sts_web.c's pv_ptp(), sts_snmp.c) and is in the
+# image, so an entry here would be stale and this gate would fail on it.
+#
+# The five below keep their conclusion — no device-side caller — but the premise
+# "device logs the code, host renders the name" was false for every one of them:
+# the device never logs or transmits the code, so no host can render anything.
+atecc_status_name                      # fmt: no-caller. core/atecc does no logging at all; atecc.c:567/949 pass the byte to atecc_status_to_errno() and discard it, so the code never leaves the device
+ina228_cause_str                       # fmt: no-caller. INA228_CAUSE_* appears nowhere outside core/ina228, and its producer ina228_diag_cause() is itself allow-listed no-caller
+ldap_result_name                       # fmt: no-caller BY DESIGN, and the only entry here whose absence is a security property. sts_aaa.c:1182 does ldap_result_to_errno(r.code) and never logs the code because FMT spec sts1000_field_maintenance_tool.md §5.3 makes a wrong password, an unknown user, an over-long field and "no authority could answer" one indistinguishable refusal (anti-enumeration). Naming the LDAP result would undo that. Do not "fix" this by adding a log line
+pwrseq_alarm_name                      # fmt: no-caller. pwrseq_alarms(), pwrseq_status() and pwrseq_stage() are all absent from zephyr.elf — nothing on the device reads the alarm word this would name
+ubx_fwupd_state_name                   # fmt: no-caller. Its producer ubx_fwupd_state() is allow-listed TODO and absent from the image
+# The rest keep the original reason: an MP-plane or UI formatter the device does
+# not call, whose name is rendered host-side. Qualification above applies.
 mp_diag_ev_name                        # fmt: enum->string; device logs the code, host renders the name
 mp_ev_kind_name                        # fmt: enum->string; device logs the code, host renders the name
 mp_ilk_reason                          # fmt: enum->string; device logs the code, host renders the name
 ptp_msg_type_name                      # fmt: enum->string; device logs the code, host renders the name
 ptp_port_state_name                    # fmt: enum->string; device logs the code, host renders the name
-ptp_profile_deviation_text             # fmt: enum->string; device logs the code, host renders the name
 ptp_recommended_name                   # fmt: enum->string; device logs the code, host renders the name
 pwrseq_action_name                     # fmt: enum->string; device logs the code, host renders the name
-pwrseq_alarm_name                      # fmt: enum->string; device logs the code, host renders the name
 refsel_action_name                     # fmt: enum->string; device logs the code, host renders the name
-ubx_fwupd_state_name                   # fmt: enum->string; device logs the code, host renders the name
 ui_sky_view_name                       # fmt: enum->string; device logs the code, host renders the name
 ui_surface_row_text                    # fmt: enum->string; device logs the code, host renders the name
 
@@ -134,6 +166,10 @@ ntp_short_from_q16                     # inlined(b): saturating cast at ntp.c:13
 snmp_rd_done                           # inlined(b): snmp.c:1614 inside snmp__parse_pdu() @0x08093cbc
 snmp_wr_rewind                         # inlined(b): snmp.c:1383/1401/1433/1461 inside snmp__emit_response() @0x08031a58
 ina228_device_id_die                   # inlined(b): ina228.c:739 inside ina228_id_matches() @0x0808c35c, which disassembles to `lsrs r0, r1, #4` — the >>4 extract, no call
+# fwupd_comp_desc was filed under `fmt` as an absent formatter. Both halves of
+# that were false: fwupd.h:217 declares it returning `const fwupd_comp_desc_t *`,
+# not a name, and it is not absent — it SHIPS, inlined into fwupd_comp_name.
+fwupd_comp_desc                        # inlined(b): fwupd_comp_name() @0x080271a8 carries the whole body — `cmp r0,#10` (bound vs FWUPD_COMP__COUNT), `movls r2,#20` (descriptor stride), `mlals r3,r2,r0,r3` (&comp_tbl[comp]), `ldrls r0,[r3,#4]` (d->name). Every reloc naming it in libapp.a is in .debug_{info,line,frame,aranges,loc,ranges}; no .text section relocates against the symbol
 # ntske_exporter_context was in the "deferred" block until NTS-KE was enabled.
 # It is not deferred and it is not uncalled: it is the only one of the six that
 # the compiler swallowed whole. Every reference to it in libapp.a is in
@@ -276,6 +312,12 @@ fault_relay_disqualify_mask            # TODO: wire it up or give it a reason
 fault_relay_set_disqualify_mask        # TODO: wire it up or give it a reason
 fault_sig_class                        # TODO: wire it up or give it a reason
 fwupd_component                        # TODO: wire it up or give it a reason
+# Moved out of `fmt`: fwupd.c:1059 is `return (c != NULL) ? c->reason : FWUPD_END_NONE;`,
+# declared under fwupd.h:647's `/* ---- accessors --- */`. It is a status accessor,
+# not a formatter. Harmless in practice — mp_rpc.c:2422 reads the same field via
+# fwupd_progress() and renders it with fwupd_end_name(), which IS in the image —
+# but per this file's own header, status accessors belong here.
+fwupd_end_reason                       # TODO: status accessor, not a formatter; the shipped path reads c->reason through fwupd_progress() instead
 fwupd_set_cfg                          # TODO: wire it up or give it a reason
 fwupd_state                            # TODO: wire it up or give it a reason
 gnssmgr_fw_active                      # TODO: wire it up or give it a reason

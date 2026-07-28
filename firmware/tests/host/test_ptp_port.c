@@ -2362,6 +2362,106 @@ static void test_scheduler_does_not_drift_or_burst(void)
 		count_tx(&r.f, (uint8_t)PTP_MSG_SYNC) - syncs_before);
 }
 
+/* ------------------------------------------------------------ alarm names -- */
+
+/*
+ * ptp_alarm_name() exists because ptp_port_alarms() left this box as a bare
+ * integer on every plane that carried it — `"alarms":8` in REST, Gauge32 8 in
+ * SNMP, 0x8 on the panel — and nothing anywhere could decode it. The bit->name
+ * mapping is therefore the whole value of the function, and an off-by-one in it
+ * is silent: every name still renders, each one naming the wrong alarm.
+ */
+static void test_alarm_name_maps_each_bit_to_its_own_name(void)
+{
+	/*
+	 * Written against the MASK constants, not against literal indices, so
+	 * this fails if a bit is ever renumbered in ptp.h as well as if the
+	 * table is misordered. __builtin_ctz turns each mask into its index.
+	 */
+	TEST_ASSERT_EQUAL_STRING(
+		"NOT_BEST_MASTER",
+		ptp_alarm_name((uint8_t)__builtin_ctz(PTP_ALARM_NOT_BEST_MASTER)));
+	TEST_ASSERT_EQUAL_STRING(
+		"FAULTY", ptp_alarm_name((uint8_t)__builtin_ctz(PTP_ALARM_FAULTY)));
+	TEST_ASSERT_EQUAL_STRING(
+		"TX_ERROR",
+		ptp_alarm_name((uint8_t)__builtin_ctz(PTP_ALARM_TX_ERROR)));
+	TEST_ASSERT_EQUAL_STRING(
+		"PROFILE_UNSUPPORTED",
+		ptp_alarm_name(
+			(uint8_t)__builtin_ctz(PTP_ALARM_PROFILE_UNSUPPORTED)));
+	TEST_ASSERT_EQUAL_STRING(
+		"ICV_FAILED",
+		ptp_alarm_name((uint8_t)__builtin_ctz(PTP_ALARM_ICV_FAILED)));
+	TEST_ASSERT_EQUAL_STRING(
+		"DISPLACED_WHILE_LOCKED",
+		ptp_alarm_name(
+			(uint8_t)__builtin_ctz(PTP_ALARM_DISPLACED_WHILE_LOCKED)));
+}
+
+/*
+ * The runtime half of the _Static_assert in ptp_port.c. The assert proves the
+ * table's LENGTH matches PTP_ALARM_ALL's width; this proves the correspondence
+ * is real in both directions — every defined bit is named, and nothing outside
+ * PTP_ALARM_ALL is. A table that gained a name for an undefined bit 6 would
+ * satisfy neither.
+ */
+static void test_alarm_name_covers_exactly_the_defined_bits(void)
+{
+	unsigned int bit;
+
+	for (bit = 0U; bit < 32U; bit++) {
+		const char *nm = ptp_alarm_name((uint8_t)bit);
+
+		if ((PTP_ALARM_ALL & (1U << bit)) != 0U) {
+			TEST_ASSERT_NOT_NULL(nm);
+			TEST_ASSERT_TRUE(nm[0] != '\0');
+		} else {
+			TEST_ASSERT_NULL(nm);
+		}
+	}
+
+	/* Out of the byte's range entirely, including the boundary. */
+	TEST_ASSERT_NULL(ptp_alarm_name(32U));
+	TEST_ASSERT_NULL(ptp_alarm_name(255U));
+}
+
+/*
+ * The alarm this whole disclosure path exists for. C37.238 must raise it and
+ * Default must not — if the raise condition ever widened to every profile the
+ * bit would be permanently on, which ptp.h explicitly rejects as telling nobody
+ * anything.
+ */
+static void test_profile_unsupported_is_raised_only_for_material_gaps(void)
+{
+	static const struct {
+		ptp_profile_t profile;
+		bool expect;
+	} cases[] = {
+		{ PTP_PROFILE_DEFAULT, false },
+		{ PTP_PROFILE_TELECOM_G8275_1, false },
+		{ PTP_PROFILE_TELECOM_G8275_2, true },
+		{ PTP_PROFILE_POWER_C37_238, true },
+	};
+	size_t i;
+
+	for (i = 0U; i < (sizeof(cases) / sizeof(cases[0])); i++) {
+		rig_t r;
+		ptp_cfg_t cfg;
+
+		ptp_cfg_defaults(&cfg);
+		TEST_ASSERT_EQUAL_INT(
+			0, ptp_cfg_apply_profile(&cfg,
+						 (uint8_t)cases[i].profile));
+		rig_init(&r, &cfg);
+
+		TEST_ASSERT_EQUAL_INT(
+			cases[i].expect ? 1 : 0,
+			((ptp_port_alarms(&r.c) &
+			  PTP_ALARM_PROFILE_UNSUPPORTED) != 0U) ? 1 : 0);
+	}
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -2417,6 +2517,10 @@ int main(void)
 
 	RUN_TEST(test_scheduler_cadence);
 	RUN_TEST(test_scheduler_does_not_drift_or_burst);
+
+	RUN_TEST(test_alarm_name_maps_each_bit_to_its_own_name);
+	RUN_TEST(test_alarm_name_covers_exactly_the_defined_bits);
+	RUN_TEST(test_profile_unsupported_is_raised_only_for_material_gaps);
 
 	return UNITY_END();
 }

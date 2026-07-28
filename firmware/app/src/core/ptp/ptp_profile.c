@@ -435,9 +435,15 @@ static const ptp_profile_desc_t desc_g8275_2 = {
  *
  * The profile mandates the *peer-delay* mechanism and a transparent-clock
  * network. This engine is E2E only, which PTP_DEV_E2E_ONLY records and
- * ptp_profile_deviation_text() surfaces. Selecting the profile is therefore
+ * ptp_profile_deviation_text() renders. Selecting the profile is therefore
  * "C37.238 parameterisation and TLV", not "C37.238 conformance", and the
- * operator is told so.
+ * operator is told so on two surfaces: sts_ptp.c logs the text once at start,
+ * and REST `/api/v1/status/ptp` carries `deviations` + `deviation_text` on every
+ * poll. PTP_DEV_E2E_ONLY is also in PTP_DEV_MATERIAL, so ptp_port_init() raises
+ * PTP_ALARM_PROFILE_UNSUPPORTED alongside. SNMP is NOT one of those surfaces:
+ * enterprise .1.6 carries ptpAlarms as a bare Gauge32 and no profile or
+ * deviation object — a poller still cannot decode it. See the open item in
+ * scripts/reachability.allow's fmt block.
  */
 static const ptp_profile_desc_t desc_c37_238 = {
 	.name = "C37.238",
@@ -506,9 +512,13 @@ const char *ptp_profile_deviation_text(uint8_t profile)
 	uint16_t d = ptp_profile_desc(profile)->deviations;
 
 	/*
-	 * A small fixed set of combinations, rendered as constants rather than
-	 * assembled into a shared buffer: this is called from log and telemetry
-	 * paths on more than one thread and must not need a lock.
+	 * A small fixed set of combinations, returned as pointers to string
+	 * literals rather than assembled into a shared buffer. That is what
+	 * makes this re-entrant: there is no per-call state and no static
+	 * scratch, so the two callers — sts_ptp.c's start-up log line on the
+	 * caller of sts_ptp_start(), and sts_web.c's pv_ptp() on the web worker
+	 * thread — need no lock between them, and the returned pointer stays
+	 * valid for the life of the image rather than until the next call.
 	 */
 	if ((d & PTP_DEV_E2E_ONLY) != 0U) {
 		return "E2E only (profile mandates peer-delay); two-step only; "

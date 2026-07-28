@@ -664,6 +664,7 @@ static int enc_net(rest_ctx_t *c, web_jw_t *w)
 static int enc_ptp(rest_ctx_t *c, web_jw_t *w)
 {
 	rest_ptp_t p;
+	unsigned int bit;
 
 	if (!have_pv(c) || PV(c)->ptp == NULL) {
 		return -ENOTSUP;
@@ -681,6 +682,39 @@ static int enc_ptp(rest_ctx_t *c, web_jw_t *w)
 	web_jw_ku64(w, "domain", p.domain);
 	web_jw_ku64(w, "transport", p.transport);
 	web_jw_ku64(w, "alarms", p.alarms);
+	/*
+	 * Names for the bits of `alarms`, in the same shape /status/alarms uses
+	 * for the fault namespace. Without them `"alarms": 8` is the whole
+	 * report an operator gets for a profile this box does not fully
+	 * implement, and no client — not the SPA, not a poller, not
+	 * tools/meridian_ctl.py — carries a table that could decode it.
+	 */
+	web_jw_karr(w, "alarm_names");
+	for (bit = 0U; bit < 32U; bit++) {
+		const char *nm;
+
+		if ((p.alarms & ((uint32_t)1U << bit)) == 0U) {
+			continue;
+		}
+		nm = (PV(c)->ptp_alarm_name != NULL)
+			     ? PV(c)->ptp_alarm_name(PV(c)->u, (uint8_t)bit)
+			     : NULL;
+		if (nm != NULL) {
+			web_jw_str(w, nm);
+		}
+	}
+	web_jw_arr_end(w);
+	/*
+	 * Profile conformance. `deviations` is the machine-readable PTP_DEV_*
+	 * mask; `deviation_text` is the same thing in the sentence core/ptp
+	 * writes for it. See rest_ptp_t for why these exist.
+	 */
+	web_jw_ku64(w, "profile", p.profile);
+	web_jw_kstr(w, "profile_name",
+		    (p.profile_name != NULL) ? p.profile_name : "");
+	web_jw_ku64(w, "deviations", p.deviations);
+	web_jw_kstr(w, "deviation_text",
+		    (p.deviation_text != NULL) ? p.deviation_text : "");
 	web_jw_ku64(w, "tx_total", p.tx_total);
 	web_jw_ku64(w, "rx_total", p.rx_total);
 	web_jw_ku64(w, "announce_timeouts", p.announce_timeouts);

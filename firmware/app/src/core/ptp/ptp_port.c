@@ -614,6 +614,33 @@ const char *ptp_port_state_name(ptp_port_state_t s)
 	}
 }
 
+const char *ptp_alarm_name(uint8_t bit)
+{
+	/*
+	 * Indexed by bit position, so the table's order IS the bit assignment
+	 * and a bit added to ptp.h without a name here becomes a hole rather
+	 * than a silent shift of every later name. The BUILD-time tie is the
+	 * assert below: the mask this table covers must equal PTP_ALARM_ALL.
+	 */
+	static const char *const names[] = {
+		"NOT_BEST_MASTER",       /* 0x01 */
+		"FAULTY",                /* 0x02 */
+		"TX_ERROR",              /* 0x04 */
+		"PROFILE_UNSUPPORTED",   /* 0x08 */
+		"ICV_FAILED",            /* 0x10 */
+		"DISPLACED_WHILE_LOCKED" /* 0x20 */
+	};
+
+	_Static_assert(((1U << (sizeof(names) / sizeof(names[0]))) - 1U) ==
+			       PTP_ALARM_ALL,
+		       "ptp_alarm_name() table and PTP_ALARM_* have diverged");
+
+	if ((size_t)bit >= (sizeof(names) / sizeof(names[0]))) {
+		return NULL;
+	}
+	return names[bit];
+}
+
 /* -------------------------------------------------------------- datasets -- */
 
 int ptp_port_dataset(const ptp_port_ctx_t *c, ptp_dataset_t *out)

@@ -38,6 +38,12 @@
  * glue layer. test_ldap_ca.c reaches for the same header for the same reason.
  */
 #include "zephyr/net/sts_web.h"
+/*
+ * PTP_PROFILE_DEVIATION_TEXT_MAX only — this suite links core/web, not core/ptp,
+ * and references no ptp symbol. Type-only includes across a module boundary are
+ * the established pattern here; see the `mp` note in tests/host/CMakeLists.txt.
+ */
+#include "ptp/ptp_profile.h"
 
 #include "host_aes.h"
 #include "test_support.h"
@@ -988,6 +994,36 @@ static int pv_net(void *u, rest_net_t *out)
 	return 0;
 }
 
+/*
+ * The PTP fake is deliberately the WORST case, not a typical one.
+ *
+ * This provider feeds the worst-case telemetry-frame measurement below, and
+ * that measurement is only worth having if the group it measures is as large as
+ * it can get in the field. A fake with alarms = 0 and profile = Default emits an
+ * empty `alarm_names` array and the 31-character Default deviation string —
+ * 97 bytes less than a real C37.238 unit with every alarm up, which is 97 bytes
+ * of guard band the test would have silently handed back.
+ *
+ * So: every bit of PTP_ALARM_ALL set (all six named, the longest possible
+ * `alarm_names`), and the profile whose deviation text is longest. The text is
+ * spelled out here rather than called from core/ptp because this suite links
+ * core/web only; PTP_PROFILE_DEVIATION_TEXT_MAX is the compile-time tie, and
+ * test_ptp_profile.c is what keeps that bound equal to the real longest string.
+ */
+#define FAKE_PTP_ALARMS 0x3FU /* PTP_ALARM_ALL: all six bits named */
+#define FAKE_PTP_DEVIATION_TEXT \
+	"E2E only (profile mandates peer-delay); two-step only; grandmaster-only"
+
+/*
+ * The tie that stops this fake from drifting *below* reality. If core/ptp grows
+ * a longer deviation string, PTP_PROFILE_DEVIATION_TEXT_MAX rises with it (its
+ * own suite enforces that), and this fails here rather than silently restoring
+ * the understated measurement this fake exists to prevent.
+ */
+_Static_assert(sizeof(FAKE_PTP_DEVIATION_TEXT) - 1U ==
+		       (size_t)PTP_PROFILE_DEVIATION_TEXT_MAX,
+	       "PTP fake no longer carries the longest deviation text");
+
 static int pv_ptp(void *u, rest_ptp_t *out)
 {
 	(void)u;
@@ -998,6 +1034,11 @@ static int pv_ptp(void *u, rest_ptp_t *out)
 	out->running = true;
 	out->clock_class = 6U;
 	out->tx_total = 100U;
+	out->alarms = FAKE_PTP_ALARMS;
+	out->profile = 3U; /* PTP_PROFILE_POWER_C37_238 */
+	out->deviations = 0x0007U;
+	out->profile_name = "C37.238";
+	out->deviation_text = FAKE_PTP_DEVIATION_TEXT;
 	return 0;
 }
 
@@ -1038,6 +1079,31 @@ static const char *pv_alarm_name(void *u, uint8_t bit)
 		return "GNSS_LOST";
 	}
 	return NULL;
+}
+
+/*
+ * The PTP alarm namespace, which is NOT the fault namespace above: the same
+ * small integers mean different things in each. Bit 3 is deliberately
+ * "PROFILE_UNSUPPORTED" here and "ANTENNA_SHORT" over there, so a test that
+ * passes with the two swapped would be the bug this callback exists to prevent.
+ *
+ * Bit 4 returns NULL on purpose even though it is set in FAKE_PTP_ALARMS: the
+ * encoder must SKIP an unnamed set bit rather than emitting null, "", or
+ * stopping the array early.
+ */
+static const char *pv_ptp_alarm_name(void *u, uint8_t bit)
+{
+	static const char *const names[] = {
+		"NOT_BEST_MASTER", "FAULTY", "TX_ERROR", "PROFILE_UNSUPPORTED",
+		NULL, /* bit 4: deliberately unnamed */
+		"DISPLACED_WHILE_LOCKED",
+	};
+
+	(void)u;
+	if ((size_t)bit >= (sizeof(names) / sizeof(names[0]))) {
+		return NULL;
+	}
+	return names[bit];
 }
 
 static int pv_survey(void *u, bool start)
@@ -1218,6 +1284,7 @@ static void providers_all(void)
 	g_pv.alarms = pv_alarms;
 	g_pv.alarms_latched = pv_alarms_latched;
 	g_pv.alarm_name = pv_alarm_name;
+	g_pv.ptp_alarm_name = pv_ptp_alarm_name;
 	g_pv.gnss_survey = pv_survey;
 	g_pv.gnss_fixed = pv_fixed;
 	g_pv.ref_override = pv_ref;
@@ -1527,6 +1594,30 @@ static void test_status_groups(void)
 	get_auth("/api/v1/status/ptp");
 	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);
 	TEST_ASSERT_TRUE(body_has("\"clock_class\":6"));
+
+	/*
+	 * The profile conformance disclosure. Before this existed an operator on
+	 * a C37.238 unit got `"alarms":8` and nothing else — core/ptp's headers
+	 * claimed the deviation was "reported" while the only renderer for it was
+	 * absent from the linked image. These four fields ARE the report.
+	 */
+	TEST_ASSERT_TRUE(body_has("\"profile\":3"));
+	TEST_ASSERT_TRUE(body_has("\"profile_name\":\"C37.238\""));
+	TEST_ASSERT_TRUE(body_has("\"deviations\":7"));
+	TEST_ASSERT_TRUE(body_has("\"deviation_text\":\""
+				  FAKE_PTP_DEVIATION_TEXT "\""));
+
+	/*
+	 * alarm_names: every SET bit that HAS a name, in ascending bit order,
+	 * with the unnamed bit 4 skipped rather than rendered as null or "".
+	 * Asserted as one exact substring so a reordering or a stray element
+	 * fails — checking membership one name at a time would not.
+	 */
+	TEST_ASSERT_TRUE(body_has(
+		"\"alarm_names\":[\"NOT_BEST_MASTER\",\"FAULTY\",\"TX_ERROR\","
+		"\"PROFILE_UNSUPPORTED\",\"DISPLACED_WHILE_LOCKED\"]"));
+	/* The fault namespace must not be what named them. */
+	TEST_ASSERT_FALSE(body_has("\"alarm_names\":[\"GNSS_LOST\""));
 
 	get_auth("/api/v1/status/alarms");
 	TEST_ASSERT_EQUAL_UINT(200U, g_resp.status);

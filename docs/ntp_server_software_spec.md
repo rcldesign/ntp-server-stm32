@@ -299,7 +299,8 @@ On GNSS loss (no fix / PPS outliers / antenna fault):
 ### 4.4 PTP grandmaster (IEEE 1588-2019)
 
 - Hardware-timestamped Sync/Follow_Up/Delay_Req-Resp (and P2P where profile dictates) off the ETH PTP unit, syntonized to the disciplined reference.
-- **Profiles:** Default (1588), and configurable **Telecom (G.8275.1/.2)** and **Power (C37.238)** profiles — domain, priority1/2, log intervals, transport (L2/UDP), one-step preferred (hardware one-step if the MAC supports it, else two-step).
+- **Profiles:** Default (1588), and configurable **Telecom (G.8275.1/.2)** and **Power (C37.238)** profiles — domain, priority1/2, log intervals, transport (L2/UDP), one-step preferred (hardware one-step if the MAC supports it, else two-step; **as-built this is two-step always** — §15.1).
+- **Profile conformance is parameterisation, not certification, and the box says so.** Each descriptor in `core/ptp/ptp_profile.c` carries a `PTP_DEV_*` deviation mask, and `ptp_profile_deviation_text()` renders it. Two deviations are **material** (`PTP_DEV_MATERIAL`) and raise `PTP_ALARM_PROFILE_UNSUPPORTED` at `ptp_port_init()`: **C37.238 mandates the peer-delay mechanism** and this engine is E2E-only, and **G.8275.2's unicast message negotiation** (Signaling REQUEST/GRANT_UNICAST_TRANSMISSION) is not implemented. Two more apply to *every* profile including Default — two-step Sync and grandmaster-only — and deliberately raise **no** alarm, because an always-on alarm reports nothing; they are still disclosed in the deviation text. The disclosure MUST reach an operator on at least: the boot log (`sts_ptp.c`, WRN when the alarm is set, INF otherwise) and REST `GET /api/v1/status/ptp`, whose object carries `profile`, `profile_name`, `deviations` (the `PTP_DEV_*` mask), `deviation_text` and `alarm_names` (the decoded `PTP_ALARM_*` bits, via `ptp_alarm_name()`). **SNMP is a known gap:** enterprise `.1.6` still exports `ptpAlarms` as a bare Gauge32 with no profile or deviation object — see §15.2.
 - **BMCA** with `clockClass`/`clockAccuracy` driven by §3.8 (GPS-locked vs holdover vs free-run). Grandmaster-capable on all LAN ports/VLANs per config.
 - **Security:** IEEE 1588-2019 Annex P integrity (ICV/TLV) where peers support it; otherwise document reliance on network-layer protection (MACsec/VLAN isolation). PTP management messages gated.
 
@@ -639,6 +640,18 @@ than trusted.
   the aux snapshot remains an accuracy optimisation, not a prerequisite.
 - **FE-5680A J6.8/J6.9 Tx/Rx direction and the full connector pinout** for the specific
   surplus variant. Needs the physical unit; no amount of firmware settles it.
+- **PTP profile conformance is not visible over SNMP.** §4.4's disclosure reaches the boot log
+  and REST `/api/v1/status/ptp`, but enterprise `.1.6` exports `ptpAlarms` as a bare Gauge32:
+  a poller sees `8` for `PTP_ALARM_PROFILE_UNSUPPORTED` and has nothing to decode it with,
+  because the shipped artefact is a **Zabbix template that maps by OID, not a MIB file that
+  maps enums**. Deliberately deferred, not overlooked — the headers and this spec both state
+  plainly that SNMP does not carry it, so the tree is coherent without it. The implementation
+  is two scalars: **`.1.6.9 ptpProfile`** and **`.1.6.10 ptpDeviations`**, both
+  `SNMP_TAG_OCTET_STRING` (strings rather than a bitmask precisely because there is no MIB to
+  decode a bitmask through), served from `ptp_profile_name()` / `ptp_profile_deviation_text()`
+  in `sts_snmp.c`'s PTP case, added to the `mib[]` catalogue and the enum in `core/snmp/snmp.h`,
+  **and mirrored into `firmware/snmp/Template_NTP_Server.yaml`**, which enumerates every OID and
+  is the only thing that makes a new object reachable from the shipped monitoring config.
 - **Anti-rollback counter budget and exhaustion recovery.** The mechanism is being put in
   place (MCUboot downgrade prevention keyed on a security counter, with the ATECC monotonic
   counter as attestation evidence rather than the boot gate). What remains is the *release

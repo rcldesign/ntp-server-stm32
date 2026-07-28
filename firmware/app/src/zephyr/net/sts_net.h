@@ -318,6 +318,17 @@ typedef struct {
 	uint8_t clock_accuracy;
 	uint8_t domain;
 	uint8_t transport;
+	/**
+	 * ptp_profile_t the engine is actually running.
+	 *
+	 * The *effective* profile, not the requested one: a configuration the
+	 * engine rejects falls back to Default (see the fallback in
+	 * sts_ptp_start()), and reporting the request would tell an operator the
+	 * box is C37.238 while it serves 1588 Default. Published so the REST and
+	 * SNMP planes can name the profile and render its documented deviations
+	 * — the disclosure PTP_ALARM_PROFILE_UNSUPPORTED only hints at.
+	 */
+	uint8_t profile;
 	/** sts_ptp_icv_state_t: off / armed-no-key / armed / refused. */
 	uint8_t icv_state;
 	bool running;
