@@ -797,6 +797,18 @@ static uint32_t session(void)
 	return session_as(ADMIN_USER, ADMIN_PW);
 }
 
+/** `session.keepalive`, for tests that have to advance the clock. */
+static void keepalive(uint32_t sid)
+{
+	char req[192];
+
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":9,"
+		       "\"method\":\"session.keepalive\",\"params\":{\"sid\":%u}}",
+		       sid);
+	(void)call(req);
+}
+
 /* --------------------------------------------------------- fw.* shorthands */
 
 /** `fw.inventory` from @p from. */
@@ -1877,6 +1889,78 @@ static void test_fw_data_and_fw_end_need_an_open_transfer(void)
 	assert_ledger("no open transfer");
 }
 
+/**
+ * A chunk arriving after the transfer-idle timeout drops the ownership record.
+ *
+ * The reachable sequence, not a contrivance: the operator opens a transfer and
+ * stops sending. sts_fwupd_step() on the console supervisor fires core/fwupd's
+ * transfer-idle timeout, which runs finish() -> restore() and leaves the session
+ * FAILED. The tool then sends its next chunk.
+ *
+ * fwupd_data() answers -EPERM for that chunk, because the state is no longer
+ * TRANSFER — which is precisely "the session you owned has ended". `fw_forget()`
+ * used to exclude -EPERM from the codes that end ownership, alongside the three
+ * refusals that genuinely leave a transfer open at `next_off`. The consequence
+ * is not cosmetic from the tool's side: `fw_sid` kept naming a session that no
+ * longer existed, so every subsequent chunk kept answering MP_E_INTERLOCK
+ * instead of MP_E_STATE and the tool was never told the transfer was over.
+ */
+static void test_a_chunk_after_the_idle_timeout_drops_ownership(void)
+{
+	uint32_t sid = session();
+
+	begin_g2(sid, (int)FWUPD_COMP_STM32_APP, IMG_LEN);
+	send_chunk(sid, 0U, 512U);
+	TEST_ASSERT_EQUAL_INT64(512, res_i("next_off"));
+
+	/*
+	 * The operator stops sending CHUNKS while the tool keeps the SESSION
+	 * alive, which is the situation the transfer-idle timeout exists for: a
+	 * live maintenance session sitting on a half-written component. Hence
+	 * the keepalive per step — MP_KEEPALIVE_TTL_MS is far shorter than the
+	 * idle budget, and a session that simply went stale would be refused by
+	 * the guard before fwupd_data() were ever reached, which would test
+	 * nothing.
+	 */
+	{
+		uint32_t waited = 0U;
+
+		while (waited <= g_fw.cfg.transfer_idle_timeout_ms) {
+			g_now += MP_KEEPALIVE_TTL_MS / 2U;
+			waited += MP_KEEPALIVE_TTL_MS / 2U;
+			keepalive(sid);
+			TEST_ASSERT_EQUAL_INT64((int64_t)sid, res_i("sid"));
+		}
+	}
+
+	/* The supervisor's pump — not any RPC — is what ends the transfer. */
+	TEST_ASSERT_EQUAL_INT(0, fwupd_step(&g_fw, (uint64_t)g_now));
+	TEST_ASSERT_EQUAL_INT((int)FWUPD_ST_FAILED, (int)fwupd_state(&g_fw));
+	assert_ledger("transfer-idle timeout");
+
+	/* The late chunk is refused, and the reply says so. */
+	send_chunk(sid, 512U, 512U);
+	TEST_ASSERT_EQUAL_INT64(MP_E_INTERLOCK, err_code());
+
+	/*
+	 * And the ownership went with it. The next attempt is "no transfer" —
+	 * the same answer a tool that never began one gets — rather than a
+	 * second interlock against a session nobody holds.
+	 */
+	send_chunk(sid, 512U, 512U);
+	TEST_ASSERT_EQUAL_INT64(MP_E_STATE, err_code());
+	TEST_ASSERT_EQUAL_STRING("no transfer", err_reason());
+
+	/* fw.end lands on the same answer, so the tool cannot end a session it
+	 * has already been told it does not own. */
+	fw_end(sid);
+	TEST_ASSERT_EQUAL_INT64(MP_E_STATE, err_code());
+
+	/* restore() ran exactly once, from the timeout, and not again. */
+	assert_ledger("after the late chunks");
+	TEST_ASSERT_EQUAL_UINT(1U, g_restores);
+}
+
 /** A wrong `sid` on a chunk is refused as a session, not silently accepted. */
 static void test_fw_data_refuses_a_foreign_sid(void)
 {
@@ -2373,6 +2457,7 @@ int main(void)
 	RUN_TEST(test_the_mp_layers_own_chunk_ceiling);
 	RUN_TEST(test_a_targets_own_chunk_ceiling_is_advertised_and_enforced);
 	RUN_TEST(test_fw_data_and_fw_end_need_an_open_transfer);
+	RUN_TEST(test_a_chunk_after_the_idle_timeout_drops_ownership);
 	RUN_TEST(test_fw_data_refuses_a_foreign_sid);
 
 	RUN_TEST(test_fw_end_verifies_and_restores);
