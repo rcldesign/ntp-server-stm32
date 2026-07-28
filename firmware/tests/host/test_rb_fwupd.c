@@ -610,12 +610,44 @@ static void test_probe_classifies_absent(void)
 	TEST_ASSERT_EQUAL_INT(0, rb_fwupd_identify(&c, buf, sizeof(buf)));
 	TEST_ASSERT_EQUAL_STRING("FE-5680A absent", buf);
 
-	/* The rail being down also classifies as absent, not as an error. */
+	/*
+	 * The rail being down is NOT "absent" — it is "not asked yet".
+	 *
+	 * This assertion used to read the other way, and it was encoding a real
+	 * defect as the contract. The SN65C3221E is powered from VCC_RB, so with
+	 * the rail down the read cannot do anything but fail; recording
+	 * RB_CAP_NONE for it answers a question that was never put. And it
+	 * sticks: `cap` returns to UNKNOWN only in rb_fwupd_init(), and
+	 * rb_fwupd_identify() re-probes only while it is UNKNOWN. Since
+	 * `fw.inventory` is G0, one unauthenticated inventory during ordinary
+	 * bring-up — before the power sequencer raises RB_PWR_EN — pinned the
+	 * rubidium at "absent, check the cable" for the rest of the uptime.
+	 *
+	 * rb_fwupd.h already called rail_up "strongly advised" for exactly this
+	 * reason; rb_fwupd_probe() simply never consulted it.
+	 */
 	unit_reset(&u);
 	u.rail = false;
 	TEST_ASSERT_EQUAL_INT(0, rb_fwupd_init(&c, &cfg, &ops));
-	TEST_ASSERT_EQUAL_INT(0, rb_fwupd_probe(&c, NULL));
-	TEST_ASSERT_EQUAL_UINT8((uint8_t)RB_CAP_NONE, rb_capability(&c));
+	TEST_ASSERT_EQUAL_INT(-EHOSTDOWN, rb_fwupd_probe(&c, NULL));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)RB_CAP_UNKNOWN, rb_capability(&c));
+
+	/* An inventory taken now says so, rather than claiming a verdict. */
+	TEST_ASSERT_EQUAL_INT(0, rb_fwupd_identify(&c, buf, sizeof(buf)));
+	TEST_ASSERT_EQUAL_STRING("FE-5680A unknown", buf);
+
+	/*
+	 * And it heals. The rail comes up, the next identify() probes again
+	 * because the class is still UNKNOWN, and the unit is classified. This
+	 * is the assertion that would have caught the original defect: under the
+	 * old behaviour the class was already latched at NONE and no probe ever
+	 * ran again.
+	 */
+	u.rail = true;
+	u.answer_read = true;
+	TEST_ASSERT_EQUAL_INT(0, rb_fwupd_identify(&c, buf, sizeof(buf)));
+	TEST_ASSERT_EQUAL_UINT8((uint8_t)RB_CAP_TELEMETRY_ONLY,
+				rb_capability(&c));
 }
 
 /* A variant that acknowledges a set but does not apply it is not trimmable. */

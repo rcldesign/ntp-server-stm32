@@ -425,15 +425,42 @@ int rb_fwupd_probe(rb_ctx_t *c, const rb_probe_req_t *req)
 		return -EINVAL;
 	}
 
+	/*
+	 * The rail first, and it must NOT latch a class.
+	 *
+	 * The SN65C3221E is powered from VCC_RB (docs/rb_rs232_interface.md), so
+	 * with the rail down there is nothing on the far side of the transceiver
+	 * to answer and the read below cannot do anything but fail. Recording
+	 * RB_CAP_NONE for that would be recording "no rubidium is fitted" as the
+	 * answer to a question that was never asked — and it sticks, because
+	 * `cap` returns to RB_CAP_UNKNOWN only in rb_fwupd_init() and
+	 * rb_fwupd_identify() re-probes only while it is UNKNOWN.
+	 *
+	 * The reachable consequence, which is why this is a refusal and not a
+	 * comment: `fw.inventory` is G0, so any unauthenticated inventory taken
+	 * before the power sequencer raises RB_PWR_EN — i.e. during ordinary
+	 * bring-up — used to pin the rubidium at "absent, check the cable" for
+	 * the rest of the uptime, with no path back.
+	 *
+	 * Leaving the class UNKNOWN is what makes it self-healing: the next
+	 * identify() after the rail comes up probes again, and until then the
+	 * operator is told the truth, which is that firmware does not yet know.
+	 */
+	if (!rail_ok(c)) {
+		audit(c, "probe-skipped-rail-down", 0, -EHOSTDOWN);
+		return -EHOSTDOWN;
+	}
+
 	c->cap = (uint8_t)RB_CAP_NONE;
 
 	rc = rb_read_offset(c, &cur);
 	audit(c, "probe-read", cur, rc);
 	if (rc != 0) {
 		/*
-		 * Nothing answered. Per docs/rb_rs232_interface.md this is also
-		 * what a variant with J6.8/J6.9 swapped looks like, so the class
-		 * is "absent" rather than "broken" and the operator is told to
+		 * Nothing answered, and the rail is up, so the silence means
+		 * something. Per docs/rb_rs232_interface.md this is also what a
+		 * variant with J6.8/J6.9 swapped looks like, so the class is
+		 * "absent" rather than "broken" and the operator is told to
 		 * check the cable before the unit.
 		 */
 		return 0;
@@ -576,6 +603,15 @@ int rb_fwupd_identify(rb_ctx_t *c, char *out, size_t cap)
 		rb_probe_req_t req;
 
 		(void)memset(&req, 0, sizeof(req));
+		/*
+		 * The return is deliberately dropped: -EHOSTDOWN means the probe
+		 * declined because VCC_RB is down, which leaves `cap` UNKNOWN and
+		 * so renders as "unknown" below. That is the answer we want an
+		 * inventory to carry — firmware does not yet know — and the next
+		 * identify() after the rail comes up will probe again. Reporting
+		 * the identify() itself as failed would turn "ask me later" into
+		 * an error the tool has to special-case.
+		 */
 		(void)rb_fwupd_probe(c, &req);
 	}
 
