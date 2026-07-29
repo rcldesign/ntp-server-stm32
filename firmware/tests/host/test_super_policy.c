@@ -117,6 +117,87 @@ static void test_a_maintenance_wdi_edge_needs_the_watchdog_disabled(void)
 	TEST_ASSERT_FALSE(sts_super_wdi_pulse_allowed(false, true));
 }
 
+/**
+ * An UNKNOWN watchdog is reported as watching.
+ *
+ * sts_supervisor_wdt_state() answers with an errno AND an out-param, and this
+ * pins the out-param on the path where the errno is -ENODEV: the supervisor has
+ * not initialised, PC12 has not been configured, and there is no pin state to
+ * report. Of the two available answers, "watching" costs a refused maintenance
+ * pulse and "not watching" costs the board its PoE port, so the fail-safe
+ * direction is the one that over-reports the watchdog as live.
+ *
+ * The errno is the caller's to ignore; the out-param is the function's headline
+ * output and the easier of the two to read alone. This assertion is what makes
+ * ignoring the errno safe rather than merely unlikely — and the reason it lives
+ * here at all is that the decision is otherwise a literal inside Zephyr glue
+ * that no host suite links.
+ */
+static void test_an_unknown_watchdog_reports_as_watching(void)
+{
+	/* Not initialised: watching, in both columns, whatever the stale
+	 * `armed` field happens to hold. This is the fail-safe. */
+	TEST_ASSERT_TRUE_MESSAGE(
+		sts_super_wdt_state_armed(false, false),
+		"an uninitialised supervisor reported its watchdog as NOT "
+		"watching; that is a maintenance WDI edge granted against a "
+		"pin nothing has configured");
+	TEST_ASSERT_TRUE_MESSAGE(
+		sts_super_wdt_state_armed(false, true),
+		"an uninitialised supervisor reported its watchdog as NOT "
+		"watching; that is a maintenance WDI edge granted against a "
+		"pin nothing has configured");
+
+	/* Initialised: report the pin, both ways round — the fail-safe must not
+	 * have been bought by pinning the answer to a constant. */
+	TEST_ASSERT_TRUE(sts_super_wdt_state_armed(true, true));
+	TEST_ASSERT_FALSE(sts_super_wdt_state_armed(true, false));
+}
+
+/**
+ * The state report never promises more than the pulse permission will grant.
+ *
+ * Two layers guard the maintenance WDI edge and they are meant to be
+ * independent: the console's MP_ILK_WDT_OFF is computed from what
+ * sts_supervisor_wdt_state() reports, and sts_supervisor_wdt_kick() re-asks
+ * sts_super_wdi_pulse_allowed() at the pin's own seam. Independent is not the
+ * same as unrelated — if the report can ever say "not watching" for a state the
+ * actuator would refuse, the outer layer has stopped agreeing with the inner
+ * one and only the inner one is really holding.
+ *
+ * prov_ilk() reads the report as `(rc == 0) && !armed`, so its short-circuit
+ * already covers the -ENODEV row. What is checked here is the weaker caller —
+ * one that takes `!armed` alone as "the watchdog is off" — because that is the
+ * reading the out-param invites and the one the fail-safe above exists for.
+ */
+static void test_the_state_report_never_outruns_the_pulse_permission(void)
+{
+	static const bool tf[] = { false, true };
+	size_t r;
+	size_t a;
+
+	for (r = 0U; r < 2U; r++) {
+		for (a = 0U; a < 2U; a++) {
+			bool reported_off = !sts_super_wdt_state_armed(tf[r], tf[a]);
+
+			if (!reported_off) {
+				continue; /* report claims nothing */
+			}
+
+			TEST_ASSERT_TRUE_MESSAGE(
+				sts_super_wdi_pulse_allowed(tf[r], tf[a]),
+				"the state report said the watchdog was off for "
+				"a state in which the actuator refuses the "
+				"pulse; the two layers no longer agree");
+		}
+	}
+
+	/* And the row that matters: unknown must never be reported as off, so
+	 * the loop above is not passing vacuously on all four cells. */
+	TEST_ASSERT_FALSE(!sts_super_wdt_state_armed(false, false));
+	TEST_ASSERT_TRUE(!sts_super_wdt_state_armed(true, false));
+}
+
 /* Liveness loss is logged at CRIT from a 4 Hz tick, so it must be edge-driven
  * and armed-gated or it buries its own cause in the ring. */
 static void test_stale_logging_is_edge_driven_and_armed_gated(void)
@@ -599,6 +680,8 @@ int main(void)
 	RUN_TEST(test_a_single_stale_participant_withholds_the_kick);
 	RUN_TEST(test_a_permitted_kick_sets_every_pwrseq_liveness_bit);
 	RUN_TEST(test_a_maintenance_wdi_edge_needs_the_watchdog_disabled);
+	RUN_TEST(test_an_unknown_watchdog_reports_as_watching);
+	RUN_TEST(test_the_state_report_never_outruns_the_pulse_permission);
 	RUN_TEST(test_stale_logging_is_edge_driven_and_armed_gated);
 	RUN_TEST(test_violation_reporting_is_change_driven);
 	RUN_TEST(test_violation_word_names_the_right_side_of_the_window);

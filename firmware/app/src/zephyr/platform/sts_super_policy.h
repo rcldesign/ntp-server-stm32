@@ -112,6 +112,42 @@ static inline bool sts_super_wdi_pulse_allowed(bool ready, bool armed)
 }
 
 /**
+ * What does sts_supervisor_wdt_state() publish through its out-param?
+ *
+ * The mirror of the predicate above, and deliberately the same two terms in the
+ * same order: this decides what a caller is TOLD about WDT_EN, that one decides
+ * what may be DRIVEN on WDI. Both must fail the same way, because a state
+ * report that says "not watching" is the premise the pulse permission is
+ * granted on one seam out.
+ *
+ * So an uninitialised supervisor reports ARMED. There is no pin to read — PC12
+ * has not been configured — and of the two things that can be said about an
+ * unknown watchdog, "watching" is the one that costs a refused maintenance
+ * pulse and "not watching" is the one that costs the board its PoE port. The
+ * report is paired with -ENODEV, but the errno is the caller's to ignore and
+ * the out-param is the headline output; this term is what makes ignoring it
+ * safe rather than merely unlikely.
+ *
+ * That is belt-and-braces TODAY, and stating so is the point of this comment.
+ * All three in-tree callers (console/mp_glue.c) check the return code first and
+ * discard the out-param on failure, so the value below reaches no live
+ * decision: prov_ilk() computes `(rc == 0) && !armed`, whose short-circuit
+ * decides MP_ILK_WDT_OFF before this value is consulted at all. Neither read
+ * that as dead code nor as the guard that is holding the hazard shut — it is
+ * the contract a fourth caller gets for free, written once so the safe
+ * direction is a tested fact rather than an inline literal in Zephyr glue no
+ * host suite links.
+ *
+ * `ready` is a term rather than an assumption for the same reason it is one
+ * above, and the ternary keeps both parameters live so dropping either is an
+ * -Werror=unused-parameter build failure rather than a silent fail-open.
+ */
+static inline bool sts_super_wdt_state_armed(bool ready, bool armed)
+{
+	return ready ? armed : true;
+}
+
+/**
  * Should this tick log the liveness loss?
  *
  * Only while armed (before that a stale participant is just a thread that has

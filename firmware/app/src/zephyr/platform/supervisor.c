@@ -455,18 +455,17 @@ int sts_supervisor_wdt_state(bool *armed)
 	if (armed == NULL) {
 		return -EINVAL;
 	}
-	if (!super.ready) {
-		/*
-		 * Unknown, and the caller must read that as "watching". The
-		 * console turns this into mp_ilk_state_t::wdt_off = false,
-		 * which refuses the WDI pulse — the only answer for a pin
-		 * nothing has configured.
-		 */
-		*armed = true;
-		return -ENODEV;
-	}
-	*armed = super.armed;
-	return 0;
+
+	/*
+	 * Reported unconditionally, including on the failure path: an
+	 * uninitialised supervisor has no PC12 to read and must still answer
+	 * "watching", so a caller that reads the out-param without the errno
+	 * cannot be told the watchdog is off. sts_super_wdt_state_armed() holds
+	 * that reasoning and is the only place the direction is written down.
+	 */
+	*armed = sts_super_wdt_state_armed(super.ready, super.armed);
+
+	return super.ready ? 0 : -ENODEV;
 }
 
 int sts_supervisor_wdt_enable(bool enable)
