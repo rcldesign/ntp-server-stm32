@@ -119,12 +119,17 @@
  *
  *    Most control objects live on GPIO/PWM/DAC the *platform* area owns, and
  *    sts_app.h exposes only sts_rb_serial_set_mode(), sts_supervisor_identify(),
- *    the RGB and fan accessors, the PHY and EXTINT pulses, the two recovery
+ *    the RGB and fan accessors, the watchdog enable/state/kick trio, the
+ *    reference-request setter, the PHY and EXTINT pulses, the two recovery
  *    pulses and the parameterised sequencer mailbox; the GNSS and Rb tunnels
- *    are this area's own. Twenty-eight manifest objects therefore have an
- *    actuator behind them:
+ *    are this area's own. Thirty-one manifest objects therefore have an
+ *    actuator behind them — the count and this enumeration are pinned by
+ *    tests/host/test_mp_deferred.c's
+ *    test_the_wired_set_is_the_one_the_header_claims, which derives the set
+ *    from the dispatch below rather than from these words:
  *
- *      obj_apply   ui.identify, ref.rb.serial, gnss.tunnel, ref.rb.tunnel
+ *      obj_apply   ui.identify, ref.rb.serial, gnss.tunnel, ref.rb.tunnel,
+ *                  sys.wdt.en, ref.mux.sel
  *      obj_apply   ui.panel.duty, pwr.panel.led.en, pwr.gps.en,
  *        (mailbox)  pwr.ant.bias.en, pwr.disp.en, pwr.rb.gate,
  *                  pwr.rb.vset_mv, ui.lamp.test, ref.term.en,
@@ -132,7 +137,7 @@
  *                  ui.rgb.b, ui.disp.bl, ref.disc.park,
  *                  ref.ocxo.vc_mv, ref.ocxo.dac_code
  *      obj_pulse   pwr.poe.kill, pwr.rb.ov.reset, sys.phy.reset,
- *                  gnss.extint
+ *                  gnss.extint, sys.wdt.kick
  *      cfg_write   pwr.rb.vmax_mv, pwr.poe.budget_mw   (mp_rpc.c, not here)
  *
  *    The other mutable objects answer MP_E_NOTSUP and carry **MP_OF_DEFERRED**

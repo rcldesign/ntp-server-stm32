@@ -14,6 +14,7 @@
  */
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "unity.h"
@@ -518,28 +519,96 @@ static void test_the_wdi_pulse_is_not_gated_on_liveness(void)
  * object whose apply moves something only a RELEASE puts back must not carry
  * MP_OF_WRITE.
  *
- * Two halves, because only one of them can be derived from the row:
+ * ENFORCED FROM THE OTHER END, because that end is the one that can be derived.
  *
- *   - Derived. MP_ILK_TUNNEL means "firmware's use of a port is suspended",
- *     which is un-doable by definition, so every object declaring it must
- *     appear below. A fourth tunnel is covered the day it declares the
- *     interlock, whether or not anyone remembers this test.
- *   - Named. An un-doable actuator with no interlock — `ref.rb.serial` today —
- *     is indistinguishable from an ordinary GPIO in the manifest, so it is
- *     listed by hand. The list is exact in both directions: dropping a name
- *     fails on the derived half or on the tunnel roll-call below, and adding
- *     MP_OF_WRITE to a listed row fails here.
+ * "Cannot be un-done without a lease" is not a property of a manifest row.
+ * MP_ILK_TUNNEL implies it, but the implication does not run the other way, and
+ * scoping the rule to that bit is what let `ref.rb.serial` (no interlock at all)
+ * and `sys.wdt.en` (MP_ILK_WDT_LIVE, whose apply moves a supervisor cadence only
+ * a release puts back) sit outside a guard written for exactly them. Deriving
+ * the set from the flags instead is worse than useless: the predicate would be
+ * "has MP_OF_OVERRIDE, lacks MP_OF_WRITE" and the assertion under test is
+ * "lacks MP_OF_WRITE", so every member would pass by construction and a row that
+ * gained MP_OF_WRITE would leave the set rather than fail.
  *
- * What this cannot do is recognise the NEXT interlock-less latch on the day it
- * is written; that is a review judgement. What it does do is stop an existing
- * member from quietly regaining MP_OF_WRITE, which is how both defects landed.
+ * So the roll-call below enumerates the COMPLEMENT — every object the table lets
+ * a bare `obj.set` move — and quantifies over the whole manifest. That inverts
+ * the maintenance burden onto the safe side: an object is guarded by DEFAULT,
+ * and the only way to make one writable is to name it here and say why. No new
+ * lease-only actuator has to be remembered, and no interlock has to be declared
+ * for the rule to reach it. `sys.wdt.en`, `ref.mux.sel`, the three tunnels,
+ * `ref.rb.serial` and all eighteen sequencer-mailbox rows are covered without
+ * appearing anywhere in this file.
+ *
+ * Three parts, then, of which only the first is judgement:
+ *
+ *   - Named. The un-doable actuators this seam wires itself rather than posting
+ *     to the sequencer. They are listed by hand and JUDGEMENT-MAINTAINED: adding
+ *     a lease-only actuator does NOT require editing this list, because the
+ *     roll-call already guards it — the list exists to pin the ids against a
+ *     rename and to assert each stays reachable the leased way, so that a
+ *     narrowing removes the bug and not the feature.
+ *   - The writable roll-call. `{o : o has MP_OF_WRITE}` must equal
+ *     `g_writable_objects[]` exactly, in both directions. This is the half that
+ *     catches a lease-only row regaining MP_OF_WRITE, whoever wrote it and
+ *     whatever interlocks it declares.
+ *   - The tunnel roll-call. Every MP_ILK_TUNNEL object must be a named actuator,
+ *     and there must be exactly three. Narrower than the roll-call and kept
+ *     because it pins the interlock's own membership, not just the flag.
+ *
+ * What this still cannot do is judge whether a NEWLY writable object is safe to
+ * write; it can only refuse to let one become writable silently. That is the
+ * review it forces, and it is the review both defects skipped.
  */
 static const char *const g_lease_only_actuators[] = {
 	"gnss.tunnel",
 	"ref.rb.tunnel",
 	"sys.smp.tunnel",
-	/* Not a tunnel, and that is the point — see above. */
+	/* Not tunnels, and that is the point — see above. `ref.rb.serial` throws
+	 * K1 and nothing re-asserts PE4; `sys.wdt.en` moves a TPS3430 arm/kick
+	 * cadence sts_supervisor_wdt_enable() owns, and mp_glue.c's branch keeps
+	 * the pre-lease state in `wdt_en_saved_armed` so only a RELEASE can put
+	 * it back; `ref.mux.sel` posts a THREE-valued reference request from a
+	 * two-valued object, so no value of it means AUTO and only the saved slot
+	 * in `mux_sel_saved_req` restores automatic behaviour. */
 	"ref.rb.serial",
+	"sys.wdt.en",
+	"ref.mux.sel",
+};
+
+/**
+ * Every object a bare `obj.set` may move. Exact in both directions.
+ *
+ * Six of the nine also carry MP_OF_DEFERRED — nothing is wired behind them, so
+ * `obj.set` is refused by prov_obj_supported() before the guard runs — which
+ * leaves exactly three objects on this board that accept a write reaching an
+ * actuator: the two cfg keys, which are persistent settings rather than
+ * actuations and are put back by writing them again, and `ui.identify`, a
+ * beacon that expires on its own after STS_RECOV_IDENTIFY_MS and stops on both
+ * an explicit 0 and a release.
+ *
+ * Adding a row here is the review this test exists to force. The question to
+ * answer in the comment beside it is not "is this safe to write" but "when a
+ * technician sets this and walks away, WHAT PUTS IT BACK" — and "the next
+ * operator" is not an answer, because that is precisely what `gnss.tunnel` and
+ * `ref.rb.serial` relied on.
+ */
+static const char *const g_writable_objects[] = {
+	/* Deferred: published, refused, and writable only on paper. Each stays
+	 * on this list rather than becoming F_LEASE because the day it is wired
+	 * is the day its restore path has to be argued, not before. */
+	"pwr.rb.en",
+	"pwr.rb.pot.code",
+	"ref.relay.hold",
+	"gnss.safeboot",
+	"gnss.dsel",
+	"sys.nor.reset",
+	/* Wired. cfg-backed: m_obj_set() stages these through cfg_write() and
+	 * they persist by design, so "nothing puts it back" is the point. */
+	"pwr.rb.vmax_mv",
+	"pwr.poe.budget_mw",
+	/* Wired, and the one true actuator here: self-expiring. */
+	"ui.identify",
 };
 
 static bool is_lease_only_actuator(const char *id)
@@ -556,15 +625,32 @@ static bool is_lease_only_actuator(const char *id)
 	return false;
 }
 
+static bool is_declared_writable(const char *id)
+{
+	size_t k;
+
+	for (k = 0U;
+	     k < (sizeof(g_writable_objects) / sizeof(g_writable_objects[0]));
+	     k++) {
+		if (strcmp(id, g_writable_objects[k]) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void test_a_lease_only_actuator_is_never_writable(void)
 {
 	static const char *const tunnels[] = { "gnss.tunnel", "ref.rb.tunnel",
 					       "sys.smp.tunnel" };
 	const size_t n_actuators = sizeof(g_lease_only_actuators) /
 				   sizeof(g_lease_only_actuators[0]);
+	const size_t n_writable = sizeof(g_writable_objects) /
+				  sizeof(g_writable_objects[0]);
 	const size_t n_tunnels = sizeof(tunnels) / sizeof(tunnels[0]);
 	size_t i;
 	unsigned int with_ilk = 0U;
+	unsigned int with_write = 0U;
 
 	for (i = 0U; i < n_actuators; i++) {
 		int idx = mp_obj_find(g_lease_only_actuators[i]);
@@ -591,7 +677,43 @@ static void test_a_lease_only_actuator_is_never_writable(void)
 		}
 	}
 
-	/* The derived half: no MP_ILK_TUNNEL object may be absent from it. */
+	/*
+	 * THE DERIVED HALF, over the whole table rather than one interlock: the
+	 * set of objects carrying MP_OF_WRITE is exactly g_writable_objects[].
+	 *
+	 * Every object absent from that list is thereby asserted to be
+	 * lease-only or read-only, which is how `sys.wdt.en` and `ref.mux.sel`
+	 * are covered without the rule having to know they exist. Failing here
+	 * does not mean the row is wrong — it means nobody has yet written down
+	 * what puts it back.
+	 */
+	for (i = 0U; i < mp_obj_count(); i++) {
+		const mp_obj_t *o = mp_obj_at(i);
+		char msg[224];
+
+		if ((o->flags & MP_OF_WRITE) == 0U) {
+			continue;
+		}
+		with_write++;
+		(void)snprintf(msg, sizeof(msg),
+			       "`%s` gained MP_OF_WRITE: a bare `obj.set` "
+			       "creates no lease, so name it in "
+			       "g_writable_objects[] and say there what puts it "
+			       "back when the tool walks away",
+			       o->id);
+		TEST_ASSERT_TRUE_MESSAGE(is_declared_writable(o->id), msg);
+	}
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		(unsigned int)n_writable, with_write,
+		"g_writable_objects[] names an object the manifest no longer "
+		"makes writable; shrink the list rather than leaving it stale");
+
+	/*
+	 * The tunnel roll-call. Narrower than the above and kept because it pins
+	 * MP_ILK_TUNNEL's own membership: a fourth tunnel that declares the
+	 * interlock is caught here even though the roll-call would already have
+	 * refused it MP_OF_WRITE.
+	 */
 	for (i = 0U; i < mp_obj_count(); i++) {
 		const mp_obj_t *o = mp_obj_at(i);
 

@@ -533,6 +533,116 @@ static void test_the_deferred_flag_is_the_dispatch(void)
 }
 
 /**
+ * mp_glue.c's header enumerates the wired set. This is that enumeration, proved.
+ *
+ * The header comment says "Thirty-one manifest objects therefore have an
+ * actuator behind them" and lists them by name, grouped by the seam each one
+ * reaches. That claim rotted once already: it read "Twenty-eight" and omitted
+ * `ref.mux.sel`, `sys.wdt.en` and `sys.wdt.kick` long after all three had live
+ * branches in obj_apply()/obj_pulse() a few hundred lines below it. Nothing
+ * failed, because no test had ever read the number — and a stale count in the
+ * one file a reviewer trusts to describe the seam is how wrong numbers reach the
+ * docs that quote it.
+ *
+ * A BARE COUNT WOULD NOT HAVE HELPED, and this file has already learnt that: the
+ * deferred side's numeric floor of 20 is the cautionary tale recorded in
+ * test_the_deferred_flag_is_the_dispatch(), where a number that had to be edited
+ * every time the thing it measured improved was replaced by the set itself. A
+ * count also passes on any equal-and-opposite edit — wire one object, un-wire
+ * another — while saying nothing about which. So this is the SET, by name, exact
+ * in both directions, derived from the dispatch by derive_dispatch() and never
+ * from the prose.
+ *
+ * load_source() blanks comments before the scan, so the header's own list cannot
+ * satisfy this test: the ids below have to be matched by real `strcmp(o->id,
+ * "…")` branches, by a compiled recovery-policy table, or by the cfg flags.
+ * The test therefore cannot check the header's WORDING — only that the set it
+ * describes is the set that exists. If this fails, fix mp_glue.c's header in the
+ * same change.
+ */
+static void test_the_wired_set_is_the_one_the_header_claims(void)
+{
+	/* Grouped and ordered as mp_glue.c's header groups them, so the two read
+	 * against each other line by line. */
+	static const char *const wired[] = {
+		/* obj_apply, this area's own actuators */
+		"ui.identify", "ref.rb.serial", "gnss.tunnel", "ref.rb.tunnel",
+		"sys.wdt.en", "ref.mux.sel",
+		/* obj_apply, posted to the sequencer mailbox */
+		"ui.panel.duty", "pwr.panel.led.en", "pwr.gps.en",
+		"pwr.ant.bias.en", "pwr.disp.en", "pwr.rb.gate",
+		"pwr.rb.vset_mv", "ui.lamp.test", "ref.term.en", "sys.fan.duty",
+		"ui.rgb.mode", "ui.rgb.r", "ui.rgb.g", "ui.rgb.b", "ui.disp.bl",
+		"ref.disc.park", "ref.ocxo.vc_mv", "ref.ocxo.dac_code",
+		/* obj_pulse */
+		"pwr.poe.kill", "pwr.rb.ov.reset", "sys.phy.reset",
+		"gnss.extint", "sys.wdt.kick",
+		/* cfg_write, in mp_rpc.c rather than mp_glue.c */
+		"pwr.rb.vmax_mv", "pwr.poe.budget_mw",
+	};
+	const size_t n = sizeof(wired) / sizeof(wired[0]);
+	size_t i;
+	size_t k;
+	unsigned int found = 0U;
+
+	derive_dispatch();
+
+	for (i = 0U; i < mp_obj_count(); i++) {
+		const mp_obj_t *o = mp_obj_at(i);
+		bool listed = false;
+		char msg[224];
+
+		if (!mutable_obj(o) || !g_mut_wired[i]) {
+			continue;
+		}
+		found++;
+		for (k = 0U; k < n; k++) {
+			if (strcmp(o->id, wired[k]) == 0) {
+				listed = true;
+			}
+		}
+		(void)snprintf(msg, sizeof(msg),
+			       "`%s` gained an actuator but is missing from this "
+			       "list and from mp_glue.c's header enumeration; "
+			       "update both, including the count",
+			       o->id);
+		TEST_ASSERT_TRUE_MESSAGE(listed, msg);
+	}
+
+	/* The other direction, and the one a count alone would miss: a name here
+	 * that the dispatch no longer reaches. */
+	for (k = 0U; k < n; k++) {
+		int idx = mp_obj_find(wired[k]);
+		char msg[224];
+
+		(void)snprintf(msg, sizeof(msg),
+			       "`%s` is listed as wired but the dispatch no "
+			       "longer reaches it; shrink this list and "
+			       "mp_glue.c's header rather than leaving them "
+			       "stale",
+			       wired[k]);
+		TEST_ASSERT_TRUE_MESSAGE(idx >= 0, wired[k]);
+		TEST_ASSERT_TRUE_MESSAGE(g_mut_wired[(size_t)idx], msg);
+	}
+
+	/* Duplicates would let a dropped name hide inside the total. */
+	for (k = 0U; k < n; k++) {
+		size_t j;
+
+		for (j = 0U; j < k; j++) {
+			TEST_ASSERT_TRUE_MESSAGE(
+				strcmp(wired[j], wired[k]) != 0, wired[k]);
+		}
+	}
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		(unsigned int)n, found,
+		"the wired count changed; mp_glue.c's header says how many "
+		"objects have an actuator behind them and that number is now "
+		"wrong");
+}
+
+/**
  * The set of objects whose mutation works but whose read does not.
  *
  * One bit cannot say "actuates but cannot be read back", so the manifest's bit
@@ -1378,6 +1488,7 @@ int main(void)
 	UNITY_BEGIN();
 
 	RUN_TEST(test_the_deferred_flag_is_the_dispatch);
+	RUN_TEST(test_the_wired_set_is_the_one_the_header_claims);
 	RUN_TEST(test_the_write_only_residue_is_exactly_these_five);
 	RUN_TEST(test_the_console_never_writes_the_dac);
 	RUN_TEST(test_the_discipline_thread_drains_them);
