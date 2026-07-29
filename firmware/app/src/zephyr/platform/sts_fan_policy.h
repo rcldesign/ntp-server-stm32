@@ -31,11 +31,17 @@
  * ---------------------------------------------------------------------------
  * core/thermal owns the PI loop, the ladder thresholds and the stall detector
  * (tests/host/test_thermal.c). This header owns what housekeeping does with the
- * answer: the actuator conversion, the refusal path, the alarm mapping, and the
- * latching of rungs 2 and 3 for the 4 Hz pwrseq tick to pick up. That last part
- * is the one with history — nothing consumed request_rb_shed at all, so a
- * stalled fan past the kill threshold lit an LED and sent a trap while the
- * ~12 W rubidium kept running and the board never cold-cycled.
+ * answer: the actuator conversion, the refusal path, the alarm mapping, the
+ * maintenance override's resolution against the loop, and the latching of rungs
+ * 2 and 3 for the 4 Hz pwrseq tick to pick up. That last part is the one with
+ * history — nothing consumed request_rb_shed at all, so a stalled fan past the
+ * kill threshold lit an LED and sent a trap while the ~12 W rubidium kept
+ * running and the board never cold-cycled.
+ *
+ * The override resolution is here for the same reason as the resting duty: it
+ * carries the §10.9 invariant on the one path that has no other carrier. While
+ * it lived in hk.c — Zephyr glue, which does not link into a host suite — the
+ * release rule could be deleted outright and the whole suite stayed green.
  *
  * pwm_set(), the tach ISR and the k_mutex-protected cache stay in hk.c.
  */
@@ -195,6 +201,79 @@ static inline size_t sts_fan_alarms(const sts_fan_action_t *act,
 	out[2].active = act->alarm_fan_fault;
 
 	return 3U;
+}
+
+/* ------------------------------------------------- maintenance override -- */
+
+/**
+ * A maintenance lease held over the fan.
+ *
+ * `pct` is a FLOOR and not a level. A technician can raise the fan to prove an
+ * airflow path or to pre-cool a box before a long test, and can never hold it
+ * below what the thermal loop is asking for as the enclosure heats up. Zero and
+ * inactive are the same thing to sts_fan_resolve(); `pct` is cleared on release
+ * anyway so a lapsed lease cannot leave a stale floor behind it.
+ */
+typedef struct {
+	bool active;
+	uint8_t pct;
+} sts_fan_ovr_t;
+
+/**
+ * The duty TIM15_CH1 must hold: max(thermal loop, override floor).
+ *
+ * @param loop_pct  The loop's OWN last answer — including the fail-safe duty
+ *                  sts_fan_policy_eval() commands on a step it declined, which
+ *                  is what keeps a stalled loop from being quietly undercut by
+ *                  a lease taken out before it stalled.
+ * @param ovr       The held lease, or NULL for "none".
+ */
+static inline uint8_t sts_fan_resolve(uint8_t loop_pct, const sts_fan_ovr_t *ovr)
+{
+	if (ovr != NULL && ovr->active && ovr->pct > loop_pct) {
+		return ovr->pct;
+	}
+
+	return loop_pct;
+}
+
+/**
+ * Take or release the lease, and return the duty to program right now.
+ *
+ * Storing the lease and resolving the duty are ONE decision and are taken here
+ * together, because the two halves are only correct with respect to each other:
+ *
+ *  - A TAKE resolves to max(loop, floor) — the lease raises the fan and never
+ *    lowers it. The requested level is clamped to full airflow rather than
+ *    rejected, on the same reasoning as sts_fan_pulse_ns().
+ *
+ *  - A RELEASE resolves to STS_FAN_DUTY_RESTING_PCT — full airflow — and NOT
+ *    to the loop's last answer. ARCHITECTURE.md §10.9 fixes the resting state
+ *    at maximum airflow for every moment firmware has no live opinion, and a
+ *    lease that has just lapsed is exactly such a moment: the loop's answer is
+ *    up to a second stale and, on a step the loop declined, is not a
+ *    measurement of anything. The next 1 Hz step re-establishes the regulated
+ *    duty, so the cost is bounded at one second of a fan running too fast,
+ *    against the alternative of a fan running too slow in a box nobody is
+ *    watching.
+ *
+ * @param ovr       Lease state, updated in place. Never NULL.
+ * @param active    True to take/replace the lease, false to release it.
+ * @param pct       Requested floor. Ignored when @p active is false.
+ * @param loop_pct  The thermal loop's own last answer.
+ * @return The duty to program into TIM15_CH1.
+ */
+static inline uint8_t sts_fan_ovr_apply(sts_fan_ovr_t *ovr, bool active, uint8_t pct,
+					uint8_t loop_pct)
+{
+	ovr->active = active;
+	ovr->pct = active ? ((pct > 100U) ? 100U : pct) : 0U;
+
+	if (!active) {
+		return STS_FAN_DUTY_RESTING_PCT;
+	}
+
+	return sts_fan_resolve(loop_pct, ovr);
 }
 
 /* ------------------------------------------------------------------ tach -- */

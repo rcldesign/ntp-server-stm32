@@ -238,14 +238,19 @@ static struct {
 	 * and can never hold it below what the loop is asking for as the box
 	 * heats up (ARCHITECTURE.md §10.9, sts_app.h STS_PWRSEQ_REQ_FAN_DUTY).
 	 *
+	 * `fan_ovr` is the lease itself. How it resolves against the loop — the
+	 * max() above, and the release that resolves to full airflow rather than
+	 * to the loop's stale answer — is sts_fan_policy.h's, not this file's: a
+	 * decision taken here is a decision no host suite can execute, and that
+	 * is exactly how the release rule came to be deletable in silence.
+	 *
 	 * Every field is written only from this thread — the 1 Hz thermal step and
 	 * the mailbox drain both run on it — and read under hk_mutex by
 	 * sts_hk_fan_state(), the same arrangement as hk_cache.
 	 */
 	uint8_t fan_loop_pct;
 	uint8_t fan_out_pct;
-	uint8_t fan_ovr_pct;
-	bool fan_ovr_active;
+	sts_fan_ovr_t fan_ovr;
 } hk;
 
 /* ========================================================================= */
@@ -938,15 +943,6 @@ static int hk_fan_set_duty(uint8_t duty_pct)
 	return 0;
 }
 
-/** max(thermal loop, override). The override is a floor; the loop always wins up. */
-static uint8_t hk_fan_want(void)
-{
-	if (hk.fan_ovr_active && (hk.fan_ovr_pct > hk.fan_loop_pct)) {
-		return hk.fan_ovr_pct;
-	}
-	return hk.fan_loop_pct;
-}
-
 int sts_hk_fan_state(sts_hk_fan_t *out)
 {
 	if (out == NULL) {
@@ -956,7 +952,7 @@ int sts_hk_fan_state(sts_hk_fan_t *out)
 	(void)k_mutex_lock(&hk_mutex, K_FOREVER);
 	out->loop_pct = hk.fan_loop_pct;
 	out->out_pct = hk.fan_out_pct;
-	out->override_active = hk.fan_ovr_active;
+	out->override_active = hk.fan_ovr.active;
 	(void)k_mutex_unlock(&hk_mutex);
 
 	return 0;
@@ -970,22 +966,16 @@ int sts_hk_fan_override(bool active, uint8_t pct)
 		return -ENODEV;
 	}
 
-	(void)k_mutex_lock(&hk_mutex, K_FOREVER);
-	hk.fan_ovr_active = active;
-	hk.fan_ovr_pct = active ? (uint8_t)MIN(pct, 100U) : 0U;
-	(void)k_mutex_unlock(&hk_mutex);
-
 	/*
-	 * A RELEASE resolves to the resting duty — full airflow — and NOT to the
-	 * loop's last answer. ARCHITECTURE.md §10.9 fixes the resting state at
-	 * maximum airflow for whenever firmware has no live opinion, and a lease
-	 * that has just lapsed is exactly that moment: the loop's answer is up to
-	 * a second stale and, on a step it declined, is not a measurement at all.
-	 * The next 1 Hz step re-establishes the regulated duty, so the cost is
-	 * bounded at one second of a fan that is running too fast, against the
-	 * alternative of a fan that is running too slow.
+	 * Storing the lease and resolving the duty it implies are one decision,
+	 * and it is sts_fan_ovr_apply()'s: a take resolves to max(loop, floor),
+	 * a RELEASE resolves to the resting duty — full airflow — and not to the
+	 * loop's last answer (ARCHITECTURE.md §10.9; the reasoning is in the
+	 * policy header, next to the code a host suite actually executes).
 	 */
-	want = active ? hk_fan_want() : STS_FAN_DUTY_RESTING_PCT;
+	(void)k_mutex_lock(&hk_mutex, K_FOREVER);
+	want = sts_fan_ovr_apply(&hk.fan_ovr, active, pct, hk.fan_loop_pct);
+	(void)k_mutex_unlock(&hk_mutex);
 
 	return (hk_fan_set_duty(want) != 0) ? -EIO : 0;
 }
@@ -1236,7 +1226,7 @@ static void hk_thermal_1hz(uint32_t now_ms)
 	 * leaves the box cooling (ARCHITECTURE.md §10.9). A held override can
 	 * only raise this — max(loop, override) — so the ladder is never held
 	 * below what the thermal loop is asking for. */
-	(void)hk_fan_set_duty(hk_fan_want());
+	(void)hk_fan_set_duty(sts_fan_resolve(hk.fan_loop_pct, &hk.fan_ovr));
 
 	if (act.loop_failed) {
 		return;

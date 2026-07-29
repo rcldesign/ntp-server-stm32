@@ -34,7 +34,13 @@
  *   RGB D5          The priority encode is core/fault's (fault_rgb_state); the
  *                   *inputs* are assembled here, and the identify expiry is
  *                   32-bit-wrap arithmetic that is wrong for 49.7 days at a
- *                   time if the comparison is unsigned.
+ *                   time if the comparison is unsigned. The maintenance
+ *                   override resolves here too — which pattern wins, what each
+ *                   pattern's three duties are, and the order the leg holds
+ *                   compose in — because a decision taken in supervisor.c is a
+ *                   decision no host suite links, and an indicator that shows
+ *                   the wrong colour is wrong in exactly the silent way this
+ *                   file exists to stop.
  *
  * Plus the §8.3 self-confirm trigger, which is the moment MCUboot's automatic
  * revert stops protecting a remote box. Confirming one condition too early
@@ -205,6 +211,199 @@ static inline void sts_super_rgb_in(const quality_block_t *q, bool any_fault,
 	out->warming = ((q->flags & QUALITY_FLAG_OCXO_WARM) == 0U) ||
 		       (q->lock_state == (uint8_t)QUALITY_LOCK_ACQUIRING) ||
 		       (q->lock_state == (uint8_t)QUALITY_LOCK_LOCKING);
+}
+
+/* ------------------------------------------------- RGB override + colour --- */
+
+/*
+ * The `ui.rgb.mode` values, restated here rather than included from sts_app.h.
+ * This header's dependency set is a leaf one (fault, pwrseq, quality) and the
+ * `super_policy` suite's link set follows it; pulling in the app's public
+ * surface would drag cfg, logring and mp_mirror behind it for six integers.
+ * supervisor.c BUILD_ASSERTs the two sets identical, so drift is a build
+ * failure rather than an amber that shows up red on a technician's screen.
+ */
+#define STS_SUPER_RGB_MODE_AUTO       0U /* no pattern held — use the encode */
+#define STS_SUPER_RGB_MODE_OFF        1U
+#define STS_SUPER_RGB_MODE_GREEN      2U
+#define STS_SUPER_RGB_MODE_AMBER      3U
+#define STS_SUPER_RGB_MODE_RED        4U
+#define STS_SUPER_RGB_MODE_BLUE_PULSE 5U
+#define STS_SUPER_RGB_MODE_COUNT      6U
+
+/** Legs, in the order TIM4 CH1/CH2/CH3 are programmed. */
+#define STS_SUPER_RGB_LEG_R     0U
+#define STS_SUPER_RGB_LEG_G     1U
+#define STS_SUPER_RGB_LEG_B     2U
+#define STS_SUPER_RGB_LEG_COUNT 3U
+
+/*
+ * The pattern duties. Deliberately not 100 %: docs/sts1000_rgb_indicator.md
+ * sizes each colour's ballast resistor for a matched apparent brightness at
+ * full duty, and the indicator is read across a rack aisle rather than stared
+ * at. Amber is a RATIO of two legs — 70/35 — so scaling one without the other
+ * turns it orange-red, which is the colour red is supposed to own.
+ */
+#define STS_SUPER_RGB_DUTY_GREEN   60U
+#define STS_SUPER_RGB_DUTY_AMBER_R 70U
+#define STS_SUPER_RGB_DUTY_AMBER_G 35U
+#define STS_SUPER_RGB_DUTY_RED     70U
+#define STS_SUPER_RGB_DUTY_BLUE    80U
+
+/** Identify pulses at 1 Hz, so a half period is 500 ms. */
+#define STS_SUPER_RGB_PULSE_HALF_MS 500U
+
+/**
+ * The D5 maintenance override, in two independently-leased layers.
+ *
+ * `mode` forces a whole PATTERN (STS_SUPER_RGB_MODE_AUTO = none held); the leg
+ * entries hold individual duties AFTER the pattern has resolved to a colour, so
+ * one leg can be held without taking the indicator off the fault policy.
+ */
+typedef struct {
+	uint8_t mode;
+	bool leg_held[STS_SUPER_RGB_LEG_COUNT];
+	uint8_t leg_pct[STS_SUPER_RGB_LEG_COUNT];
+} sts_super_rgb_ovr_t;
+
+/** What D5 is to be driven to. */
+typedef struct {
+	/** The pattern actually resolved. NEVER STS_SUPER_RGB_MODE_AUTO — "auto"
+	 *  names where the answer came from, not something D5 can show. */
+	uint8_t mode;
+	uint8_t duty[STS_SUPER_RGB_LEG_COUNT];
+} sts_super_rgb_out_t;
+
+/**
+ * core/fault's priority-encode result as a `ui.rgb.mode` pattern.
+ *
+ * An explicit map and not `(uint8_t)state + 1`: the two enums happen to be one
+ * apart today, and an arithmetic bridge turns any future reordering of
+ * fault_rgb_state_t into amber shown as red, silently, on a pin nobody is
+ * asserting against.
+ */
+static inline uint8_t sts_super_rgb_mode_of(fault_rgb_state_t state)
+{
+	switch (state) {
+	case FAULT_RGB_GREEN:
+		return STS_SUPER_RGB_MODE_GREEN;
+	case FAULT_RGB_AMBER:
+		return STS_SUPER_RGB_MODE_AMBER;
+	case FAULT_RGB_RED:
+		return STS_SUPER_RGB_MODE_RED;
+	case FAULT_RGB_BLUE_PULSE:
+		return STS_SUPER_RGB_MODE_BLUE_PULSE;
+	case FAULT_RGB_OFF:
+	default:
+		return STS_SUPER_RGB_MODE_OFF;
+	}
+}
+
+/**
+ * The pattern D5 is to show: the forced one, or the fault policy's own.
+ *
+ * @param mode        The held override, STS_SUPER_RGB_MODE_AUTO for none.
+ * @param auto_state  core/fault's encode, used only when nothing is held.
+ */
+static inline uint8_t sts_super_rgb_mode_now(uint8_t mode, fault_rgb_state_t auto_state)
+{
+	if (mode != STS_SUPER_RGB_MODE_AUTO && mode < STS_SUPER_RGB_MODE_COUNT) {
+		return mode;
+	}
+
+	return sts_super_rgb_mode_of(auto_state);
+}
+
+/** One pattern's three duties, before any leg override. */
+static inline void sts_super_rgb_colour(uint8_t mode, uint32_t now_ms,
+					uint8_t out[STS_SUPER_RGB_LEG_COUNT])
+{
+	out[STS_SUPER_RGB_LEG_R] = 0U;
+	out[STS_SUPER_RGB_LEG_G] = 0U;
+	out[STS_SUPER_RGB_LEG_B] = 0U;
+
+	switch (mode) {
+	case STS_SUPER_RGB_MODE_GREEN:
+		out[STS_SUPER_RGB_LEG_G] = STS_SUPER_RGB_DUTY_GREEN;
+		break;
+	case STS_SUPER_RGB_MODE_AMBER:
+		out[STS_SUPER_RGB_LEG_R] = STS_SUPER_RGB_DUTY_AMBER_R;
+		out[STS_SUPER_RGB_LEG_G] = STS_SUPER_RGB_DUTY_AMBER_G;
+		break;
+	case STS_SUPER_RGB_MODE_RED:
+		out[STS_SUPER_RGB_LEG_R] = STS_SUPER_RGB_DUTY_RED;
+		break;
+	case STS_SUPER_RGB_MODE_BLUE_PULSE:
+		/* Phase taken from the monotonic clock, so multiple units in a
+		 * rack do not have to agree on anything. */
+		out[STS_SUPER_RGB_LEG_B] =
+			((now_ms / STS_SUPER_RGB_PULSE_HALF_MS) % 2U == 0U)
+				? STS_SUPER_RGB_DUTY_BLUE
+				: 0U;
+		break;
+	case STS_SUPER_RGB_MODE_OFF:
+	default:
+		break;
+	}
+}
+
+/**
+ * Hold one leg's duty, or release it.
+ *
+ * Clamps rather than rejects, on the same reasoning as sts_fan_pulse_ns(): a
+ * request the caller has already accepted must land somewhere defined. A
+ * release zeroes the stored level too, so a lapsed lease leaves nothing behind
+ * for the next resolve to pick up.
+ *
+ * @return false if @p leg is not a leg — the state is then untouched.
+ */
+static inline bool sts_super_rgb_leg_set(sts_super_rgb_ovr_t *ovr, uint8_t leg,
+					 bool active, uint8_t pct)
+{
+	if (leg >= STS_SUPER_RGB_LEG_COUNT) {
+		return false;
+	}
+
+	ovr->leg_held[leg] = active;
+	ovr->leg_pct[leg] = active ? ((pct > 100U) ? 100U : pct) : 0U;
+
+	return true;
+}
+
+/**
+ * Resolve pattern, then legs.
+ *
+ * The two layers compose in this order and not the other: the legs override
+ * individual duties AFTER the pattern has become a colour. That is what lets a
+ * technician hold one leg — to prove a dead colour channel, say — without
+ * taking the whole indicator off the fault policy, and it is why a leg hold at
+ * 0 % is a real command (dark) and not "no override".
+ *
+ * @param ovr         The held override. NULL is the same as nothing held.
+ * @param auto_state  core/fault's encode.
+ * @param now_ms      Monotonic milliseconds, for the identify pulse phase.
+ * @param out         Never NULL; always fully written.
+ */
+static inline void sts_super_rgb_resolve(const sts_super_rgb_ovr_t *ovr,
+					 fault_rgb_state_t auto_state, uint32_t now_ms,
+					 sts_super_rgb_out_t *out)
+{
+	memset(out, 0, sizeof(*out));
+
+	out->mode = sts_super_rgb_mode_now(
+		(ovr != NULL) ? ovr->mode : (uint8_t)STS_SUPER_RGB_MODE_AUTO, auto_state);
+
+	sts_super_rgb_colour(out->mode, now_ms, out->duty);
+
+	if (ovr == NULL) {
+		return;
+	}
+
+	for (uint8_t i = 0U; i < STS_SUPER_RGB_LEG_COUNT; i++) {
+		if (ovr->leg_held[i]) {
+			out->duty[i] = ovr->leg_pct[i];
+		}
+	}
 }
 
 /* --------------------------------------------------------- self-confirm --- */

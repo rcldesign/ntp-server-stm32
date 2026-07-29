@@ -305,6 +305,214 @@ static void test_fault_and_identify_pass_through(void)
 	TEST_ASSERT_EQUAL_INT(FAULT_RGB_BLUE_PULSE, fault_rgb_state(&in));
 }
 
+/* ------------------------------------------------------- RGB resolution --- */
+
+/*
+ * Mode 0 is "auto" — a SOURCE, not a colour. Resolving it as a pattern in its
+ * own right would drive D5 dark on a box that is serving, and nothing else in
+ * the system would disagree: the indicator is the one annunciator with no
+ * read-back path of its own beyond the one this resolution feeds.
+ */
+static void test_auto_hands_the_pattern_back_to_the_fault_encode(void)
+{
+	sts_super_rgb_ovr_t ovr = { 0 };
+	sts_super_rgb_out_t out;
+
+	ovr.mode = STS_SUPER_RGB_MODE_AUTO;
+
+	sts_super_rgb_resolve(&ovr, FAULT_RGB_GREEN, 0U, &out);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_GREEN, (uint32_t)out.mode);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_DUTY_GREEN,
+				 (uint32_t)out.duty[STS_SUPER_RGB_LEG_G]);
+
+	sts_super_rgb_resolve(&ovr, FAULT_RGB_RED, 0U, &out);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_RED, (uint32_t)out.mode);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_DUTY_RED,
+				 (uint32_t)out.duty[STS_SUPER_RGB_LEG_R]);
+
+	/* And a NULL override is the same as nothing held. */
+	sts_super_rgb_resolve(NULL, FAULT_RGB_AMBER, 0U, &out);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_AMBER, (uint32_t)out.mode);
+}
+
+/*
+ * Every fault_rgb_state_t maps to its OWN pattern. The two enums are one apart
+ * today, so an arithmetic bridge passes every test that only checks one value;
+ * this walks all five, which is what makes a reordering of either enum visible.
+ */
+static void test_every_fault_state_maps_to_its_own_pattern(void)
+{
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_OFF,
+				 (uint32_t)sts_super_rgb_mode_of(FAULT_RGB_OFF));
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_GREEN,
+				 (uint32_t)sts_super_rgb_mode_of(FAULT_RGB_GREEN));
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_AMBER,
+				 (uint32_t)sts_super_rgb_mode_of(FAULT_RGB_AMBER));
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_RED,
+				 (uint32_t)sts_super_rgb_mode_of(FAULT_RGB_RED));
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_BLUE_PULSE,
+				 (uint32_t)sts_super_rgb_mode_of(FAULT_RGB_BLUE_PULSE));
+
+	/* The resolved pattern is never AUTO, for any input. */
+	for (int s = FAULT_RGB_OFF; s <= FAULT_RGB_BLUE_PULSE; s++) {
+		TEST_ASSERT_NOT_EQUAL_UINT32(
+			STS_SUPER_RGB_MODE_AUTO,
+			(uint32_t)sts_super_rgb_mode_now(STS_SUPER_RGB_MODE_AUTO,
+							 (fault_rgb_state_t)s));
+	}
+}
+
+/* A held pattern outranks the fault encode — including a fault. That is the
+ * point of the lease: a technician standing at the box, on a dead-man. */
+static void test_a_held_pattern_outranks_the_fault_encode(void)
+{
+	sts_super_rgb_ovr_t ovr = { 0 };
+	sts_super_rgb_out_t out;
+
+	ovr.mode = STS_SUPER_RGB_MODE_GREEN;
+
+	sts_super_rgb_resolve(&ovr, FAULT_RGB_RED, 0U, &out);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_GREEN, (uint32_t)out.mode);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)out.duty[STS_SUPER_RGB_LEG_R]);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_DUTY_GREEN,
+				 (uint32_t)out.duty[STS_SUPER_RGB_LEG_G]);
+
+	/* Releasing it returns D5 to the encode within the same call. */
+	ovr.mode = STS_SUPER_RGB_MODE_AUTO;
+	sts_super_rgb_resolve(&ovr, FAULT_RGB_RED, 0U, &out);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_RED, (uint32_t)out.mode);
+}
+
+/* Amber is a two-leg RATIO, not a colour name. Losing either leg makes it red
+ * or green — both of which mean something else entirely on this indicator. */
+static void test_amber_keeps_both_of_its_legs(void)
+{
+	uint8_t duty[STS_SUPER_RGB_LEG_COUNT];
+
+	sts_super_rgb_colour(STS_SUPER_RGB_MODE_AMBER, 0U, duty);
+
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_DUTY_AMBER_R,
+				 (uint32_t)duty[STS_SUPER_RGB_LEG_R]);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_DUTY_AMBER_G,
+				 (uint32_t)duty[STS_SUPER_RGB_LEG_G]);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)duty[STS_SUPER_RGB_LEG_B]);
+	TEST_ASSERT_TRUE(duty[STS_SUPER_RGB_LEG_R] > duty[STS_SUPER_RGB_LEG_G]);
+}
+
+/* OFF is dark on all three legs, and an unknown pattern is dark too rather
+ * than whatever the previous case fell through into. */
+static void test_off_and_an_unknown_pattern_are_dark(void)
+{
+	uint8_t duty[STS_SUPER_RGB_LEG_COUNT];
+
+	sts_super_rgb_colour(STS_SUPER_RGB_MODE_OFF, 0U, duty);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)duty[STS_SUPER_RGB_LEG_R]);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)duty[STS_SUPER_RGB_LEG_G]);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)duty[STS_SUPER_RGB_LEG_B]);
+
+	sts_super_rgb_colour(200U, 0U, duty);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)duty[STS_SUPER_RGB_LEG_R]);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)duty[STS_SUPER_RGB_LEG_G]);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)duty[STS_SUPER_RGB_LEG_B]);
+}
+
+/*
+ * Identify is a 1 Hz square wave: on for the first half second of each second,
+ * off for the second. A pulse that never turns off is a solid blue LED, which
+ * is indistinguishable from a stuck indicator across a rack aisle.
+ */
+static void test_identify_pulses_at_one_hertz(void)
+{
+	uint8_t duty[STS_SUPER_RGB_LEG_COUNT];
+
+	sts_super_rgb_colour(STS_SUPER_RGB_MODE_BLUE_PULSE, 0U, duty);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_DUTY_BLUE,
+				 (uint32_t)duty[STS_SUPER_RGB_LEG_B]);
+
+	sts_super_rgb_colour(STS_SUPER_RGB_MODE_BLUE_PULSE, 499U, duty);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_DUTY_BLUE,
+				 (uint32_t)duty[STS_SUPER_RGB_LEG_B]);
+
+	sts_super_rgb_colour(STS_SUPER_RGB_MODE_BLUE_PULSE, 500U, duty);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)duty[STS_SUPER_RGB_LEG_B]);
+
+	sts_super_rgb_colour(STS_SUPER_RGB_MODE_BLUE_PULSE, 1000U, duty);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_DUTY_BLUE,
+				 (uint32_t)duty[STS_SUPER_RGB_LEG_B]);
+
+	/* The other two legs stay dark throughout, so identify cannot read as
+	 * a colour that means something. */
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)duty[STS_SUPER_RGB_LEG_R]);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)duty[STS_SUPER_RGB_LEG_G]);
+}
+
+/*
+ * The legs compose AFTER the pattern, and only the held ones. Compose them the
+ * other way round and a leg hold would be erased by the pattern that follows
+ * it, which is the failure a technician reads as "the override did nothing".
+ */
+static void test_a_leg_hold_overrides_the_pattern_it_sits_on(void)
+{
+	sts_super_rgb_ovr_t ovr = { 0 };
+	sts_super_rgb_out_t out;
+
+	TEST_ASSERT_TRUE(sts_super_rgb_leg_set(&ovr, STS_SUPER_RGB_LEG_B, true, 25U));
+
+	sts_super_rgb_resolve(&ovr, FAULT_RGB_GREEN, 0U, &out);
+
+	/* The pattern still resolved, and still owns the legs nobody held. */
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_GREEN, (uint32_t)out.mode);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_DUTY_GREEN,
+				 (uint32_t)out.duty[STS_SUPER_RGB_LEG_G]);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)out.duty[STS_SUPER_RGB_LEG_R]);
+	/* The held leg is the technician's. */
+	TEST_ASSERT_EQUAL_UINT32(25U, (uint32_t)out.duty[STS_SUPER_RGB_LEG_B]);
+}
+
+/* A leg held at 0 % is a real command — dark — and not "no override". That is
+ * how a technician proves a colour channel is the thing that is stuck. */
+static void test_a_leg_held_at_zero_is_a_command_not_a_release(void)
+{
+	sts_super_rgb_ovr_t ovr = { 0 };
+	sts_super_rgb_out_t out;
+
+	(void)sts_super_rgb_leg_set(&ovr, STS_SUPER_RGB_LEG_G, true, 0U);
+	sts_super_rgb_resolve(&ovr, FAULT_RGB_GREEN, 0U, &out);
+
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_MODE_GREEN, (uint32_t)out.mode);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)out.duty[STS_SUPER_RGB_LEG_G]);
+
+	/* Releasing it hands the leg back to the pattern. */
+	(void)sts_super_rgb_leg_set(&ovr, STS_SUPER_RGB_LEG_G, false, 0U);
+	sts_super_rgb_resolve(&ovr, FAULT_RGB_GREEN, 0U, &out);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_DUTY_GREEN,
+				 (uint32_t)out.duty[STS_SUPER_RGB_LEG_G]);
+}
+
+/* Each leg is leased on its own: holding one must not disturb the other two,
+ * and an out-of-range leg index changes nothing at all. */
+static void test_leg_leases_are_independent_and_bounded(void)
+{
+	sts_super_rgb_ovr_t ovr = { 0 };
+	sts_super_rgb_out_t out;
+
+	(void)sts_super_rgb_leg_set(&ovr, STS_SUPER_RGB_LEG_R, true, 100U);
+	TEST_ASSERT_FALSE(sts_super_rgb_leg_set(&ovr, STS_SUPER_RGB_LEG_COUNT, true, 50U));
+	TEST_ASSERT_FALSE(sts_super_rgb_leg_set(&ovr, 99U, true, 50U));
+
+	sts_super_rgb_resolve(&ovr, FAULT_RGB_AMBER, 0U, &out);
+
+	TEST_ASSERT_EQUAL_UINT32(100U, (uint32_t)out.duty[STS_SUPER_RGB_LEG_R]);
+	TEST_ASSERT_EQUAL_UINT32(STS_SUPER_RGB_DUTY_AMBER_G,
+				 (uint32_t)out.duty[STS_SUPER_RGB_LEG_G]);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)out.duty[STS_SUPER_RGB_LEG_B]);
+
+	/* An over-range duty clamps rather than wrapping into a dim LED. */
+	(void)sts_super_rgb_leg_set(&ovr, STS_SUPER_RGB_LEG_B, true, 200U);
+	sts_super_rgb_resolve(&ovr, FAULT_RGB_AMBER, 0U, &out);
+	TEST_ASSERT_EQUAL_UINT32(100U, (uint32_t)out.duty[STS_SUPER_RGB_LEG_B]);
+}
+
 /* --------------------------------------------------------- self-confirm --- */
 
 /*
@@ -373,6 +581,16 @@ int main(void)
 	RUN_TEST(test_holdover_reaches_the_rgb_encoder);
 	RUN_TEST(test_rgb_inputs_without_a_quality_block_assume_warming);
 	RUN_TEST(test_fault_and_identify_pass_through);
+
+	RUN_TEST(test_auto_hands_the_pattern_back_to_the_fault_encode);
+	RUN_TEST(test_every_fault_state_maps_to_its_own_pattern);
+	RUN_TEST(test_a_held_pattern_outranks_the_fault_encode);
+	RUN_TEST(test_amber_keeps_both_of_its_legs);
+	RUN_TEST(test_off_and_an_unknown_pattern_are_dark);
+	RUN_TEST(test_identify_pulses_at_one_hertz);
+	RUN_TEST(test_a_leg_hold_overrides_the_pattern_it_sits_on);
+	RUN_TEST(test_a_leg_held_at_zero_is_a_command_not_a_release);
+	RUN_TEST(test_leg_leases_are_independent_and_bounded);
 
 	RUN_TEST(test_self_confirm_needs_every_term);
 	RUN_TEST(test_self_confirm_accepts_only_a_locked_clock);

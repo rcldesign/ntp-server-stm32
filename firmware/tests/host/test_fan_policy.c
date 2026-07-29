@@ -20,6 +20,13 @@
  * annunciated and never actuated, so the ladder had no bottom. These tests pin
  * that each rung reaches a latch, and that the latch is not silently dropped by
  * the fail-safe path on its way past.
+ *
+ * The override half is here because it was measured to be uncovered: deleting
+ * the release rule from hk.c outright — resolving a lapsed maintenance lease to
+ * the thermal loop's last answer instead of to full airflow — left the entire
+ * host suite green, because a decision taken in Zephyr glue is a decision no
+ * host suite links. It is a fourth carrier of the same §10.9 invariant, and it
+ * now lives in the policy header where these tests execute it.
  */
 
 #include <errno.h>
@@ -259,6 +266,132 @@ static void test_alarm_list_pairs_each_id_with_its_own_state(void)
 	}
 }
 
+/* ------------------------------------------------------ override lease ---- */
+
+/*
+ * The release rule, and the reason this half of the file exists.
+ *
+ * A lease that has just lapsed is a moment when firmware has no live opinion of
+ * what the fan should be doing — which is precisely the case ARCHITECTURE.md
+ * §10.9 fixes at maximum airflow. Resolving a release to the loop's last answer
+ * instead looks harmless and is not: that answer is up to a second stale, and on
+ * a step the loop declined it is not a measurement of anything at all.
+ *
+ * The loop is deliberately parked at 30 % here. That is the only value at which
+ * the two candidate rules — "resting" and "whatever the loop last said" — give
+ * different answers, so this assertion is the one that fails if the release rule
+ * is ever dropped.
+ */
+static void test_release_resolves_to_resting_not_to_the_loop(void)
+{
+	sts_fan_ovr_t ovr = { 0 };
+
+	TEST_ASSERT_EQUAL_UINT32(40U, (uint32_t)sts_fan_ovr_apply(&ovr, true, 40U, 30U));
+
+	TEST_ASSERT_EQUAL_UINT32(STS_FAN_DUTY_RESTING_PCT,
+				 (uint32_t)sts_fan_ovr_apply(&ovr, false, 0U, 30U));
+	TEST_ASSERT_EQUAL_UINT32(100U,
+				 (uint32_t)sts_fan_ovr_apply(&ovr, false, 0U, 30U));
+}
+
+/* A release with no lease held is still a release, and still rests at full
+ * airflow: pwrseq_exec drains a release for a lease that already expired. */
+static void test_release_without_a_lease_still_rests_at_full(void)
+{
+	sts_fan_ovr_t ovr = { 0 };
+
+	TEST_ASSERT_EQUAL_UINT32(STS_FAN_DUTY_RESTING_PCT,
+				 (uint32_t)sts_fan_ovr_apply(&ovr, false, 0U, 0U));
+	TEST_ASSERT_FALSE(ovr.active);
+}
+
+/* A release leaves no floor behind. The next 1 Hz step must resolve to the
+ * loop's answer alone, or a lapsed lease would go on holding the fan up. */
+static void test_release_clears_the_floor(void)
+{
+	sts_fan_ovr_t ovr = { 0 };
+
+	(void)sts_fan_ovr_apply(&ovr, true, 90U, 30U);
+	(void)sts_fan_ovr_apply(&ovr, false, 0U, 30U);
+
+	TEST_ASSERT_FALSE(ovr.active);
+	TEST_ASSERT_EQUAL_UINT32(0U, (uint32_t)ovr.pct);
+	TEST_ASSERT_EQUAL_UINT32(30U, (uint32_t)sts_fan_resolve(30U, &ovr));
+}
+
+/*
+ * The override is a FLOOR, not a level. A technician who asks for 30 % on a box
+ * whose loop is already calling for 80 % gets 80 % — a maintenance request must
+ * never be able to slow the fan down on a box that is heating.
+ */
+static void test_an_override_below_the_loop_cannot_lower_the_fan(void)
+{
+	sts_fan_ovr_t ovr = { 0 };
+
+	TEST_ASSERT_EQUAL_UINT32(80U, (uint32_t)sts_fan_ovr_apply(&ovr, true, 30U, 80U));
+	TEST_ASSERT_EQUAL_UINT32(80U, (uint32_t)sts_fan_resolve(80U, &ovr));
+
+	/* Equality is not "above": a floor at the loop's own level changes
+	 * nothing, and must not be read as an override winning. */
+	TEST_ASSERT_EQUAL_UINT32(80U, (uint32_t)sts_fan_resolve(80U, &ovr));
+	TEST_ASSERT_EQUAL_UINT32(30U, (uint32_t)ovr.pct);
+}
+
+/* Above the loop, the lease is the point: it raises the fan. */
+static void test_an_override_above_the_loop_raises_it(void)
+{
+	sts_fan_ovr_t ovr = { 0 };
+
+	TEST_ASSERT_EQUAL_UINT32(90U, (uint32_t)sts_fan_ovr_apply(&ovr, true, 90U, 30U));
+	TEST_ASSERT_EQUAL_UINT32(90U, (uint32_t)sts_fan_resolve(30U, &ovr));
+	TEST_ASSERT_EQUAL_UINT32(90U, (uint32_t)sts_fan_resolve(0U, &ovr));
+}
+
+/*
+ * The loop always wins upward. A lease held at 60 % while the enclosure heats
+ * must not cap the ladder at 60 %: the 1 Hz step re-resolves against the same
+ * floor every second, and every rung above it has to get through.
+ */
+static void test_the_loop_rising_past_a_held_override_wins(void)
+{
+	sts_fan_ovr_t ovr = { 0 };
+
+	(void)sts_fan_ovr_apply(&ovr, true, 60U, 20U);
+
+	TEST_ASSERT_EQUAL_UINT32(60U, (uint32_t)sts_fan_resolve(20U, &ovr));
+	TEST_ASSERT_EQUAL_UINT32(60U, (uint32_t)sts_fan_resolve(59U, &ovr));
+	TEST_ASSERT_EQUAL_UINT32(61U, (uint32_t)sts_fan_resolve(61U, &ovr));
+	TEST_ASSERT_EQUAL_UINT32(85U, (uint32_t)sts_fan_resolve(85U, &ovr));
+	/* Including the fail-safe duty a declined step commands. */
+	TEST_ASSERT_EQUAL_UINT32(STS_FAN_DUTY_RESTING_PCT,
+				 (uint32_t)sts_fan_resolve(STS_FAN_DUTY_RESTING_PCT, &ovr));
+}
+
+/* An out-of-range request clamps to full airflow rather than being rejected —
+ * the same direction as sts_fan_pulse_ns(), for the same reason. */
+static void test_an_out_of_range_override_clamps_to_full_airflow(void)
+{
+	sts_fan_ovr_t ovr = { 0 };
+
+	TEST_ASSERT_EQUAL_UINT32(100U, (uint32_t)sts_fan_ovr_apply(&ovr, true, 200U, 30U));
+	TEST_ASSERT_EQUAL_UINT32(100U, (uint32_t)ovr.pct);
+	TEST_ASSERT_EQUAL_UINT32(STS_FAN_PWM_PERIOD_NS, sts_fan_pulse_ns(ovr.pct));
+}
+
+/* No lease at all resolves to the loop, and a NULL lease is the same thing —
+ * the 1 Hz step must never be made conditional on an override existing. */
+static void test_no_override_resolves_to_the_loop(void)
+{
+	sts_fan_ovr_t ovr = { 0 };
+
+	TEST_ASSERT_EQUAL_UINT32(45U, (uint32_t)sts_fan_resolve(45U, &ovr));
+	TEST_ASSERT_EQUAL_UINT32(45U, (uint32_t)sts_fan_resolve(45U, NULL));
+
+	/* An inactive lease carrying a stale level is still inactive. */
+	ovr.pct = 99U;
+	TEST_ASSERT_EQUAL_UINT32(45U, (uint32_t)sts_fan_resolve(45U, &ovr));
+}
+
 /* ------------------------------------------------------------------ tach --- */
 
 /*
@@ -317,6 +450,15 @@ int main(void)
 	RUN_TEST(test_rung_three_reaches_the_kill_latch);
 	RUN_TEST(test_fan_stall_is_independent_of_the_ladder);
 	RUN_TEST(test_alarm_list_pairs_each_id_with_its_own_state);
+
+	RUN_TEST(test_release_resolves_to_resting_not_to_the_loop);
+	RUN_TEST(test_release_without_a_lease_still_rests_at_full);
+	RUN_TEST(test_release_clears_the_floor);
+	RUN_TEST(test_an_override_below_the_loop_cannot_lower_the_fan);
+	RUN_TEST(test_an_override_above_the_loop_raises_it);
+	RUN_TEST(test_the_loop_rising_past_a_held_override_wins);
+	RUN_TEST(test_an_out_of_range_override_clamps_to_full_airflow);
+	RUN_TEST(test_no_override_resolves_to_the_loop);
 
 	RUN_TEST(test_tach_uses_two_pulses_per_revolution);
 	RUN_TEST(test_tach_reports_zero_for_no_edges);
