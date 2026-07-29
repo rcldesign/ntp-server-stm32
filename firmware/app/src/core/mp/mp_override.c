@@ -674,6 +674,7 @@ int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
 	const mp_obj_t *o = mp_obj_at(obj);
 	mp_ilk_res_t local;
 	mp_lease_t *l;
+	bool live;
 	int rc;
 
 	if ((c == NULL) || (o == NULL)) {
@@ -709,6 +710,7 @@ int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
 	}
 
 	l = lease_of(c, obj);
+	live = (l != NULL); /* a lease was ALREADY standing on this object */
 	if (l == NULL) {
 		l = lease_free(c);
 		if (l == NULL) {
@@ -718,11 +720,36 @@ int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
 
 	rc = c->apply(c->apply_user, obj, &res->value);
 	if (rc < 0) {
-		/* The slot must not be left half-claimed either way. */
-		if (l->obj1 == (uint16_t)(obj + 1U)) {
-			l->obj1 = 0U;
-			l->verify_at_ms = 0U;
-			l->settle_by_ms = 0U;
+		/*
+		 * The slot must not be left half-claimed either way — but the
+		 * two ways are not the same slot, and treating them alike is
+		 * how a refused re-grant used to strand an actuator.
+		 *
+		 * A FRESH slot (lease_free(), obj1 == 0) was never claimed:
+		 * nothing was commanded, so there is nothing to revert and
+		 * abandoning it is the whole of the cleanup.
+		 *
+		 * A STANDING lease is not a half-claimed slot, it is a
+		 * COMMANDED PIN. Zeroing it in place deleted the only record
+		 * that anything was holding the object while leaving the
+		 * actuator wherever the previous grant put it — no release
+		 * apply, no event, and nothing left in the table for the
+		 * dead-man, the tick or a later mp_ovr_release() to act on. The
+		 * object was overridden, unowned, and invisible until reboot.
+		 * lease_drop() is the correct exit: it runs the release apply
+		 * that returns the object to firmware-automatic and says so on
+		 * channel 0x09.
+		 *
+		 * The event is MP_OVR_EV_RELEASE, not MP_OVR_EV_VETO, on every
+		 * errno — including the veto path below, which then emits its
+		 * own veto as well. They are two different facts: the lease you
+		 * held is gone, AND the value you asked for was refused. A
+		 * technician needs both, and one event carrying the first
+		 * implicitly is how the first gets missed.
+		 */
+		if (live) {
+			lease_drop(c, l, (uint8_t)MP_OVR_EV_RELEASE,
+				   "re-grant refused");
 		}
 		/*
 		 * -ENOTSUP is NOT a veto, and the difference is what a
@@ -747,6 +774,36 @@ int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
 		 */
 		if (rc == -ENOTSUP) {
 			return -ENOTSUP;
+		}
+		/*
+		 * -EBUSY is not a veto either, and it is the same
+		 * mis-attribution one step further along.
+		 *
+		 * -EBUSY does not mean firmware disapproved. It means something
+		 * else already holds the resource — and on the path that
+		 * actually produces it, that something else is the technician's
+		 * OWN other lease. Hold `ref.rb.serial` at cmos, open
+		 * `ref.rb.tunnel`, then re-command the relay:
+		 * rb_serial_set_mode() refuses, because throwing K1 under a live
+		 * passthrough would corrupt whatever the host is mid-transaction
+		 * with. That refusal is correct and it is not a safety verdict.
+		 *
+		 * Reported as a veto it read "firmware's safety supervision
+		 * refused you", which is both wrong and unactionable: it sends
+		 * the bench looking for an interlock or a fault, and the actual
+		 * remedy — close the tunnel and re-issue — is not something a
+		 * veto ever suggests. mp_map_errno() turns -EBUSY into
+		 * MP_E_BUSY, which is the retryable answer and is already the
+		 * contract the glue documents at the `ref.rb.serial` apply.
+		 *
+		 * No event and no counter, for the -ENOTSUP reason above: the
+		 * veto stream is only worth subscribing to while everything on
+		 * it is a safety refusal. The lease drop above still emits its
+		 * own MP_OVR_EV_RELEASE, so a standing lease lost to a busy
+		 * resource is still announced.
+		 */
+		if (rc == -EBUSY) {
+			return -EBUSY;
 		}
 		/* Firmware refused a value it understood: that is a veto. */
 		c->vetoes++;

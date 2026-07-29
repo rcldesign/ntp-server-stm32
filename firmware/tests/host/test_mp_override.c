@@ -1482,8 +1482,15 @@ static void test_apply_refusal_is_a_veto_and_leaves_no_lease(void)
 	TEST_ASSERT_EQUAL_UINT(1U, events_of((uint8_t)MP_OVR_EV_VETO));
 	TEST_ASSERT_EQUAL_UINT32(1U, g_c.vetoes);
 
-	/* And a refusal on a *replacement* must not destroy the existing lease
-	 * silently either — it is reported as a veto and the slot is freed. */
+	/*
+	 * And a refusal on a *replacement* must not destroy the existing lease
+	 * silently either. A standing lease is a COMMANDED PIN, not a
+	 * half-claimed slot: freeing it without running the release left the
+	 * actuator wherever the previous grant put it, unowned and invisible.
+	 * So the slot is freed AND the release runs AND both facts reach the
+	 * subscriber — the release that says the object went back to
+	 * firmware-automatic, and the veto that says the new value was refused.
+	 */
 	g_apply_rc = 0;
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_grant(&g_c, obj, 50, 0U, sid, &st,
 					      1000U, NULL));
@@ -1492,6 +1499,10 @@ static void test_apply_refusal_is_a_veto_and_leaves_no_lease(void)
 	TEST_ASSERT_EQUAL_INT(-EACCES, mp_ovr_grant(&g_c, obj, 60, 0U, sid, &st,
 						    1000U, NULL));
 	TEST_ASSERT_EQUAL_size_t(0U, mp_ovr_active(&g_c));
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, releases_of(obj),
+		"a vetoed re-grant freed the slot without reverting the pin");
+	TEST_ASSERT_EQUAL_UINT(1U, events_of((uint8_t)MP_OVR_EV_RELEASE));
 	TEST_ASSERT_EQUAL_UINT(1U, events_of((uint8_t)MP_OVR_EV_VETO));
 }
 
@@ -1532,9 +1543,18 @@ static void test_an_unwired_apply_is_notsup_and_not_a_veto(void)
 		0U, g_c.vetoes,
 		"an unimplemented object was counted as a firmware veto");
 
-	/* The same refusal against a *standing* lease frees the slot without
-	 * claiming a veto either — and the release still runs, so the object
-	 * really did go back to firmware-automatic. */
+	/*
+	 * The same refusal against a *standing* lease frees the slot without
+	 * claiming a veto either — and the release runs, so the object really
+	 * did go back to firmware-automatic.
+	 *
+	 * That second clause was asserted by nobody until now. The suite checked
+	 * mp_ovr_active() and the veto counters, both of which were already true
+	 * of the defect: the slot really was zeroed, in place, with no
+	 * apply(obj, NULL) anywhere — the actuator stayed where the previous
+	 * grant put it and nothing was left in the table to move it back. The
+	 * comment claiming otherwise is why the hole survived review.
+	 */
 	g_apply_rc = 0;
 	TEST_ASSERT_EQUAL_INT(0, mp_ovr_grant(&g_c, obj, 50, 0U, sid, &st,
 					      1000U, NULL));
@@ -1543,6 +1563,12 @@ static void test_an_unwired_apply_is_notsup_and_not_a_veto(void)
 	TEST_ASSERT_EQUAL_INT(-ENOTSUP, mp_ovr_grant(&g_c, obj, 60, 0U, sid,
 						     &st, 1000U, NULL));
 	TEST_ASSERT_EQUAL_size_t(0U, mp_ovr_active(&g_c));
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, releases_of(obj),
+		"the standing lease was deleted without reverting the pin");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, events_of((uint8_t)MP_OVR_EV_RELEASE),
+		"the lease vanished with nothing on channel 0x09 to say so");
 	TEST_ASSERT_EQUAL_UINT(0U, events_of((uint8_t)MP_OVR_EV_VETO));
 	TEST_ASSERT_EQUAL_UINT32(0U, g_c.vetoes);
 
@@ -1553,6 +1579,375 @@ static void test_an_unwired_apply_is_notsup_and_not_a_veto(void)
 						    1000U, NULL));
 	TEST_ASSERT_EQUAL_UINT(1U, events_of((uint8_t)MP_OVR_EV_VETO));
 	TEST_ASSERT_EQUAL_UINT32(1U, g_c.vetoes);
+}
+
+/**
+ * An apply that answers -EBUSY is not a veto either, and here the
+ * mis-attribution accused the technician of the wrong thing entirely.
+ *
+ * The reachable producer is `ref.rb.serial`: rb_serial_set_mode() answers
+ * -EBUSY while a raw tunnel holds UART7, because throwing the K1 relay under a
+ * live passthrough would corrupt whatever the host is mid-transaction with. So
+ * the sequence that hits it is hold `ref.rb.serial`, open `ref.rb.tunnel`,
+ * re-command the relay — every step of which is the technician's own doing.
+ *
+ * Reported as -EACCES that reached the bench as MP_E_VETO: "firmware's safety
+ * supervision refused you", which sends someone looking for an interlock that
+ * does not exist and never names the actual remedy (close the tunnel). -EBUSY
+ * carries its own identity through to MP_E_BUSY, the retryable code, which is
+ * what the glue's own comment at the `ref.rb.serial` apply already promised.
+ *
+ * The errno IS the whole decision — mp_map_errno() maps -EACCES to MP_E_VETO
+ * and -EBUSY to MP_E_BUSY with nothing in between — so it is asserted here,
+ * where the engine decides it, rather than through the RPC layer.
+ */
+static void test_a_busy_resource_is_busy_and_not_a_veto(void)
+{
+	size_t obj = obj_of("ui.disp.bl");
+	mp_ilk_state_t st;
+	uint32_t sid;
+
+	ilk_permissive(&st);
+	sid = open_session(1000U);
+
+	/* No lease yet: nothing was claimed, so nothing is reverted. */
+	g_apply_rc = -EBUSY;
+	TEST_ASSERT_EQUAL_INT(-EBUSY, mp_ovr_grant(&g_c, obj, 50, 0U, sid, &st,
+						   1000U, NULL));
+	TEST_ASSERT_EQUAL_size_t(0U, mp_ovr_active(&g_c));
+	TEST_ASSERT_NULL(mp_ovr_lease(&g_c, obj));
+	TEST_ASSERT_EQUAL_UINT(0U, releases_of(obj));
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, events_of((uint8_t)MP_OVR_EV_VETO),
+		"a busy resource emitted a safety veto on channel 9");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, g_c.vetoes,
+		"a busy resource was counted as a firmware veto");
+
+	/*
+	 * Over a standing lease it is the Finding-B shape as well: the lease
+	 * goes, the release runs, the subscriber is told — and it is still not
+	 * a veto. This is the exact sequence a technician reaches by holding
+	 * ref.rb.serial and then opening ref.rb.tunnel.
+	 */
+	g_apply_rc = 0;
+	TEST_ASSERT_EQUAL_INT(0, mp_ovr_grant(&g_c, obj, 50, 0U, sid, &st,
+					      1000U, NULL));
+	logs_clear();
+	g_apply_rc = -EBUSY;
+	TEST_ASSERT_EQUAL_INT(-EBUSY, mp_ovr_grant(&g_c, obj, 60, 0U, sid, &st,
+						   1000U, NULL));
+	TEST_ASSERT_EQUAL_size_t(0U, mp_ovr_active(&g_c));
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, releases_of(obj),
+		"a busy re-grant freed the slot without reverting the pin");
+	TEST_ASSERT_EQUAL_UINT(1U, events_of((uint8_t)MP_OVR_EV_RELEASE));
+	TEST_ASSERT_EQUAL_UINT(0U, events_of((uint8_t)MP_OVR_EV_VETO));
+	TEST_ASSERT_EQUAL_UINT32(0U, g_c.vetoes);
+
+	/* And -EIO, which firmware DID understand, is still a veto. The split
+	 * is by errno, not "any failure is now quiet". */
+	g_apply_rc = -EIO;
+	TEST_ASSERT_EQUAL_INT(-EACCES, mp_ovr_grant(&g_c, obj, 60, 0U, sid, &st,
+						    1000U, NULL));
+	TEST_ASSERT_EQUAL_UINT(1U, events_of((uint8_t)MP_OVR_EV_VETO));
+	TEST_ASSERT_EQUAL_UINT32(1U, g_c.vetoes);
+}
+
+/* ================================ the other half of a release the glue refused */
+/*
+ * Everything above proves what THIS module does with a refused release: it
+ * counts it (`release_errors`) and drops the lease anyway. That is correct — a
+ * lease core could not clear because the glue was slow or busy would be worse
+ * than one whose last write is still in flight — but it means the engine cannot
+ * be the thing that guarantees the pin came back. Whoever refused owes it.
+ *
+ * On UART7 that owner is platform/rb_serial.c, and it did not pay:
+ *
+ *   1. `obj.override ref.rb.serial cmos`   lease slot 0, K1 -> CMOS
+ *   2. `obj.override ref.rb.tunnel true`   lease slot 1, UART7 handed to the host
+ *   3. USB pulled -> mp_ovr_revert_all(), which drops in SLOT ORDER, so slot 0
+ *      goes first: its release lands as rb_serial_set_mode(RS232), which refuses
+ *      with -EBUSY because the tunnel is still open. release_errors++, lease
+ *      gone, relay still CMOS.
+ *   4. Slot 1 then closes the tunnel — and closing it moved nothing.
+ *
+ * The board resumes with K1 in a commissioning position no lease holds and
+ * FE-5680A housekeeping telemetry silently dead until somebody reboots it.
+ *
+ * WHY THIS IS A SOURCE SCAN. The fix belongs in the module that owns PE4, and
+ * that module is Zephyr glue — devicetree GPIO specs, a UART ISR and a 20 ms
+ * relay settle — so it cannot be linked into a host suite at all, and the
+ * `mp_override` suite's own apply fake models the ANSWER (an errno) rather than
+ * the pins. A fixture that simulated the relay would be asserting against its
+ * own copy of the logic, which is how several guards in this tree went green
+ * for the wrong reason. So the mechanism is read out of the source instead,
+ * the way test_smear_isolation.c and test_factory_policy.c read theirs.
+ *
+ * It is a real scan, not a grep for a keyword: it pins BOTH halves and the
+ * ordering that connects them. Deleting the latch, deleting the discharge,
+ * dropping the RS-232-only guard that keeps the CMOS direction undeferred, or
+ * moving the discharge above the callback retraction — where set_mode() would
+ * refuse itself — each fails a different assertion below.
+ */
+
+#ifndef STS_APP_SRC_DIR
+#error "STS_APP_SRC_DIR must be defined by tests/host/CMakeLists.txt"
+#endif
+
+#define SRC_MAX (64U * 1024U)
+
+static char g_src[SRC_MAX];
+static size_t g_src_len;
+static char g_src_name[128];
+
+typedef struct {
+	size_t begin;
+	size_t end;
+} span_t;
+
+/**
+ * Read @p rel into g_src, blanking comments AND string literals in place so
+ * offsets stay 1:1 with the file.
+ *
+ * The strings go too, unlike test_mp_deferred.c's loader: nothing quoted is
+ * under test here, and this file's own LOG_WRN/LOG_INF lines name the relay
+ * positions in prose. A scan that counted those would pass on a module that
+ * only *talks* about restoring the relay.
+ */
+static void load_source(const char *rel)
+{
+	char path[512];
+	FILE *f;
+	size_t n;
+	size_t i;
+	enum { CODE, BLOCK, LINE, STR, CHR } state = CODE;
+
+	(void)snprintf(path, sizeof(path), "%s/%s", STS_APP_SRC_DIR, rel);
+	f = fopen(path, "rb");
+	TEST_ASSERT_NOT_NULL_MESSAGE(f, path);
+	n = fread(g_src, 1U, sizeof(g_src) - 1U, f);
+	(void)fclose(f);
+	TEST_ASSERT_TRUE_MESSAGE(n < (sizeof(g_src) - 1U),
+				 "source did not fit the scan buffer");
+	TEST_ASSERT_TRUE_MESSAGE(n > 4096U, "source is implausibly small");
+	g_src[n] = '\0';
+	g_src_len = n;
+	(void)snprintf(g_src_name, sizeof(g_src_name), "%s", rel);
+
+	for (i = 0U; i < n; i++) {
+		char c = g_src[i];
+		char d = ((i + 1U) < n) ? g_src[i + 1U] : '\0';
+
+		switch (state) {
+		case CODE:
+			if ((c == '/') && (d == '*')) {
+				state = BLOCK;
+				g_src[i] = ' ';
+				g_src[i + 1U] = ' ';
+				i++;
+			} else if ((c == '/') && (d == '/')) {
+				state = LINE;
+				g_src[i] = ' ';
+				g_src[i + 1U] = ' ';
+				i++;
+			} else if (c == '"') {
+				state = STR;
+				g_src[i] = ' ';
+			} else if (c == '\'') {
+				state = CHR;
+				g_src[i] = ' ';
+			}
+			break;
+		case BLOCK:
+			g_src[i] = (c == '\n') ? '\n' : ' ';
+			if ((c == '*') && (d == '/')) {
+				g_src[i + 1U] = ' ';
+				i++;
+				state = CODE;
+			}
+			break;
+		case LINE:
+			if (c == '\n') {
+				state = CODE;
+			} else {
+				g_src[i] = ' ';
+			}
+			break;
+		case STR:
+		case CHR:
+			/* The escape pair is stepped over so an escaped quote
+			 * cannot end the literal early. */
+			if (c == '\\') {
+				g_src[i] = ' ';
+				if ((i + 1U) < n) {
+					g_src[i + 1U] = ' ';
+				}
+				i++;
+				break;
+			}
+			if (((state == STR) && (c == '"')) ||
+			    ((state == CHR) && (c == '\''))) {
+				state = CODE;
+			}
+			g_src[i] = ' ';
+			break;
+		}
+	}
+}
+
+static unsigned int count_in(const span_t *s, const char *needle)
+{
+	size_t k = strlen(needle);
+	unsigned int hits = 0U;
+	size_t i;
+
+	for (i = s->begin; (k != 0U) && ((i + k) <= s->end); i++) {
+		if (memcmp(&g_src[i], needle, k) == 0) {
+			hits++;
+		}
+	}
+	return hits;
+}
+
+static size_t offset_in(const span_t *s, const char *needle)
+{
+	size_t k = strlen(needle);
+	size_t i;
+	char msg[256];
+
+	for (i = s->begin; (i + k) <= s->end; i++) {
+		if (memcmp(&g_src[i], needle, k) == 0) {
+			return i;
+		}
+	}
+	(void)snprintf(msg, sizeof(msg),
+		       "%s: `%s` is gone — fix this scan, do not delete the "
+		       "assertion it feeds",
+		       g_src_name, needle);
+	TEST_FAIL_MESSAGE(msg);
+	return 0U;
+}
+
+/** The braced body of the function whose definition begins with @p sig. */
+static span_t fn_body(const char *sig)
+{
+	size_t k = strlen(sig);
+	span_t s = { 0U, 0U };
+	size_t at = 0U;
+	unsigned int hits = 0U;
+	int depth = 0;
+	size_t i;
+	char msg[256];
+
+	(void)snprintf(msg, sizeof(msg),
+		       "%s: cannot locate exactly one body of `%s` — fix this "
+		       "scan, do not delete the assertion it feeds",
+		       g_src_name, sig);
+
+	for (i = 0U; (i + k) <= g_src_len; i++) {
+		if (memcmp(&g_src[i], sig, k) == 0) {
+			hits++;
+			at = i;
+		}
+	}
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(1U, hits, msg);
+
+	while ((at < g_src_len) && (g_src[at] != '{')) {
+		at++;
+	}
+	TEST_ASSERT_TRUE_MESSAGE(at < g_src_len, msg);
+	s.begin = at + 1U;
+
+	for (i = at; i < g_src_len; i++) {
+		if (g_src[i] == '{') {
+			depth++;
+		} else if (g_src[i] == '}') {
+			depth--;
+			if (depth == 0) {
+				s.end = i;
+				break;
+			}
+		}
+	}
+	TEST_ASSERT_TRUE_MESSAGE(s.end > s.begin, msg);
+	return s;
+}
+
+/**
+ * A release refused because a tunnel held UART7 must still reach the relay.
+ *
+ * Two halves and one ordering, all three load-bearing:
+ *
+ *   set_mode()      still refuses under a live tunnel (the refusal is correct
+ *                   and must not be "fixed" by removing it), and records the
+ *                   debt — but only for the RS-232 direction, so a refused CMOS
+ *                   command stays refused rather than firing minutes later.
+ *   tunnel_close()  pays it, and clears it, so a hardware failure does not
+ *                   become a standing obligation to fire in a later session.
+ *   the order       the discharge is BELOW the `tunnel_cb` retraction, because
+ *                   set_mode() refuses whenever a tunnel holds the port and
+ *                   would otherwise refuse itself and re-arm the latch.
+ */
+static void test_a_release_refused_by_a_tunnel_is_paid_at_tunnel_close(void)
+{
+	span_t sm;
+	span_t tc;
+	size_t retract;
+
+	load_source("zephyr/platform/rb_serial.c");
+
+	/* --- half 1: the refusal remembers what it refused ---------------- */
+	sm = fn_body("int rb_serial_set_mode(uint8_t mode)");
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&sm, "return -EBUSY;"),
+		"rb_serial_set_mode() no longer refuses under a live tunnel, so "
+		"K1 can be thrown mid-passthrough");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&sm, "rb.restore_rs232_on_close = true;"),
+		"a release refused by the tunnel is dropped on the floor again: "
+		"K1 stays where the previous grant put it, with no lease left "
+		"to move it");
+	TEST_ASSERT_TRUE_MESSAGE(
+		offset_in(&sm, "if (rb.tunnel_cb != NULL) {") <
+			offset_in(&sm, "rb.restore_rs232_on_close = true;"),
+		"the deferred restore is being recorded outside the tunnel "
+		"refusal it exists for");
+	TEST_ASSERT_TRUE_MESSAGE(
+		offset_in(&sm, "if (mode == (uint8_t)RB_SERIAL_MODE_RS232) {") <
+			offset_in(&sm, "rb.restore_rs232_on_close = true;"),
+		"the deferral lost its RS-232-only guard, so a refused CMOS "
+		"command now throws the relay into the commissioning position "
+		"some time after it was rejected");
+
+	/* --- half 2: the close pays it, and only once -------------------- */
+	tc = fn_body("int rb_serial_tunnel_close(void)");
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&tc, "if (rb.restore_rs232_on_close) {"),
+		"rb_serial_tunnel_close() no longer discharges the deferred "
+		"restore, so a dead-man revert during a tunnel leaves K1 in the "
+		"commissioning position");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&tc,
+			     "rb_serial_set_mode((uint8_t)RB_SERIAL_MODE_RS232)"),
+		"the discharge no longer commands the relay back to RS-232");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&tc, "rb.restore_rs232_on_close = false;"),
+		"the latch is never cleared, so one refused release arms every "
+		"future tunnel close");
+
+	/* --- the ordering that makes the discharge possible at all ------- */
+	retract = offset_in(&tc, "rb.tunnel_cb = NULL;");
+	TEST_ASSERT_TRUE_MESSAGE(
+		retract < offset_in(&tc, "rb_serial_set_mode("),
+		"the deferred restore moved above the tunnel_cb retraction, "
+		"where set_mode() refuses itself and re-arms the latch it was "
+		"called to discharge");
+	TEST_ASSERT_TRUE_MESSAGE(
+		retract < offset_in(&tc, "if (rb.restore_rs232_on_close) {"),
+		"the latch is tested before the port is given back");
 }
 
 static void test_firmware_veto(void)
@@ -2001,6 +2396,8 @@ int main(void)
 	RUN_TEST(test_lease_table_full);
 	RUN_TEST(test_apply_refusal_is_a_veto_and_leaves_no_lease);
 	RUN_TEST(test_an_unwired_apply_is_notsup_and_not_a_veto);
+	RUN_TEST(test_a_busy_resource_is_busy_and_not_a_veto);
+	RUN_TEST(test_a_release_refused_by_a_tunnel_is_paid_at_tunnel_close);
 	RUN_TEST(test_firmware_veto);
 
 	RUN_TEST(test_deadman_reverts_on_a_stale_keepalive);
