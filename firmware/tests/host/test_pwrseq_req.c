@@ -145,6 +145,11 @@ typedef struct {
 	bool pin;
 	bool automatic;
 	uint8_t shed_at; /* pwrseq_shed_level_t; 0 = never shed */
+	/* pwrseq_rail_t's edge history: `off_ms` is when `pin` last went low,
+	 * meaningful while `level_known && !last_on`. */
+	bool level_known;
+	bool last_on;
+	uint32_t off_ms;
 } rail_t;
 
 static rail_t g_rail[STS_PWRSEQ_REQ_COUNT];
@@ -261,6 +266,29 @@ static bool apply_duty(bool release, int32_t value, uint8_t *out_err,
 }
 
 /*
+ * pwrseq_exec.c's pwrseq_rail_drive(), reproduced down to the one fact this
+ * suite needs from it: the off stamp is taken on the EDGE, not on the level.
+ * A rail re-driven to the level it already holds has not gone off again.
+ */
+static void rail_drive(rail_t *r, bool on)
+{
+	if (!r->level_known || (r->last_on != on)) {
+		if (!on) {
+			r->off_ms = g_now;
+		}
+		r->level_known = true;
+		r->last_on = on;
+	}
+	r->pin = on;
+}
+
+/* pwrseq_exec.c's pwrseq_rail_want(): the level a request asks for. */
+static bool rail_want(const rail_t *r, bool release, int32_t value)
+{
+	return release ? r->automatic : (value != 0);
+}
+
+/*
  * pwrseq_exec.c's pwrseq_mbox_apply_rail(), reproduced.
  *
  * Three rules and nothing else: ON only where firmware also wants it on, OFF
@@ -281,7 +309,7 @@ static bool apply_rail(uint8_t req, bool release, int32_t value,
 		return false;
 	}
 
-	want = release ? r->automatic : (value != 0);
+	want = rail_want(r, release, value);
 
 	if (want && !r->automatic) {
 		*out_err = ((r->shed_at != 0U) && (g_shed >= r->shed_at))
@@ -291,7 +319,7 @@ static bool apply_rail(uint8_t req, bool release, int32_t value,
 	}
 
 	was = r->pin;
-	r->pin = want;
+	rail_drive(r, want);
 
 	if (want && !was && (req == (uint8_t)STS_PWRSEQ_REQ_GPS_EN)) {
 		g_gnss_reset_notes++;
@@ -337,6 +365,40 @@ static bool apply_vset(bool release, int32_t value, uint8_t *out_err,
 	return true;
 }
 
+/*
+ * pwrseq_exec.c's pwrseq_mbox_defer(), reproduced.
+ *
+ * The display's minimum off-time, enforced where the pin is. A RELEASE is not
+ * interlock-evaluated in core — it must never be refusable, or a lapsed lease,
+ * a dropped link or the dead-man could not hand the rail back — so it arrives
+ * here resolving to `automatic`, which for a display firmware wants up is
+ * true. Without this the rail would come back one 250 ms pass after the grant
+ * dropped it, against a 1000 ms rule.
+ *
+ * DEFERRED, never refused: the request stays in the mailbox and a later pass
+ * executes it. The skip is BEFORE the claim, because claiming clears `posted`.
+ */
+static bool mbox_defer(uint8_t req)
+{
+	const rail_t *r = &g_rail[req];
+	bool release = false;
+	int32_t value = 0;
+
+	if (req != (uint8_t)STS_PWRSEQ_REQ_DISP_EN) {
+		return false;
+	}
+	if (!r->level_known || r->last_on) {
+		return false;
+	}
+	if ((g_now - r->off_ms) >= MP_DISP_MIN_OFF_MS) {
+		return false;
+	}
+	if (!sts_pwrseq_reqq_peek(&g_mbox, req, &release, &value)) {
+		return false;
+	}
+	return rail_want(r, release, value);
+}
+
 /**
  * One housekeeping pass: pwrseq_exec.c's pwrseq_service_mailbox().
  *
@@ -356,6 +418,10 @@ static void hk_pass(void)
 		int32_t value = 0;
 		bool release = false;
 		bool ok;
+
+		if (mbox_defer(req)) {
+			continue;
+		}
 
 		if (!sts_pwrseq_reqq_claim(&g_mbox, req, &release, &value)) {
 			continue;
@@ -960,6 +1026,74 @@ static void test_two_requests_for_one_object_coalesce_to_the_last(void)
 }
 
 /**
+ * A REVISION MUST NOT INHERIT ITS PREDECESSOR'S RECEIPT.
+ *
+ * The dangerous ordering is not two posts before a drain — that is the
+ * coalesce rule above — it is post, drain, post, THEN read. Override A reaches
+ * the pin and the sequencer settles APPLIED. Before the console's next pass a
+ * technician revises to B; mp_ovr_grant() replaces the lease and re-arms
+ * `settle_by_ms`. If the post left A's receipt in the slot, the very next
+ * drain would hand it to mp_ovr_settled(), which matches by OBJECT alone —
+ * clearing B's deadline, disarming the only watchdog that drops a lease whose
+ * write never landed, and reporting `verify_pending: false` for a value that
+ * is not at the pin. The lease would then stand for its whole TTL asserting a
+ * level the board does not have.
+ *
+ * Two back-to-back overrides from any scripted client hit this, so the test is
+ * the ordinary case and not a contrived one. It asserts the deadline SURVIVES
+ * the drain, that the discard was counted rather than silent, and — the part
+ * that makes it a safety test — that the re-armed watchdog still fires when B
+ * genuinely never drains.
+ */
+static void test_a_revision_does_not_inherit_the_previous_receipt(void)
+{
+	uint32_t sid = session();
+	unsigned int i;
+
+	/* A: on. It reaches the pin and the sequencer settles APPLIED. */
+	override_panel(sid, true);
+	hk_pass();
+	TEST_ASSERT_TRUE(pin_on());
+	TEST_ASSERT_EQUAL_UINT32(1U, g_mbox.applied);
+
+	/* B: off, before the console has read A's receipt. */
+	override_panel(sid, false);
+	TEST_ASSERT_TRUE(res_b("verify_pending"));
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		1U, g_mbox.discarded,
+		"the superseded receipt was thrown away without being "
+		"counted, which is the silent disappearance this mailbox "
+		"exists to prevent");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, g_mbox.coalesced,
+		"A was drained before B was posted, so nothing was coalesced");
+
+	/* The drain must find nothing to confirm: B is still in flight. */
+	console_pass();
+	TEST_ASSERT_TRUE_MESSAGE(pin_on(),
+				 "housekeeping has not run, so B cannot be at "
+				 "the pin yet");
+	TEST_ASSERT_TRUE_MESSAGE(
+		mp_ovr_pending(&g_c.ovr, panel_obj()),
+		"A's receipt confirmed B's write: the lease now claims a pin "
+		"level the board does not have");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, g_c.ovr.settled,
+		"a settle was counted for a write that never landed");
+
+	/* And the re-armed watchdog still works: B never drains, so it goes. */
+	for (i = 0U; i < 16U; i++) {
+		g_now += HK_TICK_MS;
+		TEST_ASSERT_EQUAL_INT(0, mp_ovr_keepalive(&g_c.ovr, sid, g_now));
+		console_pass();
+	}
+	TEST_ASSERT_NULL_MESSAGE(mp_ovr_lease(&g_c.ovr, panel_obj()),
+				 "the revised lease's settle deadline was "
+				 "disarmed, so it stood for its whole TTL");
+	TEST_ASSERT_EQUAL_UINT32(1U, g_c.ovr.settle_failures);
+}
+
+/**
  * Requests for DIFFERENT objects never displace each other, and the table
  * cannot overflow.
  *
@@ -1384,6 +1518,26 @@ static void test_every_wired_rail_reaches_its_pin_and_comes_back(void)
 		TEST_ASSERT_EQUAL_INT(0, mp_ovr_release(&g_c.ovr, obj, sid,
 							g_now));
 		hk_pass();
+		if (req == (uint8_t)STS_PWRSEQ_REQ_DISP_EN) {
+			/*
+			 * The one row with a minimum off-time. Its release is
+			 * DEFERRED and never refused, so it lands a few passes
+			 * later rather than on this one — the rail still comes
+			 * back, which is what this loop is asserting. The
+			 * deferral itself is
+			 * test_a_release_waits_out_the_display_off_time.
+			 */
+			unsigned int guard = (MP_DISP_MIN_OFF_MS / HK_TICK_MS) + 2U;
+
+			while (sts_pwrseq_reqq_pending(&g_mbox, req)) {
+				TEST_ASSERT_TRUE_MESSAGE(
+					guard-- > 0U,
+					"the deferred display release never "
+					"ran: the wait is not bounded by the "
+					"minimum off-time");
+				hk_pass();
+			}
+		}
 		TEST_ASSERT_TRUE_MESSAGE(
 			g_rail[req].pin,
 			"a released lease left the rail off; a dead-man that "
@@ -1471,6 +1625,119 @@ static void test_a_shed_rail_refuses_an_override_with_the_shed_reason(void)
 	TEST_ASSERT_EQUAL_UINT32(vetoes_before + 1U, g_c.ovr.vetoes);
 	TEST_ASSERT_TRUE_MESSAGE(mp_stream_event_count(&g_c.st) > 0U,
 				 "the refusal withdrew the lease silently");
+}
+
+/**
+ * THE MINIMUM OFF-TIME SURVIVES THE RELEASE PATH — deferred, never refused.
+ *
+ * MP_ILK_DISP_OFF (FMT §5.5) keeps DISP_EN low for MP_DISP_MIN_OFF_MS once it
+ * has gone low, for the RT9742 inrush and the PCA9306/ST7796 supply
+ * sequencing. core evaluates it on a GRANT and deliberately does not on a
+ * RELEASE: lease_drop() calls the apply callback with no value, because a
+ * release that could be refused would let a lapsed lease, a dropped link or the
+ * dead-man strand the box in the maintenance state. The release therefore
+ * arrives at the platform resolving to `auto_on` — true, for a display firmware
+ * wants up — and would re-energise the rail one 250 ms pass after the grant
+ * dropped it. Pulling the USB cable is enough to trigger it.
+ *
+ * The two halves are equally load-bearing and a lesser test would prove only
+ * one. If the release were REFUSED the pin would be safe and the rail would
+ * never come back, which is a worse failure than the one being fixed — so this
+ * asserts that the request is still PENDING while it waits, that nothing was
+ * counted as refused, and that the rail does return once the off-time is up.
+ */
+static void test_a_release_waits_out_the_display_off_time(void)
+{
+	uint32_t sid = session();
+	uint8_t req = req_of("pwr.disp.en");
+	size_t obj = obj_of("pwr.disp.en");
+	uint32_t off_at;
+	unsigned int i;
+
+	/* The rail has been up long enough that the grant is not the thing
+	 * under test — MP_ILK_DISP_OFF only gates a request that raises it. */
+	g_ilk.disp_on = true;
+	g_ilk.disp_changed_ms = g_now - (MP_DISP_MIN_OFF_MS + 1000U);
+
+	override_obj(sid, "pwr.disp.en", 0);
+	TEST_ASSERT_NOT_NULL(mp_ovr_lease(&g_c.ovr, obj));
+
+	hk_pass();
+	TEST_ASSERT_FALSE_MESSAGE(g_rail[req].pin,
+				  "the grant never reached the display rail");
+	off_at = g_now;
+	console_pass();
+
+	/* The technician unplugs. The lease goes at once; the pin cannot. */
+	TEST_ASSERT_EQUAL_INT(0, mp_ovr_release(&g_c.ovr, obj, sid, g_now));
+	TEST_ASSERT_TRUE(sts_pwrseq_reqq_pending(&g_mbox, req));
+
+	/* Every pass inside the off-time leaves the rail down AND leaves the
+	 * request in the mailbox: waiting, not rejected. */
+	for (i = 0U; i < 3U; i++) {
+		hk_pass();
+		TEST_ASSERT_TRUE_MESSAGE((g_now - off_at) < MP_DISP_MIN_OFF_MS,
+					 "the test walked past the off-time it "
+					 "meant to stay inside");
+		TEST_ASSERT_FALSE_MESSAGE(
+			g_rail[req].pin,
+			"the release re-energised DISP_EN inside the minimum "
+			"off-time, so a technician who unplugs the cable "
+			"cycles the display supply");
+		TEST_ASSERT_TRUE_MESSAGE(
+			sts_pwrseq_reqq_pending(&g_mbox, req),
+			"the release was consumed rather than deferred: the "
+			"display rail can never come back");
+		TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+			0U, g_mbox.refused,
+			"a release was REFUSED, which strands the box in the "
+			"maintenance state a lapsed lease must leave");
+	}
+
+	/* And once the off-time is up it is applied, not forgotten. */
+	hk_pass();
+	TEST_ASSERT_TRUE_MESSAGE((g_now - off_at) >= MP_DISP_MIN_OFF_MS,
+				 "the off-time has not actually elapsed");
+	TEST_ASSERT_TRUE_MESSAGE(g_rail[req].pin,
+				 "the deferred release never ran: firmware's "
+				 "own display rail stayed off for good");
+	TEST_ASSERT_FALSE(sts_pwrseq_reqq_pending(&g_mbox, req));
+	TEST_ASSERT_EQUAL_UINT32(0U, g_mbox.refused);
+}
+
+/**
+ * The off stamp is taken on the EDGE, so an off-then-on inside one pass counts.
+ *
+ * This is what a level sampled once per pass cannot do, and it is why the rule
+ * lives beside the pin rather than in mp_glue.c's `disp_changed_ms`. Driving
+ * the rail to the level it already holds must NOT restart the off-time either,
+ * or a sequencer that re-asserts its own level every pass would hold a release
+ * off for ever.
+ */
+static void test_the_display_off_stamp_follows_edges_not_samples(void)
+{
+	rail_t r;
+
+	memset(&r, 0, sizeof(r));
+
+	rail_drive(&r, false);
+	TEST_ASSERT_EQUAL_UINT32(g_now, r.off_ms);
+
+	/* Re-driving the same level is not a new off. */
+	g_now += 400U;
+	rail_drive(&r, false);
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		g_now - 400U, r.off_ms,
+		"re-driving a rail to the level it already holds restarted the "
+		"minimum off-time");
+
+	/* Up and back down inside what would be one console sample: the stamp
+	 * is the SECOND transition, which is the one the rule measures. */
+	rail_drive(&r, true);
+	rail_drive(&r, false);
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		g_now, r.off_ms,
+		"an off-then-on-then-off was collapsed to the first edge");
 }
 
 /**
@@ -2062,8 +2329,9 @@ static void test_the_mailbox_drain_does_not_re_veto_the_antenna_bias(void)
 	 *   shed, has not reached, or has taken down as a fail-action.
 	 */
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
-		1U, count_in(&b, "want = release ? r->auto_on : (value != 0);"),
-		"a rail release no longer restores firmware's own level");
+		1U, count_in(&b, "want = pwrseq_rail_want(r, release, value);"),
+		"the rail executor no longer resolves its request through the "
+		"shared want helper");
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
 		1U, count_in(&b, "if (want && !r->auto_on) {"),
 		"an override may now raise a rail firmware has taken down");
@@ -2079,6 +2347,78 @@ static void test_the_mailbox_drain_does_not_re_veto_the_antenna_bias(void)
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
 		0U, count_in(&d, "sts_mp_veto("),
 		"the mailbox drain raises a firmware veto");
+}
+
+/**
+ * The display's minimum off-time is enforced in the SHIPPED drain, before the
+ * claim, and it defers rather than refuses.
+ *
+ * The behavioural test above runs against this file's mirror, which cannot
+ * prove that pwrseq_exec.c still does any of it. Four separate decisions are
+ * pinned here because each fails differently:
+ *
+ *   the skip is BEFORE the claim   — claiming clears `posted`, so a deferral
+ *                                    taken after the claim would DROP the
+ *                                    release rather than postpone it, and the
+ *                                    display rail would never come back.
+ *   the stamp is on the EDGE       — pwrseq_rail_drive() is the single writer
+ *                                    of these pins and the only place that
+ *                                    sees an off-then-on inside one pass.
+ *   the wait is bounded by the     — a hard-coded number here would drift from
+ *   interlock's own constant         the interlock that shares the rule.
+ *   only a RAISE waits             — dropping the rail is never deferred.
+ */
+static void test_the_display_off_time_is_deferred_in_the_shipped_drain(void)
+{
+	span_t d;
+	span_t f;
+	span_t v;
+
+	load_source("zephyr/platform/pwrseq_exec.c");
+
+	d = fn_body("static void pwrseq_service_mailbox(uint32_t now_ms)\n{");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&d, "pwrseq_mbox_defer(req)"),
+		"the shipped drain no longer waits out the display's minimum "
+		"off-time, so a released lease re-energises DISP_EN one pass "
+		"after it dropped it");
+	TEST_ASSERT_TRUE_MESSAGE(
+		offset_in(&d, "pwrseq_mbox_defer(req)") <
+			offset_in(&d, "sts_pwrseq_reqq_claim("),
+		"the deferral moved below the claim, so a deferred request is "
+		"discarded instead of postponed");
+
+	f = fn_body("static bool pwrseq_mbox_defer(uint8_t req)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&f, "MP_DISP_MIN_OFF_MS"),
+		"the platform's wait no longer uses the interlock's own "
+		"constant, so the two can drift");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&f, "r->off_ms"),
+		"the wait no longer measures from the pin's own edge stamp");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&f, "sts_pwrseq_reqq_peek("),
+		"the deferral claims the request instead of peeking at it");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&f, "pwrseq_rail_want(r, release, value)"),
+		"the deferral no longer asks whether the request RAISES the "
+		"rail, so dropping the display could be deferred too");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&f, "STS_PWRSEQ_REQ_ERR_"),
+		"the deferral produces a refusal: a release that can be "
+		"refused strands the box in the maintenance state");
+
+	/* And the edge stamp itself is where the pins are actually written. */
+	v = fn_body("static void pwrseq_rail_drive(pwrseq_rail_t *r, bool on)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&v, "r->off_ms = k_uptime_get_32();"),
+		"the rail writer no longer stamps the off edge, so the "
+		"minimum off-time measures from nothing");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&v, "if (!r->level_known || (r->last_on != on))"),
+		"the off stamp is taken on the level rather than the edge, so "
+		"a rail firmware re-asserts every pass never finishes its "
+		"off-time");
 }
 
 /**
@@ -2463,6 +2803,7 @@ int main(void)
 	RUN_TEST(test_the_settle_deadline_clears_the_worst_console_latency);
 
 	RUN_TEST(test_two_requests_for_one_object_coalesce_to_the_last);
+	RUN_TEST(test_a_revision_does_not_inherit_the_previous_receipt);
 	RUN_TEST(test_every_request_id_has_its_own_slot);
 	RUN_TEST(test_the_mailbox_refuses_a_non_request_id);
 	RUN_TEST(test_a_drain_cannot_settle_a_request_into_silence);
@@ -2479,6 +2820,8 @@ int main(void)
 	RUN_TEST(test_every_wired_rail_reaches_its_pin_and_comes_back);
 	RUN_TEST(test_restoring_the_gps_rail_notifies_the_receiver);
 	RUN_TEST(test_a_shed_rail_refuses_an_override_with_the_shed_reason);
+	RUN_TEST(test_a_release_waits_out_the_display_off_time);
+	RUN_TEST(test_the_display_off_stamp_follows_edges_not_samples);
 	RUN_TEST(test_the_deadman_restores_a_rail_through_the_mailbox);
 	RUN_TEST(test_a_release_after_a_latched_short_leaves_the_bias_off);
 	RUN_TEST(test_the_panel_dimmer_is_now_pending_and_refuses_a_shed_panel);
@@ -2491,6 +2834,7 @@ int main(void)
 	RUN_TEST(test_every_mailbox_row_is_wired_at_both_ends);
 	RUN_TEST(test_the_mailbox_drain_does_not_re_veto_the_antenna_bias);
 	RUN_TEST(test_the_setpoint_row_refuses_stage_eight_and_a_gated_fe);
+	RUN_TEST(test_the_display_off_time_is_deferred_in_the_shipped_drain);
 	RUN_TEST(test_the_rail_readbacks_and_the_disp_interlock_read_the_pin);
 	RUN_TEST(test_the_rb_verify_expectation_is_the_programmed_rail);
 	RUN_TEST(test_the_console_drains_outcomes_before_the_engine_tick);

@@ -470,6 +470,19 @@ typedef struct {
 	size_t n_sigs;
 	uint8_t shed_at; /* pwrseq_shed_level_t; PWRSEQ_SHED_NONE = never shed */
 	bool auto_on;
+	/*
+	 * The pin's own history, kept HERE because this file is its single
+	 * writer and therefore the only place that sees every transition. A
+	 * level sampled on a pass cannot substitute: two transitions inside one
+	 * 250 ms pass are invisible to a sampler and the second one is the one
+	 * a minimum-off-time rule has to measure from.
+	 *
+	 * `off_ms` is the uptime at the last high-to-low transition and is only
+	 * meaningful while `level_known && !last_on`.
+	 */
+	bool level_known;
+	bool last_on;
+	uint32_t off_ms;
 } pwrseq_rail_t;
 
 static pwrseq_rail_t pwrseq_rails[STS_PWRSEQ_REQ_COUNT] = {
@@ -515,9 +528,25 @@ static pwrseq_rail_t pwrseq_rails[STS_PWRSEQ_REQ_COUNT] = {
 					 .shed_at = (uint8_t)PWRSEQ_SHED_NONE },
 };
 
-/** Drive one rail and keep its expected-off mask in step. */
+/** Drive one rail, keep its expected-off mask in step, and stamp the edge. */
 static void pwrseq_rail_drive(pwrseq_rail_t *r, bool on)
 {
+	/*
+	 * Every writer of these pins reaches them through here — the stage
+	 * machine's own actions in pwrseq_exec_action() and the mailbox's
+	 * executor alike — so this is the one place that can record when a rail
+	 * went off. Recorded on the EDGE, not on the level: re-driving a rail to
+	 * the level it already holds is not a new off and must not restart a
+	 * minimum-off-time.
+	 */
+	if (!r->level_known || (r->last_on != on)) {
+		if (!on) {
+			r->off_ms = k_uptime_get_32();
+		}
+		r->level_known = true;
+		r->last_on = on;
+	}
+
 	/* Clearing the mask before energising and setting it after de-energising
 	 * is the order pwrseq_exec_action() uses, and it is the one that leaves
 	 * no window in which a real failure reads as expected. */
@@ -1291,6 +1320,91 @@ static bool pwrseq_mbox_apply_duty(bool release, int32_t value, uint8_t *out_err
 }
 
 /**
+ * The level a mailbox request asks a rail to hold.
+ *
+ * One expression, shared by the executor that drives the pin and the deferral
+ * that decides whether this pass may drive it. Two copies would be two chances
+ * to answer "is this request trying to raise the rail?" differently.
+ */
+static bool pwrseq_rail_want(const pwrseq_rail_t *r, bool release, int32_t value)
+{
+	return release ? r->auto_on : (value != 0);
+}
+
+/**
+ * Must this pass leave @p req in the mailbox and come back to it?
+ *
+ * ---------------------------------------------------------------------------
+ * MP_ILK_DISP_OFF, enforced where the pin is
+ * ---------------------------------------------------------------------------
+ * FMT §5.5's minimum off-time exists for the RT9742 inrush and the
+ * PCA9306/ST7796 supply sequencing: DISP_EN must stay low for
+ * MP_DISP_MIN_OFF_MS once it has gone low. core's interlock refuses a GRANT
+ * that would break it, and that is the whole story for grants.
+ *
+ * It is not the whole story for RELEASES, and a release must never become
+ * refusable — a lease that lapses, a link that drops or a dead-man that fires
+ * has to be able to hand the rail back unconditionally, or the box would be
+ * left in the maintenance state that was supposed to be temporary. So
+ * lease_drop() calls the apply callback with no value and core does not
+ * evaluate interlocks on that path at all. The release then resolves HERE to
+ * `auto_on`, which for a display the sequencer wants up is true — re-energising
+ * DISP_EN as little as one 250 ms pass after the grant drove it low, against a
+ * 1000 ms rule. Unplugging the maintenance cable is enough to do it.
+ *
+ * The answer is to DEFER, not to refuse: the request stays in the mailbox and
+ * a later pass executes it, so the release still happens and the rail still
+ * comes back — just not before the pin has been low long enough. The skip is
+ * BEFORE the claim for the same reason sts_pwrseq_req_is_foreign()'s is:
+ * claiming clears `posted`, and a claim taken back would either be counted as a
+ * second post or leave a window with no request in the slot at all.
+ *
+ * The timestamp is the rail's own `off_ms`, stamped on the EDGE by
+ * pwrseq_rail_drive(). mp_glue.c's `disp_changed_ms` cannot serve: it is a
+ * level sampled once per console pass, so an off-then-on inside one pass is
+ * invisible to it and the off it is supposed to be measuring never starts.
+ * This file is the pin's single writer and sees every transition.
+ *
+ * Bounded by construction: the wait can never exceed MP_DISP_MIN_OFF_MS, which
+ * is well inside MP_APPLY_SETTLE_MS, so a deferred GRANT is still confirmed
+ * before core's settle watchdog would drop its lease.
+ */
+static bool pwrseq_mbox_defer(uint8_t req)
+{
+	const pwrseq_rail_t *r = &pwrseq_rails[req];
+	k_spinlock_key_t key;
+	bool release = false;
+	int32_t value = 0;
+	bool pending;
+
+	if (req != (uint8_t)STS_PWRSEQ_REQ_DISP_EN) {
+		return false;
+	}
+	/* Not off, or never driven: there is no off-time to wait out. A rail
+	 * that has been off since boot reads `level_known` false and is not
+	 * deferred, which is correct — it has been off far longer than the
+	 * rule asks. */
+	if (!r->level_known || r->last_on) {
+		return false;
+	}
+	/* k_uptime_get_32() and not the pass's `now_ms`: `off_ms` may have been
+	 * stamped later in this same pass, and an unsigned difference computed
+	 * against a stale `now` would underflow to a huge number and read as
+	 * "long enough" on exactly the edge that just happened. */
+	if ((k_uptime_get_32() - r->off_ms) >= MP_DISP_MIN_OFF_MS) {
+		return false;
+	}
+
+	key = k_spin_lock(&pwrseq_mbox_lock);
+	pending = sts_pwrseq_reqq_peek(&pwrseq_mbox, req, &release, &value);
+	k_spin_unlock(&pwrseq_mbox_lock, key);
+
+	/* Only a request that RAISES the rail waits. Dropping it, or holding it
+	 * down, is always allowed. */
+	return pending && pwrseq_rail_want(r, release, value);
+}
+
+/**
  * Execute one claimed GPIO-rail request. Housekeeping-thread context only.
  *
  * The whole policy is three lines, and every one of them is stated in the
@@ -1313,7 +1427,7 @@ static bool pwrseq_mbox_apply_rail(uint8_t req, bool release, int32_t value,
 		return false;
 	}
 
-	want = release ? r->auto_on : (value != 0);
+	want = pwrseq_rail_want(r, release, value);
 
 	if (want && !r->auto_on) {
 		/*
@@ -1613,6 +1727,14 @@ static void pwrseq_service_mailbox(uint32_t now_ms)
 		 * sts_pwrseq_req_is_foreign() is the single fact both sides read.
 		 */
 		if (sts_pwrseq_req_is_foreign(req)) {
+			continue;
+		}
+
+		/*
+		 * The display's minimum off-time, and the second reason to skip
+		 * before the claim. See pwrseq_mbox_defer().
+		 */
+		if (pwrseq_mbox_defer(req)) {
 			continue;
 		}
 

@@ -97,6 +97,17 @@
  * the same object — so reporting it would withdraw the SUCCESSOR's lease for
  * its predecessor's reason. The reverse order (A applied, B refused) keeps the
  * refusal, which is the case that matters.
+ *
+ * A new POST over an unread outcome is the same argument one step further and
+ * is the one case where the halves are not independent. The console posts only
+ * because it has just granted a lease, and that grant replaced the previous
+ * lease for the object and re-armed its settle deadline; the unread outcome
+ * describes the lease that is gone. Reporting it would either confirm the new
+ * lease's write on the old one's evidence — clearing a settle deadline whose
+ * write has not reached the pin and disarming the watchdog that would have
+ * caught it — or withdraw the new lease for the old one's refusal. So
+ * sts_pwrseq_reqq_post() discards it and counts it in `discarded`; a refusal
+ * whose cause still holds is re-raised on the next drain anyway.
  */
 
 #ifndef STS1000_ZEPHYR_PLATFORM_STS_PWRSEQ_REQ_H_
@@ -117,10 +128,12 @@ extern "C" {
 /**
  * One object's mailbox slot.
  *
- * `posted` is the request half and `outcome` the reply half; they are
- * independent, so a slot may hold an unread outcome and a freshly posted
- * request at the same time — which is exactly what happens when a technician
- * revises an override faster than the console drains.
+ * `posted` is the request half and `outcome` the reply half. They are written
+ * by different threads on different passes, so a slot may hold both at once —
+ * the drain settles an outcome the console has not read yet. The one order
+ * that is NOT independent is a new post over an unread outcome: that outcome
+ * belongs to a lease the post has already replaced, so the post discards it
+ * (counted in `discarded`). See sts_pwrseq_reqq_post().
  */
 typedef struct {
 	/* --- request half: written by the producer, cleared by the drain --- */
@@ -153,6 +166,11 @@ typedef struct {
 	uint32_t applied;
 	/** Requests the drain refused; saturating. */
 	uint32_t refused;
+	/**
+	 * Unread outcomes a later post for the same object threw away;
+	 * saturating. Never silent — see sts_pwrseq_reqq_post().
+	 */
+	uint32_t discarded;
 } sts_pwrseq_reqq_t;
 
 /** True when @p req names a usable slot. Slot 0 is never one. */
@@ -205,8 +223,9 @@ static inline void sts_pwrseq_req_bump(uint32_t *c)
  *                value is then ignored. This is obj_apply()'s `value == NULL`.
  *
  * @retval 0        Posted. An undrained request for the same object was
- *                  replaced and counted in `coalesced` — see the collision rule
- *                  in the file header.
+ *                  replaced and counted in `coalesced`; an UNREAD OUTCOME for
+ *                  it was discarded and counted in `discarded` — see the
+ *                  collision rule in the file header.
  * @retval -EINVAL  @p q is NULL or @p req is not a request id.
  */
 static inline int sts_pwrseq_reqq_post(sts_pwrseq_reqq_t *q, uint8_t req,
@@ -222,6 +241,33 @@ static inline int sts_pwrseq_reqq_post(sts_pwrseq_reqq_t *q, uint8_t req,
 	s = &q->slot[req];
 	if (s->posted) {
 		sts_pwrseq_req_bump(&q->coalesced);
+	}
+	if (s->outcome != (uint8_t)STS_PWRSEQ_REQ_OUT_NONE) {
+		/*
+		 * The unread outcome describes a lease this request has just
+		 * replaced: mp_ovr_grant() swaps the lease on a second grant
+		 * for the same object and re-arms its settle deadline. It is
+		 * the same argument sts_pwrseq_reqq_take() makes about
+		 * reporting an outcome twice — it "would withdraw a lease the
+		 * first report already withdrew, and then withdraw its
+		 * replacement". An APPLIED taken after this post would confirm
+		 * the SUCCESSOR's write on the predecessor's evidence, clearing
+		 * a settle deadline whose write is not at the pin yet and
+		 * disarming the only watchdog that would have dropped it.
+		 *
+		 * Discarding is safe in the other direction too: a REFUSED
+		 * describes a condition of the object, not of the value, so if
+		 * it still holds the successor will be refused as well on the
+		 * very next drain.
+		 *
+		 * Counted, not dropped — a request that vanishes silently is
+		 * the defect this whole path exists to close.
+		 */
+		s->outcome = (uint8_t)STS_PWRSEQ_REQ_OUT_NONE;
+		s->err = (uint8_t)STS_PWRSEQ_REQ_ERR_NONE;
+		s->applied = 0;
+		s->settled_ms = 0U;
+		sts_pwrseq_req_bump(&q->discarded);
 	}
 	s->posted = true;
 	s->release = release;
@@ -239,6 +285,43 @@ static inline bool sts_pwrseq_reqq_pending(const sts_pwrseq_reqq_t *q,
 		return false;
 	}
 	return q->slot[req].posted;
+}
+
+/**
+ * Read @p req's pending request WITHOUT claiming it. Consumer side;
+ * **spinlock held.**
+ *
+ * Peek, not take — the deliberate opposite of sts_pwrseq_reqq_claim(), and it
+ * exists for exactly one shape: a drain that must decide whether this pass is
+ * allowed to execute the request before it takes ownership of it. Claiming
+ * first and putting the request back is not the same thing; it would either
+ * count a second post or open a window in which the slot holds no request at
+ * all, and pwrseq_service_mailbox() already skips foreign rows BEFORE the
+ * claim for the same reason.
+ *
+ * @retval true   @p out_release / @p out_value written; the request is still
+ *                pending and a later claim will return the same values unless
+ *                the producer revises it.
+ * @retval false  Nothing pending, or a bad argument.
+ */
+static inline bool sts_pwrseq_reqq_peek(const sts_pwrseq_reqq_t *q, uint8_t req,
+					bool *out_release, int32_t *out_value)
+{
+	const sts_pwrseq_req_slot_t *s;
+
+	if ((q == NULL) || !sts_pwrseq_req_id_ok(req) || (out_release == NULL) ||
+	    (out_value == NULL)) {
+		return false;
+	}
+
+	s = &q->slot[req];
+	if (!s->posted) {
+		return false;
+	}
+
+	*out_release = s->release;
+	*out_value = s->value;
+	return true;
 }
 
 /**
