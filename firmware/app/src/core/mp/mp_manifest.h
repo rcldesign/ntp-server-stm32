@@ -127,9 +127,41 @@ const char *mp_guard_name(uint8_t g);
  * what MP_ILK_WDT_LIVE answers for `sys.wdt.en`.
  */
 #define MP_ILK_WDT_OFF (1U << 11) /**< WDI pulse needs WDT_EN de-asserted */
+/*
+ * The two Vc objects are two VIEWS OF ONE ACTUATOR, and this is the bit that
+ * stops them being driven as two.
+ *
+ * `ref.ocxo.vc_mv` and `ref.ocxo.dac_code` both end at DAC1_OUT1. Leased at the
+ * same time with different values there is no correct answer — whichever
+ * settled last would be the pin's value and the other lease would go on
+ * reporting a Vc the oven has never seen. Silently resolving that by
+ * last-writer-wins is what a mailbox does WITHIN one object; ACROSS two objects
+ * it is a control that lies. So a grant of either is refused while the other is
+ * leased, and a technician picks the view they want to work in.
+ *
+ * Judged on the leases themselves, which is the fact in question and not a
+ * proxy for it: mp_ovr_lease() is the register of what is held.
+ */
+#define MP_ILK_DAC_SOLE (1U << 12) /**< the other Vc view must not be leased */
+/*
+ * The park may not be released out from under a Vc override.
+ *
+ * MP_ILK_DAC_PARK gates the two Vc objects on the loop being parked, so
+ * releasing `ref.disc.park` while one of them is held would resume steering
+ * into a live override and leave the loop and the console fighting for PA4.
+ * The refusal has a `req` term — only `req == 0` is refused, because taking or
+ * re-taking the park is never the dangerous direction.
+ *
+ * It covers the DELIBERATE release only. A lease that lapses reaches
+ * obj_apply() with a NULL value and no interlock is evaluated on that path; the
+ * involuntary case is closed in the discipline thread's drain, which drops the
+ * override WITH the park and withdraws its lease rather than refusing a release
+ * nothing could then retry.
+ */
+#define MP_ILK_DAC_IDLE (1U << 13) /**< no Vc override may be outstanding */
 
 /** Number of defined interlocks. */
-#define MP_ILK_COUNT 12U
+#define MP_ILK_COUNT 14U
 
 /** Every defined interlock bit. */
 #define MP_ILK_ALL ((1U << MP_ILK_COUNT) - 1U)

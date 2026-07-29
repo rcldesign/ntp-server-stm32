@@ -246,6 +246,17 @@ typedef struct {
 	bool disc_parked; /**< the discipline loop is parked (DAC free) */
 	bool extref_ok;   /**< EXTREF_MON in band */
 	bool rb_lock;     /**< RB_LOCK asserted */
+	/*
+	 * The two views of DAC1_OUT1, each true while THAT object holds a lease.
+	 * MP_ILK_DAC_SOLE reads the opposite one of the pair and MP_ILK_DAC_IDLE
+	 * reads both. The unknown reading is `false` for the same reason
+	 * `wdt_off`'s is not — here the glue is the register: these come from
+	 * mp_ovr_lease() in the very context that holds them, so there is no
+	 * observability gap to fail safe from, and a false that was a failure to
+	 * look would refuse nothing that matters (the pin has no override either).
+	 */
+	bool dac_mv_held;   /**< `ref.ocxo.vc_mv` is leased */
+	bool dac_code_held; /**< `ref.ocxo.dac_code` is leased */
 } mp_ilk_state_t;
 
 /** Outcome of an interlock evaluation. */

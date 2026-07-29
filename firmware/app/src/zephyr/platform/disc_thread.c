@@ -106,6 +106,21 @@ static struct {
 	uint16_t last_dac_code;
 	bool dac_written;
 
+	/*
+	 * The code FIRMWARE last wanted on PA4, kept apart from the code the pin
+	 * actually holds. While a maintenance override is in force the two differ,
+	 * and this is what the release re-drives — "firmware's automatic level"
+	 * for a parked loop being the frozen code, not zero and not the centre.
+	 */
+	uint16_t auto_code;
+	bool auto_valid;
+
+	/* disc_cfg_t's actuator transfer, cached at init so the mailbox drain
+	 * and the published read-back convert without reaching into `disc`
+	 * while a tick is running. Write-once, before the thread starts. */
+	uint16_t dac_vref_mv;
+	uint16_t dac_max_code;
+
 	int liveness_id;
 	bool started;
 
@@ -115,6 +130,57 @@ static struct {
 
 static atomic_t disc_park_req = ATOMIC_INIT(0);
 static atomic_t disc_unpark_req = ATOMIC_INIT(0);
+
+/*
+ * ---------------------------------------------------------------------------
+ * The two park latches, and why there are two
+ * ---------------------------------------------------------------------------
+ * Both are owned by this thread; nothing else writes them.
+ *
+ * `disc_pfi_parked` tracks the LATCHED power-fail park above: set when the PFI
+ * request lands, cleared when sts_pfi_service() reports the rail back.
+ *
+ * `disc_maint_parked` tracks the operator's `ref.disc.park` lease. It is a latch
+ * too — deliberately, and not the transient bracket sts_disc_handoff_park()
+ * opens below. The bracket exists to span ONE mux flip and closes itself within
+ * the same refsel action list; a maintenance park has to outlive the RPC that
+ * asked for it and stay closed across every DAC write the technician then makes,
+ * because MP_ILK_DAC_PARK is re-evaluated on each of them.
+ *
+ * They are separate flags rather than one counter because the two directions
+ * must not defeat each other. A maintenance release while PFI still holds the
+ * rail down would resume steering into a browning-out board; a PFI recovery
+ * while a technician holds a DAC override would resume the loop underneath that
+ * override and fight it for PA4. disc_resume_if_idle() therefore resumes only
+ * when BOTH are clear, which is the one rule both directions need.
+ */
+static bool disc_pfi_parked;
+static bool disc_maint_parked;
+
+/*
+ * The maintenance override of DAC1_OUT1, owned by this thread.
+ *
+ * `dac_ovr_row` is the mailbox row holding it (STS_PWRSEQ_REQ_OCXO_VC_MV or
+ * _OCXO_DAC_CODE). Recording WHICH row owns the pin is what lets the two views
+ * of one actuator have a row each without racing: a release arriving on the row
+ * that does not own the override re-drives nothing, so the order the two rows
+ * drain in cannot decide the value left on the pin.
+ */
+static bool dac_ovr_active;
+static uint8_t dac_ovr_row;
+
+/*
+ * What PA4 is actually holding, published for the console's read-back and for
+ * MP_ILK_DAC_SOLE / MP_ILK_DAC_IDLE.
+ *
+ * One aligned word, written only by this thread: code in the low 16 bits,
+ * "an override is in force" in bit 16. The same argument ref_override_req below
+ * makes — a single word IS the whole synchronisation requirement, and a mutex
+ * shared with a priority-12 reader would put a management plane on the timing
+ * path (ARCHITECTURE.md §10 invariant 10).
+ */
+#define DISC_DACPUB_OVR BIT(16)
+static atomic_t disc_dac_pub = ATOMIC_INIT(0);
 
 /*
  * The operator's request to clear core/refsel's sticky flap latch.
@@ -203,6 +269,9 @@ static void disc_write_dac(uint16_t code)
 
 	dt_state.last_dac_code = code;
 	dt_state.dac_written = true;
+	atomic_set(&disc_dac_pub,
+		   (atomic_val_t)code |
+			   (dac_ovr_active ? (atomic_val_t)DISC_DACPUB_OVR : 0));
 
 	/*
 	 * Record the Vc for the PFI fast-save (storage/sts_store.h). Only the
@@ -213,12 +282,80 @@ static void disc_write_dac(uint16_t code)
 	sts_store_note_dac_code(code);
 }
 
+/**
+ * Drive the code FIRMWARE wants, and remember it.
+ *
+ * Every automatic writer — the loop, both park paths, the initial centre —
+ * goes through here, and the maintenance override in disc_service_mailbox()
+ * is the only caller of disc_write_dac() directly. That split is what makes
+ * the override stick: without it the loop re-writes disc_out_t::dac_code every
+ * second and undoes a technician's Vc within one PPS period, because a parked
+ * loop keeps emitting the code it froze at.
+ *
+ * The remembered value is also the release target, so "return to
+ * firmware-automatic control" has a definite answer at the instant the lease
+ * lapses rather than one that arrives on the next tick.
+ */
+static void disc_apply_auto_dac(uint16_t code)
+{
+	dt_state.auto_code = code;
+	dt_state.auto_valid = true;
+
+	if (dac_ovr_active) {
+		return;
+	}
+	disc_write_dac(code);
+}
+
 void sts_discipline_park(void)
 {
 	/* ISR context (PFI). Only a flag; the thread does the work, and the
 	 * DAC keeps holding its last code in the meantime, which is exactly
 	 * the parked behaviour. */
 	atomic_set(&disc_park_req, 1);
+}
+
+bool sts_disc_dac_state(uint16_t *out_code, int32_t *out_mv, bool *out_ovr)
+{
+	atomic_val_t v = atomic_get(&disc_dac_pub);
+	uint16_t code = (uint16_t)(v & 0xFFFF);
+
+	if (!dt_state.started) {
+		return false;
+	}
+	if (out_code != NULL) {
+		*out_code = code;
+	}
+	if (out_mv != NULL) {
+		*out_mv = disc_code_to_mv(dt_state.dac_vref_mv,
+					  dt_state.dac_max_code, code);
+	}
+	if (out_ovr != NULL) {
+		*out_ovr = ((v & DISC_DACPUB_OVR) != 0);
+	}
+	return true;
+}
+
+/**
+ * Resume steering, but only if NOTHING is still holding the loop down.
+ *
+ * The single gate every unpark path goes through. Each holder clears its own
+ * latch and then asks; whoever clears the last one is the one that actually
+ * resumes. Without it the three parks are three independent claims on one
+ * state variable and the last release wins regardless of who still needs it —
+ * which is how a PFI recovery would resume the loop under a technician's DAC
+ * override, and how releasing that override's park would resume it into a
+ * browning-out rail.
+ *
+ * @retval true   Nothing holds it and disc_unpark() accepted (which is also
+ *                its answer when the loop was not parked at all).
+ */
+static bool disc_resume_if_idle(void)
+{
+	if (disc_pfi_parked || disc_maint_parked) {
+		return false;
+	}
+	return disc_unpark(&disc) == 0;
 }
 
 /*
@@ -236,13 +373,19 @@ void sts_disc_handoff_park(void)
 	uint16_t code = 0;
 
 	if (disc_park(&disc, &code) == 0) {
-		disc_write_dac(code);
+		disc_apply_auto_dac(code);
 	}
 }
 
 void sts_disc_handoff_unpark(void)
 {
-	(void)disc_unpark(&disc);
+	/*
+	 * The bracket's own close. It goes through the same gate as every other
+	 * resume: a mux flip that completed while the PFI latch or an operator's
+	 * maintenance park was standing must not resume steering just because
+	 * refsel is finished with the pin.
+	 */
+	disc_resume_if_idle();
 }
 
 void sts_discipline_unpark_request(void)
@@ -563,11 +706,12 @@ static void disc_handle_park(void)
 	uint16_t code = 0;
 
 	if (atomic_set(&disc_park_req, 0) != 0) {
+		disc_pfi_parked = true;
 		if (disc_park(&disc, &code) == 0) {
 			/* The DAC already holds this value — disc_park() freezes
 			 * rather than moves — so the write is a confirmation, not a
 			 * change, and it is skipped by disc_write_dac()'s dedup. */
-			disc_write_dac(code);
+			disc_apply_auto_dac(code);
 		}
 
 		sts_log(LOGR_SUB_TIMING, LOGR_CRIT,
@@ -583,13 +727,228 @@ static void disc_handle_park(void)
 	 * the accumulator no longer describes the timebase.
 	 */
 	if (atomic_set(&disc_unpark_req, 0) != 0) {
-		if (disc_unpark(&disc) == 0) {
+		disc_pfi_parked = false;
+		if (disc_maint_parked) {
+			/* The operator's park outlives the power-fail one. Said
+			 * out loud, because "PFI cleared" with the loop still
+			 * parked is otherwise an unexplained stratum. */
+			sts_log(LOGR_SUB_TIMING, LOGR_NOTICE,
+				"PFI cleared: maintenance park still held, Vc "
+				"frozen");
+		} else if (disc_unpark(&disc) == 0) {
 			dt_state.have_expected = false;
 			sts_log(LOGR_SUB_TIMING, LOGR_NOTICE,
 				"PFI cleared: discipline resumed (recovering, "
 				"retained error %.0f ns)",
 				(double)disc_retained_error_ns(&disc));
 		}
+	}
+}
+
+/* ---- maintenance mailbox (sts_pwrseq_req.h, foreign rows) --------------- */
+
+/**
+ * Drop any maintenance override and put PA4 back where firmware wants it.
+ *
+ * @return the row that had been holding it, or STS_PWRSEQ_REQ_NONE.
+ */
+static uint8_t disc_drop_dac_override(void)
+{
+	uint8_t row = dac_ovr_row;
+
+	if (!dac_ovr_active) {
+		return (uint8_t)STS_PWRSEQ_REQ_NONE;
+	}
+
+	dac_ovr_active = false;
+	dac_ovr_row = (uint8_t)STS_PWRSEQ_REQ_NONE;
+	if (dt_state.auto_valid) {
+		disc_write_dac(dt_state.auto_code);
+	} else {
+		/* Nothing automatic has ever been driven, so there is no level
+		 * to go back to; re-publish what the pin holds so the override
+		 * flag stops claiming a lease that is gone. */
+		atomic_set(&disc_dac_pub,
+			   (atomic_val_t)dt_state.last_dac_code);
+	}
+	return row;
+}
+
+/** Settle @p row and stamp it with the code PA4 now holds. */
+static void disc_settle_dac(uint8_t row, bool applied, uint8_t err, bool as_mv)
+{
+	int32_t v = as_mv ? disc_code_to_mv(dt_state.dac_vref_mv,
+					    dt_state.dac_max_code,
+					    dt_state.last_dac_code)
+			  : (int32_t)dt_state.last_dac_code;
+
+	(void)sts_pwrseq_req_settle(row, applied, err, v,
+				    (uint32_t)k_uptime_get_32());
+}
+
+/** Execute one claimed Vc row. @p as_mv selects which of the two views it is. */
+static void disc_service_dac_row(uint8_t row, bool release, int32_t value,
+				 bool as_mv)
+{
+	uint16_t code;
+
+	if (release) {
+		/*
+		 * Only the OWNING row puts the pin back. The two views share one
+		 * actuator, and MP_ILK_DAC_SOLE means only one of them can hold
+		 * a lease — but a lapsed lease on the other view still arrives
+		 * here, and letting it re-drive the automatic level would undo
+		 * an override it never took. Never refused: a release that could
+		 * fail is a dead-man that cannot fire.
+		 */
+		if (dac_ovr_active && (dac_ovr_row == row)) {
+			(void)disc_drop_dac_override();
+		}
+		disc_settle_dac(row, true, (uint8_t)STS_PWRSEQ_REQ_ERR_NONE,
+				as_mv);
+		return;
+	}
+
+	/*
+	 * The park is re-checked HERE, not only at the interlock. MP_ILK_DAC_PARK
+	 * is evaluated on the console thread at grant time; between that and this
+	 * drain the loop can have resumed — a refsel handoff closing its bracket,
+	 * or a PFI recovery — and a Vc write into a running loop is a control that
+	 * reports success and is overwritten within the second.
+	 */
+	if (disc_state(&disc) != DISC_STATE_PARKED) {
+		disc_settle_dac(row, false, (uint8_t)STS_PWRSEQ_REQ_ERR_STAGE,
+				as_mv);
+		return;
+	}
+
+	if (as_mv) {
+		if (disc_mv_to_code(dt_state.dac_vref_mv, dt_state.dac_max_code,
+				    value, &code) != 0) {
+			disc_settle_dac(row, false,
+					(uint8_t)STS_PWRSEQ_REQ_ERR_HW, as_mv);
+			return;
+		}
+	} else {
+		if (value < 0) {
+			value = 0;
+		}
+		if (value > (int32_t)dt_state.dac_max_code) {
+			value = (int32_t)dt_state.dac_max_code;
+		}
+		code = (uint16_t)value;
+	}
+
+	dac_ovr_active = true;
+	dac_ovr_row = row;
+	disc_write_dac(code);
+	disc_settle_dac(row, true, (uint8_t)STS_PWRSEQ_REQ_ERR_NONE, as_mv);
+}
+
+/** Execute one claimed `ref.disc.park` request. */
+static void disc_service_park_row(bool release, int32_t value)
+{
+	bool want = !release && (value != 0);
+	uint16_t code = 0;
+	uint8_t dropped;
+
+	if (want) {
+		disc_maint_parked = true;
+		if (disc_park(&disc, &code) == 0) {
+			disc_apply_auto_dac(code);
+		}
+		sts_log(LOGR_SUB_TIMING, LOGR_NOTICE,
+			"maintenance: discipline parked, Vc frozen at %u",
+			(unsigned int)dt_state.last_dac_code);
+		(void)sts_pwrseq_req_settle(
+			(uint8_t)STS_PWRSEQ_REQ_DISC_PARK, true,
+			(uint8_t)STS_PWRSEQ_REQ_ERR_NONE, 1,
+			(uint32_t)k_uptime_get_32());
+		return;
+	}
+
+	/*
+	 * The release direction, and the ordering hazard it closes.
+	 *
+	 * MP_ILK_DAC_IDLE refuses a DELIBERATE `ref.disc.park = 0` while either
+	 * Vc object is leased, so a technician who asks for this in the wrong
+	 * order is told so. It cannot cover the INVOLUNTARY release: a lease that
+	 * lapses reaches obj_apply() with a NULL value and no interlock is
+	 * evaluated on that path. Refusing here instead would be worse than the
+	 * hazard — the park lease is already gone on the console side, so a
+	 * refusal would strand the loop parked with nothing left able to release
+	 * it.
+	 *
+	 * So the override is dropped WITH the park, and the row that held it is
+	 * settled REFUSED so mp_veto() withdraws that lease with a stated reason.
+	 * The technician loses the override they were told they could not keep,
+	 * and hears why; what they never get is an unparked loop and a live
+	 * override both driving PA4.
+	 */
+	dropped = disc_drop_dac_override();
+	if (dropped != (uint8_t)STS_PWRSEQ_REQ_NONE) {
+		disc_settle_dac(dropped, false,
+				(uint8_t)STS_PWRSEQ_REQ_ERR_STAGE,
+				dropped == (uint8_t)STS_PWRSEQ_REQ_OCXO_VC_MV);
+		sts_log(LOGR_SUB_TIMING, LOGR_WARN,
+			"maintenance: Vc override withdrawn with the park");
+	}
+
+	disc_maint_parked = false;
+	if (disc_resume_if_idle()) {
+		dt_state.have_expected = false;
+	}
+	sts_log(LOGR_SUB_TIMING, LOGR_NOTICE,
+		"maintenance: park released (%s)",
+		disc_pfi_parked ? "PFI still holds it" : "discipline resumed");
+	(void)sts_pwrseq_req_settle((uint8_t)STS_PWRSEQ_REQ_DISC_PARK, true,
+				    (uint8_t)STS_PWRSEQ_REQ_ERR_NONE,
+				    disc_pfi_parked ? 1 : 0,
+				    (uint32_t)k_uptime_get_32());
+}
+
+/**
+ * Drain this thread's foreign mailbox rows. **discipline-thread context only.**
+ *
+ * Claim, execute, settle — pwrseq_service_mailbox()'s discipline, reaching the
+ * queue through sts_pwrseq_req_claim()/_settle(), which refuse every row this
+ * area does not own.
+ *
+ * THE ORDER IS DELIBERATE: both Vc rows before the park row.
+ *
+ * A lease lapse can drop a Vc lease and the park lease in the same window. Taken
+ * park-first, the park release would find the override still standing, withdraw
+ * it as above, and report a veto for a lease that was expiring on its own — the
+ * technician would be told their override was revoked when in fact it simply ran
+ * out. Taken Vc-first the override is already gone by the time the park release
+ * runs, there is nothing to withdraw, and the veto path stays for the case it
+ * describes. The grant direction needs no such care: MP_ILK_DAC_PARK will not
+ * pass a Vc grant until the park has landed AND been published, so the two can
+ * never be granted inside one window.
+ */
+static void disc_service_mailbox(void)
+{
+	static const struct {
+		uint8_t row;
+		bool as_mv;
+	} vc_rows[] = {
+		{ (uint8_t)STS_PWRSEQ_REQ_OCXO_VC_MV, true },
+		{ (uint8_t)STS_PWRSEQ_REQ_OCXO_DAC_CODE, false },
+	};
+	int32_t value = 0;
+	bool release = false;
+	size_t i;
+
+	for (i = 0U; i < ARRAY_SIZE(vc_rows); i++) {
+		if (sts_pwrseq_req_claim(vc_rows[i].row, &release, &value)) {
+			disc_service_dac_row(vc_rows[i].row, release, value,
+					     vc_rows[i].as_mv);
+		}
+	}
+
+	if (sts_pwrseq_req_claim((uint8_t)STS_PWRSEQ_REQ_DISC_PARK, &release,
+				 &value)) {
+		disc_service_park_row(release, value);
 	}
 }
 
@@ -707,6 +1066,13 @@ static void disc_entry(void *p1, void *p2, void *p3)
 		mono_ms = sts_mono_ms();
 
 		disc_handle_park();
+		/*
+		 * Before the tick, so a park requested from the console is in
+		 * force for the pass that follows it rather than one later —
+		 * and so a Vc override lands on a loop this pass has not yet
+		 * had the chance to resume.
+		 */
+		disc_service_mailbox();
 		disc_handle_ref_requests();
 
 		/*
@@ -747,7 +1113,13 @@ static void disc_entry(void *p1, void *p2, void *p3)
 					       &out);
 		}
 
-		disc_write_dac(out.dac_code);
+		/*
+		 * The automatic writer. While a maintenance override is held
+		 * this records the level to go back to and leaves PA4 alone —
+		 * a parked loop re-emits its frozen code every second, which
+		 * would otherwise undo a technician's Vc within one PPS period.
+		 */
+		disc_apply_auto_dac(out.dac_code);
 		/* Anchored on the capture instant when there was one, so the grid
 		 * follows the reference rather than this thread's wake-up. */
 		disc_advance_expected(have_pps ? cap.mono_ms : mono_ms);
@@ -817,6 +1189,11 @@ int sts_discipline_start(void)
 		return rc;
 	}
 
+	/* The actuator transfer, cached before the thread exists so the mailbox
+	 * drain and sts_disc_dac_state() never read `disc` mid-tick. */
+	dt_state.dac_vref_mv = cfg.dac_vref_mv;
+	dt_state.dac_max_code = cfg.dac_max_code;
+
 	dt_state.counts_per_second = sts_pps_timer_hz();
 	if (dt_state.counts_per_second == 0U) {
 		LOG_ERR("discipline: PPS capture not initialised");
@@ -830,7 +1207,7 @@ int sts_discipline_start(void)
 	 * about to drive it and must not start from an undefined output
 	 * register (interface ref §3).
 	 */
-	disc_write_dac(cfg.dac_center_code);
+	disc_apply_auto_dac(cfg.dac_center_code);
 
 	dt_state.liveness_id = sts_liveness_register("discipline");
 

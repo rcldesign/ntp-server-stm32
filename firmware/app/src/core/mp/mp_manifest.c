@@ -88,6 +88,10 @@ static const ilk_info_t ilks[MP_ILK_COUNT] = {
 	  "the discipline loop must be parked before the DAC may be driven" },
 	{ MP_ILK_WDT_OFF, "wdt.off",
 	  "WDI may be pulsed only with the external watchdog disabled" },
+	{ MP_ILK_DAC_SOLE, "dac.sole",
+	  "the other view of DAC1_OUT1 is already leased" },
+	{ MP_ILK_DAC_IDLE, "dac.idle",
+	  "the park may not be released while a Vc override is held" },
 };
 
 static const ilk_info_t *ilk_info(uint32_t bit)
@@ -315,13 +319,41 @@ const mp_obj_t mp_objs[] = {
 	{ .id = "ref.term.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G1,
 	  .group = MP_GRP_REF, .flags = F_LEASE, .net = "REF_TERM_EN",
 	  .desc = "external-reference SMA 50 ohm termination (PC10)" },
+	/*
+	 * The maintenance park, and the object that makes the two below
+	 * reachable at all.
+	 *
+	 * MP_ILK_DAC_PARK gates them on `disc_parked`, which prov_ilk() takes
+	 * from QUALITY_FLAG_PARKED — a real measurement. Until this row existed
+	 * the only producers of that state were the PFI power-fail ISR and
+	 * refsel's own handoff bracket, so the interlock was satisfiable only
+	 * during a power failure. EXPLICIT rather than implied by a Vc write,
+	 * because interlocks are evaluated BEFORE apply: a park implied by the
+	 * write could not satisfy the interlock gating that write.
+	 *
+	 * F_LEASE, not writable, for the reason every asynchronous actuator on
+	 * this board is: the park lands on the discipline thread's next pass and
+	 * `obj.set` has no field in which to admit a write that has not happened
+	 * yet. A lease also gives it a dead-man — a console that walks away
+	 * leaves the loop parked for at most the lease, not until the next boot.
+	 *
+	 * Its READ-BACK is the loop's actual state and not this object's request,
+	 * the same choice `ref.mux.sel` makes: a PFI park reads back parked with
+	 * no lease held, which is the truth a technician needs.
+	 */
+	{ .id = "ref.disc.park", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G3,
+	  .group = MP_GRP_REF, .flags = F_LEASE, .ilk = MP_ILK_DAC_IDLE,
+	  .net = "OCXO_VC",
+	  .desc = "park the discipline loop; freezes Vc and frees the DAC" },
 	{ .id = "ref.ocxo.vc_mv", .kind = MP_KIND_MV, .guard = MP_GUARD_G3,
-	  .group = MP_GRP_REF, .flags = F_RW_D, .min = 0, .max = 3300,
-	  .step = 1, .unit = U_MV, .ilk = MP_ILK_DAC_PARK, .net = "OCXO_VC",
+	  .group = MP_GRP_REF, .flags = F_LEASE, .min = 0, .max = 3300,
+	  .step = 1, .unit = U_MV,
+	  .ilk = MP_ILK_DAC_PARK | MP_ILK_DAC_SOLE, .net = "OCXO_VC",
 	  .desc = "DAC1_OUT1 -> U36 OPA320 -> OH300 Vc, centre 1650 mV (PA4)" },
 	{ .id = "ref.ocxo.dac_code", .kind = MP_KIND_CODE,
-	  .guard = MP_GUARD_G3, .group = MP_GRP_REF, .flags = F_RW_D, .min = 0,
-	  .max = 4095, .step = 1, .ilk = MP_ILK_DAC_PARK, .net = "OCXO_VC",
+	  .guard = MP_GUARD_G3, .group = MP_GRP_REF, .flags = F_LEASE, .min = 0,
+	  .max = 4095, .step = 1,
+	  .ilk = MP_ILK_DAC_PARK | MP_ILK_DAC_SOLE, .net = "OCXO_VC",
 	  .desc = "raw 12-bit DAC1_OUT1 code (PA4)" },
 	{ .id = "ref.relay.hold", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
 	  .group = MP_GRP_REF, .flags = F_RW_D, .ilk = MP_ILK_RELAY_OK,

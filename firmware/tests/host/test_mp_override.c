@@ -1327,6 +1327,110 @@ static void test_ilk_dac_needs_the_loop_parked(void)
 	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(mv, 0, &st, 0U, &res));
 }
 
+/**
+ * The two Vc views may not be leased at once (MP_ILK_DAC_SOLE).
+ *
+ * They are two names for DAC1_OUT1. Held together with different values there
+ * is no correct pin state and one of the two leases must be reporting a Vc the
+ * oven has never seen — so the second grant is refused rather than resolved.
+ * The refusal reads the OTHER view of the pair, which is what lets a lease be
+ * RE-granted (mp_ovr_grant() replaces a lease on a second grant for the same
+ * object, and that must not be refused by the object's own lease).
+ */
+static void test_ilk_the_two_vc_views_exclude_each_other(void)
+{
+	size_t mv = obj_of("ref.ocxo.vc_mv");
+	size_t code = obj_of("ref.ocxo.dac_code");
+	mp_ilk_state_t st;
+	mp_ilk_res_t res;
+
+	ilk_permissive(&st);
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(mv, 1650, &st, 0U, &res));
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(code, 2048, &st, 0U, &res));
+
+	/* The raw-code view is leased: the millivolt view is refused. */
+	st.dac_code_held = true;
+	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(mv, 1650, &st, 0U, &res));
+	TEST_ASSERT_EQUAL_UINT32(MP_ILK_DAC_SOLE, res.failed);
+	/* ...and so is 0, because the refusal is about WHO drives the pin and
+	 * not about the value. */
+	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(mv, 0, &st, 0U, &res));
+	/* But re-granting the view that already holds it is not refused. */
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(code, 3000, &st, 0U, &res));
+
+	ilk_permissive(&st);
+	st.dac_mv_held = true;
+	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(code, 2048, &st, 0U, &res));
+	TEST_ASSERT_EQUAL_UINT32(MP_ILK_DAC_SOLE, res.failed);
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(mv, 1700, &st, 0U, &res));
+}
+
+/**
+ * The park may not be RELEASED out from under a Vc override (MP_ILK_DAC_IDLE).
+ *
+ * Releasing it resumes the loop, and a resumed loop rewrites DAC1_OUT1 every
+ * second — so a technician who still holds a Vc lease would be left with a
+ * control that reports a value the pin no longer carries, and two writers
+ * arguing over PA4 in between.
+ *
+ * Only `req == 0` is refused. TAKING the park while a Vc override stands is
+ * harmless: the loop is already parked, which is that override's own
+ * precondition, so refusing it would block a technician from re-arming the very
+ * interlock their lease depends on.
+ */
+static void test_ilk_park_release_is_refused_under_a_vc_override(void)
+{
+	size_t park = obj_of("ref.disc.park");
+	mp_ilk_state_t st;
+	mp_ilk_res_t res;
+
+	ilk_permissive(&st);
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(park, 1, &st, 0U, &res));
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(park, 0, &st, 0U, &res));
+
+	st.dac_mv_held = true;
+	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(park, 0, &st, 0U, &res));
+	TEST_ASSERT_EQUAL_UINT32(MP_ILK_DAC_IDLE, res.failed);
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(park, 1, &st, 0U, &res));
+
+	ilk_permissive(&st);
+	st.dac_code_held = true;
+	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(park, 0, &st, 0U, &res));
+	TEST_ASSERT_EQUAL_UINT32(MP_ILK_DAC_IDLE, res.failed);
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(park, 1, &st, 0U, &res));
+
+	/* Both at once is still one refusal, and still only of the release. */
+	st.dac_mv_held = true;
+	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(park, 0, &st, 0U, &res));
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(park, 1, &st, 0U, &res));
+}
+
+/**
+ * The park is not gated on being parked, and the Vc objects are not gated on
+ * each other's absence by MP_ILK_DAC_PARK.
+ *
+ * A cross-check on the manifest wiring rather than on the evaluator: if
+ * `ref.disc.park` had picked up MP_ILK_DAC_PARK it would demand the very state
+ * it exists to produce, which is the unsatisfiable-interlock defect this whole
+ * group was blocked on.
+ */
+static void test_the_park_object_does_not_demand_its_own_effect(void)
+{
+	const mp_obj_t *park = mp_obj_at(obj_of("ref.disc.park"));
+	const mp_obj_t *mv = mp_obj_at(obj_of("ref.ocxo.vc_mv"));
+	const mp_obj_t *code = mp_obj_at(obj_of("ref.ocxo.dac_code"));
+
+	TEST_ASSERT_EQUAL_UINT32(0U, park->ilk & MP_ILK_DAC_PARK);
+	TEST_ASSERT_EQUAL_UINT32(MP_ILK_DAC_IDLE, park->ilk & MP_ILK_DAC_IDLE);
+
+	/* And both Vc views carry BOTH of their guards, not one of them. */
+	TEST_ASSERT_EQUAL_UINT32(MP_ILK_DAC_PARK | MP_ILK_DAC_SOLE,
+				 mv->ilk & (MP_ILK_DAC_PARK | MP_ILK_DAC_SOLE));
+	TEST_ASSERT_EQUAL_UINT32(MP_ILK_DAC_PARK | MP_ILK_DAC_SOLE,
+				 code->ilk &
+					 (MP_ILK_DAC_PARK | MP_ILK_DAC_SOLE));
+}
+
 static void test_ilk_tunnel_reports_a_consequence_not_a_refusal(void)
 {
 	size_t obj = obj_of("gnss.tunnel");
@@ -2476,6 +2580,9 @@ int main(void)
 	RUN_TEST(test_ilk_wdi_pulse_is_refused_while_the_watchdog_is_armed);
 	RUN_TEST(test_ilk_clock_mux_guard);
 	RUN_TEST(test_ilk_dac_needs_the_loop_parked);
+	RUN_TEST(test_ilk_the_two_vc_views_exclude_each_other);
+	RUN_TEST(test_ilk_park_release_is_refused_under_a_vc_override);
+	RUN_TEST(test_the_park_object_does_not_demand_its_own_effect);
 	RUN_TEST(test_ilk_tunnel_reports_a_consequence_not_a_refusal);
 
 	RUN_TEST(test_grant_and_release);

@@ -3027,10 +3027,92 @@ static void test_lock_is_lost_after_sustained_bad_seconds(void)
 	TEST_ASSERT_EQUAL_UINT8(QUALITY_STRATUM_UNSYNC, out.stratum);
 }
 
+/**
+ * The actuator transfer, both directions, as the console uses it.
+ *
+ * `ref.ocxo.vc_mv` and `ref.ocxo.dac_code` are two views of DAC1_OUT1 and the
+ * mailbox converts between them on every write and every read-back. Two copies
+ * of that arithmetic would eventually disagree by a rounding rule and a
+ * technician would see a value read back as a different one from the one
+ * written, so there is one pair and this is it.
+ */
+static void test_the_code_millivolt_transfer_is_one_conversion(void)
+{
+	uint16_t code = 0u;
+	uint32_t i;
+
+	/* The endpoints and the documented centre. 2048 * 3300 / 4095 = 1650. */
+	TEST_ASSERT_EQUAL_INT32(0, disc_code_to_mv(3300u, 4095u, 0u));
+	TEST_ASSERT_EQUAL_INT32(3300, disc_code_to_mv(3300u, 4095u, 4095u));
+	TEST_ASSERT_EQUAL_INT32(1650, disc_code_to_mv(3300u, 4095u, 2048u));
+
+	TEST_ASSERT_EQUAL_INT(0, disc_mv_to_code(3300u, 4095u, 1650, &code));
+	TEST_ASSERT_EQUAL_UINT16(2048u, code);
+	TEST_ASSERT_EQUAL_INT(0, disc_mv_to_code(3300u, 4095u, 0, &code));
+	TEST_ASSERT_EQUAL_UINT16(0u, code);
+	TEST_ASSERT_EQUAL_INT(0, disc_mv_to_code(3300u, 4095u, 3300, &code));
+	TEST_ASSERT_EQUAL_UINT16(4095u, code);
+
+	/* Out of range clamps rather than wrapping — the console clamps to the
+	 * manifest envelope first, so anything arriving here is already a bug
+	 * and must not become a code at the other end of the pull range. */
+	TEST_ASSERT_EQUAL_INT(0, disc_mv_to_code(3300u, 4095u, -1, &code));
+	TEST_ASSERT_EQUAL_UINT16(0u, code);
+	TEST_ASSERT_EQUAL_INT(0, disc_mv_to_code(3300u, 4095u, 99999, &code));
+	TEST_ASSERT_EQUAL_UINT16(4095u, code);
+	TEST_ASSERT_EQUAL_INT32(3300, disc_code_to_mv(3300u, 4095u, 60000u));
+
+	TEST_ASSERT_EQUAL_INT(-EINVAL,
+			      disc_mv_to_code(3300u, 4095u, 1650, NULL));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, disc_mv_to_code(0u, 4095u, 1650, &code));
+	TEST_ASSERT_EQUAL_INT(-EINVAL, disc_mv_to_code(3300u, 0u, 1650, &code));
+
+	/*
+	 * ROUND TRIP, and the limit of what it can promise.
+	 *
+	 * It is NOT exact and cannot be made so: 4096 codes are being mapped
+	 * through 3301 whole millivolts, so the millivolt view is the COARSER of
+	 * the two and codes 0 and 1 both read 0 mV (1 * 3300 / 4095 = 0.806).
+	 * The honest property is that neither direction drifts by more than one
+	 * unit — one code is 806 uV of Vc, which at the OH300's ~0.4 ppm
+	 * full-scale pull is under a part in 10^10 and far below anything the
+	 * bench procedure resolves.
+	 *
+	 * Both bounds hold only because the inverse rounds to NEAREST. Truncating
+	 * there biases every write half an LSB low and takes the code->mv->code
+	 * error to 2, which is what these assertions catch.
+	 */
+	for (i = 0u; i <= 4095u; i++) {
+		int32_t mv = disc_code_to_mv(3300u, 4095u, (uint16_t)i);
+		int32_t err;
+
+		TEST_ASSERT_EQUAL_INT(0,
+				      disc_mv_to_code(3300u, 4095u, mv, &code));
+		err = (int32_t)code - (int32_t)i;
+		TEST_ASSERT_TRUE_MESSAGE((err >= -1) && (err <= 1),
+					 "code -> mv -> code drifted by more "
+					 "than one code");
+	}
+
+	for (i = 0u; i <= 3300u; i++) {
+		int32_t mv;
+		int32_t err;
+
+		TEST_ASSERT_EQUAL_INT(0, disc_mv_to_code(3300u, 4095u,
+							 (int32_t)i, &code));
+		mv = disc_code_to_mv(3300u, 4095u, code);
+		err = mv - (int32_t)i;
+		TEST_ASSERT_TRUE_MESSAGE((err >= -1) && (err <= 1),
+					 "mv -> code -> mv drifted by more "
+					 "than one millivolt");
+	}
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
 
+	RUN_TEST(test_the_code_millivolt_transfer_is_one_conversion);
 	RUN_TEST(test_defaults);
 	RUN_TEST(test_init_centres_the_actuator);
 	RUN_TEST(test_init_rejects_bad_config);

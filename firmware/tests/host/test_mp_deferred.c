@@ -443,7 +443,20 @@ static bool mutable_obj(const mp_obj_t *o)
  */
 static void test_the_deferred_flag_is_the_dispatch(void)
 {
+	/* The objects mp_glue.c still does not dispatch, by name. See the
+	 * argument below for why this replaced a numeric floor. */
+	static const char *const still_deferred[] = {
+		"gnss.dsel",         "gnss.reset",      "gnss.safeboot",
+		"pwr.rb.en",         "pwr.rb.pot.code", "ref.relay.hold",
+		"sensor.buttons",    "sensor.en.fault", "sensor.enc.pos",
+		"sensor.gnss.ant",   "sensor.gps.ant_off",
+		"sensor.gps.txrdy",  "sensor.ina.alert", "sensor.pfi",
+		"sensor.pg",         "sensor.poe.status",
+		"sensor.usb.vbus",   "sys.nor.reset",   "sys.smp.tunnel",
+		"ui.disp.reset",
+	};
 	size_t i;
+	size_t k;
 	unsigned int deferred = 0U;
 	unsigned int wired = 0U;
 
@@ -474,9 +487,45 @@ static void test_the_deferred_flag_is_the_dispatch(void)
 	 * Not a vacuous pass: both sets have to be non-trivial, or a broken
 	 * derivation that marked everything (or nothing) would agree with a
 	 * manifest that did the same.
+	 *
+	 * The deferred side used to be a floor of 20. That number was written
+	 * when the set was large and it has been shrinking with every wiring
+	 * stage; wiring the OCXO steering group took it to exactly 20 and the
+	 * floor started refusing the very outcome the work was for. A floor that
+	 * has to be edited each time the thing it measures improves is not
+	 * measuring anything, so it is replaced by the SET ITSELF, by name.
+	 *
+	 * That is strictly stronger than the inequality it replaces: it fails on
+	 * an object that quietly becomes deferred again (an un-wiring) as well as
+	 * on one that is wired without the list being updated, and it says which.
+	 * Every member is deferred for a reason recorded in mp_glue.c's header —
+	 * no accessor exists (`sys.nor.reset`, `gnss.dsel`), the interlock refuses
+	 * it on purpose (`pwr.rb.pot.code`), the 1 kHz scan is not published
+	 * object-by-object (the `sensor.*` group), or the seam is still open
+	 * (`pwr.rb.en`, `ref.relay.hold`, `sys.smp.tunnel`, `gnss.reset`,
+	 * `gnss.safeboot`, `ui.disp.reset`).
 	 */
-	TEST_ASSERT_TRUE_MESSAGE(deferred > 20U,
-				 "the derivation marked almost everything wired");
+	for (k = 0U; k < (sizeof(still_deferred) / sizeof(still_deferred[0]));
+	     k++) {
+		int idx = mp_obj_find(still_deferred[k]);
+		char msg[192];
+
+		(void)snprintf(msg, sizeof(msg),
+			       "`%s` is listed as still deferred but the "
+			       "manifest no longer says so; shrink the list "
+			       "rather than leaving it stale",
+			       still_deferred[k]);
+		TEST_ASSERT_TRUE_MESSAGE(idx >= 0, still_deferred[k]);
+		TEST_ASSERT_TRUE_MESSAGE(
+			(mp_obj_at((size_t)idx)->flags & MP_OF_DEFERRED) != 0U,
+			msg);
+	}
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		(unsigned int)(sizeof(still_deferred) /
+			       sizeof(still_deferred[0])),
+		deferred,
+		"an object became deferred without joining this list");
+
 	TEST_ASSERT_TRUE_MESSAGE(wired > 20U,
 				 "the derivation marked almost everything "
 				 "deferred");
@@ -545,6 +594,183 @@ static void test_the_write_only_residue_is_exactly_these_five(void)
 		(unsigned int)(sizeof(expect) / sizeof(expect[0])), found,
 		"one of the named write-only objects now reads back; "
 		"shrink the list rather than leaving it stale");
+}
+
+/**
+ * THE CONSOLE NEVER WRITES PA4.
+ *
+ * Spec §3 makes the discipline thread the only writer of DAC1_OUT1 and the
+ * owner of disc_ctx_t. `ref.disc.park`, `ref.ocxo.vc_mv` and `ref.ocxo.dac_code`
+ * are the three objects that could break that, and the whole reason they are
+ * mailbox rows rather than direct calls is that a console thread reaching the
+ * actuator "works" on a bench every time and corrupts the loop only when the
+ * two threads happen to interleave.
+ *
+ * Asserted as an ABSENCE over the whole of mp_glue.c, not just obj_apply(): a
+ * helper called from obj_apply() would move the defect one frame down and pass
+ * a body-scoped check. mp_glue.c is not linked by any host suite, so this reads
+ * the source — the same technique the rest of this file uses.
+ *
+ * load_source() blanks comments before the scan, so the prose in mp_glue.c that
+ * names these functions cannot satisfy or trip the assertions below.
+ */
+static void test_the_console_never_writes_the_dac(void)
+{
+	static const char *const forbidden[] = {
+		"dac_write_value(",  /* the Zephyr DAC driver itself */
+		"disc_write_dac(",   /* the discipline thread's own writer */
+		"disc_apply_auto_dac(",
+		"disc_park(",        /* mutating the loop's state machine */
+		"disc_unpark(",
+		"sts_discipline_park(",
+		"sts_disc_handoff_park(",
+	};
+	span_t all;
+	span_t ap;
+	size_t k;
+
+	load_source("zephyr/console/mp_glue.c");
+	all.begin = 0U;
+	all.end = g_src_len;
+
+	for (k = 0U; k < (sizeof(forbidden) / sizeof(forbidden[0])); k++) {
+		char msg[224];
+
+		(void)snprintf(msg, sizeof(msg),
+			       "mp_glue.c calls `%s`; the console thread has "
+			       "reached the discipline loop's actuator and PA4 "
+			       "now has two writers",
+			       forbidden[k]);
+		TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, count_in(&all, forbidden[k]),
+					       msg);
+	}
+
+	/* What it does instead: posts, and answers PENDING. Three objects, one
+	 * post each — a shared post would make the outcome half attribute a
+	 * settle or a veto to whichever lease it guessed. */
+	ap = fn_body("static int obj_apply(void *user, size_t obj, const int32_t *value)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&ap, "STS_PWRSEQ_REQ_DISC_PARK"),
+		"`ref.disc.park` no longer posts exactly one request");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&ap, "STS_PWRSEQ_REQ_OCXO_VC_MV"),
+		"`ref.ocxo.vc_mv` no longer posts exactly one request");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&ap, "STS_PWRSEQ_REQ_OCXO_DAC_CODE"),
+		"`ref.ocxo.dac_code` no longer posts exactly one request");
+}
+
+/**
+ * ...and the discipline thread is where the actuation actually happens.
+ *
+ * The other half of the assertion above: proving mp_glue.c does not write PA4
+ * is worth nothing if nobody else does either, which would make the objects
+ * silently inert. The drain claims each row, and the Vc executor is the one
+ * place disc_write_dac() is reached from a request.
+ */
+static void test_the_discipline_thread_drains_them(void)
+{
+	span_t mb;
+	span_t dac;
+	span_t park;
+	span_t gate;
+	span_t loop;
+
+	load_source("zephyr/platform/disc_thread.c");
+
+	mb = fn_body("static void disc_service_mailbox(void)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&mb, "STS_PWRSEQ_REQ_DISC_PARK"),
+		"the discipline drain no longer claims the park row");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&mb, "STS_PWRSEQ_REQ_OCXO_VC_MV"),
+		"the discipline drain no longer claims the Vc millivolt row");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&mb, "STS_PWRSEQ_REQ_OCXO_DAC_CODE"),
+		"the discipline drain no longer claims the Vc code row");
+	/*
+	 * ORDER: both Vc rows are claimed before the park row. A lapse can drop
+	 * a Vc lease and the park lease into the same window; taken park-first
+	 * the release would withdraw a Vc lease that was expiring on its own and
+	 * tell the technician it had been revoked.
+	 */
+	/*
+	 * Anchored on the EXECUTOR CALLS, not on the row constants. The row ids
+	 * also appear in the vc_rows[] initializer at the top of the body, which
+	 * does not move when the claim loop does — an earlier version of this
+	 * assertion compared those and passed with the order reversed.
+	 */
+	TEST_ASSERT_TRUE_MESSAGE(
+		offset_in(&mb, "disc_service_dac_row(") <
+			offset_in(&mb, "disc_service_park_row("),
+		"the park row is now drained before the Vc rows, so a lapse "
+		"withdraws a lease that was expiring anyway");
+
+	/*
+	 * THE RESUME GATE READS BOTH LATCHES.
+	 *
+	 * There are two independent holders of the parked state — the PFI
+	 * power-fail latch and the operator's lease — and each clears only its
+	 * own. A gate that consulted one of them would let a PFI recovery resume
+	 * the loop under a technician's Vc override, and let a maintenance
+	 * release resume it into a browning-out rail. Both directions are the
+	 * same one-line fact, which is why it is a gate and not two open-coded
+	 * checks.
+	 */
+	gate = fn_body("static bool disc_resume_if_idle(void)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&gate, "disc_pfi_parked"),
+		"the resume gate stopped consulting the PFI latch, so a "
+		"maintenance release now defeats a power-fail park");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&gate, "disc_maint_parked"),
+		"the resume gate stopped consulting the maintenance latch, so "
+		"a PFI recovery now resumes the loop under a Vc override");
+
+	/* The Vc executor writes the pin; the park executor never does. */
+	dac = fn_body("static void disc_service_dac_row(uint8_t row, bool release, int32_t value,");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&dac, "disc_write_dac("),
+		"the Vc drain no longer drives DAC1_OUT1");
+	/*
+	 * The park is re-checked AT THE ACTUATOR, not only at the interlock.
+	 * MP_ILK_DAC_PARK is evaluated on the console thread at grant time;
+	 * between that and this drain a refsel handoff or a PFI recovery can
+	 * have resumed the loop, and a Vc write into a running loop is a control
+	 * that reports success and is overwritten within the second.
+	 */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&dac, "DISC_STATE_PARKED"),
+		"the Vc drain trusts the console-side interlock and no longer "
+		"re-checks that the loop is still parked when it executes");
+
+	park = fn_body("static void disc_service_park_row(bool release, int32_t value)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&park, "disc_park("),
+		"the park drain no longer parks the loop");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&park, "disc_resume_if_idle("),
+		"the park drain resumes without consulting the other latch");
+	/*
+	 * THE OVERRIDE MUST STICK. A parked loop re-emits its frozen code every
+	 * second, so the per-second writer has to be the auto path — which
+	 * stands aside while an override is held — and never disc_write_dac()
+	 * directly. This is the assertion that fails if anyone "simplifies" the
+	 * split away, and the symptom in the field would be a Vc that reverts
+	 * about one second after it is set.
+	 */
+	loop = fn_body("static void disc_entry(void *p1, void *p2, void *p3)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&loop, "disc_write_dac("),
+		"the discipline loop writes the DAC directly again, so a "
+		"maintenance override is undone within one PPS period");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&loop, "disc_apply_auto_dac("),
+		"the discipline loop no longer drives the actuator at all");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&loop, "disc_service_mailbox()"),
+		"the discipline loop no longer drains its mailbox, so the "
+		"three objects are posted and never executed");
 }
 
 /** Every object the dispatch names is a manifest object, and vice versa. */
@@ -737,6 +963,28 @@ static void test_the_permanent_refusals_are_labelled(void)
 		1U, count_in(&b, "out->liveness_ok = false;"),
 		"the watchdog liveness term changed; it may only be reported "
 		"true from a real measurement");
+
+	/*
+	 * The two Vc leases: read from the LEASE REGISTER, which is the fact the
+	 * interlock asks about, and never from the pin.
+	 *
+	 * Not the same shortcut MP_ILK_MUX_GUARD was corrected for. That
+	 * interlock asks a question about HARDWARE and was answered with the
+	 * loop's own choice between two references. MP_ILK_DAC_SOLE and
+	 * MP_ILK_DAC_IDLE ask whether a LEASE is held, and mp_ovr_lease() is
+	 * where that lives. sts_disc_dac_state()'s `overridden` bit is downstream
+	 * of it and lags by a drain, so reading the pin here would let a second
+	 * grant through the window between a grant and the discipline thread's
+	 * next pass — which is precisely the pair of writers the bit forbids.
+	 */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		2U, count_in(&b, "mp_ovr_lease(&mp.ovr,"),
+		"the OCXO Vc interlock terms stopped reading the lease "
+		"register; a derived or lagging value must not stand in for it");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&b, "sts_disc_dac_state("),
+		"prov_ilk() is judging the Vc interlocks on the published pin "
+		"state, which lags the lease it is supposed to be checking");
 
 	/* The display off-time: no longer a stub — a real observation. */
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
@@ -1021,6 +1269,8 @@ int main(void)
 
 	RUN_TEST(test_the_deferred_flag_is_the_dispatch);
 	RUN_TEST(test_the_write_only_residue_is_exactly_these_five);
+	RUN_TEST(test_the_console_never_writes_the_dac);
+	RUN_TEST(test_the_discipline_thread_drains_them);
 	RUN_TEST(test_the_dispatch_names_nothing_the_manifest_lacks);
 
 	RUN_TEST(test_the_image_gates_actuation_on_the_flag);

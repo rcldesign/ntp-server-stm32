@@ -656,11 +656,32 @@ static void test_the_deferred_flag_is_published(void)
 		}
 	}
 
-	/* Neither all nor none: a manifest where every object is deferred, or
+	/*
+	 * Neither all nor none: a manifest where every object is deferred, or
 	 * none is, would satisfy the per-object check above and tell the host
-	 * nothing. */
-	TEST_ASSERT_TRUE(deferred > 20U);
+	 * nothing.
+	 *
+	 * Pinned by NAMED SENTINELS in both directions rather than by a count.
+	 * The threshold here was `deferred > 20`, which is a proxy for "the set
+	 * is non-trivial" that stops being true as the set shrinks — wiring the
+	 * OCXO steering group took it to exactly 20 and the assertion refused the
+	 * improvement. Two real objects, one from each side, test the same
+	 * property without a number that has to be maintained downward: the
+	 * membership itself is proved object-by-object above and enumerated by
+	 * name in test_mp_deferred.c.
+	 */
+	TEST_ASSERT_TRUE(deferred > 0U);
 	TEST_ASSERT_TRUE(deferred < mp_obj_count());
+	TEST_ASSERT_TRUE_MESSAGE(
+		(mp_obj_at((size_t)mp_obj_find("pwr.rb.en"))->flags &
+		 MP_OF_DEFERRED) != 0U,
+		"`pwr.rb.en` is the deferred-side sentinel and is no longer "
+		"deferred; pick another or this test proves nothing");
+	TEST_ASSERT_TRUE_MESSAGE(
+		(mp_obj_at((size_t)mp_obj_find("ref.ocxo.dac_code"))->flags &
+		 MP_OF_DEFERRED) == 0U,
+		"`ref.ocxo.dac_code` is the wired-side sentinel and has become "
+		"deferred again; the OCXO steering group has been un-wired");
 }
 
 /* --------------------------------------------------------- as-built checks */

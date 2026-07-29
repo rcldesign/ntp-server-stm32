@@ -121,7 +121,7 @@
  *    sts_app.h exposes only sts_rb_serial_set_mode(), sts_supervisor_identify(),
  *    the RGB and fan accessors, the PHY and EXTINT pulses, the two recovery
  *    pulses and the parameterised sequencer mailbox; the GNSS and Rb tunnels
- *    are this area's own. Twenty-five manifest objects therefore have an
+ *    are this area's own. Twenty-eight manifest objects therefore have an
  *    actuator behind them:
  *
  *      obj_apply   ui.identify, ref.rb.serial, gnss.tunnel, ref.rb.tunnel
@@ -129,7 +129,8 @@
  *        (mailbox)  pwr.ant.bias.en, pwr.disp.en, pwr.rb.gate,
  *                  pwr.rb.vset_mv, ui.lamp.test, ref.term.en,
  *                  sys.fan.duty, ui.rgb.mode, ui.rgb.r, ui.rgb.g,
- *                  ui.rgb.b, ui.disp.bl
+ *                  ui.rgb.b, ui.disp.bl, ref.disc.park,
+ *                  ref.ocxo.vc_mv, ref.ocxo.dac_code
  *      obj_pulse   pwr.poe.kill, pwr.rb.ov.reset, sys.phy.reset,
  *                  gnss.extint
  *      cfg_write   pwr.rb.vmax_mv, pwr.poe.budget_mw   (mp_rpc.c, not here)
@@ -150,7 +151,7 @@
  *    mailbox drain, a branch in obj_apply() and obj_read() here, and the
  *    manifest row.
  *
- *    Fifteen objects ride it. Every one is LEASE-ONLY — an asynchronous apply
+ *    Eighteen objects ride it. Every one is LEASE-ONLY — an asynchronous apply
  *    has no honest `obj.set` reply and m_obj_set() refuses a positive apply
  *    return by name — and every one's release re-drives FIRMWARE'S OWN
  *    automatic level rather than off, so a lapsed lease cannot leave the
@@ -161,12 +162,14 @@
  *    the panel pair is the documented exception that releases to off, because
  *    PC0 and PE0 share a setter and two releases must not disagree.
  *
- *    ONE OF THE FIFTEEN IS NOT DRAINED HERE OR BY HOUSEKEEPING. `ui.disp.bl`'s
- *    pin is rewritten by ui_display.c on every render frame, so the ui thread
- *    is PE6's single writer and the row is marked foreign
- *    (sts_pwrseq_req_is_foreign); that thread claims, executes and settles it
- *    through sts_pwrseq_req_claim()/_settle(). Nothing changes on this side —
- *    the post and the outcome read are the same two calls.
+ *    FOUR OF THE EIGHTEEN ARE NOT DRAINED BY HOUSEKEEPING. `ui.disp.bl`'s pin
+ *    is rewritten by ui_display.c on every render frame, so the ui thread is
+ *    PE6's single writer; `ref.disc.park` and the two OCXO Vc views belong to
+ *    the discipline thread, which spec §3 makes the only writer of DAC1_OUT1
+ *    (PA4) and the owner of disc_ctx_t. All four are marked foreign
+ *    (sts_pwrseq_req_is_foreign); the owning thread claims, executes and
+ *    settles each through sts_pwrseq_req_claim()/_settle(). Nothing changes on
+ *    this side — the post and the outcome read are the same two calls.
  *
  *    TWO PULSES ARE NOT POSTED AT ALL. `sys.phy.reset` and `gnss.extint` each
  *    drive a pin whose single runtime writer is the accessor being called, and
@@ -178,10 +181,7 @@
  *    breaking ARCHITECTURE.md §10 invariant 3 in one direction and rb_shutdown()'s
  *    documented order in the other, and its release has nowhere honest to go;
  *    the argument is over the mailbox in pwrseq_exec.c. `pwr.rb.pot.code` is
- *    refused at the interlock (prov_ilk below). `ref.mux.sel`, the two OCXO Vc
- *    objects and the two watchdog objects belong to refsel, the discipline
- *    thread and the supervisor respectively (ARCHITECTURE.md §10.1/§10.2/§10.5)
- *    and need their own seams, not this one.
+ *    refused at the interlock (prov_ilk below).
  *
  *    `sys.nor.reset` and `gnss.dsel` are deferred for the plainest reason in
  *    the set: NO ACCESSOR EXISTS. NOR_RST_N is released once by platform.c's
@@ -765,6 +765,39 @@ static int prov_ilk(void *user, mp_ilk_state_t *out)
 	if (sts_quality_snapshot(&q) == 0) {
 		out->ocxo_warm = ((q.flags & QUALITY_FLAG_OCXO_WARM) != 0U);
 		out->disc_parked = ((q.flags & QUALITY_FLAG_PARKED) != 0U);
+	}
+
+	/*
+	 * The two views of DAC1_OUT1, from the LEASE REGISTER rather than from
+	 * the pin.
+	 *
+	 * That is not the same shortcut the mux guard was corrected for. There
+	 * the interlock asked a question about HARDWARE — is the external
+	 * reference in band, is RB_LOCK asserted — and was answered with the
+	 * loop's own choice between them. MP_ILK_DAC_SOLE and MP_ILK_DAC_IDLE ask
+	 * a question about LEASES: may this object be granted while that one is
+	 * held. mp_ovr_lease() is where that fact lives; sts_disc_dac_state()'s
+	 * `overridden` bit is downstream of it and lags it by a drain, so reading
+	 * the pin here would let a second grant slip through the window between a
+	 * grant and the discipline thread's next pass.
+	 */
+	{
+		int vm = mp_obj_find("ref.ocxo.vc_mv");
+		int dc = mp_obj_find("ref.ocxo.dac_code");
+
+		if ((vm < 0) || (dc < 0)) {
+			/* A rename that missed this. Loud, and BOTH read held so
+			 * the pair refuses rather than opening. */
+			LOG_ERR("MP interlock: the OCXO Vc objects are missing "
+				"from the manifest");
+			out->dac_mv_held = true;
+			out->dac_code_held = true;
+		} else {
+			out->dac_mv_held =
+				mp_ovr_lease(&mp.ovr, (size_t)vm) != NULL;
+			out->dac_code_held =
+				mp_ovr_lease(&mp.ovr, (size_t)dc) != NULL;
+		}
 	}
 
 	have_ps = (sts_pwrseq_snapshot(&ps) == 0) && ps.started;
@@ -1531,6 +1564,44 @@ static int obj_read(void *user, size_t obj, mp_val_t *out)
 		out->valid = true;
 		return 0;
 	}
+	/*
+	 * The discipline loop's park, read as the LOOP'S STATE and not as this
+	 * object's request — the same choice `ref.mux.sel` above makes, and for
+	 * the same reason. QUALITY_FLAG_PARKED is true for a PFI park and for
+	 * refsel's handoff bracket as well as for a maintenance lease, so
+	 * "parked, no lease held" is a real and useful reading; an object that
+	 * echoed the request instead would report 0 through a power failure.
+	 */
+	if (strcmp(o->id, "ref.disc.park") == 0) {
+		if (sts_quality_snapshot(&q) != 0) {
+			return -EIO;
+		}
+		out->i = ((q.flags & QUALITY_FLAG_PARKED) != 0U) ? 1 : 0;
+		out->valid = true;
+		return 0;
+	}
+	/*
+	 * The two views of DAC1_OUT1, read from THE PIN.
+	 *
+	 * quality_block_t::dac_code and ::vc_cmd_mv are what core/disc last
+	 * COMMANDED, which is the frozen code while a maintenance override holds
+	 * the pin somewhere else — so a read-back from there would answer a
+	 * technician's write with the value they had just replaced.
+	 * sts_disc_dac_state() reports what the discipline thread actually drove,
+	 * override or loop, which is what a read-back has to mean.
+	 */
+	if ((strcmp(o->id, "ref.ocxo.vc_mv") == 0) ||
+	    (strcmp(o->id, "ref.ocxo.dac_code") == 0)) {
+		uint16_t code = 0;
+		int32_t mv = 0;
+
+		if (!sts_disc_dac_state(&code, &mv, NULL)) {
+			return -EIO;
+		}
+		out->i = (o->kind == (uint8_t)MP_KIND_MV) ? mv : (int32_t)code;
+		out->valid = true;
+		return 0;
+	}
 	if (strcmp(o->id, "ref.rb.serial") == 0) {
 		sts_rb_serial_t rb;
 
@@ -1927,6 +1998,81 @@ static int obj_apply(void *user, size_t obj, const int32_t *value)
 		int32_t pct = (value != NULL) ? CLAMP(*value, 0, 100) : 0;
 		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_DISP_BL,
 					     (value != NULL) ? &pct : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+
+	/*
+	 * =====================================================================
+	 * The OCXO steering group: `ref.disc.park` and its two Vc views
+	 * =====================================================================
+	 *
+	 * THREE MORE FOREIGN ROWS, drained by the DISCIPLINE thread. Spec §3 is
+	 * absolute that DAC1_OUT1 (PA4) is written by that thread and no other,
+	 * and it owns disc_ctx_t besides — so this side posts and nothing here
+	 * touches the pin or the loop. `ui.disp.bl` above established the shape;
+	 * these differ only in which thread claims them.
+	 *
+	 * ALL THREE ARE MP_APPLY_PENDING and all three are F_LEASE. An apply that
+	 * lands a pass later has no honest `obj.set` reply — m_obj_set() refuses a
+	 * positive apply return by name — and the lease is also the dead-man that
+	 * stops a console walking away from a parked loop.
+	 *
+	 * `ref.disc.park` is what makes the other two reachable. MP_ILK_DAC_PARK
+	 * demands `disc_parked`, and until this row existed the only producers of
+	 * that state were the PFI ISR and refsel's handoff bracket — so the two Vc
+	 * objects could be granted only during a power failure. It is EXPLICIT and
+	 * not implied by a Vc write, because an interlock is evaluated before
+	 * apply and a park implied by the write cannot satisfy the interlock
+	 * gating that write.
+	 *
+	 * ITS RELEASE IS GUARDED IN TWO PLACES, not one. MP_ILK_DAC_IDLE refuses a
+	 * deliberate `ref.disc.park = 0` while either Vc object is leased. A lease
+	 * that LAPSES reaches here with value == NULL and no interlock runs on
+	 * that path, so the drain closes that half: it drops the override with the
+	 * park and settles the Vc row REFUSED, which withdraws that lease through
+	 * mp_veto() with a reason. Refusing the lapse instead would strand the
+	 * loop parked with no lease left able to release it.
+	 *
+	 * The two Vc objects post to a row EACH, though they drive one pin. The
+	 * outcome half feeds mp_ovr_settled()/mp_veto() and mp_req_objects[] maps
+	 * a row to one object at compile time, so a shared row would settle or
+	 * withdraw whichever lease it guessed. They are kept from driving the pin
+	 * independently by MP_ILK_DAC_SOLE — one of the pair may be leased at a
+	 * time — and by the drain recording which row owns the override.
+	 *
+	 * A RELEASE OF EITHER Vc ROW re-drives the code the LOOP last commanded,
+	 * which for the parked loop it must be is the frozen one. Not zero: PA4 at
+	 * 0 V is Vc at the bottom of the pull range, so a lapsed lease would steer
+	 * the oven rather than let go of it.
+	 */
+	if (strcmp(o->id, "ref.disc.park") == 0) {
+		int32_t on = (value != NULL) && (*value != 0);
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_DISC_PARK,
+					     (value != NULL) ? &on : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	/*
+	 * A BRANCH EACH, not one branch selecting a row by kind. The two rows
+	 * are separate so the outcome half can attribute a settle or a veto to
+	 * the right lease, and test_pwrseq_req.c pins one post and one
+	 * MP_APPLY_PENDING per mailbox row precisely so a row cannot quietly
+	 * lose its branch while the manifest still advertises it as wired.
+	 * Sharing a call site here would satisfy the manifest and break that.
+	 */
+	if (strcmp(o->id, "ref.ocxo.vc_mv") == 0) {
+		int32_t v = (value != NULL) ? CLAMP(*value, o->min, o->max) : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_OCXO_VC_MV,
+					     (value != NULL) ? &v : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	if (strcmp(o->id, "ref.ocxo.dac_code") == 0) {
+		int32_t v = (value != NULL) ? CLAMP(*value, o->min, o->max) : 0;
+		int rc = sts_pwrseq_req_post(
+			(uint8_t)STS_PWRSEQ_REQ_OCXO_DAC_CODE,
+			(value != NULL) ? &v : NULL);
 
 		return (rc == 0) ? MP_APPLY_PENDING : rc;
 	}
@@ -2539,6 +2685,12 @@ static const char *const mp_req_objects[STS_PWRSEQ_REQ_COUNT] = {
 	 * is identical either way — this table only says which object an outcome
 	 * belongs to. */
 	[STS_PWRSEQ_REQ_DISP_BL] = "ui.disp.bl",
+	/* Foreign-owned too, but drained by the DISCIPLINE thread. Each Vc view
+	 * keeps a row of its own precisely so this table stays 1:1 — an outcome
+	 * for one must never settle or withdraw the other's lease. */
+	[STS_PWRSEQ_REQ_DISC_PARK] = "ref.disc.park",
+	[STS_PWRSEQ_REQ_OCXO_VC_MV] = "ref.ocxo.vc_mv",
+	[STS_PWRSEQ_REQ_OCXO_DAC_CODE] = "ref.ocxo.dac_code",
 };
 
 /**

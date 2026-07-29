@@ -557,6 +557,33 @@ int disc_park(disc_ctx_t *ctx, uint16_t *out_code);
  */
 int disc_unpark(disc_ctx_t *ctx);
 
+/**
+ * The actuator's code<->millivolt transfer, both directions, in ONE place.
+ *
+ * `ref.ocxo.vc_mv` and `ref.ocxo.dac_code` are two views of DAC1_OUT1, so the
+ * console converts between them on every write and every read-back; the loop's
+ * own disc_out_t::vc_cmd_mv telemetry is the same conversion. Two copies of it
+ * would eventually disagree by a rounding rule and a technician would see a
+ * value read back as a different one from the one written.
+ *
+ * Free functions on (vref, max_code) rather than methods on disc_ctx_t, because
+ * the discipline thread must answer both while the context is being stepped —
+ * these take no state and cannot race with a tick.
+ *
+ * @param vref_mv   disc_cfg_t::dac_vref_mv (3300 on this board).
+ * @param max_code  disc_cfg_t::dac_max_code (4095, 12-bit).
+ */
+int32_t disc_code_to_mv(uint16_t vref_mv, uint16_t max_code, uint16_t code);
+
+/**
+ * The inverse, rounded to NEAREST code. @p mv is clamped to [0, vref_mv].
+ *
+ * @retval 0        @p out_code written.
+ * @retval -EINVAL  @p out_code is NULL, or a zero vref/max_code.
+ */
+int disc_mv_to_code(uint16_t vref_mv, uint16_t max_code, int32_t mv,
+		    uint16_t *out_code);
+
 /** Current state. DISC_STATE__COUNT for a NULL/uninitialised context. */
 disc_state_t disc_state(const disc_ctx_t *ctx);
 

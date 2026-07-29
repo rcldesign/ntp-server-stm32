@@ -356,9 +356,8 @@ int disc_init(disc_ctx_t *ctx, const disc_cfg_t *cfg)
 
 	ctx->state = DISC_STATE_ACQUIRING;
 	ctx->dac_code = cfg->dac_center_code;
-	ctx->vc_cmd_mv = (int32_t)(((uint32_t)ctx->dac_code *
-				    (uint32_t)cfg->dac_vref_mv) /
-				   (uint32_t)cfg->dac_max_code);
+	ctx->vc_cmd_mv = disc_code_to_mv(cfg->dac_vref_mv, cfg->dac_max_code,
+					 ctx->dac_code);
 	ctx->t_demote_s = UINT32_MAX;
 	windows_reset(ctx);
 	ctx->initialised = true;
@@ -973,10 +972,51 @@ static float slew_limit(const disc_ctx_t *ctx)
 	}
 }
 
+int32_t disc_code_to_mv(uint16_t vref_mv, uint16_t max_code, uint16_t code)
+{
+	if (max_code == 0u) {
+		return 0;
+	}
+	if (code > max_code) {
+		code = max_code;
+	}
+	return (int32_t)(((uint32_t)code * (uint32_t)vref_mv) /
+			 (uint32_t)max_code);
+}
+
+int disc_mv_to_code(uint16_t vref_mv, uint16_t max_code, int32_t mv,
+		    uint16_t *out_code)
+{
+	uint32_t num;
+
+	if ((out_code == NULL) || (vref_mv == 0u) || (max_code == 0u)) {
+		return -EINVAL;
+	}
+	if (mv < 0) {
+		mv = 0;
+	}
+	if (mv > (int32_t)vref_mv) {
+		mv = (int32_t)vref_mv;
+	}
+
+	/*
+	 * Round to nearest, not truncate. The step is vref/max_code = 806 uV on
+	 * this board, so a millivolt request never lands exactly on a code and
+	 * truncation would bias every write half an LSB low — a systematic Vc
+	 * offset on the one object a technician uses to measure the pull curve.
+	 */
+	num = ((uint32_t)mv * (uint32_t)max_code) + ((uint32_t)vref_mv / 2u);
+	*out_code = (uint16_t)(num / (uint32_t)vref_mv);
+	if (*out_code > max_code) {
+		*out_code = max_code;
+	}
+	return 0;
+}
+
 static int32_t code_to_mv(const disc_ctx_t *ctx, uint16_t code)
 {
-	return (int32_t)(((uint32_t)code * (uint32_t)ctx->cfg.dac_vref_mv) /
-			 (uint32_t)ctx->cfg.dac_max_code);
+	return disc_code_to_mv(ctx->cfg.dac_vref_mv, ctx->cfg.dac_max_code,
+			       code);
 }
 
 /* ------------------------------------------------------------- publication */

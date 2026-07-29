@@ -475,6 +475,9 @@ static const char *const g_req_objects[STS_PWRSEQ_REQ_COUNT] = {
 	[STS_PWRSEQ_REQ_RGB_G] = "ui.rgb.g",
 	[STS_PWRSEQ_REQ_RGB_B] = "ui.rgb.b",
 	[STS_PWRSEQ_REQ_DISP_BL] = "ui.disp.bl",
+	[STS_PWRSEQ_REQ_DISC_PARK] = "ref.disc.park",
+	[STS_PWRSEQ_REQ_OCXO_VC_MV] = "ref.ocxo.vc_mv",
+	[STS_PWRSEQ_REQ_OCXO_DAC_CODE] = "ref.ocxo.dac_code",
 };
 
 /** The mailbox row that actuates @p id, or STS_PWRSEQ_REQ_NONE. */
@@ -1124,6 +1127,56 @@ static void test_every_request_id_has_its_own_slot(void)
 	TEST_ASSERT_EQUAL_UINT32((uint32_t)n, g_mbox.posted);
 }
 
+/**
+ * Row ownership is DATA, and every row has exactly one owner.
+ *
+ * sts_pwrseq_req_is_foreign() is consulted by BOTH sides — the housekeeping
+ * drain skips the rows it names and sts_pwrseq_req_claim()/_settle() refuse the
+ * rest — so the single-writer rule is structural rather than documentary. A row
+ * that fell out of this predicate would be claimed by nobody and its object
+ * would go silently inert while the manifest still advertised it as wired.
+ *
+ * Four rows are foreign: `ui.disp.bl` on the ui thread, and the OCXO steering
+ * group on the discipline thread, which spec §3 makes the only writer of PA4.
+ * Slot 0 is not a row and must not read as foreign — a bad id has to fail the
+ * id check, not arrive at a drain that believes somebody else owns it.
+ */
+static void test_every_row_has_exactly_one_owner(void)
+{
+	uint8_t req;
+	unsigned int foreign = 0U;
+
+	TEST_ASSERT_FALSE(
+		sts_pwrseq_req_is_foreign((uint8_t)STS_PWRSEQ_REQ_NONE));
+
+	TEST_ASSERT_TRUE(
+		sts_pwrseq_req_is_foreign((uint8_t)STS_PWRSEQ_REQ_DISP_BL));
+	TEST_ASSERT_TRUE(
+		sts_pwrseq_req_is_foreign((uint8_t)STS_PWRSEQ_REQ_DISC_PARK));
+	TEST_ASSERT_TRUE(
+		sts_pwrseq_req_is_foreign((uint8_t)STS_PWRSEQ_REQ_OCXO_VC_MV));
+	TEST_ASSERT_TRUE(sts_pwrseq_req_is_foreign(
+		(uint8_t)STS_PWRSEQ_REQ_OCXO_DAC_CODE));
+
+	for (req = (uint8_t)STS_PWRSEQ_REQ_NONE + 1U;
+	     req < (uint8_t)STS_PWRSEQ_REQ_COUNT; req++) {
+		if (sts_pwrseq_req_is_foreign(req)) {
+			foreign++;
+		}
+	}
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		4U, foreign,
+		"a row changed owner; both drains read this predicate, so the "
+		"housekeeping pass and the foreign claim have to move together");
+
+	/* The rails housekeeping owns are emphatically not foreign — this is
+	 * the direction that would put a second writer on a power rail. */
+	TEST_ASSERT_FALSE(
+		sts_pwrseq_req_is_foreign((uint8_t)STS_PWRSEQ_REQ_RB_GATE));
+	TEST_ASSERT_FALSE(
+		sts_pwrseq_req_is_foreign((uint8_t)STS_PWRSEQ_REQ_GPS_EN));
+}
+
 /** Slot 0 is never a request, and neither is anything past the table. */
 static void test_the_mailbox_refuses_a_non_request_id(void)
 {
@@ -1367,7 +1420,7 @@ static void test_every_mailbox_object_is_lease_only(void)
 	}
 
 	/* Not vacuous: the loop has to have covered the whole mailbox. */
-	TEST_ASSERT_EQUAL_UINT(15U, (unsigned int)STS_PWRSEQ_REQ_COUNT - 1U);
+	TEST_ASSERT_EQUAL_UINT(18U, (unsigned int)STS_PWRSEQ_REQ_COUNT - 1U);
 }
 
 /**
@@ -2805,6 +2858,7 @@ int main(void)
 	RUN_TEST(test_two_requests_for_one_object_coalesce_to_the_last);
 	RUN_TEST(test_a_revision_does_not_inherit_the_previous_receipt);
 	RUN_TEST(test_every_request_id_has_its_own_slot);
+	RUN_TEST(test_every_row_has_exactly_one_owner);
 	RUN_TEST(test_the_mailbox_refuses_a_non_request_id);
 	RUN_TEST(test_a_drain_cannot_settle_a_request_into_silence);
 	RUN_TEST(test_an_outcome_is_taken_exactly_once);

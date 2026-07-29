@@ -311,6 +311,29 @@ int sts_ref_override_set(uint8_t mode);
  */
 uint8_t sts_ref_override_get(void);
 
+/**
+ * What DAC1_OUT1 (PA4) is actually holding, and whether a maintenance override
+ * put it there.
+ *
+ * The PIN, not the loop's intention. quality_block_t::dac_code and ::vc_cmd_mv
+ * are what core/disc COMMANDED, and while `ref.ocxo.vc_mv` or `ref.ocxo.dac_code`
+ * is leased the two differ by exactly the override — so a read-back sourced from
+ * the quality block would report the frozen code to a technician who had just
+ * written a different one. This is the read-back for those two objects, and the
+ * observed half MP_ILK_DAC_SOLE / MP_ILK_DAC_IDLE are judged on.
+ *
+ * Lock-free: one aligned word published by the discipline thread. Any thread,
+ * not an ISR.
+ *
+ * @param out_code Receives the 12-bit code on the pin; may be NULL.
+ * @param out_mv   Receives disc_code_to_mv() of it; may be NULL.
+ * @param out_ovr  Receives true while an override holds it; may be NULL.
+ *
+ * @retval true   Written; the discipline thread has started.
+ * @retval false  Not started — nothing has driven PA4 and no output is written.
+ */
+bool sts_disc_dac_state(uint16_t *out_code, int32_t *out_mv, bool *out_ovr);
+
 /* ---- bench calibration procedures ---------------------------------------- */
 /*
  * One entry point, one genuinely automatable procedure. See core/cal/cal.h for
@@ -1390,6 +1413,69 @@ typedef enum {
 	 * with nothing behind it.
 	 */
 	STS_PWRSEQ_REQ_DISP_BL,
+	/*
+	 * The discipline loop's MAINTENANCE PARK — `ref.disc.park`, value 0/1.
+	 *
+	 * FOREIGN-OWNED like DISP_BL, but drained by the DISCIPLINE thread: that
+	 * thread owns `disc_ctx_t` and DAC1_OUT1 (ARCHITECTURE.md §10.2), so a
+	 * console calling disc_park() directly would mutate the loop's state
+	 * between disc_tick_pps() and the disc_write_dac() built from its answer.
+	 *
+	 * IT EXISTS BECAUSE MP_ILK_DAC_PARK WAS OTHERWISE UNSATISFIABLE. That
+	 * interlock gates the two OCXO Vc objects on `disc_parked`, which
+	 * prov_ilk() sources from QUALITY_FLAG_PARKED — a real measurement, and
+	 * correctly so. But the only producers of that state were the PFI
+	 * power-fail ISR and refsel's own handoff bracket, so the interlock could
+	 * be satisfied only during a power failure or inside a mux flip nobody can
+	 * aim at. The park had to become something a technician can ASK for.
+	 *
+	 * EXPLICIT, NEVER IMPLIED ON ACQUIRE. Interlocks are evaluated before
+	 * apply, so a park implied by the DAC write could not satisfy the
+	 * interlock gating that very write.
+	 *
+	 * A LATCH, not the transient bracket sts_disc_handoff_park() opens. The
+	 * whole point is that it outlives the RPC that asked for it and spans
+	 * every DAC write the technician then makes; a bracket that closed itself
+	 * would drop the interlock under the next write. It is a SECOND latch
+	 * beside the PFI one, not a shared flag: the loop resumes only when both
+	 * are clear, so releasing a maintenance park cannot defeat a PFI park that
+	 * landed while it was held, and a PFI recovery cannot unpark the loop
+	 * under a technician's DAC override.
+	 *
+	 * Its RELEASE resolves to UNPARKED — firmware's automatic state — and the
+	 * resume goes through disc_unpark(), i.e. RECOVERING with a rate-limited
+	 * pull-in rather than a step.
+	 */
+	STS_PWRSEQ_REQ_DISC_PARK,
+	/*
+	 * DAC1_OUT1 (PA4) under maintenance override, in millivolts —
+	 * `ref.ocxo.vc_mv` — and in raw 12-bit codes — `ref.ocxo.dac_code`.
+	 * Foreign-owned, drained by the discipline thread for the reason above:
+	 * spec §3 makes that thread the only writer of PA4, so the console must
+	 * post rather than write.
+	 *
+	 * TWO ROWS FOR ONE ACTUATOR, and that needs saying. The mailbox's outcome
+	 * half feeds mp_ovr_settled()/mp_veto(), and mp_glue.c's mp_req_objects[]
+	 * maps one row to one manifest object at compile time — so a shared row
+	 * would settle or withdraw whichever of the two leases it guessed, which
+	 * is exactly the cross-attribution STS_PWRSEQ_REQ_LAMP_TEST above refused.
+	 * What the two views must NOT do is drive the pin independently, and that
+	 * is closed on the other side: MP_ILK_DAC_SOLE refuses a grant of either
+	 * while the other is leased, and the drain records WHICH row owns the
+	 * override, so a release from the row that does not own it re-drives
+	 * nothing.
+	 *
+	 * The mV row is converted to a code by disc_mv_to_code() — the inverse of
+	 * the same disc_code_to_mv() the read-back and core/disc's own telemetry
+	 * use, so there is one conversion on the board and not two.
+	 *
+	 * Their RELEASE re-drives the code the LOOP last commanded, which for a
+	 * parked loop is the frozen one. Not "off": PA4 at 0 V is Vc at the bottom
+	 * of the pull range, which is a long way from the automatic level and
+	 * would leave a lapsed lease steering the oven.
+	 */
+	STS_PWRSEQ_REQ_OCXO_VC_MV,
+	STS_PWRSEQ_REQ_OCXO_DAC_CODE,
 	STS_PWRSEQ_REQ_COUNT
 } sts_pwrseq_req_id_t;
 

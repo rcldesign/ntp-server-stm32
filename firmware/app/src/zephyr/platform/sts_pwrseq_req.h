@@ -203,10 +203,20 @@ static inline bool sts_pwrseq_req_id_ok(uint8_t req)
  *
  * Slot 0 is not a row and is not foreign — a bad id must fail the id check, not
  * arrive at a drain that thinks somebody else has it.
+ *
+ * Three rows name the DISCIPLINE thread rather than the ui thread. The rule is
+ * the same one and not a second one: spec §3 makes that thread the only writer
+ * of DAC1_OUT1 (PA4) and the owner of disc_ctx_t, so its park and its two Vc
+ * views are drained where their single writer already is. This predicate does
+ * not say WHICH foreign thread owns a row, and does not need to — each foreign
+ * drain claims only the rows it names, and housekeeping skips all of them.
  */
 static inline bool sts_pwrseq_req_is_foreign(uint8_t req)
 {
-	return req == (uint8_t)STS_PWRSEQ_REQ_DISP_BL;
+	return (req == (uint8_t)STS_PWRSEQ_REQ_DISP_BL) ||
+	       (req == (uint8_t)STS_PWRSEQ_REQ_DISC_PARK) ||
+	       (req == (uint8_t)STS_PWRSEQ_REQ_OCXO_VC_MV) ||
+	       (req == (uint8_t)STS_PWRSEQ_REQ_OCXO_DAC_CODE);
 }
 
 static inline void sts_pwrseq_req_bump(uint32_t *c)

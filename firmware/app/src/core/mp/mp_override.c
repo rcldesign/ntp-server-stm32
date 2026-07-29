@@ -232,6 +232,29 @@ int mp_ilk_eval(size_t obj, int32_t req, const mp_ilk_state_t *st,
 		}
 	}
 
+	if ((mask & MP_ILK_DAC_SOLE) != 0U) {
+		/* The OTHER view of the same pin, chosen by this object's kind:
+		 * a re-grant of the object already held must not be refused by
+		 * its own lease. */
+		bool other = (o->kind == (uint8_t)MP_KIND_MV) ? st->dac_code_held
+							      : st->dac_mv_held;
+
+		if (other) {
+			out->failed = MP_ILK_DAC_SOLE;
+			return -EPERM;
+		}
+	}
+
+	if ((mask & MP_ILK_DAC_IDLE) != 0U) {
+		/* Only the RELEASE direction. Taking the park while a Vc
+		 * override stands is harmless — it is already parked, which is
+		 * that override's own precondition. */
+		if ((req == 0) && (st->dac_mv_held || st->dac_code_held)) {
+			out->failed = MP_ILK_DAC_IDLE;
+			return -EPERM;
+		}
+	}
+
 	/* --- clamps ------------------------------------------------------- */
 
 	if ((mask & MP_ILK_RB_VMAX) != 0U) {

@@ -304,7 +304,6 @@ auth_is_locked                         # TODO: wire it up or give it a reason
 auth_stats_reset                       # TODO: wire it up or give it a reason
 cfg_get_f32                            # TODO: wire it up or give it a reason
 cfg_set_migrations                     # TODO: wire it up or give it a reason
-disc_state                             # TODO: wire it up or give it a reason
 fault_evt_count                        # TODO: wire it up or give it a reason
 fault_expected_off_mask                # TODO: wire it up or give it a reason
 fault_relay_disqualify_mask            # TODO: wire it up or give it a reason
