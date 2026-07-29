@@ -471,18 +471,27 @@ static void test_the_deferred_flag_is_the_dispatch(void)
  *
  * One bit cannot say "actuates but cannot be read back", so the manifest's bit
  * describes the mutation and this residue is where it under-reports. Pinning
- * the residue by name is what keeps it from growing: each of the three has a
+ * the residue by name is what keeps it from growing: each of the five has a
  * structural reason for having nothing to read — `ui.identify` is a write-only
- * beacon, and the other two are momentary pulses whose pin rests deasserted —
- * and a fourth would mean somebody wired a setter without a read-back and let
- * the flag quietly become less true.
+ * beacon, and the other four are momentary pulses whose pin rests deasserted,
+ * so the only thing a read could report is "not pulsing right now" — and a
+ * sixth would mean somebody wired a setter without a read-back and let the flag
+ * quietly become less true.
+ *
+ * `sys.phy.reset` and `gnss.extint` joined the pulse group when obj_pulse()
+ * gained their branches. Neither has a rest state worth publishing: LAN_RST_N
+ * is released within 1.5 ms of the call returning, and GPS_EXTINT is a
+ * 1 ms edge whose EFFECT is reported by the receiver as UBX-TIM-TM2, not by
+ * this seam.
  */
-static void test_the_write_only_residue_is_exactly_these_three(void)
+static void test_the_write_only_residue_is_exactly_these_five(void)
 {
 	static const char *const expect[] = {
 		"ui.identify",
 		"pwr.poe.kill",
 		"pwr.rb.ov.reset",
+		"sys.phy.reset",
+		"gnss.extint",
 	};
 	size_t i;
 	unsigned int found = 0U;
@@ -777,7 +786,7 @@ int main(void)
 	UNITY_BEGIN();
 
 	RUN_TEST(test_the_deferred_flag_is_the_dispatch);
-	RUN_TEST(test_the_write_only_residue_is_exactly_these_three);
+	RUN_TEST(test_the_write_only_residue_is_exactly_these_five);
 	RUN_TEST(test_the_dispatch_names_nothing_the_manifest_lacks);
 
 	RUN_TEST(test_the_image_gates_actuation_on_the_flag);

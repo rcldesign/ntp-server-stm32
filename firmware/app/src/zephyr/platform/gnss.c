@@ -120,6 +120,10 @@ static const struct device *const gnss_uart = DEVICE_DT_GET(DT_NODELABEL(usart3)
 /* GPS_ANT_OFF_MON (PD4): the LNA's own "I am switched off" indication, one of the
  * antenna supervisor's three evidence sources (bias-supervisor doc §9.3). */
 static const struct gpio_dt_spec ant_off_mon = STS_USER_GPIO(gps_ant_off_gpios);
+/* GPS_EXTINT (PD6): the F9T's external-interrupt input. An edge latches a time
+ * mark the receiver reports as UBX-TIM-TM2, so this file is its single writer —
+ * a second one would inject marks the session's owner cannot attribute. */
+static const struct gpio_dt_spec gps_extint = STS_USER_GPIO(gps_extint_gpios);
 
 /* ---- module state -------------------------------------------------------- */
 
@@ -1138,6 +1142,20 @@ int sts_gnss_start(void)
 		(void)gpio_pin_configure_dt(&ant_off_mon, GPIO_INPUT);
 	}
 
+	/*
+	 * EXTINT deasserted before the receiver is powered. This runs ahead of
+	 * pwrseq's stage 5 (platform.c starts gnss then pwrseq), so PD6 is at a
+	 * defined level before GPS_PWR_EN comes up rather than floating into a
+	 * module that is booting — a spurious edge there is a time mark nothing
+	 * asked for. Failure is not fatal: it costs `gnss.extint`, which
+	 * sts_gnss_extint_pulse() then refuses on the same readiness test.
+	 */
+	if (gpio_is_ready_dt(&gps_extint)) {
+		(void)gpio_pin_configure_dt(&gps_extint, GPIO_OUTPUT_INACTIVE);
+	} else {
+		LOG_WRN("GPS_EXTINT not ready; the time-mark trigger is unavailable");
+	}
+
 	gnss_load_cfg(&cfg);
 	gs.survey_acc_0p1mm = cfg.survey_acc_limit_0p1mm;
 
@@ -1197,6 +1215,44 @@ int sts_gnss_notify_reset(uint32_t now_ms)
 	gs.have_pvt_prev = false;
 
 	return gnssmgr_notify_reset(&mgr, now_ms);
+}
+
+int sts_gnss_extint_pulse(void)
+{
+	if (!gs.started || !gpio_is_ready_dt(&gps_extint)) {
+		return -ENODEV;
+	}
+
+	/*
+	 * Refused while somebody else owns USART3, and the refusal is about the
+	 * REPORT rather than about the pin.
+	 *
+	 * The edge below latches a time mark the receiver emits as UBX-TIM-TM2 on
+	 * that port. A raw maintenance tunnel is forwarding those bytes verbatim
+	 * to whoever opened it, and a receiver firmware session is speaking the
+	 * safeboot loader protocol where an unexpected UBX frame is at best noise;
+	 * in both cases the mark would arrive inside somebody else's session,
+	 * unattributable to the request that caused it. -EBUSY is the retryable
+	 * answer (MP_E_BUSY), which is the honest one — close the tunnel and the
+	 * trigger works.
+	 */
+	if (sts_mp_tunnel_gnss_open() || gs.fw_mode) {
+		return -EBUSY;
+	}
+
+	/*
+	 * No mailbox, and no width parameter. This file is PD6's single writer,
+	 * so there is no queue to serialise against; and the F9T latches on the
+	 * EDGE, so a width is not a property of the request — the same reason
+	 * obj_pulse() drops the manifest widths of `pwr.poe.kill` and
+	 * `pwr.rb.ov.reset`. STS_GNSS_EXTINT_PULSE_US is far above the input
+	 * filter and short enough to busy-wait on the calling thread.
+	 */
+	(void)gpio_pin_set_dt(&gps_extint, 1);
+	k_busy_wait(STS_GNSS_EXTINT_PULSE_US);
+	(void)gpio_pin_set_dt(&gps_extint, 0);
+
+	return 0;
 }
 
 void sts_gnss_ant_supervisor_start(void)

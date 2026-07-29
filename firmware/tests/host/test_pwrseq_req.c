@@ -396,11 +396,19 @@ static const char *const g_req_objects[STS_PWRSEQ_REQ_COUNT] = {
 	[STS_PWRSEQ_REQ_NONE] = NULL,
 	[STS_PWRSEQ_REQ_PANEL_LED_EN] = PANEL_ID,
 	[STS_PWRSEQ_REQ_PANEL_DUTY] = "ui.panel.duty",
+	[STS_PWRSEQ_REQ_LAMP_TEST] = "ui.lamp.test",
 	[STS_PWRSEQ_REQ_GPS_EN] = "pwr.gps.en",
 	[STS_PWRSEQ_REQ_ANT_BIAS_EN] = "pwr.ant.bias.en",
 	[STS_PWRSEQ_REQ_DISP_EN] = "pwr.disp.en",
 	[STS_PWRSEQ_REQ_RB_GATE] = "pwr.rb.gate",
 	[STS_PWRSEQ_REQ_RB_VSET_MV] = "pwr.rb.vset_mv",
+	[STS_PWRSEQ_REQ_REF_TERM_EN] = "ref.term.en",
+	[STS_PWRSEQ_REQ_FAN_DUTY] = "sys.fan.duty",
+	[STS_PWRSEQ_REQ_RGB_MODE] = "ui.rgb.mode",
+	[STS_PWRSEQ_REQ_RGB_R] = "ui.rgb.r",
+	[STS_PWRSEQ_REQ_RGB_G] = "ui.rgb.g",
+	[STS_PWRSEQ_REQ_RGB_B] = "ui.rgb.b",
+	[STS_PWRSEQ_REQ_DISP_BL] = "ui.disp.bl",
 };
 
 /** The mailbox row that actuates @p id, or STS_PWRSEQ_REQ_NONE. */
@@ -1225,7 +1233,7 @@ static void test_every_mailbox_object_is_lease_only(void)
 	}
 
 	/* Not vacuous: the loop has to have covered the whole mailbox. */
-	TEST_ASSERT_EQUAL_UINT(7U, (unsigned int)STS_PWRSEQ_REQ_COUNT - 1U);
+	TEST_ASSERT_EQUAL_UINT(15U, (unsigned int)STS_PWRSEQ_REQ_COUNT - 1U);
 }
 
 /**
@@ -2129,6 +2137,10 @@ static void test_the_setpoint_row_refuses_stage_eight_and_a_gated_fe(void)
  * and — worse for the display — would make MP_ILK_DISP_OFF blind to the very
  * off it measures, so a technician could cycle DISP_EN with no minimum
  * off-time.
+ *
+ * `ref.term.en` is the fifth read-back and reaches the same rule from the other
+ * direction: the snapshot has no ref-term field at all, so there is no belief
+ * for it to answer from — only the pin, or nothing.
  */
 static void test_the_rail_readbacks_and_the_disp_interlock_read_the_pin(void)
 {
@@ -2138,9 +2150,43 @@ static void test_the_rail_readbacks_and_the_disp_interlock_read_the_pin(void)
 	load_source("zephyr/console/mp_glue.c");
 
 	rd = fn_body("static int obj_read(void *user, size_t obj, mp_val_t *out)");
+	/*
+	 * FIVE, and each one is named below so a future reader can check the
+	 * number instead of trusting it. The fifth is `ref.term.en` — the
+	 * STS_PWRSEQ_REQ_REF_TERM_EN row, REF_TERM_EN on PC10 — which joined
+	 * the other four when the SMA termination became leasable (F_LEASE in
+	 * mp_manifest.c) and so acquired the same pin/belief divergence. It is
+	 * a genuine measurement on exactly the same path as the four: it calls
+	 * sts_pwrseq_rail_on(), which ends in `gpio_pin_get_dt(r->gpio) == 1`,
+	 * and pwrseq_rails[STS_PWRSEQ_REQ_REF_TERM_EN].gpio is &ref_term_en,
+	 * which sts_pwrseq_start() configures behind a gpio_is_ready_dt()
+	 * guard — not a NULL row that would make the call always answer false.
+	 *
+	 * It is the one row with no companion `ps.` assertion, and that is not
+	 * an omission: see the note above this function.
+	 */
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
-		4U, count_in(&rd, "sts_pwrseq_rail_on("),
+		5U, count_in(&rd, "sts_pwrseq_rail_on("),
 		"a rail read-back stopped reporting the pin");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&rd, "STS_PWRSEQ_REQ_GPS_EN"),
+		"the GPS rail is not one of the pin read-backs counted above");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&rd, "STS_PWRSEQ_REQ_ANT_BIAS_EN"),
+		"the antenna-bias rail is not one of the pin read-backs "
+		"counted above");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&rd, "STS_PWRSEQ_REQ_DISP_EN"),
+		"the display rail is not one of the pin read-backs counted "
+		"above");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&rd, "STS_PWRSEQ_REQ_RB_GATE"),
+		"the rubidium gate is not one of the pin read-backs counted "
+		"above");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&rd, "STS_PWRSEQ_REQ_REF_TERM_EN"),
+		"the SMA termination is not one of the pin read-backs counted "
+		"above");
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
 		0U, count_in(&rd, "ps.gps_on"),
 		"the GPS read-back answers from pwrseq's belief again");

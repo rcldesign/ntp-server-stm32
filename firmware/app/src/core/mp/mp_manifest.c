@@ -280,8 +280,18 @@ const mp_obj_t mp_objs[] = {
 	  .group = MP_GRP_REF, .flags = F_RW_D, .min = 0, .max = 1, .step = 1,
 	  .enums = "ocxo,rb", .ilk = MP_ILK_MUX_GUARD, .net = "MUX_SEL",
 	  .desc = "U52 74LVC1G157 clock mux -> PH0 HSE bypass (PB6)" },
+	/*
+	 * F_LEASE, not F_RW, for the reason `pwr.panel.led.en` gives above: the
+	 * apply is posted to the sequencer mailbox and answers
+	 * MP_APPLY_PENDING, which `obj.set`'s reply has no field to admit.
+	 *
+	 * The RELEASE direction is the unusual part — it re-terminates. R176's
+	 * 100k pull-up boots PC10 asserted and pwrseq drives it active at start,
+	 * so terminated is firmware's automatic level and un-terminating is the
+	 * direction a technician has to ask for.
+	 */
 	{ .id = "ref.term.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_REF, .flags = F_RW_D, .net = "REF_TERM_EN",
+	  .group = MP_GRP_REF, .flags = F_LEASE, .net = "REF_TERM_EN",
 	  .desc = "external-reference SMA 50 ohm termination (PC10)" },
 	{ .id = "ref.ocxo.vc_mv", .kind = MP_KIND_MV, .guard = MP_GUARD_G3,
 	  .group = MP_GRP_REF, .flags = F_RW_D, .min = 0, .max = 3300,
@@ -316,7 +326,7 @@ const mp_obj_t mp_objs[] = {
 	  .group = MP_GRP_GNSS, .flags = F_RW_D, .net = "GPS_DSEL",
 	  .desc = "ZED-F9T interface select (PD7)" },
 	{ .id = "gnss.extint", .kind = MP_KIND_PULSE, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_GNSS, .flags = F_PULSE_D, .min = 1, .max = 1000,
+	  .group = MP_GRP_GNSS, .flags = F_PULSE, .min = 1, .max = 1000,
 	  .step = 1, .unit = U_MS, .net = "GPS_EXTINT",
 	  .desc = "ZED-F9T time-mark / aiding trigger (PD6)" },
 	{ .id = "gnss.tunnel", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
@@ -339,8 +349,21 @@ const mp_obj_t mp_objs[] = {
 	  .group = MP_GRP_PANEL, .flags = F_LEASE, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .net = "PANEL_LED_PWM",
 	  .desc = "front-panel LED string dimmer, LPTIM2_CH2 (PE0)" },
+	/*
+	 * The four panel controls below are lease-only for the reason
+	 * `pwr.panel.led.en` gives: each is posted to the sequencer mailbox and
+	 * answers MP_APPLY_PENDING.
+	 *
+	 * `ui.disp.bl` is the one row the HOUSEKEEPING pass does not drain.
+	 * ui_display.c rewrites TIM15_CH2 on every render frame, so the ui
+	 * thread is PE6's single writer and claims the row itself
+	 * (sts_pwrseq_req_is_foreign). `ui.lamp.test` gets a row of its own
+	 * rather than sharing `ui.panel.duty`'s, because the mailbox's
+	 * last-writer-wins rule is per OBJECT and a shared row would settle and
+	 * withdraw the other object's leases.
+	 */
 	{ .id = "ui.disp.bl", .kind = MP_KIND_PCT, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW_D, .min = 0, .max = 100,
+	  .group = MP_GRP_PANEL, .flags = F_LEASE, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .net = "DISP_BL",
 	  .desc = "ST7796 module backlight duty (PE6)" },
 	{ .id = "ui.disp.reset", .kind = MP_KIND_PULSE, .guard = MP_GUARD_G2,
@@ -348,23 +371,23 @@ const mp_obj_t mp_objs[] = {
 	  .step = 1, .unit = U_MS, .net = "DISP_RST",
 	  .desc = "ST7796 reset, active low (PA10)" },
 	{ .id = "ui.rgb.mode", .kind = MP_KIND_ENUM, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW_D, .min = 0, .max = 5, .step = 1,
+	  .group = MP_GRP_PANEL, .flags = F_LEASE, .min = 0, .max = 5, .step = 1,
 	  .enums = "auto,off,green,amber,red,blue-pulse", .net = "LED_R/G/B",
 	  .desc = "D5 status RGB pattern; auto returns it to the fault policy" },
 	{ .id = "ui.rgb.r", .kind = MP_KIND_PCT, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW_D, .min = 0, .max = 100,
+	  .group = MP_GRP_PANEL, .flags = F_LEASE, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .net = "LED_R",
 	  .desc = "D5 red leg, TIM4_CH1, common anode + low-side NPN (PD12)" },
 	{ .id = "ui.rgb.g", .kind = MP_KIND_PCT, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW_D, .min = 0, .max = 100,
+	  .group = MP_GRP_PANEL, .flags = F_LEASE, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .net = "LED_G",
 	  .desc = "D5 green leg, TIM4_CH2 (PD13)" },
 	{ .id = "ui.rgb.b", .kind = MP_KIND_PCT, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW_D, .min = 0, .max = 100,
+	  .group = MP_GRP_PANEL, .flags = F_LEASE, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .net = "LED_B",
 	  .desc = "D5 blue leg, TIM4_CH3 (PD14)" },
 	{ .id = "ui.lamp.test", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW_D,
+	  .group = MP_GRP_PANEL, .flags = F_LEASE,
 	  .desc = "all panel indicators on, for a lamp test" },
 	/*
 	 * G1, not G0, despite being "which box is this in the rack".
@@ -384,8 +407,16 @@ const mp_obj_t mp_objs[] = {
 	  .desc = "D5 identify pulse; outranks the fault colour by policy" },
 
 	/* --------------------------------------------------- §6.5 system --- */
+	/*
+	 * Lease-only like the rest of the mailbox, and the only row whose
+	 * override is a FLOOR rather than a level: housekeeping programs
+	 * max(thermal loop, override), and a release resolves to full airflow
+	 * rather than to the loop's last answer (ARCHITECTURE.md §10.9).
+	 * MP_ILK_FAN_FLOOR clamps the request up at grant; the executor is what
+	 * keeps it there as the box heats up.
+	 */
 	{ .id = "sys.fan.duty", .kind = MP_KIND_PCT, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_SYSTEM, .flags = F_RW_D, .min = 0, .max = 100,
+	  .group = MP_GRP_SYSTEM, .flags = F_LEASE, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .ilk = MP_ILK_FAN_FLOOR,
 	  .net = "FAN_PWM",
 	  .desc = "25 kHz fan PWM, TIM15_CH1; idle/fault state is full speed (PE5)" },
@@ -401,7 +432,7 @@ const mp_obj_t mp_objs[] = {
 	  .group = MP_GRP_SYSTEM, .flags = F_RWL_D, .net = "NOR_RST_N",
 	  .desc = "U62 MX25L25645 reset, active low (PE10)" },
 	{ .id = "sys.phy.reset", .kind = MP_KIND_PULSE, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_SYSTEM, .flags = F_PULSE_D | MP_OF_ACTIVE_LOW,
+	  .group = MP_GRP_SYSTEM, .flags = F_PULSE | MP_OF_ACTIVE_LOW,
 	  .min = 1, .max = 1000, .step = 1, .unit = U_MS,
 	  .net = "LAN_RST_N",
 	  .desc = "LAN8742AI reset, active low, 100 us minimum (PD10)" },

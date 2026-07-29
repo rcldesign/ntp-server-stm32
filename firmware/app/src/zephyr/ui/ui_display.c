@@ -93,6 +93,7 @@
 #include "ui/ui_font8x16.h"
 #include "zephyr/ui/sts_sky_policy.h"
 #include "zephyr/ui/sts_ui.h"
+#include "zephyr/sts_app.h"
 
 LOG_MODULE_REGISTER(sts_ui_display, CONFIG_STS1000_LOG_LEVEL);
 
@@ -136,6 +137,26 @@ static uint32_t disp_enable_ms;  /* mono_ms at which DISP_EN was asserted */
 static uint32_t disp_next_try_ms;/* earliest mono_ms for the next init attempt */
 static bool disp_ever_ready;
 static uint16_t bl_last_permille = 0xFFFFu; /* force the first duty write */
+
+/*
+ * The backlight's two levels, kept apart because the mailbox row for `ui.disp.bl`
+ * is FOREIGN-OWNED (sts_pwrseq_req_is_foreign) and executed on this thread.
+ *
+ * `bl_auto` is the ui area's own answer — ui_backlight_permille(), rewritten by
+ * sts_ui.c on every render frame and by the brightness action and the cfg
+ * applier. `bl_ovr_*` is the maintenance lease. They are separate for the same
+ * reason pwrseq_rail_t keeps `auto_on` apart from the pin: a release has to go
+ * back to firmware-automatic control, and here that means the render tick's own
+ * value resumes on the very next frame rather than the panel being left at
+ * whatever the technician last asked for.
+ *
+ * Rewriting the compare from any other thread would make housekeeping a second
+ * writer of PE6 AND of `bl_last_permille` — which is why the row is foreign at
+ * all, rather than being drained with the rest.
+ */
+static uint16_t bl_auto_permille;
+static uint16_t bl_ovr_permille;
+static bool bl_ovr_active;
 
 /* Shadow of the last surface pushed, for the per-row diff. */
 static char shadow_ch[STS_UI_ROWS * STS_UI_COLS];
@@ -990,7 +1011,8 @@ int ui_display_blit(const ui_surface_t *surf)
 	return 0;
 }
 
-void ui_display_backlight_permille(uint16_t permille)
+/** Program TIM15_CH2. @return 0 when the compare register now holds @p permille. */
+static int bl_program(uint16_t permille)
 {
 	uint32_t pulse;
 
@@ -998,16 +1020,134 @@ void ui_display_backlight_permille(uint16_t permille)
 		permille = 1000u;
 	}
 	if (permille == bl_last_permille) {
-		return;
+		return 0;
 	}
 	if (!device_is_ready(bl_pwm)) {
-		return;
+		return -ENODEV;
 	}
 
 	pulse = ((uint32_t)BL_PERIOD_NS * permille) / 1000u;
-	if (pwm_set(bl_pwm, BL_CHANNEL, BL_PERIOD_NS, pulse, 0) == 0) {
-		bl_last_permille = permille;
+	if (pwm_set(bl_pwm, BL_CHANNEL, BL_PERIOD_NS, pulse, 0) != 0) {
+		return -EIO;
 	}
+
+	bl_last_permille = permille;
+	return 0;
+}
+
+void ui_display_backlight_permille(uint16_t permille)
+{
+	if (permille > 1000u) {
+		permille = 1000u;
+	}
+	bl_auto_permille = permille;
+
+	/* A held lease outranks the render tick, which would otherwise undo the
+	 * override within one frame — 100 ms — and make `ui.disp.bl` a control
+	 * that reports success and does nothing. */
+	(void)bl_program(bl_ovr_active ? bl_ovr_permille : bl_auto_permille);
+}
+
+uint8_t sts_ui_backlight_pct(void)
+{
+	/*
+	 * The sentinel, not a duty: bl_last_permille starts at 0xFFFF so the
+	 * first write cannot be elided, and ui_display_init() programs the
+	 * compare to 0 without going through bl_program(). Either way the
+	 * register holds 0, which is what an honest read-back says.
+	 */
+	if (bl_last_permille > 1000u) {
+		return 0u;
+	}
+
+	/* Truncating, not rounding: the drain converts a percent request as
+	 * pct * 10, so this is its exact inverse and a host reads back the
+	 * number it wrote. */
+	return (uint8_t)(bl_last_permille / 10u);
+}
+
+/**
+ * Drain the foreign-owned DISP_BL row. **ui-thread context only.**
+ *
+ * Claim, execute, settle — the same discipline pwrseq_service_mailbox() uses,
+ * with the claim/settle halves reaching the mailbox through
+ * sts_pwrseq_req_claim()/_settle(), which refuse every row this area does not
+ * own. Called once per render pass, so a request lands within one UI period.
+ */
+void ui_display_backlight_service(void)
+{
+	int32_t value = 0;
+	bool release = false;
+	uint16_t want;
+
+	if (!sts_pwrseq_req_claim((uint8_t)STS_PWRSEQ_REQ_DISP_BL, &release,
+				  &value)) {
+		return;
+	}
+
+	if (release) {
+		/*
+		 * Back to firmware-automatic control, which for this pin is the
+		 * render tick's own level — not off. A lease that lapsed into a
+		 * dark panel would be a dead-man that blinded the box it was
+		 * protecting. Never refused, so a lapsed lease always lands.
+		 */
+		bl_ovr_active = false;
+		(void)bl_program(bl_auto_permille);
+		(void)sts_pwrseq_req_settle((uint8_t)STS_PWRSEQ_REQ_DISP_BL, true,
+					    (uint8_t)STS_PWRSEQ_REQ_ERR_NONE,
+					    (int32_t)sts_ui_backlight_pct(),
+					    (uint32_t)k_uptime_get_32());
+		return;
+	}
+
+	if (value < 0) {
+		value = 0;
+	}
+	if (value > 100) {
+		value = 100;
+	}
+
+	/*
+	 * A non-zero duty into an unpowered module is a control reporting
+	 * success with nothing behind it, so it is refused — and refused as
+	 * ERR_UNPOWERED rather than ERR_STAGE, because DISP_EN may be low
+	 * because a `pwr.disp.en` lease dropped it or because the ladder shed
+	 * the display, and "the sequencer has not reached it" is only one of
+	 * those three. Zero is never refused: dark is the fail-safe direction.
+	 *
+	 * The PIN, through sts_pwrseq_rail_on(), not the sequencer's snapshot —
+	 * `pwr.disp.en` is leasable, so pwrseq's own belief and the rail parted
+	 * company the moment that object was wired.
+	 */
+	if ((value != 0) &&
+	    !sts_pwrseq_rail_on((uint8_t)STS_PWRSEQ_REQ_DISP_EN)) {
+		(void)sts_pwrseq_req_settle(
+			(uint8_t)STS_PWRSEQ_REQ_DISP_BL, false,
+			(uint8_t)STS_PWRSEQ_REQ_ERR_UNPOWERED,
+			(int32_t)sts_ui_backlight_pct(),
+			(uint32_t)k_uptime_get_32());
+		return;
+	}
+
+	want = (uint16_t)(value * 10);
+	bl_ovr_active = true;
+	bl_ovr_permille = want;
+
+	if (bl_program(want) != 0) {
+		bl_ovr_active = false;
+		(void)sts_pwrseq_req_settle(
+			(uint8_t)STS_PWRSEQ_REQ_DISP_BL, false,
+			(uint8_t)STS_PWRSEQ_REQ_ERR_HW,
+			(int32_t)sts_ui_backlight_pct(),
+			(uint32_t)k_uptime_get_32());
+		return;
+	}
+
+	(void)sts_pwrseq_req_settle((uint8_t)STS_PWRSEQ_REQ_DISP_BL, true,
+				    (uint8_t)STS_PWRSEQ_REQ_ERR_NONE,
+				    (int32_t)sts_ui_backlight_pct(),
+				    (uint32_t)k_uptime_get_32());
 }
 
 bool ui_display_ready(void)

@@ -71,6 +71,16 @@ int ui_display_blit(const ui_surface_t *surf);
 /** Set the DISP_BL duty, 0..1000 permille. Safe before the panel is up. */
 void ui_display_backlight_permille(uint16_t permille);
 
+/**
+ * Drain the `ui.disp.bl` mailbox row — claim, execute, settle. **ui thread.**
+ *
+ * The row is foreign-owned (platform/sts_pwrseq_req.h,
+ * sts_pwrseq_req_is_foreign): PE6's single writer is the render pass, so
+ * housekeeping skips it and this area executes it. Call once per render frame,
+ * after the automatic backlight level has been programmed.
+ */
+void ui_display_backlight_service(void);
+
 /** True once the ST7796 has been initialised at least once. */
 bool ui_display_ready(void);
 

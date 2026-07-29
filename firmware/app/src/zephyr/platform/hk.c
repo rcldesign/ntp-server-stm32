@@ -221,6 +221,31 @@ static struct {
 	 * there (sts_app.h: "must be quick or defer to the area's own thread").
 	 */
 	atomic_t ina_cal_reload;
+
+	/*
+	 * The fan actuator, as three facts that must not be collapsed into one.
+	 *
+	 * `fan_loop_pct` is the thermal loop's OWN last answer, including the
+	 * fail-safe duty sts_fan_policy_eval() commands on a step it declined —
+	 * which is exactly why it is not sts_health_t::fan_duty_pct, whose
+	 * regulated telemetry is deliberately NOT updated on that path. It is what
+	 * MP_ILK_FAN_FLOOR clamps a maintenance request against, and an interlock
+	 * whose floor is lower than the state the box is actually in is not an
+	 * interlock.
+	 *
+	 * `fan_out_pct` is what TIM15_CH1 actually holds: max(loop, override).
+	 * The override is a FLOOR and not a level, so a lease can raise the fan
+	 * and can never hold it below what the loop is asking for as the box
+	 * heats up (ARCHITECTURE.md §10.9, sts_app.h STS_PWRSEQ_REQ_FAN_DUTY).
+	 *
+	 * Every field is written only from this thread — the 1 Hz thermal step and
+	 * the mailbox drain both run on it — and read under hk_mutex by
+	 * sts_hk_fan_state(), the same arrangement as hk_cache.
+	 */
+	uint8_t fan_loop_pct;
+	uint8_t fan_out_pct;
+	uint8_t fan_ovr_pct;
+	bool fan_ovr_active;
 } hk;
 
 /* ========================================================================= */
@@ -894,14 +919,75 @@ static uint32_t hk_tach_rpm(uint32_t now_ms)
 	return sts_fan_tach_rpm(edges, dt_ms);
 }
 
-static void hk_fan_set_duty(uint8_t duty_pct)
+static int hk_fan_set_duty(uint8_t duty_pct)
 {
 	int rc = pwm_set(fan_pwm, FAN_PWM_CHANNEL, FAN_PWM_PERIOD_NS,
 			 sts_fan_pulse_ns(duty_pct), 0);
 
 	if (rc != 0) {
 		LOG_ERR("FAN_PWM set %u%% failed (%d)", duty_pct, rc);
+		return rc;
 	}
+
+	/* Recorded only on success, so a refused write reports the duty still in
+	 * the compare register rather than the one that did not land. */
+	(void)k_mutex_lock(&hk_mutex, K_FOREVER);
+	hk.fan_out_pct = duty_pct;
+	(void)k_mutex_unlock(&hk_mutex);
+
+	return 0;
+}
+
+/** max(thermal loop, override). The override is a floor; the loop always wins up. */
+static uint8_t hk_fan_want(void)
+{
+	if (hk.fan_ovr_active && (hk.fan_ovr_pct > hk.fan_loop_pct)) {
+		return hk.fan_ovr_pct;
+	}
+	return hk.fan_loop_pct;
+}
+
+int sts_hk_fan_state(sts_hk_fan_t *out)
+{
+	if (out == NULL) {
+		return -EINVAL;
+	}
+
+	(void)k_mutex_lock(&hk_mutex, K_FOREVER);
+	out->loop_pct = hk.fan_loop_pct;
+	out->out_pct = hk.fan_out_pct;
+	out->override_active = hk.fan_ovr_active;
+	(void)k_mutex_unlock(&hk_mutex);
+
+	return 0;
+}
+
+int sts_hk_fan_override(bool active, uint8_t pct)
+{
+	uint8_t want;
+
+	if (!hk.started) {
+		return -ENODEV;
+	}
+
+	(void)k_mutex_lock(&hk_mutex, K_FOREVER);
+	hk.fan_ovr_active = active;
+	hk.fan_ovr_pct = active ? (uint8_t)MIN(pct, 100U) : 0U;
+	(void)k_mutex_unlock(&hk_mutex);
+
+	/*
+	 * A RELEASE resolves to the resting duty — full airflow — and NOT to the
+	 * loop's last answer. ARCHITECTURE.md §10.9 fixes the resting state at
+	 * maximum airflow for whenever firmware has no live opinion, and a lease
+	 * that has just lapsed is exactly that moment: the loop's answer is up to
+	 * a second stale and, on a step it declined, is not a measurement at all.
+	 * The next 1 Hz step re-establishes the regulated duty, so the cost is
+	 * bounded at one second of a fan that is running too fast, against the
+	 * alternative of a fan that is running too slow.
+	 */
+	want = active ? hk_fan_want() : STS_FAN_DUTY_RESTING_PCT;
+
+	return (hk_fan_set_duty(want) != 0) ? -EIO : 0;
 }
 
 /* ========================================================================= */
@@ -1134,10 +1220,23 @@ static void hk_thermal_1hz(uint32_t now_ms)
 	rc = thermal_step_1hz(&thermal, &in, &out);
 	sts_fan_policy_eval(rc, &out, &act);
 
+	/*
+	 * The loop's own answer is recorded FIRST and unconditionally, including
+	 * the fail-safe duty a declined step commands. That is what makes it a
+	 * usable interlock floor: the previous shape published a stale low duty
+	 * as the floor while a loop that had stopped stepping held the pin at
+	 * 100 %, and a floor below the state the box is in is not a floor.
+	 */
+	(void)k_mutex_lock(&hk_mutex, K_FOREVER);
+	hk.fan_loop_pct = act.duty_pct;
+	(void)k_mutex_unlock(&hk_mutex);
+
 	/* Unconditional: the fail-safe path commands STS_FAN_DUTY_RESTING_PCT
 	 * rather than skipping the write, so a loop that will not step still
-	 * leaves the box cooling (ARCHITECTURE.md §10.9). */
-	hk_fan_set_duty(act.duty_pct);
+	 * leaves the box cooling (ARCHITECTURE.md §10.9). A held override can
+	 * only raise this — max(loop, override) — so the ladder is never held
+	 * below what the thermal loop is asking for. */
+	(void)hk_fan_set_duty(hk_fan_want());
 
 	if (act.loop_failed) {
 		return;
@@ -1229,9 +1328,12 @@ int sts_hk_start(void)
 
 	/*
 	 * Full speed before the loop has an opinion. A fan that is not being
-	 * commanded must be running, not stopped (ARCHITECTURE.md §10.9).
+	 * commanded must be running, not stopped (ARCHITECTURE.md §10.9). The
+	 * loop's own record starts there too, so an interlock evaluated before
+	 * the first thermal step reports the duty the pin is really at.
 	 */
-	hk_fan_set_duty(STS_FAN_DUTY_RESTING_PCT);
+	hk.fan_loop_pct = STS_FAN_DUTY_RESTING_PCT;
+	(void)hk_fan_set_duty(STS_FAN_DUTY_RESTING_PCT);
 
 	rc = gpio_pin_configure_dt(&fan_tach, GPIO_INPUT);
 	if (rc == 0) {

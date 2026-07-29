@@ -1022,6 +1022,144 @@ int sts_pwrseq_poe_kill(void);
  * MP_MIRROR_F_IDENTIFY reports). 0 stops it. Safe from any thread. */
 void sts_supervisor_identify(uint32_t duration_ms);
 
+/* ---- status RGB D5 (TIM4_CH1..3) — read-back and maintenance override ---- */
+/*
+ * supervisor.c is the single writer of PD12/PD13/PD14 and it re-drives them on
+ * its own 4 Hz pass, so an override is a STATE the supervisor consults rather
+ * than a write anyone else performs. The setters below are therefore
+ * housekeeping-thread-only, called from the mailbox drain that shares that
+ * thread; the getters are read-only and safe from any thread.
+ *
+ * The two layers compose and are leased separately. `mode` chooses the PATTERN:
+ * STS_RGB_MODE_AUTO hands D5 back to core/fault's priority encode, and every
+ * other value forces one fault_rgb_state_t. The three LEGS then override
+ * individual duties after the pattern has been resolved to a colour, so a
+ * technician can hold one leg without taking the indicator off the fault policy.
+ *
+ * An override outranks BOTH the fault colour and `ui.identify`. That is
+ * deliberate: those two are annunciation, and an override is a commanded test by
+ * someone standing at the box whose duration is bounded by the lease's dead-man.
+ */
+#define STS_RGB_MODE_AUTO       0U /* core/fault's priority encode */
+#define STS_RGB_MODE_OFF        1U
+#define STS_RGB_MODE_GREEN      2U
+#define STS_RGB_MODE_AMBER      3U
+#define STS_RGB_MODE_RED        4U
+#define STS_RGB_MODE_BLUE_PULSE 5U
+#define STS_RGB_MODE_COUNT      6U
+
+#define STS_RGB_LEG_R 0U
+#define STS_RGB_LEG_G 1U
+#define STS_RGB_LEG_B 2U
+#define STS_RGB_LEG_COUNT 3U
+
+/* Force the D5 pattern, or return it to the fault policy.
+ *
+ * @param mode  STS_RGB_MODE_*. STS_RGB_MODE_AUTO releases the override.
+ * @retval 0        Applied; D5 already carries it.
+ * @retval -EINVAL  @p mode is not a mode.
+ * @retval -ENODEV  The supervisor never initialised. */
+int sts_supervisor_rgb_mode(uint8_t mode);
+
+/* Hold one leg's duty, or release it.
+ *
+ * @param leg     STS_RGB_LEG_*.
+ * @param active  false releases; @p pct is then ignored.
+ * @param pct     0..100, clamped.
+ * @retval 0        Applied; D5 already carries it.
+ * @retval -EINVAL  @p leg is not a leg.
+ * @retval -ENODEV  The supervisor never initialised. */
+int sts_supervisor_rgb_leg(uint8_t leg, bool active, uint8_t pct);
+
+/* The pattern D5 is ACTUALLY showing: the forced mode while one is held, else
+ * the fault policy's current state mapped onto STS_RGB_MODE_*. Never the
+ * request — the read-back for `ui.rgb.mode`. STS_RGB_MODE_AUTO is never
+ * returned, because "auto" names where the answer comes from, not a colour;
+ * before the supervisor's first pass the honest answer is STS_RGB_MODE_OFF,
+ * which is what sts_supervisor_init() drives. */
+uint8_t sts_supervisor_rgb_mode_get(void);
+
+/* The duty ACTUALLY programmed into one leg's compare register, percent. The
+ * read-back for `ui.rgb.r/g/b`; 0 for a bad leg or before the first pass. */
+uint8_t sts_supervisor_rgb_leg_get(uint8_t leg);
+
+/* ---- fan (FAN_PWM, PE5/TIM15_CH1) --------------------------------------- */
+
+/** What the fan actuator is doing, as three separate facts. */
+typedef struct {
+	/*
+	 * The thermal loop's OWN last answer, including the fail-safe duty it
+	 * commands on a step it declined. This is MP_ILK_FAN_FLOOR's floor, and
+	 * it is deliberately not sts_health_t::fan_duty_pct: that field is the
+	 * regulated telemetry and is not updated on the fail-safe path, so a loop
+	 * that had stopped stepping reported a stale low duty as the floor while
+	 * the pin sat at 100 %. An interlock whose floor is lower than the state
+	 * the box is actually in is not an interlock.
+	 */
+	uint8_t loop_pct;
+	/* The duty ACTUALLY programmed into TIM15_CH1 — max(loop, override)
+	 * while an override is held. The read-back for `sys.fan.duty`. */
+	uint8_t out_pct;
+	/* An override is held. */
+	bool    override_active;
+} sts_hk_fan_t;
+
+/* Snapshot the fan actuator. @retval 0 / -EINVAL for NULL; zeroed before
+ * housekeeping starts. Safe from any thread. */
+int sts_hk_fan_state(sts_hk_fan_t *out);
+
+/* Hold the fan at a duty FLOOR, or release it. **Housekeeping thread only** —
+ * it programs TIM15_CH1, which that thread is the single writer of.
+ *
+ * @param active  false releases the override AND commands the resting duty
+ *                (full airflow) immediately; @p pct is then ignored. See
+ *                STS_PWRSEQ_REQ_FAN_DUTY for why a release does not restore the
+ *                loop's last answer.
+ * @param pct     0..100, clamped. Programmed as max(thermal loop, @p pct), so
+ *                the loop can always still win.
+ * @retval 0        Applied.
+ * @retval -ENODEV  Housekeeping never started.
+ * @retval -EIO     pwm_set() refused. */
+int sts_hk_fan_override(bool active, uint8_t pct);
+
+/* ---- Ethernet PHY reset (LAN_RST_N, PD10) -------------------------------- */
+
+/* Pulse the LAN8742AI reset: assert for CONFIG_STS1000_PHY_RESET_ASSERT_US,
+ * release, then wait CONFIG_STS1000_PHY_RESET_RECOVERY_US before returning.
+ *
+ * The same code path and the same two timings the boot-time release uses, so a
+ * maintenance reset cannot drift away from the one the PHY is known to come up
+ * from. Both are microseconds and both are busy-waits: at the defaults the whole
+ * call is 1.5 ms, which is why it may be made directly from the calling thread
+ * rather than posted. The link drops and Zephyr's PHY monitor re-establishes it.
+ *
+ * @retval 0        Pulsed.
+ * @retval -ENODEV  The GPIO port is not ready.
+ * @retval other    The GPIO write's own errno. */
+int sts_platform_phy_reset(void);
+
+/* ---- GNSS EXTINT (GPS_EXTINT, PD6) --------------------------------------- */
+
+/* Pulse the ZED-F9T's EXTINT input: assert for STS_GNSS_EXTINT_PULSE_US, then
+ * return it to the deasserted level.
+ *
+ * The receiver latches a time mark on the edge (UBX-TIM-TM2), so the WIDTH is
+ * not a parameter — an edge-triggered input has no use for one, which is the
+ * same reason obj_pulse() drops the widths of `pwr.poe.kill` and
+ * `pwr.rb.ov.reset`. The fixed width is orders of magnitude above any input
+ * filter and short enough to be a busy-wait on the calling thread.
+ *
+ * @retval 0        Pulsed.
+ * @retval -ENODEV  The GNSS thread never started, or the port is not ready.
+ * @retval -EBUSY   A raw tunnel or a receiver firmware update holds USART3.
+ *                  A time mark landing in either would inject a TIM-TM2 the
+ *                  session's owner did not ask for and cannot attribute. */
+int sts_gnss_extint_pulse(void);
+
+/** EXTINT assertion width. 1 ms: far above the F9T's input filter, and 2 % of
+ *  the console's own 50 ms MP-lock budget. */
+#define STS_GNSS_EXTINT_PULSE_US 1000U
+
 /* ---- parameterised sequencer requests ----------------------------------- */
 /*
  * The three entry points above post single BITS of one atomic word, which works
@@ -1088,6 +1226,30 @@ typedef enum {
 	 * released to before it was routed through the mailbox.
 	 */
 	STS_PWRSEQ_REQ_PANEL_DUTY,
+	/*
+	 * The lamp test — `ui.lamp.test`, the panel string driven full-on while
+	 * it is held. Value 0/1; a release resolves to 0, exactly as PANEL_DUTY's
+	 * does and for the same reason.
+	 *
+	 * A ROW OF ITS OWN, not a second writer of PANEL_DUTY's, even though both
+	 * end in the same sts_panel_led_set(). The mailbox's collision rule is
+	 * "last writer wins, PER OBJECT", and the outcome half is what feeds
+	 * mp_ovr_settled()/mp_veto() — so two manifest objects sharing one row
+	 * would settle or withdraw each other's leases, which is precisely the
+	 * cross-attribution sts_pwrseq_req.h refuses to do inside a single row.
+	 *
+	 * It exists at all because the PANEL BUTTON needs it. sts_ui.c's
+	 * UI_ACTION_LAMP_TEST used to call sts_panel_led_set(100) directly from
+	 * the ui thread, which bypasses the shed check the drain performs — so the
+	 * lamp test could re-energise a rail the ladder had dropped for a power or
+	 * thermal reason, on the very same setter `pwr.panel.led.en` was routed
+	 * through this mailbox to protect. Both paths now post here.
+	 *
+	 * Ordered with the panel family, so a drain that carries both a lamp test
+	 * and a `ui.panel.duty` request lands on the duty — the deliberate value —
+	 * rather than on the momentary one.
+	 */
+	STS_PWRSEQ_REQ_LAMP_TEST,
 	/* GPS_PWR_EN (PC8) — U22 LT3045 3V3_GPS. Re-raising it reboots the
 	 * receiver, so the drain also tells gnssmgr its configuration is gone. */
 	STS_PWRSEQ_REQ_GPS_EN,
@@ -1106,6 +1268,74 @@ typedef enum {
 	 * gated onto the rail — see the drain in pwrseq_exec.c.
 	 */
 	STS_PWRSEQ_REQ_RB_VSET_MV,
+	/*
+	 * REF_TERM_EN (PC10) — the external-reference SMA's 50 ohm termination.
+	 *
+	 * The one row whose FIRMWARE-AUTOMATIC level is ON rather than off. The
+	 * board boots terminated through R176's 100k pull-up and the software
+	 * spec records "REF_TERM_EN booting terminated by hardware pull-up" as a
+	 * settled decision, so `auto_on` is true from pwrseq start and a release
+	 * re-terminates. Un-terminating is the direction a technician has to ask
+	 * for, and — per the ON/OFF reading above — it is also the direction that
+	 * is never refused, which is correct here for a different reason than it
+	 * is for a rail: a 50 ohm shunt across an unpowered SMA is not a load
+	 * that can be shed, so no ladder and no fail-action ever wants it gone.
+	 */
+	STS_PWRSEQ_REQ_REF_TERM_EN,
+	/*
+	 * FAN_PWM (PE5/TIM15_CH1), percent — `sys.fan.duty`.
+	 *
+	 * Not a load either: the value is a duty and the fail-safe direction is
+	 * UP, not down. ARCHITECTURE.md §10.9 fixes the resting state at maximum
+	 * airflow so a hung MCU cannot cook the box, so this row inverts two of
+	 * the conventions above and says so:
+	 *
+	 *   - the override is a FLOOR, not a level. housekeeping programs
+	 *     max(thermal loop, override), so a lease can raise the fan and can
+	 *     never hold it below what the thermal loop is asking for while the
+	 *     lease is held. MP_ILK_FAN_FLOOR clamps the request once, at grant;
+	 *     this is what keeps it true afterwards, when the box heats up.
+	 *   - a RELEASE resolves to STS_FAN_DUTY_RESTING_PCT (100 %), not to the
+	 *     loop's last answer. The loop's answer is up to a second stale and,
+	 *     on a step it declined, is not a measurement at all; full airflow is
+	 *     what §10.9 requires whenever firmware has no live opinion, and a
+	 *     lease that has just lapsed is exactly that moment. The next 1 Hz
+	 *     step re-establishes the regulated duty.
+	 */
+	STS_PWRSEQ_REQ_FAN_DUTY,
+	/*
+	 * Status RGB D5 (TIM4_CH1..3, PD12/13/14) — `ui.rgb.mode` and the three
+	 * legs. Driven by platform/supervisor.c on the same 4 Hz housekeeping
+	 * pass that drains this mailbox, so the pattern and the legs keep one
+	 * writer.
+	 *
+	 * `ui.rgb.mode` selects a whole pattern: 0 = auto, i.e. hand D5 back to
+	 * core/fault's priority encode; 1..5 force one fault_rgb_state_t. The
+	 * three leg rows override individual duties AFTER the pattern has been
+	 * resolved to a colour, so a technician can hold one leg at a known duty
+	 * without taking the whole indicator off the fault policy. Each is
+	 * released independently and a release returns that element to automatic.
+	 */
+	STS_PWRSEQ_REQ_RGB_MODE,
+	STS_PWRSEQ_REQ_RGB_R,
+	STS_PWRSEQ_REQ_RGB_G,
+	STS_PWRSEQ_REQ_RGB_B,
+	/*
+	 * DISP_BL (PE6/TIM15_CH2), percent — `ui.disp.bl`.
+	 *
+	 * THE FIRST ROW WHOSE EXECUTOR IS NOT THE HOUSEKEEPING PASS. ui_display.c
+	 * rewrites the backlight compare on every render frame, so a duty written
+	 * from anywhere else is undone within one frame and the two writers race
+	 * ui_display.c's own "last programmed" cache. The row is therefore
+	 * FOREIGN-OWNED (sts_pwrseq_req_is_foreign): the housekeeping drain skips
+	 * it and the ui thread claims, executes and settles it on its own pass
+	 * through sts_pwrseq_req_claim()/_settle().
+	 *
+	 * Refused non-zero while DISP_EN is off, for the reason every other ON is:
+	 * a backlight duty into an unpowered module is a control reporting success
+	 * with nothing behind it.
+	 */
+	STS_PWRSEQ_REQ_DISP_BL,
 	STS_PWRSEQ_REQ_COUNT
 } sts_pwrseq_req_id_t;
 
@@ -1135,6 +1365,19 @@ typedef enum {
 	 * all (../../CLAUDE.md, "Rb digipot in a buck FB node").
 	 */
 	STS_PWRSEQ_REQ_ERR_GATED,
+	/*
+	 * The rail the object sits behind is not up, so there is nothing for the
+	 * value to reach — `ui.disp.bl` against a dark DISP_EN.
+	 *
+	 * Separate from ERR_STAGE because the two are no longer the same fact
+	 * once a rail is leasable: DISP_EN may be low because the sequencer has
+	 * not reached stage 6, or because a `pwr.disp.en` lease dropped it, or
+	 * because the ladder shed the display. "Sequencer has not reached it" is
+	 * only true in the first case, and a technician who has just dropped the
+	 * rail themselves needs to be told which rail rather than be sent to look
+	 * at the stage machine.
+	 */
+	STS_PWRSEQ_REQ_ERR_UNPOWERED,
 	STS_PWRSEQ_REQ_ERR_COUNT
 } sts_pwrseq_req_err_t;
 
@@ -1185,12 +1428,57 @@ const char *sts_pwrseq_req_reason(uint8_t err);
  * mp_glue.c), generalised to the four GPIO rails the mailbox drives.
  *
  * @param req  An sts_pwrseq_req_id_t naming a GPIO rail row: GPS_EN,
- *             ANT_BIAS_EN, DISP_EN or RB_GATE.
+ *             ANT_BIAS_EN, DISP_EN, RB_GATE or REF_TERM_EN.
  * @return     The pin's logical level. False for any other row (the panel pair
  *             is read through sts_panel_led_get(), the setpoint through
  *             sts_pwrseq_rb_expected_mv()), for a pin that is not ready, and
  *             before the sequencer starts. */
 bool sts_pwrseq_rail_on(uint8_t req);
+
+/* ---- mailbox rows another area's thread executes ------------------------- */
+/*
+ * Every row above is drained by the housekeeping pass, because housekeeping is
+ * the single writer of the pin behind it. That is a property of the ROW, not of
+ * the mailbox: a pin whose single writer is some other thread cannot be moved
+ * from the housekeeping pass without becoming a second writer of it, which is
+ * the whole hazard this mailbox exists to remove.
+ *
+ * So ownership is data. sts_pwrseq_req_is_foreign() (platform/sts_pwrseq_req.h)
+ * names the rows whose executor lives elsewhere; the housekeeping drain skips
+ * exactly those, and these two entry points — the claim and the settle halves of
+ * the same claim-execute-settle discipline the housekeeping drain uses — REFUSE
+ * every row that is not one of them. A foreign thread therefore cannot execute a
+ * housekeeping-owned row even by mistake, which makes the single-writer rule
+ * structural instead of documentary.
+ *
+ * Everything else is unchanged: the requester still posts through
+ * sts_pwrseq_req_post() and still reads the outcome through
+ * sts_pwrseq_req_take(), and a row nobody drains simply never settles, which
+ * mp_ovr_tick() already treats as failure.
+ */
+
+/* Claim @p req's pending request for execution on the CALLING thread.
+ *
+ * The execution must happen after this returns and its result reported through
+ * sts_pwrseq_req_settle(); claiming clears the pending flag, so a request that
+ * arrives during the execution is a new request for the next pass rather than
+ * one this pass swallows.
+ *
+ * @retval true   @p release / @p value written; the caller owns the request.
+ * @retval false  Nothing pending, a bad argument, a row this area does not own,
+ *                or the sequencer never started. */
+bool sts_pwrseq_req_claim(uint8_t req, bool *release, int32_t *value);
+
+/* Report what became of a claimed foreign-owned request.
+ *
+ * @param applied  The actuator took it; @p value is what reached the pin.
+ * @param err      sts_pwrseq_req_err_t, ignored unless refused.
+ *
+ * @retval 0        Recorded; the console picks it up on its next pass.
+ * @retval -EINVAL  Bad argument, a row this area does not own, or the sequencer
+ *                  never started. */
+int sts_pwrseq_req_settle(uint8_t req, bool applied, uint8_t err, int32_t value,
+			  uint32_t now_ms);
 
 /* The rail voltage the digipot code currently PROGRAMMED implies, millivolts.
  *
@@ -1280,6 +1568,22 @@ int sts_panel_led_set(uint8_t duty_pct);
 
 /* Last commanded duty, 0..100. */
 uint8_t sts_panel_led_get(void);
+
+/* ---- display backlight (DISP_BL, PE6/TIM15_CH2 — the ui area owns it) ---- */
+/*
+ * The duty ACTUALLY programmed into TIM15_CH2, percent — the read-back for
+ * `ui.disp.bl`, and the ui area's answer to the same question every other
+ * mailbox row answers from the pin rather than from anyone's intent.
+ *
+ * Percent, while ui_display_backlight_permille() is per-mille: the manifest
+ * publishes MP_KIND_PCT and the conversion belongs on the side that owns the
+ * hardware, so the console never has to know the actuator's resolution. The
+ * value is the last duty a pwm_set() ACCEPTED, so a refused write reports the
+ * duty that is still in the compare register.
+ *
+ * Reads 0 before the ui area starts (the __weak stub), which is also what
+ * ui_display_init() programs. Safe from any thread. */
+uint8_t sts_ui_backlight_pct(void);
 
 /* ---- panel mirror (ui area produces, console area consumes) -------------- */
 /* Publish the front-panel frame the Maintenance Protocol mirrors: the rendered

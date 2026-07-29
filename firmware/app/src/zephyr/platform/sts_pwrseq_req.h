@@ -162,6 +162,35 @@ static inline bool sts_pwrseq_req_id_ok(uint8_t req)
 	       (req < (uint8_t)STS_PWRSEQ_REQ_COUNT);
 }
 
+/**
+ * Is @p req's executor somewhere other than the housekeeping pass?
+ *
+ * ---------------------------------------------------------------------------
+ * Why ownership is DATA and not a comment
+ * ---------------------------------------------------------------------------
+ * Every row's whole justification is that the mailbox keeps ONE writer on the
+ * pin behind it. That is a property of the row: housekeeping is the single
+ * writer of the rails, the digipot, the fan and the status RGB, so those rows
+ * are executed on its pass — but DISP_BL's single writer is the ui thread,
+ * which rewrites TIM15_CH2's compare on every render frame. Executing that row
+ * from housekeeping would not merely be undone within one frame; it would make
+ * housekeeping the second writer of the pin and of ui_display.c's own
+ * "last programmed" cache, which is exactly the defect the mailbox removes.
+ *
+ * So the fact lives here, next to the collision rule, and BOTH sides consult
+ * it: pwrseq_service_mailbox() skips the rows this returns true for, and the
+ * foreign claim/settle entry points refuse every row it returns false for.
+ * Neither side can execute a row the other owns, and a new row's owner is one
+ * line in one place rather than an omission in two drains.
+ *
+ * Slot 0 is not a row and is not foreign — a bad id must fail the id check, not
+ * arrive at a drain that thinks somebody else has it.
+ */
+static inline bool sts_pwrseq_req_is_foreign(uint8_t req)
+{
+	return req == (uint8_t)STS_PWRSEQ_REQ_DISP_BL;
+}
+
 static inline void sts_pwrseq_req_bump(uint32_t *c)
 {
 	if (*c != UINT32_MAX) {
@@ -346,6 +375,8 @@ static inline const char *sts_pwrseq_req_reason_of(uint8_t err)
 		return "actuator refused the write";
 	case STS_PWRSEQ_REQ_ERR_GATED:
 		return "FE is connected to this rail";
+	case STS_PWRSEQ_REQ_ERR_UNPOWERED:
+		return "the rail behind it is off";
 	case STS_PWRSEQ_REQ_ERR_NONE:
 	case STS_PWRSEQ_REQ_ERR_COUNT:
 	default:

@@ -91,6 +91,55 @@ static int sts1000_early_reset_release(void)
 	return 0;
 }
 
+/*
+ * The maintenance reset, `sys.phy.reset`.
+ *
+ * Deliberately the SAME two busy-waits and the same pin sequence as the boot
+ * release above, because a maintenance reset that used different timings would
+ * be resetting the PHY in a way the board has never been proven to come up
+ * from. The only difference is that the pin is already configured by the time
+ * this can be called, so the assert is a set rather than a configure.
+ *
+ * Called directly on the caller's thread rather than posted to a mailbox, and
+ * that is safe for a reason no other reset object can claim: PD10 has exactly
+ * one runtime writer, this function, because the hook above runs once at
+ * POST_KERNEL and nothing else in the tree touches LAN_RST_N. The whole call is
+ * CONFIG_STS1000_PHY_RESET_{ASSERT,RECOVERY}_US = 1.5 ms at the defaults, which
+ * is inside the console's own 50 ms MP-lock budget.
+ */
+int sts_platform_phy_reset(void)
+{
+	int rc;
+
+	if (!gpio_is_ready_dt(&lan_rst)) {
+		return -ENODEV;
+	}
+
+	rc = gpio_pin_set_dt(&lan_rst, 1);
+	if (rc != 0) {
+		LOG_ERR("LAN_RST_N: assert failed (%d)", rc);
+		return rc;
+	}
+
+	k_busy_wait(CONFIG_STS1000_PHY_RESET_ASSERT_US);
+
+	rc = gpio_pin_set_dt(&lan_rst, 0);
+	if (rc != 0) {
+		/* The PHY is now held in reset with no link and no way back from
+		 * here. Loud, because everything on the wire has just stopped. */
+		LOG_ERR("LAN_RST_N: release failed (%d); the PHY is stuck in reset",
+			rc);
+		return rc;
+	}
+
+	k_busy_wait(CONFIG_STS1000_PHY_RESET_RECOVERY_US);
+
+	sts_log(LOGR_SUB_SYS, LOGR_WARN,
+		"LAN8742AI reset pulsed by maintenance; the link will re-establish");
+
+	return 0;
+}
+
 SYS_INIT(sts1000_early_reset_release, POST_KERNEL,
 	 CONFIG_STS1000_EARLY_RESET_INIT_PRIORITY);
 

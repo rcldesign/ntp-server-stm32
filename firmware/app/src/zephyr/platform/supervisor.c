@@ -114,6 +114,28 @@ static struct {
 	/* Snapshot of the kicker's violation counter, so the housekeeping thread can
 	 * log it (the kicker must not, it holds a cooperative priority). */
 	uint32_t logged_violations;
+
+	/*
+	 * The D5 maintenance override, in two independently-leased layers.
+	 *
+	 * `ovr_mode` forces a whole PATTERN (STS_RGB_MODE_AUTO = none held, hand
+	 * D5 back to core/fault's priority encode); `leg_ovr`/`leg_pct` hold
+	 * individual duties AFTER the pattern has resolved to a colour, so one leg
+	 * can be held without taking the indicator off the fault policy.
+	 *
+	 * These are STATE the 4 Hz pass consults, not writes anyone else performs:
+	 * this file is the single writer of PD12/PD13/PD14 and re-drives them on
+	 * its own pass, so a foreign write would be undone within 250 ms. The
+	 * setters are housekeeping-thread-only for the same reason.
+	 *
+	 * `leg_out` and `shown_mode` are the other direction — what was ACTUALLY
+	 * programmed, so a read-back reports the indicator rather than the request.
+	 */
+	uint8_t ovr_mode;
+	bool    leg_ovr[STS_RGB_LEG_COUNT];
+	uint8_t leg_pct[STS_RGB_LEG_COUNT];
+	uint8_t leg_out[STS_RGB_LEG_COUNT];
+	uint8_t shown_mode;
 } super;
 
 void sts_supervisor_set_seq_eligible(bool eligible)
@@ -122,6 +144,20 @@ void sts_supervisor_set_seq_eligible(bool eligible)
 }
 
 /* ------------------------------------------------------------------ RGB -- */
+
+/*
+ * The manifest's `ui.rgb.mode` enum and core/fault's priority-encode result are
+ * the same five patterns offset by one, because mode 0 is "auto" — which names
+ * where the answer comes from, not a colour. Asserted rather than commented so
+ * a reordered fault_rgb_state_t stops the build here instead of turning amber
+ * into red on a technician's screen.
+ */
+BUILD_ASSERT((int)FAULT_RGB_OFF + 1 == (int)STS_RGB_MODE_OFF, "rgb enum drift");
+BUILD_ASSERT((int)FAULT_RGB_GREEN + 1 == (int)STS_RGB_MODE_GREEN, "rgb enum drift");
+BUILD_ASSERT((int)FAULT_RGB_AMBER + 1 == (int)STS_RGB_MODE_AMBER, "rgb enum drift");
+BUILD_ASSERT((int)FAULT_RGB_RED + 1 == (int)STS_RGB_MODE_RED, "rgb enum drift");
+BUILD_ASSERT((int)FAULT_RGB_BLUE_PULSE + 1 == (int)STS_RGB_MODE_BLUE_PULSE,
+	     "rgb enum drift");
 
 static void rgb_set(uint8_t r_pct, uint8_t g_pct, uint8_t b_pct)
 {
@@ -137,9 +173,22 @@ static void rgb_set(uint8_t r_pct, uint8_t g_pct, uint8_t b_pct)
 
 		(void)pwm_set(rgb_pwm, out[i].ch, RGB_PERIOD_NS, pulse, 0);
 	}
+	super.leg_out[STS_RGB_LEG_R] = r_pct;
+	super.leg_out[STS_RGB_LEG_G] = g_pct;
+	super.leg_out[STS_RGB_LEG_B] = b_pct;
 }
 
-static void rgb_apply(fault_rgb_state_t state, uint32_t now_ms)
+/** The pattern D5 is to show: the forced mode, or the fault policy's own. */
+static uint8_t rgb_mode_now(void)
+{
+	if (super.ovr_mode != STS_RGB_MODE_AUTO) {
+		return super.ovr_mode;
+	}
+	return (uint8_t)super.rgb + 1U; /* the BUILD_ASSERTs above */
+}
+
+/** One pattern's three duties, before any leg override. */
+static void rgb_colour_of(uint8_t mode, uint32_t now_ms, uint8_t out[3])
 {
 	/*
 	 * Brightness is deliberately not 100 %: the ballast table in
@@ -147,26 +196,109 @@ static void rgb_apply(fault_rgb_state_t state, uint32_t now_ms)
 	 * a matched apparent brightness at full duty, and the indicator is read
 	 * across a rack aisle, not stared at.
 	 */
-	switch (state) {
-	case FAULT_RGB_GREEN:
-		rgb_set(0U, 60U, 0U);
+	out[STS_RGB_LEG_R] = 0U;
+	out[STS_RGB_LEG_G] = 0U;
+	out[STS_RGB_LEG_B] = 0U;
+
+	switch (mode) {
+	case STS_RGB_MODE_GREEN:
+		out[STS_RGB_LEG_G] = 60U;
 		break;
-	case FAULT_RGB_AMBER:
-		rgb_set(70U, 35U, 0U);
+	case STS_RGB_MODE_AMBER:
+		out[STS_RGB_LEG_R] = 70U;
+		out[STS_RGB_LEG_G] = 35U;
 		break;
-	case FAULT_RGB_RED:
-		rgb_set(70U, 0U, 0U);
+	case STS_RGB_MODE_RED:
+		out[STS_RGB_LEG_R] = 70U;
 		break;
-	case FAULT_RGB_BLUE_PULSE:
+	case STS_RGB_MODE_BLUE_PULSE:
 		/* 1 Hz square pulse, phase taken from the monotonic clock so
 		 * multiple units in a rack do not have to agree on anything. */
-		rgb_set(0U, 0U, ((now_ms / 500U) % 2U == 0U) ? 80U : 0U);
+		out[STS_RGB_LEG_B] = ((now_ms / 500U) % 2U == 0U) ? 80U : 0U;
 		break;
-	case FAULT_RGB_OFF:
+	case STS_RGB_MODE_OFF:
 	default:
-		rgb_set(0U, 0U, 0U);
 		break;
 	}
+}
+
+/**
+ * Resolve pattern, then legs, then program D5. Housekeeping-thread context.
+ *
+ * The two layers compose in this order and not the other: the legs override
+ * individual duties AFTER the pattern has become a colour, which is what lets a
+ * technician hold one leg without taking the whole indicator off the fault
+ * policy. `shown_mode` records the pattern that was actually resolved — never
+ * STS_RGB_MODE_AUTO, because "auto" is a source and not something D5 can show.
+ */
+static void rgb_program(uint32_t now_ms)
+{
+	uint8_t mode = rgb_mode_now();
+	uint8_t duty[STS_RGB_LEG_COUNT];
+
+	rgb_colour_of(mode, now_ms, duty);
+
+	for (size_t i = 0; i < STS_RGB_LEG_COUNT; i++) {
+		if (super.leg_ovr[i]) {
+			duty[i] = super.leg_pct[i];
+		}
+	}
+
+	super.shown_mode = mode;
+	rgb_set(duty[STS_RGB_LEG_R], duty[STS_RGB_LEG_G], duty[STS_RGB_LEG_B]);
+}
+
+int sts_supervisor_rgb_mode(uint8_t mode)
+{
+	if (mode >= STS_RGB_MODE_COUNT) {
+		return -EINVAL;
+	}
+	if (!super.ready) {
+		return -ENODEV;
+	}
+
+	/* STS_RGB_MODE_AUTO is the release: the stored override goes and the next
+	 * resolve falls through to core/fault's encode. Applied immediately so
+	 * the caller's "applied" outcome is true of the pin, not of the next
+	 * 4 Hz pass. */
+	super.ovr_mode = mode;
+	rgb_program(k_uptime_get_32());
+
+	return 0;
+}
+
+int sts_supervisor_rgb_leg(uint8_t leg, bool active, uint8_t pct)
+{
+	if (leg >= STS_RGB_LEG_COUNT) {
+		return -EINVAL;
+	}
+	if (!super.ready) {
+		return -ENODEV;
+	}
+
+	super.leg_ovr[leg] = active;
+	super.leg_pct[leg] = active ? (uint8_t)MIN(pct, 100U) : 0U;
+	rgb_program(k_uptime_get_32());
+
+	return 0;
+}
+
+uint8_t sts_supervisor_rgb_mode_get(void)
+{
+	/* Before the first pass the honest answer is OFF, which is what
+	 * sts_supervisor_init() drives — not AUTO, which is not a colour. */
+	if (!super.ready || (super.shown_mode == STS_RGB_MODE_AUTO)) {
+		return (uint8_t)STS_RGB_MODE_OFF;
+	}
+	return super.shown_mode;
+}
+
+uint8_t sts_supervisor_rgb_leg_get(uint8_t leg)
+{
+	if (leg >= STS_RGB_LEG_COUNT) {
+		return 0U;
+	}
+	return super.leg_out[leg];
 }
 
 void sts_supervisor_identify(uint32_t duration_ms)
@@ -408,10 +540,19 @@ void sts_supervisor_step(uint32_t now_ms)
 		super.identify_until_ms = 0U;
 	}
 
+	/*
+	 * The fault policy's answer is recorded on every pass but only re-driven
+	 * when it changed or when the pattern actually on D5 is the pulse, which
+	 * has to be re-driven to pulse at all. An override's own writes happen in
+	 * its setter, so a held mode or leg needs nothing here — and a change of
+	 * fault state under a held mode simply resolves to the same duties.
+	 */
 	rgb_state = fault_rgb_state(&rgb_in);
-	if (rgb_state != super.rgb || rgb_state == FAULT_RGB_BLUE_PULSE) {
+	if (rgb_state != super.rgb) {
 		super.rgb = rgb_state;
-		rgb_apply(rgb_state, now_ms);
+		rgb_program(now_ms);
+	} else if (rgb_mode_now() == STS_RGB_MODE_BLUE_PULSE) {
+		rgb_program(now_ms);
 	}
 
 	/*
@@ -460,7 +601,8 @@ int sts_supervisor_init(void)
 	}
 
 	super.rgb = FAULT_RGB_OFF;
-	rgb_apply(FAULT_RGB_OFF, 0U);
+	super.ovr_mode = (uint8_t)STS_RGB_MODE_AUTO;
+	rgb_program(0U);
 
 	super.ready = true;
 	return 0;

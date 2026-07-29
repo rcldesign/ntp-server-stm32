@@ -54,6 +54,18 @@ __weak void sts_ui_post_input(const sts_input_evt_t *evt)
 	ARG_UNUSED(evt);
 }
 
+/*
+ * The read-back for `ui.disp.bl`, which the console area calls. 0 is the honest
+ * answer with no ui area in the image: TIM15_CH2's compare is whatever the PWM
+ * driver left it at and nothing has programmed a backlight duty, so reporting
+ * any other number would invent one. sts_app.h names this stub as the
+ * before-the-ui-area value.
+ */
+__weak uint8_t sts_ui_backlight_pct(void)
+{
+	return 0U;
+}
+
 __weak bool sts_update_pending_confirm(void)
 {
 	return false;

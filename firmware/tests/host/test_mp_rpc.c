@@ -1052,14 +1052,31 @@ static void test_session_methods(void)
 
 /* ================================== §5.3 authentication and the role floor */
 
-/** A G1 action (`obj.set` on ui.disp.bl); returns the reply's error code, or 0. */
+/**
+ * A G1 action (`obj.set` on ui.identify); returns the reply's error code, or 0.
+ *
+ * The vehicle is `ui.identify` because it is the ONLY row in mp_manifest.c that
+ * is both MP_GUARD_G1 and MP_OF_WRITE (`F_RW`). Every other G1 row is a
+ * mailbox-backed asynchronous actuator and is therefore `F_LEASE` —
+ * override-only, MP_OF_WRITE deliberately withheld — and m_obj_set() answers a
+ * non-writable object MP_E_NOTSUP "not writable" *before* guard_or_fail() is
+ * ever called. Probing one of those would hand the same "not writable" to an
+ * anonymous session and to an admin alike, which measures the writable-flag
+ * check and not the role floor; the group would then be green with the guard
+ * ladder ripped out. What these tests are about is the ROLE FLOOR, so the probe
+ * needs an object whose `obj.set` reaches the guard and, for a privileged
+ * session, the apply. The guard class (G1) is what has to match, not the pin.
+ *
+ * `ui.identify` is MP_KIND_BOOL, so the value it can carry is 1; the caller
+ * witnesses the actuation by g_apply[0].obj rather than by a distinctive value.
+ */
 static int64_t try_g1(uint32_t sid)
 {
 	char req[256];
 
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"ui.disp.bl\",\"value\":42,"
+		       "\"params\":{\"id\":\"ui.identify\",\"value\":1,"
 		       "\"sid\":%u}}",
 		       sid);
 	(void)call(req);
@@ -1147,7 +1164,16 @@ static void test_an_operator_gets_g1_but_not_g2(void)
 
 	TEST_ASSERT_EQUAL_INT64(0, try_g1(sid));
 	TEST_ASSERT_EQUAL_UINT(1U, g_apply_n);
-	TEST_ASSERT_EQUAL_INT32(42, g_apply[0].value);
+	/*
+	 * The probe reached the actuator, and reached the RIGHT one. A bool
+	 * carries only 0/1, so the object index — not the value — is what
+	 * witnesses that this apply came from try_g1() and not from some other
+	 * path, and `release` distinguishes a `set` from a lease being dropped.
+	 */
+	TEST_ASSERT_EQUAL_size_t((size_t)mp_obj_find("ui.identify"),
+				 g_apply[0].obj);
+	TEST_ASSERT_FALSE(g_apply[0].release);
+	TEST_ASSERT_EQUAL_INT32(1, g_apply[0].value);
 
 	TEST_ASSERT_EQUAL_INT64(MP_E_ROLE, try_g2_with_serial(sid));
 	TEST_ASSERT_EQUAL_UINT(1U, g_apply_n); /* nothing further applied */
@@ -1561,22 +1587,29 @@ static void test_obj_set_guard_escalation(void)
 	uint32_t sid;
 	char req[320];
 
-	/* G1 object with no session. */
+	/*
+	 * G1 object with no session. `ui.identify` is the manifest's only
+	 * writable G1 row (see try_g1()); a lease-only row would be refused
+	 * MP_E_NOTSUP by the writable check before the session was ever looked
+	 * at, and this assertion would stop meaning "G1 needs a session".
+	 */
 	(void)call("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"obj.set\","
-		   "\"params\":{\"id\":\"ui.disp.bl\",\"value\":50}}");
+		   "\"params\":{\"id\":\"ui.identify\",\"value\":1}}");
 	TEST_ASSERT_EQUAL_INT64(MP_E_NO_SESSION, err_code());
 
 	sid = session();
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"ui.disp.bl\",\"value\":50,"
+		       "\"params\":{\"id\":\"ui.identify\",\"value\":1,"
 		       "\"sid\":%u}}",
 		       sid);
 	(void)call(req);
-	TEST_ASSERT_EQUAL_INT64(50, res_i("value"));
+	TEST_ASSERT_EQUAL_INT64(1, res_i("value"));
 	TEST_ASSERT_FALSE(res_b("persistent"));
 	TEST_ASSERT_EQUAL_UINT(1U, g_apply_n);
-	TEST_ASSERT_EQUAL_INT32(50, g_apply[0].value);
+	TEST_ASSERT_EQUAL_size_t((size_t)mp_obj_find("ui.identify"),
+				 g_apply[0].obj);
+	TEST_ASSERT_EQUAL_INT32(1, g_apply[0].value);
 
 	/* A G2 object needs the typed serial. */
 	(void)snprintf(req, sizeof(req),
@@ -1652,18 +1685,28 @@ static void test_obj_set_bad_values(void)
 	uint32_t sid = session();
 	char req[320];
 
+	/*
+	 * Every case below rides `ui.identify` — the manifest's only writable
+	 * G1 row (see try_g1()) — because m_obj_set() runs the MP_OF_WRITE
+	 * check FIRST. On a lease-only row each of these would answer
+	 * MP_E_NOTSUP "not writable" and the parameter handling under test
+	 * would never be reached; the read-only case below deliberately keeps
+	 * its own vehicle, because MP_E_NOTSUP is exactly what it asserts.
+	 */
+
 	/* No value at all. */
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"ui.disp.bl\",\"sid\":%u}}",
+		       "\"params\":{\"id\":\"ui.identify\",\"sid\":%u}}",
 		       sid);
 	(void)call(req);
 	TEST_ASSERT_EQUAL_INT64(MP_E_BAD_PARAMS, err_code());
 
-	/* A string where a number belongs. */
+	/* A string where a number belongs — for a bool, BOTH the bool reader
+	 * and the integer fallback have to refuse it. */
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"ui.disp.bl\",\"value\":\"x\","
+		       "\"params\":{\"id\":\"ui.identify\",\"value\":\"x\","
 		       "\"sid\":%u}}",
 		       sid);
 	(void)call(req);
@@ -1681,7 +1724,7 @@ static void test_obj_set_bad_values(void)
 	/* A bool accepts an integer too — a tool that sends 1 is not wrong. */
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"ref.term.en\",\"value\":1,"
+		       "\"params\":{\"id\":\"ui.identify\",\"value\":1,"
 		       "\"sid\":%u}}",
 		       sid);
 	(void)call(req);
@@ -1956,14 +1999,22 @@ static uint32_t session_declaring_unsupported(const char *id)
  */
 static void test_an_unimplemented_object_answers_notsup(void)
 {
-	uint32_t sid = session_declaring_unsupported("ui.disp.bl");
+	/*
+	 * `ui.identify` carries both MP_OF_WRITE and MP_OF_OVERRIDE (`F_RW`),
+	 * so one object exercises both methods against impl_or_fail(). It has
+	 * to be a WRITABLE row: on a lease-only object m_obj_set()'s
+	 * MP_OF_WRITE check would answer MP_E_NOTSUP "not writable" first, and
+	 * the `set` assertion below would be green without impl_or_fail() ever
+	 * being consulted — the same code for an entirely different reason.
+	 */
+	uint32_t sid = session_declaring_unsupported("ui.identify");
 	char req[384];
 
 	g_apply_n = 0U;
 
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"ui.disp.bl\",\"value\":40,"
+		       "\"params\":{\"id\":\"ui.identify\",\"value\":1,"
 		       "\"sid\":%u}}",
 		       sid);
 	(void)call(req);
@@ -1971,8 +2022,8 @@ static void test_an_unimplemented_object_answers_notsup(void)
 
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":"
-		       "\"obj.override\",\"params\":{\"id\":\"ui.disp.bl\","
-		       "\"value\":40,\"sid\":%u}}",
+		       "\"obj.override\",\"params\":{\"id\":\"ui.identify\","
+		       "\"value\":1,\"sid\":%u}}",
 		       sid);
 	(void)call(req);
 	TEST_ASSERT_EQUAL_INT64(MP_E_NOTSUP, err_code());
@@ -1998,14 +2049,16 @@ static void test_an_unimplemented_object_answers_notsup(void)
 	TEST_ASSERT_EQUAL_UINT(0U, g_pulse_n);
 
 	/* Everything else still actuates: the refusal is per object, not a
-	 * blanket one that would pass this test vacuously. */
+	 * blanket one that would pass this test vacuously. `ui.identify` is
+	 * wired again under this session, which declares only gnss.reset
+	 * unsupported. */
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"ui.disp.bl\",\"value\":40,"
+		       "\"params\":{\"id\":\"ui.identify\",\"value\":1,"
 		       "\"sid\":%u}}",
 		       sid);
 	(void)call(req);
-	TEST_ASSERT_EQUAL_INT64(40, res_i("value"));
+	TEST_ASSERT_EQUAL_INT64(1, res_i("value"));
 	TEST_ASSERT_TRUE(g_unsupported_calls > 0U);
 }
 
@@ -2163,14 +2216,26 @@ static void test_interlock_state_unavailable_is_reported(void)
 	uint32_t sid = session();
 	char req[320];
 
+	/*
+	 * `ref.relay.hold` (G2, `F_RW`+deferred, MP_ILK_RELAY_OK) — a WRITABLE
+	 * row that actually declares an interlock, so "the snapshot could not
+	 * be taken" is asserted where it has a consequence. A lease-only row
+	 * would be refused MP_E_NOTSUP by m_obj_set()'s MP_OF_WRITE check long
+	 * before the ilk provider was called, and a writable row with no
+	 * interlock mask would pin behaviour that is incidental rather than
+	 * required. The typed serial is what the G2 guard wants.
+	 */
 	g_ilk_rc = -EIO;
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"ui.disp.bl\",\"value\":50,"
-		       "\"sid\":%u}}",
-		       sid);
+		       "\"params\":{\"id\":\"ref.relay.hold\",\"value\":1,"
+		       "\"sid\":%u,\"confirm\":\"%s\"}}",
+		       sid, SERIAL);
 	(void)call(req);
 	TEST_ASSERT_EQUAL_INT64(MP_E_IO, err_code());
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, g_apply_n,
+		"the actuator ran without a readable interlock snapshot");
 }
 
 /* ----------------------------------------------------------------- streams */

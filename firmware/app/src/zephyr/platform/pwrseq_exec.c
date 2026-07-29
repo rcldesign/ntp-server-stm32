@@ -96,6 +96,16 @@ static const struct gpio_dt_spec rb_ov_reset = STS_USER_GPIO(rb_ov_reset_gpios);
 static const struct gpio_dt_spec rb_ov_det = STS_USER_GPIO(rb_ov_det_gpios);
 static const struct gpio_dt_spec rb_lock_in = STS_USER_GPIO(rb_lock_gpios);
 static const struct gpio_dt_spec poe_kill = STS_USER_GPIO(poe_kill_gpios);
+/*
+ * REF_TERM_EN (PC10) — the external-reference SMA's 50 ohm termination.
+ *
+ * Deliberately NOT in pwrseq_outputs[] below: that loop drives every member
+ * GPIO_OUTPUT_INACTIVE, and inactive here means UN-terminated. The board boots
+ * terminated through R176's 100k pull-up and the software spec records that as
+ * a settled decision, so this pin is configured ACTIVE at start and firmware's
+ * automatic level is on.
+ */
+static const struct gpio_dt_spec ref_term_en = STS_USER_GPIO(ref_term_en_gpios);
 
 static const struct gpio_dt_spec *const pwrseq_outputs[] = {
 	&gps_pwr_en, &gps_rst, &ant_bias_en, &disp_en,
@@ -488,6 +498,21 @@ static pwrseq_rail_t pwrseq_rails[STS_PWRSEQ_REQ_COUNT] = {
 				     .sigs = NULL,
 				     .n_sigs = 0U,
 				     .shed_at = (uint8_t)PWRSEQ_SHED_RB },
+	/*
+	 * The one row whose `auto_on` starts TRUE — set in sts_pwrseq_start(),
+	 * beside the configure that drives the pin, so the two cannot drift.
+	 *
+	 * No expected-off signals and PWRSEQ_SHED_NONE, and neither is an
+	 * omission: a 50 ohm shunt across an unpowered SMA is not a load, so no
+	 * rung of the ladder and no fail-action ever wants it gone, and there is
+	 * no fault signal that reads asserted while it is off. Un-terminating is
+	 * the direction a technician has to ask for; re-terminating is what a
+	 * release does, and — being the automatic level — is never refused.
+	 */
+	[STS_PWRSEQ_REQ_REF_TERM_EN] = { .gpio = &ref_term_en,
+					 .sigs = NULL,
+					 .n_sigs = 0U,
+					 .shed_at = (uint8_t)PWRSEQ_SHED_NONE },
 };
 
 /** Drive one rail and keep its expected-off mask in step. */
@@ -1077,6 +1102,60 @@ const char *sts_pwrseq_req_reason(uint8_t err)
 	return sts_pwrseq_req_reason_of(err);
 }
 
+/*
+ * The two halves of the SAME claim-execute-settle discipline the housekeeping
+ * drain uses, exported for the rows whose executor is somewhere else.
+ *
+ * Both refuse every row sts_pwrseq_req_is_foreign() does not name, which is what
+ * makes the single-writer rule structural rather than documentary: the
+ * housekeeping drain skips exactly the foreign rows and these refuse exactly the
+ * rest, so neither side can execute a row the other owns even by mistake. The
+ * spinlock is held across the header's bounded copy and nothing else — the
+ * actuation happens on the caller's own thread, between the two calls.
+ */
+bool sts_pwrseq_req_claim(uint8_t req, bool *release, int32_t *value)
+{
+	k_spinlock_key_t key;
+	bool got;
+
+	if (!sts_pwrseq_req_id_ok(req) || !sts_pwrseq_req_is_foreign(req) ||
+	    !pwrseq_started) {
+		return false;
+	}
+
+	key = k_spin_lock(&pwrseq_mbox_lock);
+	got = sts_pwrseq_reqq_claim(&pwrseq_mbox, req, release, value);
+	k_spin_unlock(&pwrseq_mbox_lock, key);
+
+	return got;
+}
+
+int sts_pwrseq_req_settle(uint8_t req, bool applied, uint8_t err, int32_t value,
+			  uint32_t now_ms)
+{
+	k_spinlock_key_t key;
+	int rc;
+
+	if (!sts_pwrseq_req_id_ok(req) || !sts_pwrseq_req_is_foreign(req) ||
+	    !pwrseq_started) {
+		return -EINVAL;
+	}
+
+	key = k_spin_lock(&pwrseq_mbox_lock);
+	rc = sts_pwrseq_reqq_settle(&pwrseq_mbox, req,
+				    applied ? (uint8_t)STS_PWRSEQ_REQ_OUT_APPLIED
+					    : (uint8_t)STS_PWRSEQ_REQ_OUT_REFUSED,
+				    err, value, now_ms);
+	k_spin_unlock(&pwrseq_mbox_lock, key);
+
+	if (!applied) {
+		LOG_WRN("pwrseq mailbox: foreign request %u refused (%s)",
+			(unsigned int)req, sts_pwrseq_req_reason_of(err));
+	}
+
+	return rc;
+}
+
 /**
  * Execute one claimed PANEL_LED_EN request. Housekeeping-thread context only.
  *
@@ -1354,6 +1433,122 @@ static bool pwrseq_mbox_apply_vset(bool release, int32_t value, uint8_t *out_err
 	return true;
 }
 
+/**
+ * Execute one claimed FAN_DUTY request — `sys.fan.duty`. Housekeeping only.
+ *
+ * TWO OF THIS FILE'S CONVENTIONS ARE INVERTED HERE, and sts_app.h says why at
+ * STS_PWRSEQ_REQ_FAN_DUTY: the fail-safe direction for a fan is UP, so the
+ * override is a FLOOR that housekeeping re-applies as max(loop, override) on
+ * every thermal step, and a RELEASE resolves to full airflow rather than to
+ * firmware's last answer.
+ *
+ * Nothing is refused. There is no stage that owns the fan (it runs from
+ * hk start, before the sequencer), no ladder rung that sheds it — rung 1 of the
+ * thermal ladder IS "fan max" — and no direction of this control that can leave
+ * the box hotter than the loop wants it. What can fail is the actuator, and
+ * that is reported as ERR_HW like every other refused write.
+ */
+static bool pwrseq_mbox_apply_fan(bool release, int32_t value, uint8_t *out_err,
+				  int32_t *out_val)
+{
+	sts_hk_fan_t f;
+	uint8_t pct = release ? 0U : (uint8_t)CLAMP(value, 0, 100);
+	int rc;
+
+	*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_NONE;
+	*out_val = 0;
+
+	rc = sts_hk_fan_override(!release, pct);
+	if (rc != 0) {
+		*out_err = (uint8_t)((rc == -ENODEV)
+					     ? STS_PWRSEQ_REQ_ERR_STAGE
+					     : STS_PWRSEQ_REQ_ERR_HW);
+		return false;
+	}
+
+	/* The DUTY THE PIN CARRIES, which after the floor is applied is not
+	 * necessarily the one that was asked for — a request below the loop's
+	 * current answer is granted and immediately outranked, and the reply has
+	 * to say so or a host would read back its request. */
+	(void)sts_hk_fan_state(&f);
+	*out_val = (int32_t)f.out_pct;
+	return true;
+}
+
+/**
+ * Execute one claimed RGB_MODE request — `ui.rgb.mode`. Housekeeping only.
+ *
+ * A release IS STS_RGB_MODE_AUTO: the object's own enum names "hand D5 back to
+ * core/fault's priority encode" as value 0, so the release direction and the
+ * automatic direction are the same value rather than two ideas that could drift.
+ * Never refused — an indicator pattern cannot be contrary to a shed or a stage,
+ * and the supervisor keeps annunciating underneath a forced colour regardless.
+ */
+static bool pwrseq_mbox_apply_rgb_mode(bool release, int32_t value,
+				       uint8_t *out_err, int32_t *out_val)
+{
+	uint8_t mode = release ? (uint8_t)STS_RGB_MODE_AUTO
+			       : (uint8_t)CLAMP(value, 0, (int32_t)STS_RGB_MODE_COUNT - 1);
+
+	*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_NONE;
+	*out_val = 0;
+
+	if (sts_supervisor_rgb_mode(mode) != 0) {
+		*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_HW;
+		return false;
+	}
+
+	/* The pattern D5 is now SHOWING, which for a release is whatever the
+	 * fault policy resolved to and never STS_RGB_MODE_AUTO. */
+	*out_val = (int32_t)sts_supervisor_rgb_mode_get();
+	return true;
+}
+
+/**
+ * Execute one claimed RGB leg request — `ui.rgb.r/g/b`. Housekeeping only.
+ *
+ * The legs compose ON TOP of whatever pattern is in force, so each is released
+ * independently and a release returns that one leg to the pattern's own duty
+ * without disturbing the other two or the pattern itself.
+ */
+static bool pwrseq_mbox_apply_rgb_leg(uint8_t req, bool release, int32_t value,
+				      uint8_t *out_err, int32_t *out_val)
+{
+	uint8_t pct = release ? 0U : (uint8_t)CLAMP(value, 0, 100);
+	uint8_t leg;
+
+	*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_NONE;
+	*out_val = 0;
+
+	/* Spelled out rather than computed from the row index: two enums in two
+	 * headers happening to run in the same order is not a contract, and
+	 * getting it wrong turns red into blue on a fault indicator. */
+	switch ((sts_pwrseq_req_id_t)req) {
+	case STS_PWRSEQ_REQ_RGB_R:
+		leg = (uint8_t)STS_RGB_LEG_R;
+		break;
+	case STS_PWRSEQ_REQ_RGB_G:
+		leg = (uint8_t)STS_RGB_LEG_G;
+		break;
+	case STS_PWRSEQ_REQ_RGB_B:
+		leg = (uint8_t)STS_RGB_LEG_B;
+		break;
+	default:
+		*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_STAGE;
+		return false;
+	}
+
+	if (sts_supervisor_rgb_leg(leg, !release, pct) != 0) {
+		*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_HW;
+		return false;
+	}
+
+	/* The duty actually in the compare register, so a released leg reports
+	 * the pattern's own colour rather than the 0 the request carried. */
+	*out_val = (int32_t)sts_supervisor_rgb_leg_get(leg);
+	return true;
+}
+
 bool sts_pwrseq_rail_on(uint8_t req)
 {
 	const pwrseq_rail_t *r;
@@ -1410,6 +1605,17 @@ static void pwrseq_service_mailbox(uint32_t now_ms)
 		bool release = false;
 		bool ok = false;
 
+		/*
+		 * Rows another area's thread owns are not this drain's, and the
+		 * skip is BEFORE the claim: claiming clears `posted`, so a claim
+		 * here would consume a request the owning drain must still see
+		 * and then settle it from a thread that never touched the pin.
+		 * sts_pwrseq_req_is_foreign() is the single fact both sides read.
+		 */
+		if (sts_pwrseq_req_is_foreign(req)) {
+			continue;
+		}
+
 		key = k_spin_lock(&pwrseq_mbox_lock);
 		ok = sts_pwrseq_reqq_claim(&pwrseq_mbox, req, &release, &value);
 		k_spin_unlock(&pwrseq_mbox_lock, key);
@@ -1428,16 +1634,43 @@ static void pwrseq_service_mailbox(uint32_t now_ms)
 			ok = pwrseq_mbox_apply_duty(release, value, &err,
 						    &applied);
 			break;
+		case STS_PWRSEQ_REQ_LAMP_TEST:
+			/*
+			 * The dimmer's executor with a boolean in front of it:
+			 * a lamp test IS "the panel string at full brightness",
+			 * so it inherits the shed and stage refusals rather than
+			 * restating them — which is the whole point of routing
+			 * sts_ui.c's UI_ACTION_LAMP_TEST through here.
+			 */
+			ok = pwrseq_mbox_apply_duty(release,
+						    (value != 0) ? 100 : 0, &err,
+						    &applied);
+			break;
 		case STS_PWRSEQ_REQ_GPS_EN:
 		case STS_PWRSEQ_REQ_ANT_BIAS_EN:
 		case STS_PWRSEQ_REQ_DISP_EN:
 		case STS_PWRSEQ_REQ_RB_GATE:
+		case STS_PWRSEQ_REQ_REF_TERM_EN:
 			ok = pwrseq_mbox_apply_rail(req, release, value, &err,
 						    &applied);
 			break;
 		case STS_PWRSEQ_REQ_RB_VSET_MV:
 			ok = pwrseq_mbox_apply_vset(release, value, &err,
 						    &applied);
+			break;
+		case STS_PWRSEQ_REQ_FAN_DUTY:
+			ok = pwrseq_mbox_apply_fan(release, value, &err,
+						   &applied);
+			break;
+		case STS_PWRSEQ_REQ_RGB_MODE:
+			ok = pwrseq_mbox_apply_rgb_mode(release, value, &err,
+							&applied);
+			break;
+		case STS_PWRSEQ_REQ_RGB_R:
+		case STS_PWRSEQ_REQ_RGB_G:
+		case STS_PWRSEQ_REQ_RGB_B:
+			ok = pwrseq_mbox_apply_rgb_leg(req, release, value, &err,
+						       &applied);
 			break;
 		default:
 			/*
@@ -1569,6 +1802,24 @@ int sts_pwrseq_start(uint32_t now_ms)
 			return rc;
 		}
 	}
+
+	/*
+	 * REF_TERM_EN is the one output that boots ASSERTED. GPIO_OUTPUT_ACTIVE
+	 * drives PC10 to the terminated level R176's pull-up already holds it at,
+	 * so the pin never passes through un-terminated on the way to being
+	 * driven; `auto_on` records that as firmware's commanded level, which is
+	 * what a released `ref.term.en` lease restores.
+	 */
+	if (!gpio_is_ready_dt(&ref_term_en)) {
+		LOG_ERR("pwrseq: REF_TERM_EN port not ready");
+		return -ENODEV;
+	}
+	rc = gpio_pin_configure_dt(&ref_term_en, GPIO_OUTPUT_ACTIVE);
+	if (rc != 0) {
+		LOG_ERR("pwrseq: REF_TERM_EN configure failed (%d)", rc);
+		return rc;
+	}
+	pwrseq_rail_auto((uint8_t)STS_PWRSEQ_REQ_REF_TERM_EN, true);
 
 	for (size_t i = 0; i < ARRAY_SIZE(pwrseq_inputs); i++) {
 		if (!gpio_is_ready_dt(pwrseq_inputs[i])) {

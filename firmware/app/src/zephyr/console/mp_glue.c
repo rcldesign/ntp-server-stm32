@@ -119,15 +119,19 @@
  *
  *    Most control objects live on GPIO/PWM/DAC the *platform* area owns, and
  *    sts_app.h exposes only sts_rb_serial_set_mode(), sts_supervisor_identify(),
- *    the two recovery pulses and the parameterised sequencer mailbox; the GNSS
- *    and Rb tunnels are this area's own. Fifteen manifest objects therefore
- *    have an actuator behind them:
+ *    the RGB and fan accessors, the PHY and EXTINT pulses, the two recovery
+ *    pulses and the parameterised sequencer mailbox; the GNSS and Rb tunnels
+ *    are this area's own. Twenty-five manifest objects therefore have an
+ *    actuator behind them:
  *
  *      obj_apply   ui.identify, ref.rb.serial, gnss.tunnel, ref.rb.tunnel
  *      obj_apply   ui.panel.duty, pwr.panel.led.en, pwr.gps.en,
  *        (mailbox)  pwr.ant.bias.en, pwr.disp.en, pwr.rb.gate,
- *                  pwr.rb.vset_mv
- *      obj_pulse   pwr.poe.kill, pwr.rb.ov.reset
+ *                  pwr.rb.vset_mv, ui.lamp.test, ref.term.en,
+ *                  sys.fan.duty, ui.rgb.mode, ui.rgb.r, ui.rgb.g,
+ *                  ui.rgb.b, ui.disp.bl
+ *      obj_pulse   pwr.poe.kill, pwr.rb.ov.reset, sys.phy.reset,
+ *                  gnss.extint
  *      cfg_write   pwr.rb.vmax_mv, pwr.poe.budget_mw   (mp_rpc.c, not here)
  *
  *    The other mutable objects answer MP_E_NOTSUP and carry **MP_OF_DEFERRED**
@@ -146,12 +150,29 @@
  *    mailbox drain, a branch in obj_apply() and obj_read() here, and the
  *    manifest row.
  *
- *    Seven objects ride it. Every one is LEASE-ONLY — an asynchronous apply has
- *    no honest `obj.set` reply and m_obj_set() refuses a positive apply return
- *    by name — and every one's release re-drives FIRMWARE'S OWN commanded level
- *    rather than off, so a lapsed lease cannot leave the receiver dark or the
- *    antenna unbiased. The panel pair is the one documented exception, because
+ *    Fifteen objects ride it. Every one is LEASE-ONLY — an asynchronous apply
+ *    has no honest `obj.set` reply and m_obj_set() refuses a positive apply
+ *    return by name — and every one's release re-drives FIRMWARE'S OWN
+ *    automatic level rather than off, so a lapsed lease cannot leave the
+ *    receiver dark or the antenna unbiased. Which level that is belongs to the
+ *    row, not to a rule of thumb: `ref.term.en` releases to TERMINATED because
+ *    the board boots that way through R176, `sys.fan.duty` releases to FULL
+ *    AIRFLOW because ARCHITECTURE.md §10.9 fixes the resting state there, and
+ *    the panel pair is the documented exception that releases to off, because
  *    PC0 and PE0 share a setter and two releases must not disagree.
+ *
+ *    ONE OF THE FIFTEEN IS NOT DRAINED HERE OR BY HOUSEKEEPING. `ui.disp.bl`'s
+ *    pin is rewritten by ui_display.c on every render frame, so the ui thread
+ *    is PE6's single writer and the row is marked foreign
+ *    (sts_pwrseq_req_is_foreign); that thread claims, executes and settles it
+ *    through sts_pwrseq_req_claim()/_settle(). Nothing changes on this side —
+ *    the post and the outcome read are the same two calls.
+ *
+ *    TWO PULSES ARE NOT POSTED AT ALL. `sys.phy.reset` and `gnss.extint` each
+ *    drive a pin whose single runtime writer is the accessor being called, and
+ *    each completes in microseconds, so both run on the console thread. See
+ *    obj_pulse() for the argument that this is not an exception to the
+ *    single-writer rule but an instance of it.
  *
  *    STILL DEFERRED, AND NOT BY OVERSIGHT. `pwr.rb.en` cannot be leased without
  *    breaking ARCHITECTURE.md §10 invariant 3 in one direction and rb_shutdown()'s
@@ -161,6 +182,15 @@
  *    objects and the two watchdog objects belong to refsel, the discipline
  *    thread and the supervisor respectively (ARCHITECTURE.md §10.1/§10.2/§10.5)
  *    and need their own seams, not this one.
+ *
+ *    `sys.nor.reset` and `gnss.dsel` are deferred for the plainest reason in
+ *    the set: NO ACCESSOR EXISTS. NOR_RST_N is released once by platform.c's
+ *    POST_KERNEL hook and is never touched again, and nothing in the tree
+ *    drives GPS_DSEL at runtime at all — sts_app.h exposes neither, so there
+ *    is nothing here to call. Advertising them before the platform entry point
+ *    exists is precisely the defect this bit exists to prevent; `sys.nor.reset`
+ *    additionally needs the XSPI driver quiesced around the pulse, which is a
+ *    platform-side ordering problem rather than a glue branch.
  *
  *    Whatever lands, tests/host/test_mp_deferred.c fails until the manifest row
  *    is cleared to match.
@@ -752,7 +782,27 @@ static int prov_ilk(void *user, mp_ilk_state_t *out)
 			out->vcc_rb_mv = hs.ina[INA228_RAIL_VCC_RB].bus_mv;
 			out->vcc_rb_valid = hs.ina[INA228_RAIL_VCC_RB].valid;
 		}
-		out->fan_floor_pct = (uint8_t)MIN(hs.fan_duty_pct, 100U);
+	}
+
+	/*
+	 * MP_ILK_FAN_FLOOR's floor is the thermal loop's OWN last answer, taken
+	 * from the actuator — NOT sts_health_t::fan_duty_pct.
+	 *
+	 * That field is the regulated telemetry and is not updated on the
+	 * fail-safe path, so a loop that had stopped stepping published a stale
+	 * low duty as the floor while TIM15_CH1 sat at 100 %. An interlock whose
+	 * floor is below the state the box is actually in is not an interlock —
+	 * it would have let a `sys.fan.duty` lease slow a fan that firmware had
+	 * already commanded to maximum because the loop was failing. The value
+	 * that matters only became reachable when this object was wired, which
+	 * is why the two changes belong together (sts_app.h, sts_hk_fan_t).
+	 */
+	{
+		sts_hk_fan_t fan;
+
+		if (sts_hk_fan_state(&fan) == 0) {
+			out->fan_floor_pct = (uint8_t)MIN(fan.loop_pct, 100U);
+		}
 	}
 
 	/* The configured ceiling, from cfg — this is what bounds every VCC_RB
@@ -1242,6 +1292,96 @@ static int obj_read(void *user, size_t obj, mp_val_t *out)
 		return 0;
 	}
 	/*
+	 * REF_TERM_EN, read from the PIN like the four rails above and for the
+	 * same reason: the object is leasable, so pwrseq's commanded level and
+	 * the pin part company for as long as a lease is held.
+	 */
+	if (strcmp(o->id, "ref.term.en") == 0) {
+		out->i = sts_pwrseq_rail_on(
+				 (uint8_t)STS_PWRSEQ_REQ_REF_TERM_EN)
+				 ? 1
+				 : 0;
+		out->valid = true;
+		return 0;
+	}
+	/*
+	 * The lamp test, read as the PANEL STRING'S OWN STATE rather than as a
+	 * remembered request.
+	 *
+	 * `ui.lamp.test` has no pin of its own — it is `ui.panel.duty` at full
+	 * scale, which is exactly why both end in the same executor — so the
+	 * honest read-back is "the string is at 100 %". A technician who reached
+	 * that state through `ui.panel.duty` reads this as on, and that is
+	 * correct: the object means "all panel indicators on", and they are.
+	 */
+	if (strcmp(o->id, "ui.lamp.test") == 0) {
+		out->i = (sts_panel_led_get() >= 100U) ? 1 : 0;
+		out->valid = true;
+		return 0;
+	}
+	/*
+	 * The display backlight, from the ui area's own compare register.
+	 *
+	 * Not from the request and not from the render tick's level: the row is
+	 * foreign-owned (sts_pwrseq_req_is_foreign) and drained on the ui
+	 * thread, so this accessor is the only place this area can see what PE6
+	 * is actually carrying.
+	 */
+	if (strcmp(o->id, "ui.disp.bl") == 0) {
+		out->i = (int32_t)sts_ui_backlight_pct();
+		out->valid = true;
+		return 0;
+	}
+	/*
+	 * D5: the pattern it is SHOWING and the duty each leg is CARRYING.
+	 *
+	 * sts_supervisor_rgb_mode_get() never answers STS_RGB_MODE_AUTO — "auto"
+	 * names where the colour comes from, not a colour — so a host that has
+	 * released the mode reads back the fault policy's current state instead
+	 * of the 0 it wrote. Same shape as every read above: the actuator, never
+	 * the intent.
+	 */
+	if (strcmp(o->id, "ui.rgb.mode") == 0) {
+		out->i = (int32_t)sts_supervisor_rgb_mode_get();
+		out->valid = true;
+		return 0;
+	}
+	if (strcmp(o->id, "ui.rgb.r") == 0) {
+		out->i = (int32_t)sts_supervisor_rgb_leg_get(
+			(uint8_t)STS_RGB_LEG_R);
+		out->valid = true;
+		return 0;
+	}
+	if (strcmp(o->id, "ui.rgb.g") == 0) {
+		out->i = (int32_t)sts_supervisor_rgb_leg_get(
+			(uint8_t)STS_RGB_LEG_G);
+		out->valid = true;
+		return 0;
+	}
+	if (strcmp(o->id, "ui.rgb.b") == 0) {
+		out->i = (int32_t)sts_supervisor_rgb_leg_get(
+			(uint8_t)STS_RGB_LEG_B);
+		out->valid = true;
+		return 0;
+	}
+	/*
+	 * The fan, as the duty TIM15_CH1 is actually programmed with —
+	 * max(thermal loop, override) — and not as the request. A lease below
+	 * the loop's current answer is granted and immediately outranked, so a
+	 * host reading back its own request would be told the box was running
+	 * cooler than it is.
+	 */
+	if (strcmp(o->id, "sys.fan.duty") == 0) {
+		sts_hk_fan_t fan;
+
+		if (sts_hk_fan_state(&fan) != 0) {
+			return -EIO;
+		}
+		out->i = (int32_t)fan.out_pct;
+		out->valid = true;
+		return 0;
+	}
+	/*
 	 * The two tunnels and the K1 relay: read-backs for objects whose
 	 * actuation is wired, so a host is not left setting a control it cannot
 	 * confirm. All three are this area's own state or one snapshot call, and
@@ -1554,6 +1694,109 @@ static int obj_apply(void *user, size_t obj, const int32_t *value)
 
 		return (rc == 0) ? MP_APPLY_PENDING : rc;
 	}
+	/*
+	 * REF_TERM_EN — the one row whose firmware-automatic level is ON, so a
+	 * release RE-TERMINATES rather than opening the SMA. The board boots
+	 * terminated through R176's pull-up, and a 50 ohm shunt across an
+	 * unpowered SMA is not a load any rung of the ladder wants shed
+	 * (sts_app.h, STS_PWRSEQ_REQ_REF_TERM_EN).
+	 */
+	if (strcmp(o->id, "ref.term.en") == 0) {
+		int32_t on = ((value != NULL) && (*value != 0)) ? 1 : 0;
+		int rc = sts_pwrseq_req_post(
+			(uint8_t)STS_PWRSEQ_REQ_REF_TERM_EN,
+			(value != NULL) ? &on : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	/*
+	 * The lamp test — a row of its OWN rather than a second writer of
+	 * PANEL_DUTY's, because the mailbox's collision rule is "last writer
+	 * wins, per object" and two objects sharing one row would settle and
+	 * withdraw each other's leases (sts_app.h, STS_PWRSEQ_REQ_LAMP_TEST).
+	 *
+	 * sts_ui.c's UI_ACTION_LAMP_TEST posts the same row from the ui thread,
+	 * which is what closed the bypass: the panel button used to call
+	 * sts_panel_led_set(100) directly and skip the drain's shed check, on
+	 * the very setter `pwr.panel.led.en` was routed through this mailbox to
+	 * protect.
+	 */
+	if (strcmp(o->id, "ui.lamp.test") == 0) {
+		int32_t on = ((value != NULL) && (*value != 0)) ? 1 : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_LAMP_TEST,
+					     (value != NULL) ? &on : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	/*
+	 * The fan. This clamp is only the manifest envelope's: MP_ILK_FAN_FLOOR
+	 * has already clamped the request UP to the thermal loop's own answer at
+	 * grant, and the executor keeps it there afterwards by programming
+	 * max(loop, override) on every 1 Hz step. A release resolves to full
+	 * airflow, not to the loop's last answer — ARCHITECTURE.md §10.9.
+	 */
+	if (strcmp(o->id, "sys.fan.duty") == 0) {
+		int32_t pct = (value != NULL) ? CLAMP(*value, 0, 100) : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_FAN_DUTY,
+					     (value != NULL) ? &pct : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	/*
+	 * D5. The pattern and the three legs compose, and each is leased and
+	 * released independently — so each gets its own row. A release of one
+	 * leg must return that leg to the pattern without disturbing the
+	 * pattern or the other two.
+	 */
+	if (strcmp(o->id, "ui.rgb.mode") == 0) {
+		int32_t mode =
+			(value != NULL)
+				? CLAMP(*value, 0,
+					(int32_t)STS_RGB_MODE_COUNT - 1)
+				: 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_RGB_MODE,
+					     (value != NULL) ? &mode : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	if (strcmp(o->id, "ui.rgb.r") == 0) {
+		int32_t pct = (value != NULL) ? CLAMP(*value, 0, 100) : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_RGB_R,
+					     (value != NULL) ? &pct : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	if (strcmp(o->id, "ui.rgb.g") == 0) {
+		int32_t pct = (value != NULL) ? CLAMP(*value, 0, 100) : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_RGB_G,
+					     (value != NULL) ? &pct : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	if (strcmp(o->id, "ui.rgb.b") == 0) {
+		int32_t pct = (value != NULL) ? CLAMP(*value, 0, 100) : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_RGB_B,
+					     (value != NULL) ? &pct : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	/*
+	 * The display backlight — posted exactly like every row above, and
+	 * drained by the UI THREAD rather than by housekeeping, because PE6's
+	 * single writer is ui_display.c's render pass
+	 * (sts_pwrseq_req_is_foreign). Nothing changes on this side: the
+	 * requester posts and reads the outcome through the same two calls
+	 * whichever thread executes it. Refused as ERR_UNPOWERED while DISP_EN
+	 * is low, for the reason every other ON is: a duty into an unpowered
+	 * module is a control reporting success with nothing behind it.
+	 */
+	if (strcmp(o->id, "ui.disp.bl") == 0) {
+		int32_t pct = (value != NULL) ? CLAMP(*value, 0, 100) : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_DISP_BL,
+					     (value != NULL) ? &pct : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
 
 	if (strcmp(o->id, "gnss.tunnel") == 0) {
 		return sts_mp_tunnel_set_gnss((value != NULL) && (*value != 0));
@@ -1638,6 +1881,30 @@ static int obj_pulse(void *user, size_t obj, uint32_t ms)
 
 	if (o == NULL) {
 		return -EINVAL;
+	}
+
+	/*
+	 * Two pulses that are NOT recovery actions and are NOT posted, because
+	 * each is a pin whose single runtime writer is the very function being
+	 * called and each completes in microseconds on this thread.
+	 *
+	 * `sys.phy.reset` re-runs the boot-time LAN8742AI release — same pin
+	 * sequence, same two busy-waits — so a maintenance reset cannot drift
+	 * away from the one the board is known to come up from. `gnss.extint`
+	 * drops an edge on PD6 and the F9T reports the mark as UBX-TIM-TM2; it
+	 * answers -EBUSY while a raw tunnel or a receiver firmware session owns
+	 * USART3, because a time mark landing inside somebody else's session
+	 * cannot be attributed to the request that caused it.
+	 *
+	 * Both drop the manifest WIDTH, for the reason the recovery pair below
+	 * drops theirs: an edge-triggered input has no use for one, and the
+	 * PHY's assert width is fixed by the timing the boot path uses.
+	 */
+	if (strcmp(o->id, "sys.phy.reset") == 0) {
+		return sts_platform_phy_reset();
+	}
+	if (strcmp(o->id, "gnss.extint") == 0) {
+		return sts_gnss_extint_pulse();
 	}
 
 	switch (sts_recov_pulse_action(o->id)) {
@@ -1975,11 +2242,22 @@ static const char *const mp_req_objects[STS_PWRSEQ_REQ_COUNT] = {
 	[STS_PWRSEQ_REQ_NONE] = NULL,
 	[STS_PWRSEQ_REQ_PANEL_LED_EN] = "pwr.panel.led.en",
 	[STS_PWRSEQ_REQ_PANEL_DUTY] = "ui.panel.duty",
+	[STS_PWRSEQ_REQ_LAMP_TEST] = "ui.lamp.test",
 	[STS_PWRSEQ_REQ_GPS_EN] = "pwr.gps.en",
 	[STS_PWRSEQ_REQ_ANT_BIAS_EN] = "pwr.ant.bias.en",
 	[STS_PWRSEQ_REQ_DISP_EN] = "pwr.disp.en",
 	[STS_PWRSEQ_REQ_RB_GATE] = "pwr.rb.gate",
 	[STS_PWRSEQ_REQ_RB_VSET_MV] = "pwr.rb.vset_mv",
+	[STS_PWRSEQ_REQ_REF_TERM_EN] = "ref.term.en",
+	[STS_PWRSEQ_REQ_FAN_DUTY] = "sys.fan.duty",
+	[STS_PWRSEQ_REQ_RGB_MODE] = "ui.rgb.mode",
+	[STS_PWRSEQ_REQ_RGB_R] = "ui.rgb.r",
+	[STS_PWRSEQ_REQ_RGB_G] = "ui.rgb.g",
+	[STS_PWRSEQ_REQ_RGB_B] = "ui.rgb.b",
+	/* Foreign-owned: posted here, drained by the ui thread. The console side
+	 * is identical either way — this table only says which object an outcome
+	 * belongs to. */
+	[STS_PWRSEQ_REQ_DISP_BL] = "ui.disp.bl",
 };
 
 /**

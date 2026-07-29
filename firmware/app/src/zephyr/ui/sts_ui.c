@@ -390,12 +390,38 @@ static void handle_action(const ui_action_t *a)
 			"identify %s (RGB request unavailable; see TODO)",
 			a->arg ? "on" : "off");
 		break;
-	case UI_ACTION_LAMP_TEST:
-		/* Drive the front-panel LED string full-on while held. */
-		(void)sts_panel_led_set(a->arg ? 100u : 0u);
+	case UI_ACTION_LAMP_TEST: {
+		/*
+		 * POSTED, NOT WRITTEN — the panel button goes through the same
+		 * mailbox row `ui.lamp.test` does.
+		 *
+		 * This used to call sts_panel_led_set(100) straight from the ui
+		 * thread, which skipped the shed check pwrseq_mbox_apply_duty()
+		 * performs: a lamp test could therefore re-energise a panel rail
+		 * the ladder had dropped for a power or thermal reason, on the
+		 * very setter `pwr.panel.led.en` was routed through the mailbox
+		 * to protect. Both paths now land on one executor, so the button
+		 * and the console cannot disagree about what is allowed.
+		 *
+		 * The value is posted, never released: this path holds no lease.
+		 * The drain answers up to 250 ms later and the outcome reaches
+		 * the console's own drain, which treats "no lease to confirm" as
+		 * ordinary.
+		 */
+		int32_t on = a->arg ? 1 : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_LAMP_TEST,
+					     &on);
+
+		if (rc != 0) {
+			sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_WARN,
+				"lamp test %s not queued (%d)",
+				a->arg ? "on" : "off", rc);
+			break;
+		}
 		sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_INFO,
-			"lamp test %s", a->arg ? "on" : "off");
+			"lamp test %s requested", a->arg ? "on" : "off");
 		break;
+	}
 	case UI_ACTION_ACK_ALARMS:
 		/*
 		 * TODO(ui-ack): acknowledging a latched alarm needs
@@ -410,6 +436,16 @@ static void handle_action(const ui_action_t *a)
 	case UI_ACTION_REBOOT:
 		sts_log((uint8_t)LOGR_SUB_UI, (uint8_t)LOGR_WARN,
 			"operator requested reboot from the panel");
+		/*
+		 * DIRECT, and deliberately not the mailbox — unlike the lamp
+		 * test above. Two reasons, both specific to a reboot path: dark
+		 * is the fail-safe direction and is never refused, so routing it
+		 * through the shed check would buy nothing; and the reset is
+		 * 50 ms away, while a posted request waits up to one 250 ms
+		 * sequencer pass, so the mailbox would simply not drain before
+		 * the board went down and the string would stay lit through the
+		 * reset. Leave this call as it is.
+		 */
 		(void)sts_panel_led_set(0u);
 		k_sleep(K_MSEC(50)); /* let the log line drain */
 		sys_reboot(SYS_REBOOT_WARM);
@@ -488,6 +524,10 @@ static void handle_action(const ui_action_t *a)
 		 * even — especially — when a step above failed.
 		 */
 		if (sts_factory_should_reboot(&st)) {
+			/* Direct for the same reason as the reboot action
+			 * above: dark is never refused, and the cold reset is
+			 * 50 ms away — sooner than the sequencer's 250 ms pass
+			 * would drain a posted request. */
 			(void)sts_panel_led_set(0u);
 			k_sleep(K_MSEC(50)); /* let the log lines drain */
 			sys_reboot(SYS_REBOOT_COLD);
@@ -1115,6 +1155,23 @@ static void ui_thread_entry(void *p1, void *p2, void *p3)
 			(void)ui_display_blit(&g_surf);
 			ui_display_backlight_permille(
 				ui_backlight_permille(&g_ui));
+			/*
+			 * The `ui.disp.bl` mailbox row, drained HERE because
+			 * PE6's single writer is this thread — the line above
+			 * rewrites TIM15_CH2 on every frame, so a duty written
+			 * from housekeeping would be undone within one period
+			 * and would race ui_display.c's own "last programmed"
+			 * cache. sts_pwrseq_req_is_foreign() names the row and
+			 * both drains consult it, so neither side can execute
+			 * the other's. Once per render pass: a request lands
+			 * within one UI period.
+			 *
+			 * After the automatic level, not before, so the claim
+			 * sees the frame's own duty already programmed and a
+			 * release resumes it immediately rather than one frame
+			 * later.
+			 */
+			ui_display_backlight_service();
 			drain_actions();
 		}
 
