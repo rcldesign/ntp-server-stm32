@@ -707,12 +707,36 @@ int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
 
 	rc = c->apply(c->apply_user, obj, &res->value);
 	if (rc < 0) {
-		/* Firmware refused the value outright: that is a veto, and the
-		 * slot must not be left half-claimed. */
+		/* The slot must not be left half-claimed either way. */
 		if (l->obj1 == (uint16_t)(obj + 1U)) {
 			l->obj1 = 0U;
 			l->verify_at_ms = 0U;
 		}
+		/*
+		 * -ENOTSUP is NOT a veto, and the difference is what a
+		 * technician does next.
+		 *
+		 * A veto says firmware's safety supervision refused a request it
+		 * understood — it lands on channel 0x09 as MP_OVR_EV_VETO, it
+		 * moves `vetoes`, and it sends whoever is at the bench looking
+		 * for the interlock or the fault that caused it. -ENOTSUP says
+		 * nothing is wired behind the object at all: there is no
+		 * supervision to find, the veto counter would be counting
+		 * unimplemented objects, and the event channel the veto work
+		 * exists to make meaningful would be carrying noise.
+		 *
+		 * So it is passed through with its identity intact —
+		 * mp_map_errno() turns it into MP_E_NOTSUP, distinct from
+		 * MP_E_VETO — with no event and no counter. The RPC layer
+		 * normally refuses such an object before the guard even runs
+		 * (mp_wiring_t::obj_supported), so this is the backstop for a
+		 * direct mp_ovr_grant() and for a wiring that answers -ENOTSUP
+		 * without having declared the object deferred.
+		 */
+		if (rc == -ENOTSUP) {
+			return -ENOTSUP;
+		}
+		/* Firmware refused a value it understood: that is a veto. */
 		c->vetoes++;
 		emit(c, (uint8_t)MP_OVR_EV_VETO, obj, sid, "apply refused");
 		return -EACCES;

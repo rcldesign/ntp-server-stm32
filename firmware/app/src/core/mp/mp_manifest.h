@@ -182,7 +182,43 @@ const char *mp_group_name(uint8_t g);
 #define MP_OF_PULSE (1U << 3)     /**< obj.pulse accepted */
 #define MP_OF_ACTIVE_LOW (1U << 4)/**< the net is asserted low */
 #define MP_OF_CFG (1U << 5)       /**< `cfg_key` is a real cfg key id */
-#define MP_OF_DEFERRED (1U << 6)  /**< wired in the manifest, -ENOTSUP today */
+
+/**
+ * Published, but nothing is wired behind it: the device refuses (FMT §4).
+ *
+ * The manifest is the whole of what the host knows — FMT §4 says the tool
+ * generates its UI from it and hardcodes nothing — so an object with no
+ * implementation behind it renders as a working control and fails on use. This
+ * bit is how the device says so in advance, and it is not decoration: the
+ * shipped glue answers `mp_wiring_t::obj_supported` straight out of it, and
+ * `obj.set`/`obj.override`/`obj.pulse` refuse before the guard runs, so an
+ * unimplemented G3 object no longer spends a typed phrase and a hold before
+ * admitting it does nothing.
+ *
+ * WHAT IT IS THE COMPLEMENT OF. Exactly the dispatch in the Zephyr glue —
+ * `obj_apply()`, `obj_pulse()` and `obj_read()` in `zephyr/console/mp_glue.c`,
+ * plus `cfg_write()` in `mp_rpc.c` for a `MP_OF_CFG` object — read per object
+ * against the operation that object exists for:
+ *
+ *   - an object declaring MP_OF_WRITE, MP_OF_OVERRIDE or MP_OF_PULSE is
+ *     deferred when **none** of its declared mutations reaches an actuator;
+ *   - a read-only object is deferred when `obj_read()` does not answer it.
+ *
+ * One bit cannot say more than that. Where an object both mutates and reads,
+ * the bit describes the MUTATION, because that is the operation whose absence
+ * a technician discovers by acting on the board. Three objects are today
+ * mutable-and-wired with no read-back accessor — `ui.identify`,
+ * `pwr.poe.kill`, `pwr.rb.ov.reset`, the first a write-only beacon and the
+ * other two momentary pulses with no state to read — and
+ * tests/host/test_mp_deferred.c pins that set by name so it cannot silently
+ * grow.
+ *
+ * The bit describes WIRING, not availability. An object without it answers
+ * every operation it declares; it may still report -EIO when a sensor sweep
+ * has not landed, which is a transient and is deliberately a different error
+ * from MP_E_NOTSUP.
+ */
+#define MP_OF_DEFERRED (1U << 6)
 
 /* ------------------------------------------------------------------ objects */
 

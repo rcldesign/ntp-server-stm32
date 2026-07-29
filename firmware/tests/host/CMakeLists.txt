@@ -446,6 +446,22 @@ module_deps(mp_events mp fault ina228 logring util)
 # requires and a stream subscriber does not provide.
 module_deps(mp_veto mp pwrseq ina228 logring util)
 
+# `mp_deferred` is the manifest's honesty flag, MP_OF_DEFERRED, against the
+# dispatch that defines it. FMT §4 has the host generate its whole UI from the
+# manifest, so an object that is published and then answers -ENOTSUP is a
+# control a technician tries at a bench and watches fail — and the flag that
+# exists to say so in advance was set by zero objects while 31 of 39 mutable
+# objects were refused. A flag alone would rot the first time somebody wired a
+# setter, so this suite DERIVES the wired set by reading mp_glue.c's dispatch
+# (brace-matched, function-scoped, `strcmp(o->id, "…")` only) and fails the
+# manifest if the two disagree.
+#
+# `mp` alone: the manifest is the thing under test, and the two policy-table
+# branches come from the header-only console/sts_recovery_policy.h, which is on
+# the include path and compiles anywhere. Everything else this suite knows it
+# learns by reading source it deliberately does not link.
+module_deps(mp_deferred mp)
+
 # ---------------------------------------------------------------------------
 # Dependency resolution
 # ---------------------------------------------------------------------------

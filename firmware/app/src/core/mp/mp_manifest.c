@@ -129,12 +129,42 @@ const char *mp_ilk_reason(uint32_t bit)
 #define U_PPB "ppb"
 #define U_MPCT "m%RH"
 
-/* Flag shorthands. */
+/*
+ * Flag shorthands.
+ *
+ * The `_D` forms add MP_OF_DEFERRED — published, but nothing is wired behind
+ * it, so the device refuses. See mp_manifest.h for what the bit is exactly the
+ * complement of; tests/host/test_mp_deferred.c derives the set from
+ * mp_glue.c's dispatch and fails this table if the two ever disagree, which is
+ * the only thing that stops the bit rotting the first time someone wires a
+ * setter and forgets the row.
+ *
+ * Spelled as names rather than `F_RW | MP_OF_DEFERRED` on forty-five rows so
+ * the table stays a table and the deferred rows read in the same column as
+ * everything else.
+ *
+ * F_LEASE is the tunnel flag set: readable and OVERRIDABLE, deliberately NOT
+ * writable. A tunnel is a leased thing — mp_tunnel.c: "it is opened by the
+ * override and closed by releasing it, by the dead-man, or by leaving MP mode"
+ * — and `obj.set` creates no lease, so a set that reached
+ * sts_mp_tunnel_set_gnss(true) would suspend the GNSS receiver with nothing in
+ * the system able to resume it: mp_ovr_revert_all() has no lease to revert, and
+ * MP_ILK_TUNNEL is a consequence rather than a refusal (mp_override.c). The
+ * grandmaster would lose GNSS until a reboot or a deliberate `obj.set … false`.
+ * Dropping MP_OF_WRITE is what makes the lease mandatory and the dead-man
+ * effective; test_mp_manifest.c asserts no MP_ILK_TUNNEL object is writable.
+ */
 #define F_RO MP_OF_READ
+#define F_RO_D (F_RO | MP_OF_DEFERRED)
 #define F_RW (MP_OF_READ | MP_OF_WRITE | MP_OF_OVERRIDE)
-#define F_RWL (MP_OF_READ | MP_OF_WRITE | MP_OF_OVERRIDE | MP_OF_ACTIVE_LOW)
+#define F_RW_D (F_RW | MP_OF_DEFERRED)
+#define F_RWL (F_RW | MP_OF_ACTIVE_LOW)
+#define F_RWL_D (F_RWL | MP_OF_DEFERRED)
 #define F_PULSE (MP_OF_READ | MP_OF_PULSE)
+#define F_PULSE_D (F_PULSE | MP_OF_DEFERRED)
 #define F_CFG (MP_OF_READ | MP_OF_WRITE | MP_OF_CFG)
+#define F_LEASE (MP_OF_READ | MP_OF_OVERRIDE)
+#define F_LEASE_D (F_LEASE | MP_OF_DEFERRED)
 
 /*
  * VCC_RB envelope. The supply's own range is 4.51-24.45 V over
@@ -154,35 +184,35 @@ const char *mp_ilk_reason(uint32_t bit)
 const mp_obj_t mp_objs[] = {
 	/* ---------------------------------------------------- §6.1 power --- */
 	{ .id = "pwr.gps.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_POWER, .flags = F_RW, .net = "GPS_PWR_EN",
+	  .group = MP_GRP_POWER, .flags = F_RW_D, .net = "GPS_PWR_EN",
 	  .desc = "U22 LT3045 3V3_GPS rail enable (PC8)" },
 	{ .id = "pwr.ant.bias.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_POWER, .flags = F_RW, .net = "ANT_BIAS_EN",
+	  .group = MP_GRP_POWER, .flags = F_RW_D, .net = "ANT_BIAS_EN",
 	  .desc = "U27 RT9742 antenna bias-T enable (PC9)" },
 	{ .id = "pwr.disp.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_POWER, .flags = F_RW, .ilk = MP_ILK_DISP_OFF,
+	  .group = MP_GRP_POWER, .flags = F_RW_D, .ilk = MP_ILK_DISP_OFF,
 	  .net = "DISP_EN",
 	  .desc = "U33 RT9742 5V_DISP + PCA9306 enable (PC11)" },
 	{ .id = "pwr.panel.led.en", .kind = MP_KIND_BOOL,
-	  .guard = MP_GUARD_G1, .group = MP_GRP_POWER, .flags = F_RW,
+	  .guard = MP_GUARD_G1, .group = MP_GRP_POWER, .flags = F_RW_D,
 	  .net = "PANEL_LED_EN",
 	  .desc = "U55 RT9742 panel-LED 5 V rail enable (PC0)" },
 	{ .id = "pwr.rb.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_POWER, .flags = F_RW,
+	  .group = MP_GRP_POWER, .flags = F_RW_D,
 	  .ilk = MP_ILK_RB_WARM | MP_ILK_RB_OV, .net = "RB_PWR_EN",
 	  .desc = "U40 MIC28516 rubidium rail enable (PB7)" },
 	{ .id = "pwr.rb.gate", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_POWER, .flags = F_RW,
+	  .group = MP_GRP_POWER, .flags = F_RW_D,
 	  .ilk = MP_ILK_RB_OV | MP_ILK_RB_VERIFY, .net = "RB_VCC_GATE",
 	  .desc = "Q25 gate: connects VCC_RB_G to the FE-5680A (PB1)" },
 	{ .id = "pwr.rb.vset_mv", .kind = MP_KIND_MV, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_POWER, .flags = F_RW, .min = RB_MV_MIN,
+	  .group = MP_GRP_POWER, .flags = F_RW_D, .min = RB_MV_MIN,
 	  .max = RB_MV_MAX, .step = 78, .unit = U_MV,
 	  .ilk = MP_ILK_RB_VMAX | MP_ILK_RB_OV | MP_ILK_RB_VERIFY,
 	  .net = "VCC_RB",
 	  .desc = "U43 MCP41U83 digipot setpoint; 24.45 - 6.645*VCTRL" },
 	{ .id = "pwr.rb.pot.code", .kind = MP_KIND_CODE, .guard = MP_GUARD_G3,
-	  .group = MP_GRP_POWER, .flags = F_RW, .min = 0, .max = RB_POT_MAX,
+	  .group = MP_GRP_POWER, .flags = F_RW_D, .min = 0, .max = RB_POT_MAX,
 	  .step = 1, .ilk = MP_ILK_RB_VMAX | MP_ILK_RB_OV,
 	  .net = "SPI_DPOT_CS",
 	  .desc = "U43 raw wiper code; 0 = terminal B = safe-low (PD2 CS)" },
@@ -205,22 +235,22 @@ const mp_obj_t mp_objs[] = {
 
 	/* ------------------------------------------------ §6.2 reference --- */
 	{ .id = "ref.mux.sel", .kind = MP_KIND_ENUM, .guard = MP_GUARD_G3,
-	  .group = MP_GRP_REF, .flags = F_RW, .min = 0, .max = 1, .step = 1,
+	  .group = MP_GRP_REF, .flags = F_RW_D, .min = 0, .max = 1, .step = 1,
 	  .enums = "ocxo,rb", .ilk = MP_ILK_MUX_GUARD, .net = "MUX_SEL",
 	  .desc = "U52 74LVC1G157 clock mux -> PH0 HSE bypass (PB6)" },
 	{ .id = "ref.term.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_REF, .flags = F_RW, .net = "REF_TERM_EN",
+	  .group = MP_GRP_REF, .flags = F_RW_D, .net = "REF_TERM_EN",
 	  .desc = "external-reference SMA 50 ohm termination (PC10)" },
 	{ .id = "ref.ocxo.vc_mv", .kind = MP_KIND_MV, .guard = MP_GUARD_G3,
-	  .group = MP_GRP_REF, .flags = F_RW, .min = 0, .max = 3300,
+	  .group = MP_GRP_REF, .flags = F_RW_D, .min = 0, .max = 3300,
 	  .step = 1, .unit = U_MV, .ilk = MP_ILK_DAC_PARK, .net = "OCXO_VC",
 	  .desc = "DAC1_OUT1 -> U36 OPA320 -> OH300 Vc, centre 1650 mV (PA4)" },
 	{ .id = "ref.ocxo.dac_code", .kind = MP_KIND_CODE,
-	  .guard = MP_GUARD_G3, .group = MP_GRP_REF, .flags = F_RW, .min = 0,
+	  .guard = MP_GUARD_G3, .group = MP_GRP_REF, .flags = F_RW_D, .min = 0,
 	  .max = 4095, .step = 1, .ilk = MP_ILK_DAC_PARK, .net = "OCXO_VC",
 	  .desc = "raw 12-bit DAC1_OUT1 code (PA4)" },
 	{ .id = "ref.relay.hold", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_REF, .flags = F_RW, .ilk = MP_ILK_RELAY_OK,
+	  .group = MP_GRP_REF, .flags = F_RW_D, .ilk = MP_ILK_RELAY_OK,
 	  .net = "HOLDOVER_ALARM_RELAY",
 	  .desc = "K2 holdover/alarm relay; high = energized = healthy (PA6)" },
 	{ .id = "ref.rb.serial", .kind = MP_KIND_ENUM, .guard = MP_GUARD_G2,
@@ -228,27 +258,27 @@ const mp_obj_t mp_objs[] = {
 	  .enums = "rs232,cmos", .net = "RB_RS232_CMOS_SW",
 	  .desc = "K1 relay: FE-5680A serial level select, RS-232 fail-safe (PE4)" },
 	{ .id = "ref.rb.tunnel", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_REF, .flags = F_RW, .ilk = MP_ILK_TUNNEL,
+	  .group = MP_GRP_REF, .flags = F_LEASE, .ilk = MP_ILK_TUNNEL,
 	  .net = "RB_TX/RB_RX",
 	  .desc = "UART7 passthrough on channel 0x08 (PE7/PB4)" },
 
 	/* ----------------------------------------------------- §6.3 gnss --- */
 	{ .id = "gnss.reset", .kind = MP_KIND_PULSE, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_GNSS, .flags = F_PULSE | MP_OF_ACTIVE_LOW, .min = 1,
+	  .group = MP_GRP_GNSS, .flags = F_PULSE_D | MP_OF_ACTIVE_LOW, .min = 1,
 	  .max = 1000, .step = 1, .unit = U_MS, .net = "GPS_RST_N",
 	  .desc = "ZED-F9T reset, active low (PD11)" },
 	{ .id = "gnss.safeboot", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G3,
-	  .group = MP_GRP_GNSS, .flags = F_RWL, .net = "GPS_SAFEBOOT_N",
+	  .group = MP_GRP_GNSS, .flags = F_RWL_D, .net = "GPS_SAFEBOOT_N",
 	  .desc = "ZED-F9T safeboot, active low; with reset enters recovery (PD15)" },
 	{ .id = "gnss.dsel", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_GNSS, .flags = F_RW, .net = "GPS_DSEL",
+	  .group = MP_GRP_GNSS, .flags = F_RW_D, .net = "GPS_DSEL",
 	  .desc = "ZED-F9T interface select (PD7)" },
 	{ .id = "gnss.extint", .kind = MP_KIND_PULSE, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_GNSS, .flags = F_PULSE, .min = 1, .max = 1000,
+	  .group = MP_GRP_GNSS, .flags = F_PULSE_D, .min = 1, .max = 1000,
 	  .step = 1, .unit = U_MS, .net = "GPS_EXTINT",
 	  .desc = "ZED-F9T time-mark / aiding trigger (PD6)" },
 	{ .id = "gnss.tunnel", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_GNSS, .flags = F_RW, .ilk = MP_ILK_TUNNEL,
+	  .group = MP_GRP_GNSS, .flags = F_LEASE, .ilk = MP_ILK_TUNNEL,
 	  .net = "GPS_TX/GPS_RX",
 	  .desc = "USART3 passthrough on channel 0x07 (PD8/PD9)" },
 
@@ -258,31 +288,31 @@ const mp_obj_t mp_objs[] = {
 	  .step = 1, .unit = U_PCT, .net = "PANEL_LED_PWM",
 	  .desc = "front-panel LED string dimmer, LPTIM2_CH2 (PE0)" },
 	{ .id = "ui.disp.bl", .kind = MP_KIND_PCT, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW, .min = 0, .max = 100,
+	  .group = MP_GRP_PANEL, .flags = F_RW_D, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .net = "DISP_BL",
 	  .desc = "ST7796 module backlight duty (PE6)" },
 	{ .id = "ui.disp.reset", .kind = MP_KIND_PULSE, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_PANEL, .flags = F_PULSE, .min = 1, .max = 200,
+	  .group = MP_GRP_PANEL, .flags = F_PULSE_D, .min = 1, .max = 200,
 	  .step = 1, .unit = U_MS, .net = "DISP_RST",
 	  .desc = "ST7796 reset, active low (PA10)" },
 	{ .id = "ui.rgb.mode", .kind = MP_KIND_ENUM, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW, .min = 0, .max = 5, .step = 1,
+	  .group = MP_GRP_PANEL, .flags = F_RW_D, .min = 0, .max = 5, .step = 1,
 	  .enums = "auto,off,green,amber,red,blue-pulse", .net = "LED_R/G/B",
 	  .desc = "D5 status RGB pattern; auto returns it to the fault policy" },
 	{ .id = "ui.rgb.r", .kind = MP_KIND_PCT, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW, .min = 0, .max = 100,
+	  .group = MP_GRP_PANEL, .flags = F_RW_D, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .net = "LED_R",
 	  .desc = "D5 red leg, TIM4_CH1, common anode + low-side NPN (PD12)" },
 	{ .id = "ui.rgb.g", .kind = MP_KIND_PCT, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW, .min = 0, .max = 100,
+	  .group = MP_GRP_PANEL, .flags = F_RW_D, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .net = "LED_G",
 	  .desc = "D5 green leg, TIM4_CH2 (PD13)" },
 	{ .id = "ui.rgb.b", .kind = MP_KIND_PCT, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW, .min = 0, .max = 100,
+	  .group = MP_GRP_PANEL, .flags = F_RW_D, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .net = "LED_B",
 	  .desc = "D5 blue leg, TIM4_CH3 (PD14)" },
 	{ .id = "ui.lamp.test", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW,
+	  .group = MP_GRP_PANEL, .flags = F_RW_D,
 	  .desc = "all panel indicators on, for a lamp test" },
 	/*
 	 * G1, not G0, despite being "which box is this in the rack".
@@ -303,28 +333,28 @@ const mp_obj_t mp_objs[] = {
 
 	/* --------------------------------------------------- §6.5 system --- */
 	{ .id = "sys.fan.duty", .kind = MP_KIND_PCT, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_SYSTEM, .flags = F_RW, .min = 0, .max = 100,
+	  .group = MP_GRP_SYSTEM, .flags = F_RW_D, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .ilk = MP_ILK_FAN_FLOOR,
 	  .net = "FAN_PWM",
 	  .desc = "25 kHz fan PWM, TIM15_CH1; idle/fault state is full speed (PE5)" },
 	{ .id = "sys.wdt.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G3,
-	  .group = MP_GRP_SYSTEM, .flags = F_RW, .ilk = MP_ILK_WDT_LIVE,
+	  .group = MP_GRP_SYSTEM, .flags = F_RW_D, .ilk = MP_ILK_WDT_LIVE,
 	  .net = "WDT_EN",
 	  .desc = "U64 TPS3430 external windowed watchdog enable (PC12)" },
 	{ .id = "sys.wdt.kick", .kind = MP_KIND_PULSE, .guard = MP_GUARD_G3,
-	  .group = MP_GRP_SYSTEM, .flags = F_PULSE, .min = 1, .max = 10,
+	  .group = MP_GRP_SYSTEM, .flags = F_PULSE_D, .min = 1, .max = 10,
 	  .step = 1, .unit = U_MS, .ilk = MP_ILK_WDT_LIVE, .net = "WDT_KICK",
 	  .desc = "U64 WDI refresh; normally only the supervisor drives it (PB2)" },
 	{ .id = "sys.nor.reset", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_SYSTEM, .flags = F_RWL, .net = "NOR_RST_N",
+	  .group = MP_GRP_SYSTEM, .flags = F_RWL_D, .net = "NOR_RST_N",
 	  .desc = "U62 MX25L25645 reset, active low (PE10)" },
 	{ .id = "sys.phy.reset", .kind = MP_KIND_PULSE, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_SYSTEM, .flags = F_PULSE | MP_OF_ACTIVE_LOW,
+	  .group = MP_GRP_SYSTEM, .flags = F_PULSE_D | MP_OF_ACTIVE_LOW,
 	  .min = 1, .max = 1000, .step = 1, .unit = U_MS,
 	  .net = "LAN_RST_N",
 	  .desc = "LAN8742AI reset, active low, 100 us minimum (PD10)" },
 	{ .id = "sys.smp.tunnel", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_SYSTEM, .flags = F_RW, .ilk = MP_ILK_TUNNEL,
+	  .group = MP_GRP_SYSTEM, .flags = F_LEASE_D, .ilk = MP_ILK_TUNNEL,
 	  .desc = "MCUmgr/SMP tunnel on channel 0x06" },
 
 	/* --------------------------------------------------- §7.1 sensors -- */
@@ -385,58 +415,58 @@ const mp_obj_t mp_objs[] = {
 
 	/* Direct-scan bitmaps — the replacement for the absent I/O expander. */
 	{ .id = "sensor.pg", .kind = MP_KIND_BITS, .group = MP_GRP_SENSOR,
-	  .flags = F_RO,
+	  .flags = F_RO_D,
 	  .enums = "3v3_gps_ldo,ocxo_ldo,3v0_rf_ldo,5v_psu,3v3_psu,ocxo_psu,"
 		   "rb_psu,poe",
 	  .desc = "GPIOG[0:7] rail power-good, 1 = asserted-low = not good" },
 	{ .id = "sensor.ina.alert", .kind = MP_KIND_BITS,
-	  .group = MP_GRP_SENSOR, .flags = F_RO,
+	  .group = MP_GRP_SENSOR, .flags = F_RO_D,
 	  .enums = "v_poe,3v3_stm,5v_disp,3v3,3v3_gps,v_ant,ocxo,vcc_rb,panel",
 	  .desc = "INA228 ALERT lines: GPIOG[8:15] plus PF13 for U54" },
 	{ .id = "sensor.en.fault", .kind = MP_KIND_BITS,
-	  .group = MP_GRP_SENSOR, .flags = F_RO,
+	  .group = MP_GRP_SENSOR, .flags = F_RO_D,
 	  .enums = "v_ant,v_disp,panel_led",
 	  .desc = "RT9742 nFLG flags U27/U33/U55 (PF8, PF9, PF12)" },
 	{ .id = "sensor.bkp.pg", .kind = MP_KIND_BITS, .group = MP_GRP_SENSOR,
 	  .flags = F_RO, .enums = "stm,gps",
 	  .desc = "TPS61094 supercap backup power-good (PF14, PF15)" },
 	{ .id = "sensor.buttons", .kind = MP_KIND_BITS,
-	  .group = MP_GRP_SENSOR, .flags = F_RO,
+	  .group = MP_GRP_SENSOR, .flags = F_RO_D,
 	  .enums = "b1,b2,b3,b4,b5,b6,b7,encoder",
 	  .desc = "panel buttons PF0..PF6 and the encoder switch PF11" },
 	{ .id = "sensor.poe.status", .kind = MP_KIND_BITS,
-	  .group = MP_GRP_SENSOR, .flags = F_RO, .enums = "ncm,lcf,ncl",
+	  .group = MP_GRP_SENSOR, .flags = F_RO_D, .enums = "ncm,lcf,ncl",
 	  .desc = "U9 NCP1095 open-drain status (PC2, PC3, PC7)" },
 
 	/* Discrete inputs outside the scan. */
 	{ .id = "sensor.rb.lock", .kind = MP_KIND_BOOL, .group = MP_GRP_SENSOR,
-	  .flags = F_RO, .net = "RB_LOCK",
+	  .flags = F_RO_D, .net = "RB_LOCK",
 	  .desc = "FE-5680A lock via U48 opto (PB13)" },
 	{ .id = "sensor.rb.ov", .kind = MP_KIND_BOOL, .group = MP_GRP_SENSOR,
-	  .flags = F_RO, .net = "RB_OV_DET",
+	  .flags = F_RO_D, .net = "RB_OV_DET",
 	  .desc = "autonomous 26 V OV latch state (PE3)" },
 	{ .id = "sensor.extref.hz", .kind = MP_KIND_SCALAR,
-	  .group = MP_GRP_SENSOR, .flags = F_RO, .min = 0, .max = 20000000,
+	  .group = MP_GRP_SENSOR, .flags = F_RO_D, .min = 0, .max = 20000000,
 	  .unit = U_HZ, .net = "EXTREF_MON",
 	  .desc = "TIM12_CH1 capture of the mux B input (PB14)" },
 	{ .id = "sensor.pfi", .kind = MP_KIND_BOOL, .group = MP_GRP_SENSOR,
-	  .flags = F_RO, .net = "PFI",
+	  .flags = F_RO_D, .net = "PFI",
 	  .desc = "U2A power-fail early warning, 38.1 V trip (PE8)" },
 	{ .id = "sensor.usb.vbus", .kind = MP_KIND_BOOL,
-	  .group = MP_GRP_SENSOR, .flags = F_RO, .net = "USB_VBUS_SENSE",
+	  .group = MP_GRP_SENSOR, .flags = F_RO_D, .net = "USB_VBUS_SENSE",
 	  .desc = "USB-C VBUS presence via divider (PE2)" },
 	{ .id = "sensor.gps.txrdy", .kind = MP_KIND_BOOL,
-	  .group = MP_GRP_SENSOR, .flags = F_RO, .net = "GPS_TXRDY",
+	  .group = MP_GRP_SENSOR, .flags = F_RO_D, .net = "GPS_TXRDY",
 	  .desc = "ZED-F9T TX-ready; valid only after the CFG-TXREADY ACK (PD5)" },
 	{ .id = "sensor.gps.ant_off", .kind = MP_KIND_BOOL,
-	  .group = MP_GRP_SENSOR, .flags = F_RO, .net = "GPS_ANT_OFF_MON",
+	  .group = MP_GRP_SENSOR, .flags = F_RO_D, .net = "GPS_ANT_OFF_MON",
 	  .desc = "ZED-F9T LNA-off indication (PD4)" },
 	{ .id = "sensor.ocxo.vc", .kind = MP_KIND_SCALAR,
 	  .group = MP_GRP_SENSOR, .flags = F_RO, .min = 0, .max = 3300,
 	  .unit = U_MV, .net = "OCXO_V",
 	  .desc = "ADC read-back of the OCXO Vc loop filter (PA3)" },
 	{ .id = "sensor.enc.pos", .kind = MP_KIND_SCALAR,
-	  .group = MP_GRP_SENSOR, .flags = F_RO, .min = -2147483647,
+	  .group = MP_GRP_SENSOR, .flags = F_RO_D, .min = -2147483647,
 	  .max = 2147483647, .net = "ENC_A/ENC_B",
 	  .desc = "TIM1 hardware quadrature position (PA8/PA9)" },
 
@@ -488,11 +518,11 @@ const mp_obj_t mp_objs[] = {
 	  .group = MP_GRP_SENSOR, .flags = F_RO, .min = 0, .max = 2147483647,
 	  .unit = U_NS, .desc = "receiver time-accuracy estimate" },
 	{ .id = "sensor.gnss.ant", .kind = MP_KIND_ENUM,
-	  .group = MP_GRP_SENSOR, .flags = F_RO, .min = 0, .max = 4,
+	  .group = MP_GRP_SENSOR, .flags = F_RO_D, .min = 0, .max = 4,
 	  .enums = "unknown,ok,open,short,off",
 	  .desc = "antenna supervisor: MON-RF + PD4 + INA228 0x45 fused" },
 	{ .id = "sensor.pwrseq.stage", .kind = MP_KIND_SCALAR,
-	  .group = MP_GRP_SENSOR, .flags = F_RO, .min = 0, .max = 15,
+	  .group = MP_GRP_SENSOR, .flags = F_RO_D, .min = 0, .max = 15,
 	  .desc = "bring-up stage machine position (interface ref §2)" },
 	/*
 	 * The active-alarm mask. Bits 0..31 are the scanned signals (fault_sig_t)

@@ -439,6 +439,107 @@ static void test_interlocks_are_attached_where_they_must_be(void)
 	}
 }
 
+/**
+ * A tunnel is a LEASED thing, so it may be overridden and never written.
+ *
+ * `gnss.tunnel` and `ref.rb.tunnel` carried MP_OF_WRITE, and m_obj_set() checks
+ * only that flag — so `obj.set gnss.tunnel true` reached obj_apply(), called
+ * sts_gnss_uart_suspend() and parked gnssmgr in GNSSMGR_ST_FW_UPDATE while
+ * creating **no lease**. mp_ovr_revert_all() — the dead-man, the link drop,
+ * `session.close`, mode exit — had nothing to revert, and MP_ILK_TUNNEL is a
+ * consequence rather than a refusal, so nothing stopped it. The grandmaster
+ * lost GNSS until a reboot.
+ *
+ * Stated over the INTERLOCK rather than over the three ids, because the rule is
+ * about what MP_ILK_TUNNEL means: it suspends firmware's use of a port, and
+ * only a lease can put that back. A fourth tunnel object added later is covered
+ * the day it declares the interlock.
+ */
+static void test_a_tunnel_object_is_never_writable(void)
+{
+	static const char *const tunnels[] = { "gnss.tunnel", "ref.rb.tunnel",
+					       "sys.smp.tunnel" };
+	size_t i;
+	unsigned int with_ilk = 0U;
+
+	for (i = 0U; i < mp_obj_count(); i++) {
+		const mp_obj_t *o = mp_obj_at(i);
+
+		if ((o->ilk & MP_ILK_TUNNEL) == 0U) {
+			continue;
+		}
+		with_ilk++;
+		TEST_ASSERT_EQUAL_UINT_MESSAGE(
+			0U, (unsigned int)(o->flags & MP_OF_WRITE), o->id);
+		/* ...and it must still be reachable the leased way, or the
+		 * narrowing would have removed the feature instead of the bug. */
+		TEST_ASSERT_TRUE_MESSAGE((o->flags & MP_OF_OVERRIDE) != 0U,
+					 o->id);
+	}
+	TEST_ASSERT_EQUAL_UINT((unsigned int)(sizeof(tunnels) /
+					      sizeof(tunnels[0])),
+			       with_ilk);
+
+	for (i = 0U; i < (sizeof(tunnels) / sizeof(tunnels[0])); i++) {
+		int idx = mp_obj_find(tunnels[i]);
+
+		TEST_ASSERT_TRUE_MESSAGE(idx >= 0, tunnels[i]);
+		TEST_ASSERT_TRUE_MESSAGE(
+			(mp_obj_at((size_t)idx)->ilk & MP_ILK_TUNNEL) != 0U,
+			tunnels[i]);
+	}
+}
+
+/**
+ * The honesty flag reaches the wire, on exactly the objects that carry it.
+ *
+ * MP_OF_DEFERRED was defined in the header, listed in emit_flags(), and set by
+ * zero objects — so the manifest a host generates its UI from (FMT §4) could
+ * not distinguish a control that works from one that answers MP_E_NOTSUP. The
+ * set itself is proved against mp_glue.c's dispatch in test_mp_deferred.c; this
+ * checks the serialisation, which is the half the host actually sees.
+ */
+static void test_the_deferred_flag_is_published(void)
+{
+	size_t i;
+	unsigned int deferred = 0U;
+
+	for (i = 0U; i < mp_obj_count(); i++) {
+		char buf[MP_MANIFEST_OBJ_JSON_MAX];
+		const mp_obj_t *o = mp_obj_at(i);
+		bool want = (o->flags & MP_OF_DEFERRED) != 0U;
+		int len = mp_manifest_obj_json(i, buf, sizeof(buf));
+		int flags;
+		uint16_t k;
+		uint16_t n;
+		bool seen = false;
+
+		TEST_ASSERT_TRUE_MESSAGE(len > 0, o->id);
+		TEST_ASSERT_TRUE(mp_json_parse(&g_p, buf, (size_t)len, g_tok,
+					       TOKS, 0U) > 0);
+		flags = mp_json_obj_get(&g_p, mp_json_root(&g_p), "flags");
+		TEST_ASSERT_TRUE_MESSAGE(flags >= 0, o->id);
+
+		n = mp_json_count(&g_p, flags);
+		for (k = 0U; k < n; k++) {
+			if (mp_json_streq(&g_p, mp_json_arr_at(&g_p, flags, k),
+					  "deferred")) {
+				seen = true;
+			}
+		}
+		TEST_ASSERT_EQUAL_MESSAGE(want, seen, o->id);
+		if (want) {
+			deferred++;
+		}
+	}
+
+	/* Neither all nor none: a manifest where every object is deferred, or
+	 * none is, would satisfy the per-object check above and tell the host
+	 * nothing. */
+	TEST_ASSERT_TRUE(deferred > 20U);
+	TEST_ASSERT_TRUE(deferred < mp_obj_count());
+}
+
 /* --------------------------------------------------------- as-built checks */
 
 static void test_no_io_expander_anywhere(void)
@@ -906,6 +1007,8 @@ int main(void)
 	RUN_TEST(test_no_g0_object_can_mutate);
 	RUN_TEST(test_guard_classes_of_the_dangerous_objects);
 	RUN_TEST(test_interlocks_are_attached_where_they_must_be);
+	RUN_TEST(test_a_tunnel_object_is_never_writable);
+	RUN_TEST(test_the_deferred_flag_is_published);
 
 	RUN_TEST(test_no_io_expander_anywhere);
 	RUN_TEST(test_rail_objects_match_the_as_built_monitor_table);

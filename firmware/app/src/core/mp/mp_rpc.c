@@ -972,6 +972,39 @@ static int cfg_write(mp_ctx_t *c, const mp_obj_t *o, int32_t value)
 	return c->w.cfg_commit(c->w.cfg_user, &res);
 }
 
+/**
+ * Refuse an object this image has nothing wired behind — BEFORE the guard runs.
+ *
+ * The ordering is the whole point. guard_or_fail() reaches mp_ovr_guard(),
+ * which on a successful G3 second phase calls mp_ovr_disarm() and consumes the
+ * arming nonce; a G2 request has already had the device serial typed at it by
+ * then. Discovering "not supported" after that spends a technician's typed
+ * phrase and hold on an object that does nothing, and the arm cannot be given
+ * back. So the question is asked first, and the answer is MP_E_NOTSUP — never
+ * MP_E_VETO, which would claim a safety supervisor refused a request when in
+ * fact no supervisor was ever consulted.
+ *
+ * The answer comes from the wiring, not from the manifest, because the manifest
+ * is const data shared with any harness that supplies its own dispatch: a NULL
+ * hook means "assume everything published is wired", which is what keeps the
+ * core suites able to actuate every object. The shipped glue answers from
+ * MP_OF_DEFERRED (mp_glue.c), so on a real board there is one truth.
+ *
+ * @retval 0     Implemented, or the wiring does not say; carry on.
+ * @retval !=0   The MP error code, already reported through mp_fail().
+ */
+static int impl_or_fail(mp_ctx_t *c, size_t idx)
+{
+	if (c->w.obj_supported == NULL) {
+		return 0;
+	}
+	if (c->w.obj_supported(c->w.obj_supported_user, idx) == 0) {
+		return 0;
+	}
+	mp_fail(c, MP_E_NOTSUP, "not implemented");
+	return MP_E_NOTSUP;
+}
+
 static int m_obj_set(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 {
 	int idx = p_obj(c, p, params);
@@ -989,6 +1022,10 @@ static int m_obj_set(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	if ((o->flags & MP_OF_WRITE) == 0U) {
 		mp_fail(c, MP_E_NOTSUP, "not writable");
 		return MP_E_NOTSUP;
+	}
+	rc = impl_or_fail(c, (size_t)idx);
+	if (rc != 0) {
+		return rc;
 	}
 	if (p_get(p, params, "value") < 0) {
 		mp_fail(c, MP_E_BAD_PARAMS, "value");
@@ -1061,6 +1098,20 @@ static int m_obj_set(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 		return mp_map_errno(rc);
 	}
 
+	/*
+	 * No `reference_suspect` here, unlike m_obj_override() — and that is now
+	 * a property of the manifest rather than an omission.
+	 *
+	 * `res.tunnel` is set by MP_ILK_TUNNEL, which only ever appears on
+	 * `gnss.tunnel`, `ref.rb.tunnel` and `sys.smp.tunnel`, and none of the
+	 * three carries MP_OF_WRITE: a tunnel is a leased thing, so it is opened
+	 * by `obj.override` and closed by releasing it, by the dead-man, or by
+	 * leaving MP mode. A `set` that stood a port down would create no lease
+	 * and nothing in the system could put it back.
+	 * tests/host/test_mp_manifest.c asserts that no writable object declares
+	 * MP_ILK_TUNNEL, so this reply cannot silently start owing the host a
+	 * suspect-reference flag.
+	 */
 	(void)mp_jw_obj_open(w);
 	(void)mp_jw_kv_str(w, "id", o->id);
 	(void)mp_jw_kv_i64(w, "value", res.value);
@@ -1106,6 +1157,10 @@ static int m_obj_override(mp_ctx_t *c, const mp_json_t *p, int params,
 	if ((o->flags & MP_OF_OVERRIDE) == 0U) {
 		mp_fail(c, MP_E_NOTSUP, "not overridable");
 		return MP_E_NOTSUP;
+	}
+	rc = impl_or_fail(c, (size_t)idx);
+	if (rc != 0) {
+		return rc;
 	}
 	if (o->kind == (uint8_t)MP_KIND_BOOL) {
 		bool b = false;
@@ -1191,6 +1246,10 @@ static int m_obj_pulse(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	if ((o->flags & MP_OF_PULSE) == 0U) {
 		mp_fail(c, MP_E_NOTSUP, "not pulsable");
 		return MP_E_NOTSUP;
+	}
+	rc = impl_or_fail(c, (size_t)idx);
+	if (rc != 0) {
+		return rc;
 	}
 	if (p_u32(p, params, "ms", (uint32_t)o->min, &ms) != 0) {
 		mp_fail(c, MP_E_BAD_PARAMS, "ms");

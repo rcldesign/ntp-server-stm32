@@ -305,6 +305,34 @@ typedef struct {
 	void *diag_user;
 
 	/**
+	 * Does THIS IMAGE's actuation reach @p obj at all? Optional.
+	 *
+	 * 0 = yes, -ENOTSUP = the object is published but nothing is wired
+	 * behind it. Consulted by `obj.set`, `obj.override` and `obj.pulse`
+	 * **before the guard runs**, so an unimplemented object is refused with
+	 * MP_E_NOTSUP instead of being discovered after the ceremony:
+	 * mp_ovr_guard() consumes the G3 arming nonce on success, so without
+	 * this check a G3 object spends a technician's typed phrase and hold
+	 * and only then answers "not supported". A G2 object spent the typed
+	 * serial the same way.
+	 *
+	 * NULL means "assume everything the manifest publishes is wired", which
+	 * is the right default for a harness that supplies its own complete
+	 * apply/pulse: the manifest's MP_OF_DEFERRED bit describes the SHIPPED
+	 * image's dispatch, and core must not assume its own manifest describes
+	 * whatever wiring it was handed. The shipped glue answers straight out
+	 * of that bit (mp_glue.c prov_obj_supported()), and
+	 * tests/host/test_mp_deferred.c pins the bit against the dispatch, so
+	 * there is one truth and not two.
+	 *
+	 * It answers for ACTUATION only. `obj.get` needs no such gate — it is
+	 * G0, there is no ceremony to burn, and obj_read()'s own -ENOTSUP
+	 * already reaches the host as MP_E_NOTSUP.
+	 */
+	int (*obj_supported)(void *user, size_t obj);
+	void *obj_supported_user;
+
+	/**
 	 * Commit the staged cfg set and run the group appliers.
 	 *
 	 * The glue must route this to its own commit wrapper (sts_cfg_commit)

@@ -1495,6 +1495,66 @@ static void test_apply_refusal_is_a_veto_and_leaves_no_lease(void)
 	TEST_ASSERT_EQUAL_UINT(1U, events_of((uint8_t)MP_OVR_EV_VETO));
 }
 
+/**
+ * An apply that answers -ENOTSUP is NOT a veto, and the difference is the whole
+ * sentence a technician reads.
+ *
+ * MP_E_VETO says firmware's safety supervision refused a request it understood,
+ * so it lands on the event channel, moves `vetoes`, and sends whoever is at the
+ * bench looking for the interlock or the fault behind it. On an object with
+ * nothing wired there is no supervisor to find: the veto counter would be
+ * counting unimplemented objects and channel 0x09 — which the veto work exists
+ * to make meaningful — would be carrying noise.
+ *
+ * Every clause below was false before this change: the return was -EACCES
+ * (MP_E_VETO), one MP_OVR_EV_VETO was emitted, and `vetoes` moved. The lease
+ * half is unchanged and is asserted anyway, because "not a veto" must not have
+ * been bought by leaving a half-claimed slot behind.
+ */
+static void test_an_unwired_apply_is_notsup_and_not_a_veto(void)
+{
+	size_t obj = obj_of("ui.disp.bl");
+	mp_ilk_state_t st;
+	uint32_t sid;
+
+	ilk_permissive(&st);
+	sid = open_session(1000U);
+
+	g_apply_rc = -ENOTSUP;
+	TEST_ASSERT_EQUAL_INT(-ENOTSUP, mp_ovr_grant(&g_c, obj, 50, 0U, sid,
+						     &st, 1000U, NULL));
+	TEST_ASSERT_EQUAL_size_t(0U, mp_ovr_active(&g_c));
+	TEST_ASSERT_NULL(mp_ovr_lease(&g_c, obj));
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, events_of((uint8_t)MP_OVR_EV_VETO),
+		"an unimplemented object emitted a safety veto on channel 9");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, g_c.vetoes,
+		"an unimplemented object was counted as a firmware veto");
+
+	/* The same refusal against a *standing* lease frees the slot without
+	 * claiming a veto either — and the release still runs, so the object
+	 * really did go back to firmware-automatic. */
+	g_apply_rc = 0;
+	TEST_ASSERT_EQUAL_INT(0, mp_ovr_grant(&g_c, obj, 50, 0U, sid, &st,
+					      1000U, NULL));
+	logs_clear();
+	g_apply_rc = -ENOTSUP;
+	TEST_ASSERT_EQUAL_INT(-ENOTSUP, mp_ovr_grant(&g_c, obj, 60, 0U, sid,
+						     &st, 1000U, NULL));
+	TEST_ASSERT_EQUAL_size_t(0U, mp_ovr_active(&g_c));
+	TEST_ASSERT_EQUAL_UINT(0U, events_of((uint8_t)MP_OVR_EV_VETO));
+	TEST_ASSERT_EQUAL_UINT32(0U, g_c.vetoes);
+
+	/* And a refusal firmware *understood* is still a veto: the separation is
+	 * by errno, not by "any failure is now quiet". */
+	g_apply_rc = -EIO;
+	TEST_ASSERT_EQUAL_INT(-EACCES, mp_ovr_grant(&g_c, obj, 60, 0U, sid, &st,
+						    1000U, NULL));
+	TEST_ASSERT_EQUAL_UINT(1U, events_of((uint8_t)MP_OVR_EV_VETO));
+	TEST_ASSERT_EQUAL_UINT32(1U, g_c.vetoes);
+}
+
 static void test_firmware_veto(void)
 {
 	size_t obj = obj_of("ui.disp.bl");
@@ -1940,6 +2000,7 @@ int main(void)
 	RUN_TEST(test_lease_ttl_is_clamped);
 	RUN_TEST(test_lease_table_full);
 	RUN_TEST(test_apply_refusal_is_a_veto_and_leaves_no_lease);
+	RUN_TEST(test_an_unwired_apply_is_notsup_and_not_a_veto);
 	RUN_TEST(test_firmware_veto);
 
 	RUN_TEST(test_deadman_reverts_on_a_stale_keepalive);

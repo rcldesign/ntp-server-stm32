@@ -1833,6 +1833,220 @@ static void test_obj_override_reports_a_tunnel_as_reference_suspect(void)
 	TEST_ASSERT_TRUE(res_b("reference_suspect"));
 }
 
+/**
+ * A tunnel cannot be opened by `obj.set`, and that is a safety property.
+ *
+ * `gnss.tunnel` and `ref.rb.tunnel` used to carry MP_OF_WRITE. m_obj_set()
+ * checks only that flag, so `obj.set gnss.tunnel true` reached obj_apply() ->
+ * sts_mp_tunnel_set_gnss(true) -> sts_gnss_uart_suspend(), parking gnssmgr in
+ * GNSSMGR_ST_FW_UPDATE — and created **no lease**, because that is
+ * `obj.override`'s job. mp_ovr_revert_all() therefore had nothing to revert:
+ * not on the dead-man, not on a link drop, not on `session.close`, not on
+ * mode exit. MP_ILK_TUNNEL is a consequence, not a refusal, so nothing blocked
+ * it either. The grandmaster lost GNSS until a reboot or a deliberate
+ * `obj.set … false`.
+ *
+ * The fix is in the manifest — the three tunnel objects are override-only — so
+ * this asserts the refusal at the RPC and, more importantly, that the apply
+ * callback was never reached. An assertion on the error code alone would pass
+ * if the port had been suspended and the reply then failed for another reason.
+ */
+static void test_obj_set_cannot_open_a_tunnel(void)
+{
+	static const char *const ids[] = { "gnss.tunnel", "ref.rb.tunnel",
+					   "sys.smp.tunnel" };
+	uint32_t sid = session();
+	size_t i;
+
+	for (i = 0U; i < (sizeof(ids) / sizeof(ids[0])); i++) {
+		char req[384];
+
+		g_apply_n = 0U;
+		(void)snprintf(req, sizeof(req),
+			       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":"
+			       "\"obj.set\",\"params\":{\"id\":\"%s\","
+			       "\"value\":true,\"sid\":%u,\"confirm\":\"%s\"}}",
+			       ids[i], sid, SERIAL);
+		(void)call(req);
+		TEST_ASSERT_EQUAL_INT64_MESSAGE(MP_E_NOTSUP, err_code(), ids[i]);
+		TEST_ASSERT_EQUAL_UINT_MESSAGE(
+			0U, g_apply_n,
+			"a set reached the tunnel's apply, so a port was stood "
+			"down with no lease to close it");
+	}
+
+	/* The leased route still works, so this is a narrowing and not a
+	 * removal: the tunnel is opened by the override the dead-man can see. */
+	{
+		char req[384];
+
+		(void)snprintf(req, sizeof(req),
+			       "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":"
+			       "\"obj.override\",\"params\":{\"id\":"
+			       "\"gnss.tunnel\",\"value\":true,\"sid\":%u,"
+			       "\"confirm\":\"%s\"}}",
+			       sid, SERIAL);
+		(void)call(req);
+		TEST_ASSERT_TRUE(res_b("reference_suspect"));
+		TEST_ASSERT_NOT_NULL(
+			mp_ovr_lease(&g_c.ovr,
+				     (size_t)mp_obj_find("gnss.tunnel")));
+	}
+}
+
+/* --------------------------------- objects this image has nothing behind --- */
+
+/**
+ * Actuating an object the image does not implement.
+ *
+ * The manifest publishes 91 objects and, on the shipped board, most control
+ * objects answer -ENOTSUP; MP_OF_DEFERRED says which, and the glue answers
+ * mp_wiring_t::obj_supported out of it. Here the hook is wired by hand — the
+ * harness's own apply implements everything, which is exactly why core must ask
+ * the WIRING rather than read the manifest itself.
+ */
+static uint32_t g_unsupported_calls;
+static char g_unsupported_id[48];
+
+static int supported_cb(void *user, size_t obj)
+{
+	const mp_obj_t *o = mp_obj_at(obj);
+
+	(void)user;
+	g_unsupported_calls++;
+	if ((o != NULL) && (g_unsupported_id[0] != '\0') &&
+	    (strcmp(o->id, g_unsupported_id) == 0)) {
+		return -ENOTSUP;
+	}
+	return 0;
+}
+
+/** Re-init g_c with obj_supported wired, declaring @p id unimplemented. */
+static uint32_t session_declaring_unsupported(const char *id)
+{
+	mp_wiring_t w;
+
+	g_unsupported_calls = 0U;
+	(void)snprintf(g_unsupported_id, sizeof(g_unsupported_id), "%s", id);
+	wire_up(&w);
+	w.obj_supported = supported_cb;
+	TEST_ASSERT_EQUAL_INT(0, mp_init(&g_c, &w));
+	TEST_ASSERT_EQUAL_INT(0, mp_set_link(&g_c, true));
+	TEST_ASSERT_EQUAL_INT(0, mp_mode_enter(&g_c));
+	return session();
+}
+
+/**
+ * MP_E_NOTSUP, never MP_E_VETO, and the actuator is never reached.
+ *
+ * `obj.override` on an unwired object used to report a VETO: mp_ovr_grant()
+ * turned the apply's -ENOTSUP into -EACCES, mp_map_errno() mapped that to
+ * MP_E_VETO, an MP_OVR_EV_VETO went out on channel 0x09 and `vetoes` moved. A
+ * technician was told firmware's safety supervision had refused them, and went
+ * looking for an interlock that does not exist.
+ */
+static void test_an_unimplemented_object_answers_notsup(void)
+{
+	uint32_t sid = session_declaring_unsupported("ui.disp.bl");
+	char req[384];
+
+	g_apply_n = 0U;
+
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"obj.set\","
+		       "\"params\":{\"id\":\"ui.disp.bl\",\"value\":40,"
+		       "\"sid\":%u}}",
+		       sid);
+	(void)call(req);
+	TEST_ASSERT_EQUAL_INT64(MP_E_NOTSUP, err_code());
+
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":"
+		       "\"obj.override\",\"params\":{\"id\":\"ui.disp.bl\","
+		       "\"value\":40,\"sid\":%u}}",
+		       sid);
+	(void)call(req);
+	TEST_ASSERT_EQUAL_INT64(MP_E_NOTSUP, err_code());
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(0U, g_apply_n,
+				       "the apply callback was reached for an "
+				       "object the wiring says is unwired");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, g_c.ovr.vetoes,
+		"an unimplemented object was counted as a safety veto");
+	TEST_ASSERT_EQUAL_size_t(0U, mp_ovr_active(&g_c.ovr));
+
+	/* A pulse takes the same answer, through the same check. */
+	sid = session_declaring_unsupported("gnss.reset");
+	g_pulse_n = 0U;
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"obj.pulse\","
+		       "\"params\":{\"id\":\"gnss.reset\",\"ms\":10,"
+		       "\"sid\":%u,\"confirm\":\"%s\"}}",
+		       sid, SERIAL);
+	(void)call(req);
+	TEST_ASSERT_EQUAL_INT64(MP_E_NOTSUP, err_code());
+	TEST_ASSERT_EQUAL_UINT(0U, g_pulse_n);
+
+	/* Everything else still actuates: the refusal is per object, not a
+	 * blanket one that would pass this test vacuously. */
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"obj.set\","
+		       "\"params\":{\"id\":\"ui.disp.bl\",\"value\":40,"
+		       "\"sid\":%u}}",
+		       sid);
+	(void)call(req);
+	TEST_ASSERT_EQUAL_INT64(40, res_i("value"));
+	TEST_ASSERT_TRUE(g_unsupported_calls > 0U);
+}
+
+/**
+ * An unimplemented G3 object does not spend the ceremony first.
+ *
+ * mp_ovr_guard() consumes the arming nonce on a successful second phase, so a
+ * check placed after the guard means a technician types the phrase, waits out
+ * the hold, sends the nonce back — and is then told the object does nothing,
+ * with the arm already gone. Asking before the guard means the ceremony never
+ * starts: no nonce is issued, `refusals` does not move (the guard was not
+ * reached at all), and the session's arm stays clear.
+ */
+static void test_an_unimplemented_g3_object_never_arms(void)
+{
+	uint32_t sid = session_declaring_unsupported("ref.ocxo.dac_code");
+	char req[448];
+
+	/* Phase 1 on the unimplemented G3 object: refused outright. */
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":"
+		       "\"obj.override\",\"params\":{\"id\":"
+		       "\"ref.ocxo.dac_code\",\"value\":2048,\"sid\":%u,"
+		       "\"confirm\":\"%s\",\"phrase\":\"%s\"}}",
+		       sid, SERIAL, MP_G3_PHRASE_DEFAULT);
+	(void)call(req);
+	TEST_ASSERT_EQUAL_INT64(MP_E_NOTSUP, err_code());
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, g_c.ovr.sess.arm_nonce,
+		"an unimplemented object armed a G3 action");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, g_c.ovr.refusals,
+		"the guard ran before the implemented-check, so the "
+		"typed-phrase ceremony was reachable on an object that does "
+		"nothing");
+
+	/* The same request against an implemented G3 object still arms, so the
+	 * refusal above is about the object and not about G3. */
+	(void)snprintf(req, sizeof(req),
+		       "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":"
+		       "\"obj.override\",\"params\":{\"id\":"
+		       "\"ref.ocxo.vc_mv\",\"value\":1650,\"sid\":%u,"
+		       "\"confirm\":\"%s\",\"phrase\":\"%s\"}}",
+		       sid, SERIAL, MP_G3_PHRASE_DEFAULT);
+	(void)call(req);
+	TEST_ASSERT_TRUE(res_b("armed"));
+	TEST_ASSERT_TRUE(res_i("nonce") != 0);
+	TEST_ASSERT_NOT_EQUAL_UINT32(0U, g_c.ovr.sess.arm_nonce);
+}
+
 static void test_obj_override_veto_and_not_overridable(void)
 {
 	uint32_t sid = session();
@@ -3551,6 +3765,9 @@ int main(void)
 	RUN_TEST(test_obj_override_interlock_refusals);
 	RUN_TEST(test_obj_override_vcc_rb_is_clamped_to_the_configured_ceiling);
 	RUN_TEST(test_obj_override_reports_a_tunnel_as_reference_suspect);
+	RUN_TEST(test_obj_set_cannot_open_a_tunnel);
+	RUN_TEST(test_an_unimplemented_object_answers_notsup);
+	RUN_TEST(test_an_unimplemented_g3_object_never_arms);
 	RUN_TEST(test_obj_override_veto_and_not_overridable);
 	RUN_TEST(test_obj_pulse);
 	RUN_TEST(test_interlock_state_unavailable_is_reported);

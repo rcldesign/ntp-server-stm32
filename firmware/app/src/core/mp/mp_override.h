@@ -498,12 +498,18 @@ void mp_ovr_disarm(mp_ovr_ctx_t *c);
  *
  * @retval 0         Granted.
  * @retval -EINVAL   Bad argument or object index.
- * @retval -ENOTSUP  The object is not overridable.
+ * @retval -ENOTSUP  The object is not overridable, OR the apply callback
+ *                   answered -ENOTSUP — nothing is wired behind the object.
+ *                   Deliberately NOT reported as a veto: no MP_OVR_EV_VETO is
+ *                   emitted and `vetoes` does not move, because telling a
+ *                   technician that safety supervision refused them sends them
+ *                   looking for an interlock that does not exist. See the
+ *                   comment on the apply-failure path in mp_override.c.
  * @retval -ERANGE   Value outside the object's envelope.
  * @retval -EPERM    An interlock refused; @p res->failed names it.
  * @retval -ENOLINK  Link down or session invalid.
  * @retval -ENOSPC   Lease table full.
- * @retval -EACCES   The apply callback vetoed the value.
+ * @retval -EACCES   The apply callback vetoed a value it understood.
  */
 int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
 		 uint32_t sid, const mp_ilk_state_t *st, uint32_t now_ms,

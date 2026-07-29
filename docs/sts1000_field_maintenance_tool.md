@@ -235,6 +235,33 @@ Rules:
 - `set_range_mv` for `rail.vcc_rb` is **derived at runtime** from the configured
   `pwr.rb.vmax_mv` — it is not a fixed 10–18 V window.
 
+### 4.1 `deferred` — the manifest says which controls are not implemented
+
+Because the tool generates its UI from this document and hardcodes nothing, an object
+that is published and then answers `MP_E_NOTSUP` renders as a working control and fails
+at the bench. The device says so in advance: every object's `flags` array carries
+**`deferred`** when nothing is wired behind it.
+
+| Rule | |
+|---|---|
+| Meaning | *published, refused.* Nothing in the running image implements the operation this object exists for. |
+| Scope | An object declaring `write`, `override` or `pulse` is `deferred` when **none** of its mutations reaches an actuator. A read-only object is `deferred` when `obj.get` cannot answer it. One bit cannot say more, so for an object that both mutates and reads the flag describes the **mutation** — the operation whose absence a technician discovers by acting on the board. |
+| Enforcement | Not advisory. `obj.set`, `obj.override` and `obj.pulse` refuse a deferred object with `MP_E_NOTSUP` **before the guard runs**, so an unimplemented G3 object cannot spend a typed phrase and a hold before admitting it does nothing, and an unimplemented G2 object cannot spend the typed device serial. |
+| Not availability | An object *without* the flag answers every operation it declares. It may still return `MP_E_IO` when a sensor sweep has not landed — deliberately a different error from `MP_E_NOTSUP`, which now means exactly one thing board-wide: *not implemented*. |
+| Under-report | Three objects mutate but have no read-back: `ui.identify` (a write-only beacon) and `pwr.poe.kill` / `pwr.rb.ov.reset` (momentary pulses whose pin rests deasserted). They are not `deferred` — their control works — and the set is pinned by name in `tests/host/test_mp_deferred.c` so it cannot grow silently. |
+
+As built: **45 of 91** objects carry `deferred` — 30 of the 39 mutable objects and 15
+read-only sensors. The nine objects with an actuator behind them are `ui.panel.duty`,
+`ui.identify`, `ref.rb.serial`, `gnss.tunnel`, `ref.rb.tunnel` (apply), `pwr.poe.kill`,
+`pwr.rb.ov.reset` (pulse) and `pwr.rb.vmax_mv`, `pwr.poe.budget_mw` (cfg-backed writes).
+`obj.get` answers **43 of 91**.
+
+The flag is not maintained by hand: `tests/host/test_mp_deferred.c` reads
+`zephyr/console/mp_glue.c`'s `obj_read()` / `obj_apply()` / `obj_pulse()` — brace-matched
+and function-scoped — derives the wired set from the dispatch, and fails the build if the
+manifest and the code disagree in either direction. Wiring a setter without clearing its
+manifest row breaks the build, and so does clearing a row without wiring anything.
+
 ---
 
 ## 5. Safety model
@@ -351,7 +378,52 @@ be dropped — a lost veto is an override left standing against a dead rail.
 | K2 holdover relay | Force-de-energize (assert alarm downstream) allowed; force-energized-while-fault refused. |
 | DISP_EN | Soft-start fault-mask window enforced; minimum off-time before re-enable. |
 | Watchdog | Arming requires the supervisor's liveness gate healthy. `diag.wdt_test` uses the sanctioned window-violation test, never a raw disable. |
-| GNSS/Rb passthrough | Suspends firmware's own use of that UART, flags the reference suspect, and auto-restores on tunnel close. |
+| GNSS/Rb passthrough | Suspends firmware's own use of that UART, flags the reference suspect, and auto-restores on tunnel close. **Leased only** — see below. |
+
+**What each interlock actually measures, and which terms are still refusals.** An
+interlock evaluated from a *derived* value is not an interlock. `MP_ILK_MUX_GUARD`
+requires `extref_ok && rb_lock`, and `prov_ilk()` computed both from the same field —
+`extref_ok = (active_ref == EXTREF)`, `rb_lock = (active_ref == RB)` — i.e. from the
+reference the discipline loop had **selected**, so the conjunction demanded one field
+hold two mutually exclusive values and `ref.mux.sel = 1` was unsatisfiable by
+construction, wired setter or not. Both now read the sequencer's published **observed**
+half: `rb_lock` ← `RB_LOCK` (PB13, per-unit polarity applied) and `extref_ok` ←
+`EXTREF_MON` (PB14/TIM12) measured *and* in band — the two hardware signals spec §3.5
+names for the handoff. Same defect class as the panel's `rb_locked`.
+
+Three terms still refuse unconditionally. Each now says which kind it is:
+
+| Term | Verdict | Why |
+|---|---|---|
+| `pwr.rb.pot.code` (`rb_code_min > rb_code_max`) | **Deliberate, permanent** | The safe wiper window needs `pwrseq`'s VCC_RB transfer function and safe-code bounds, neither of which crosses `sts_app.h`. This is the one object where guessing is unacceptable — a raw code outside the envelope can destroy the FE-5680A. `pwr.rb.vset_mv`, bounded by cfg `pwr.rb.vmax.mv`, is the supported route; the raw code stays published so a technician can *see* it is refused. |
+| `sys.wdt.en` / `sys.wdt.kick` (`liveness_ok = false`) | **Fail-safe stub**, and both halves are true | *Stub:* the supervisor's liveness gate is published nowhere this area can read — `pwrseq_in_t::liveness_ok` exists but `sts_pwrseq_snap_t` does not carry it, so `false` is not a measurement. *Fail-safe:* it is nevertheless the right answer — arming the TPS3430 window watchdog with the gate unknown risks a window violation and a board reset, and an unknown gate is not a healthy one. Making it an observation means adding the term to the published snapshot. |
+| `pwr.disp.en` (`MP_ILK_DISP_OFF`) | **Was a stub; now observed** | `disp_on` was hard `false` and `disp_changed_ms` was re-taken as *now* on every evaluation, so `since(now, changed) == 0` and the minimum-off-time term could never be satisfied — a refusal with no operating point is not a fail-safe. `disp_on` now comes from `sts_pwrseq_snap_t::display_on` and the change stamp is folded on each console pass inside the lock the tick already holds: 250 ms resolution against a 1000 ms minimum, epoch = MP start, so a rail that went off earlier reads as having gone off at engine start (longer wait, never shorter). |
+
+**A tunnel is opened by `obj.override` and by nothing else.** `gnss.tunnel`,
+`ref.rb.tunnel` and `sys.smp.tunnel` are `read`+`override`; none carries `write`.
+`m_obj_set()` checks only the `write` flag, so while they carried it `obj.set
+gnss.tunnel true` reached `sts_mp_tunnel_set_gnss(true)` → `sts_gnss_uart_suspend()` and
+parked `gnssmgr` in `GNSSMGR_ST_FW_UPDATE` while creating **no lease** — that is
+`obj.override`'s job. `mp_ovr_revert_all()` therefore had nothing to revert on the
+dead-man, on a link drop, on `session.close` or on mode exit, and `MP_ILK_TUNNEL` is a
+*consequence* rather than a refusal, so nothing blocked it: the grandmaster lost GNSS
+until a reboot or a deliberate `obj.set … false`. Dropping `write` is what makes the
+lease mandatory and the dead-man effective. `tests/host/test_mp_manifest.c` states the
+rule over the interlock — no object declaring `MP_ILK_TUNNEL` may be writable — so a
+fourth tunnel object is covered the day it is added, and `obj.set` consequently never
+owes the host a `reference_suspect` flag (`res.tunnel` is reachable only from
+`obj.override`, which does report it).
+
+**An unimplemented object is refused, not vetoed, and it is refused first.** `obj.set` /
+`obj.override` / `obj.pulse` consult the manifest's `deferred` bit (§4.1) *before*
+`mp_ovr_guard()` runs and answer `MP_E_NOTSUP`. Previously the apply's `-ENOTSUP` was
+converted to `-EACCES` inside `mp_ovr_grant()`, mapped to **`MP_E_VETO`**, emitted as
+`MP_OVR_EV_VETO "apply refused"` on channel 9 and counted in `vetoes` — telling a
+technician that firmware's safety supervision had refused them, which sent them looking
+for an interlock that does not exist and polluted the counter and the event channel the
+veto work exists to make meaningful. `-ENOTSUP` out of an apply now passes through with
+its identity intact: no event, no counter. A refusal firmware *understood* (any other
+errno) is still a veto.
 
 ---
 
@@ -397,7 +469,7 @@ Guard class in brackets. All objects are also readable.
 | REF_TERM_EN [G1] | 50 Ω terminate / high-Z (default terminated) |
 | 1PPS output | ETH_PPS_OUT (PB5) from the MAC PTP unit, buffered by U71 to J15; PTP-clock configurable, no separate buffer enable |
 | Holdover relay K2 [G2] | view; force-alarm test (fail-safe semantics displayed) |
-| Rb (FE-5680A) [G2] | power (§6.2); K1 RS-232/CMOS relay (PE4, default RS-232); RB_LOCK polarity config bit; frequency-offset read + guarded EFC trim (§9.4) |
+| Rb (FE-5680A) [G2] | power (§6.2); K1 RS-232/CMOS relay (PE4, default RS-232) — **`ref.rb.serial` is wired**, set and read-back, through `sts_rb_serial_set_mode()`/`sts_rb_serial_status()`; a release returns the relay to the RS-232 fail-safe, and `-EBUSY` (`MP_E_BUSY`) comes back while a raw tunnel holds the port. This is the control the open FE-5680A commissioning item (J6.8/J6.9 direction) needs. RB_LOCK polarity config bit; frequency-offset read + guarded EFC trim (§9.4) |
 
 ### 6.4 GNSS
 
@@ -751,15 +823,15 @@ code exists, is unit-tested on the host, and links into the signed image.
 |---|---|
 | Frame mux (COBS + CRC16, channel dispatch, `mp enter/exit`) | in tree |
 | Manifest generator (build-time table → runtime JSON + content hash) | in tree |
-| Override engine (lease table, dead-man, revert hooks, veto reporting) | in tree, and the **firmware veto is now raised** (§5.4). `platform/pwrseq_exec.c`'s action executor maps six OFF actions to a veto subject through the Zephyr-free `console/sts_mp_veto_policy.h`, `sts_mp_veto()` stages it as one atomic bit, and `sts_mp_tick()` withdraws the matching leases inside the engine lock it already holds — no second timed lock wait, so `sts_console.c`'s `BUILD_ASSERT` budget is unchanged. Verified reachable in the linked image, not merely present: `sts_mp_tick → bl mp_veto → b.w mp_ovr_veto` (a **tail call**, so no `bl` appears on the second edge) and `pwrseq_drain → bl sts_mp_veto`. `tests/host/test_mp_veto.c` drives the *condition* — `RB_OV_DET` on a real `pwrseq_in_t`, the real stage machine's decision to shut the rubidium down — not `mp_ovr_veto()` directly |
-| Sessions + guard/interlock evaluation | in tree, authenticating through `sts_aaa_check()` so the credential store and lockout table are shared with the console and web planes; role floor enforced per §5.3, fail-closed at role `none` |
+| Override engine (lease table, dead-man, revert hooks, veto reporting) | in tree, and the **firmware veto is now raised** (§5.4), and a refusal that is not a veto no longer claims to be one: an apply answering `-ENOTSUP` returns `MP_E_NOTSUP` with no `MP_OVR_EV_VETO` and no `vetoes` increment (§5.5). The three tunnel objects lost `MP_OF_WRITE`, closing a path where `obj.set` stood a UART down and created no lease for the dead-man to revert (§5.5). `platform/pwrseq_exec.c`'s action executor maps six OFF actions to a veto subject through the Zephyr-free `console/sts_mp_veto_policy.h`, `sts_mp_veto()` stages it as one atomic bit, and `sts_mp_tick()` withdraws the matching leases inside the engine lock it already holds — no second timed lock wait, so `sts_console.c`'s `BUILD_ASSERT` budget is unchanged. Verified reachable in the linked image, not merely present: `sts_mp_tick → bl mp_veto → b.w mp_ovr_veto` (a **tail call**, so no `bl` appears on the second edge) and `pwrseq_drain → bl sts_mp_veto`. `tests/host/test_mp_veto.c` drives the *condition* — `RB_OV_DET` on a real `pwrseq_in_t`, the real stage machine's decision to shut the rubidium down — not `mp_ovr_veto()` directly |
+| Sessions + guard/interlock evaluation | in tree, authenticating through `sts_aaa_check()` so the credential store and lockout table are shared with the console and web planes; role floor enforced per §5.3, fail-closed at role `none`. Interlock **state** is no longer derived where it can be measured: `MP_ILK_MUX_GUARD`'s two terms came from one field (`quality_block_t::active_ref`) and were mutually exclusive, making `ref.mux.sel = 1` unsatisfiable — they now read `RB_LOCK` (PB13) and `EXTREF_MON` (PB14/TIM12) from `sts_pwrseq_snap_t`, and `MP_ILK_DISP_OFF` reads `display_on` with a change stamp sampled on the console pass. The two terms that still refuse unconditionally are classified in §5.5 |
 | Streams (telemetry/PPS/log/event/mirror CBOR) | in tree, and now **fed**. The NMEA/UBX/passthrough tees are driven from `platform/gnss.c` and `platform/rb_serial.c` (`sts_mp_tee_*`), and the event channel has producers for all five board-side kinds — see the row below |
 | Event channel 0x09 producers (§7.5) | in tree. `platform/io_scan.c` stages `fault`/`button`/`prox`/`touch` from the 1 kHz scan and `sts_app.c`'s `sts_alarm_set()` stages `alarm` on each active-state transition; `console/mp_events.c` is the bounded staging queue between them and the drain in `sts_mp_tick()`. Before this, **`mp_post_event()` had no caller and was absent from `zephyr.elf`** — five of the eight kinds could not be produced at all, and a subscriber heard silence through a power-good drop, an alarm, a button press and a door event. `touch` is assert-only because core/fault emits no release event; the `override` **veto** sub-kind is raised by the firmware-veto seam — see the override-engine row above |
 | Tunnels (USART3) with firmware-suspend handshake | in tree. Opening the GNSS tunnel calls `sts_gnss_uart_suspend()`, so the receiver is genuinely stood down rather than merely alarmed about |
 | Tunnels (UART7, rubidium) | in tree, and the rubidium is **genuinely stood down**. The obstacle this row used to describe — `rb_serial_tunnel_open()` demands an **ISR-context** byte sink, and the only useful sink reached `uart_poll_out()` through a mutex — is what `console/mp_tunnel.c` was built to solve: the sink stages a bounded copy into a ring under a `k_spinlock` and `sts_mp_tick()` frames it on the console supervisor. While the tunnel holds UART7, `rb_serial_ops()`'s transmit path answers `-EBUSY` (`platform/rb_serial.c:316`), the RX ISR routes every octet to the tunnel sink instead of the parser ring (`:162`), and `rb_serial_set_mode()` refuses to throw the K1 relay (`:226`). Firmware is **not** a second reader or writer for the duration |
 | Diag runner + support bundle | in tree |
 | Multi-IC update orchestrator + inventory | in tree |
-| Capability manifest content | 91 objects (power 12, reference 7, gnss 5, panel 9, system 6, sensor 52); every object carries guard, caps, interlocks and its schematic designator |
+| Capability manifest content | 91 objects (power 12, reference 7, gnss 5, panel 9, system 6, sensor 52); every object carries guard, caps, interlocks and its schematic designator, and now its **`deferred`** bit (§4.1). 45 objects are published-and-refused: 30 of the 39 mutable ones and 15 read-only sensors. `MP_OF_DEFERRED` existed, was emitted by `emit_flags()`, and was set by **zero objects** — so a host generating its UI from the manifest rendered a board's worth of controls of which 8 worked. The bit is derived from `mp_glue.c`'s dispatch by `tests/host/test_mp_deferred.c`, which fails the build in either direction, and it is enforced: `mp_wiring_t::obj_supported` refuses a deferred object **before** `mp_ovr_guard()` consumes a G3 arm |
 | Guard escalation | cumulative: G0 session → G1 `ack` → G2 typed device serial + interlocks → G3 phrase + hold |
 | Dead-man revert | keepalive TTL 5 s, checked by `sts_mp_tick()` on the **250 ms** console-supervisor loop (`sts_console.c:CONSOLE_PERIOD_MS`), so a keepalive that stops reverts in **≈5.25 s typical and ≤6.95 s worst case** — the earlier "100 ms tick, ≈5.1 s" described neither the tick nor the bound. The worst case is 5 s TTL plus the longest gap between two *successful* ticks, which `sts_console.c`'s `BUILD_ASSERT` pins at `(STS_MP_TICK_MISS_MAX + 1) × (250 + STS_MP_TICK_LOCK_MS) + STS_FWUPD_STEP_BUDGET_MS` = `6 × 300 + 150` = 1950 ms, inside `MP_TICK_MAX_MS` (2000). `session.close` and mode-exit revert **synchronously** on the request thread. **A link drop reverts synchronously when the engine is idle — the ordinary case — and otherwise within one tick**: `sts_mp_notify_link()` runs on the console supervisor, which shares its pass with `sts_mp_tick()`, and that pass has exactly one timed lock wait to spend, so the notification tries `K_NO_WAIT` and parks the transition rather than adding a second (which would take the worst case to 2250 ms and break the assertion it was meant to protect). `mp status` counts the deferrals. **BREAK does not revert anything, because no BREAK reaches this transport** (§2.1). 16 leases, no allocation |
 | Diag registry | 14 tests; a failing step does not abort the run (a technician wants the whole picture); verdicts rank PASS < SKIP < FAIL < ERROR |

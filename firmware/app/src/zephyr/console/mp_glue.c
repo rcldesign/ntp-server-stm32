@@ -115,14 +115,34 @@
  *    sts1000_field_maintenance_tool.md §2.2 says so, and mp_glue.h no longer
  *    points at a TODO here that had already been rewritten away.
  *
- * 3. The object write path. Most control objects live on GPIO/PWM/DAC that the
- *    *platform* area owns, and sts_app.h exposes only sts_panel_led_set(); the
- *    GNSS and Rb tunnels are the other two wired writes. Every remaining write
- *    answers MP_E_NOTSUP, but the manifest still publishes the object, its guard
- *    and its interlocks, so the tool discovers the surface and the safety model
- *    is already enforced. Wiring the rest is a platform-area change: one setter
- *    that takes a manifest object index, or a small table of per-object
- *    accessors in sts_app.h.
+ * 3. The object write path — and the manifest now SAYS SO, per object.
+ *
+ *    Most control objects live on GPIO/PWM/DAC the *platform* area owns, and
+ *    sts_app.h exposes only sts_panel_led_set(), sts_rb_serial_set_mode(),
+ *    sts_supervisor_identify() and the two recovery pulses; the GNSS and Rb
+ *    tunnels are this area's own. Nine manifest objects therefore have an
+ *    actuator behind them:
+ *
+ *      obj_apply   ui.panel.duty, ui.identify, ref.rb.serial,
+ *                  gnss.tunnel, ref.rb.tunnel
+ *      obj_pulse   pwr.poe.kill, pwr.rb.ov.reset
+ *      cfg_write   pwr.rb.vmax_mv, pwr.poe.budget_mw   (mp_rpc.c, not here)
+ *
+ *    The other thirty mutable objects answer MP_E_NOTSUP, and forty-five
+ *    objects in all carry **MP_OF_DEFERRED** so the host is told which before
+ *    it renders them: FMT §4 has the tool generate its UI from the manifest and
+ *    hardcode nothing, so an object that is published and refused is a control
+ *    a technician tries at a bench and watches fail. The bit also gates the
+ *    RPC through mp_wiring_t::obj_supported (prov_obj_supported() below), so an
+ *    unimplemented G3 object is refused BEFORE mp_ovr_guard() consumes the
+ *    typed-phrase-and-hold arm.
+ *
+ *    Wiring the remaining thirty is still a platform-area change — a setter
+ *    that takes a manifest object index, or per-object accessors in sts_app.h —
+ *    and it needs a parameterised pwrseq request path, because the existing
+ *    operator entry points post single bits of one atomic word and cannot carry
+ *    a value. Whatever lands, tests/host/test_mp_deferred.c fails until the
+ *    manifest row is cleared to match.
  * ---------------------------------------------------------------------------
  */
 
@@ -598,17 +618,73 @@ static int prov_pps(void *user, mp_pps_t *out)
 	return 0;
 }
 
+/*
+ * The display rail as the sequencer last published it, and when this file first
+ * saw it in that state.
+ *
+ * MP_ILK_DISP_OFF (FMT §5.5, "minimum off-time before re-enable") needs two
+ * facts: whether the rail is on, and how long it has held that state.
+ * sts_pwrseq_snap_t publishes the first as `display_on`; nothing on the board
+ * publishes the second, so it is observed here out of the same 4 Hz snapshot —
+ * sampled on the console supervisor's pass and on every interlock evaluation.
+ *
+ * Both writers hold mp_lock, so a pair of plain statics is the whole
+ * synchronisation. The stamp's resolution is one console pass (250 ms) against
+ * MP_DISP_MIN_OFF_MS (1000 ms), and its epoch is the first sample this file
+ * took: a rail that went off before the MP engine started reads as having gone
+ * off when the engine started, which errs towards making the interlock wait
+ * longer rather than shorter.
+ *
+ * This replaces a stub — `disp_on` was hard false and the stamp was re-taken as
+ * `now` on every evaluation, so `since(now, changed) == 0` and the off-time
+ * term could never be satisfied. A refusal that can never be lifted is not a
+ * fail-safe, it is an interlock with no operating point.
+ */
+static bool disp_seen;
+static bool disp_on_last;
+static uint32_t disp_changed_ms;
+
+/** Fold one published sequencer view into the display change stamp. */
+static void disp_observe_locked(const sts_pwrseq_snap_t *ps)
+{
+	if ((ps == NULL) || !ps->started) {
+		/* Nothing published yet. Leaving the stamp alone keeps
+		 * `disp_seen` false, which prov_ilk() reports as the
+		 * conservative "off, and it just changed". */
+		return;
+	}
+	if (!disp_seen || (disp_on_last != ps->display_on)) {
+		disp_seen = true;
+		disp_on_last = ps->display_on;
+		disp_changed_ms = (uint32_t)k_uptime_get_32();
+	}
+}
+
 /**
  * Interlock state.
  *
  * Fail-safe by construction: anything this area cannot observe is left in the
  * state that makes the interlock *refuse*. A missing accessor must never read as
  * "permission granted".
+ *
+ * The corollary, learned the hard way here: a *derived* value must never stand
+ * in for a measurement either. `rb_lock` and `extref_ok` were both computed
+ * from `quality_block_t::active_ref` — the reference the discipline loop had
+ * SELECTED — which made MP_ILK_MUX_GUARD logically unsatisfiable, because it
+ * demands `extref_ok && rb_lock` and one field cannot equal two different
+ * values at once. `ref.mux.sel = 1` could therefore never be granted, wired
+ * setter or not. Both now come from sts_pwrseq_snap_t's OBSERVED half:
+ * `rb_lock_pin` is RB_LOCK (PB13) with the per-unit polarity applied and
+ * `extref_valid && extref_in_band` is EXTREF_MON (PB14/TIM12) measured and
+ * judged — the two hardware signals spec §3.5 names for the handoff, which is
+ * what the interlock was written against.
  */
 static int prov_ilk(void *user, mp_ilk_state_t *out)
 {
 	sts_health_t hs;
 	quality_block_t q;
+	sts_pwrseq_snap_t ps;
+	bool have_ps;
 	uint64_t alarms = sts_alarms_active();
 	uint64_t vmax = 15000U;
 
@@ -618,8 +694,14 @@ static int prov_ilk(void *user, mp_ilk_state_t *out)
 	if (sts_quality_snapshot(&q) == 0) {
 		out->ocxo_warm = ((q.flags & QUALITY_FLAG_OCXO_WARM) != 0U);
 		out->disc_parked = ((q.flags & QUALITY_FLAG_PARKED) != 0U);
-		out->rb_lock = (q.active_ref == (uint8_t)QUALITY_REF_RB);
-		out->extref_ok = (q.active_ref == (uint8_t)QUALITY_REF_EXTREF);
+	}
+
+	have_ps = (sts_pwrseq_snapshot(&ps) == 0) && ps.started;
+	if (have_ps) {
+		/* The two hardware signals, not the loop's choice between them. */
+		out->rb_lock = ps.rb_lock_pin;
+		out->extref_ok = ps.extref_valid && ps.extref_in_band;
+		disp_observe_locked(&ps);
 	}
 
 	if (sts_health_snapshot(&hs) == 0) {
@@ -644,10 +726,18 @@ static int prov_ilk(void *user, mp_ilk_state_t *out)
 	out->rb_expected_mv = (int32_t)out->rb_vmax_mv;
 
 	/*
-	 * The digipot code window would come from pwrseq's own VCC_RB transfer
-	 * function. Without an accessor the window is left inverted
-	 * (min > max), which mp_ilk_eval() treats as "cannot compute" and
-	 * refuses — the correct answer for a raw wiper write.
+	 * `pwr.rb.pot.code`: a DELIBERATE, PERMANENT refusal, not a stub.
+	 *
+	 * The window is left inverted (min > max), which mp_ilk_eval() treats as
+	 * "cannot compute" and answers -EPERM. Computing it needs pwrseq's own
+	 * VCC_RB transfer function and its safe-code bounds, neither of which
+	 * crosses sts_app.h — and this is the one object where guessing is
+	 * unacceptable: a raw wiper code that leaves the safe envelope can
+	 * destroy the FE-5680A (../CLAUDE.md, "Rb digipot in a buck FB node").
+	 * The setpoint object `pwr.rb.vset_mv` is the supported route and is
+	 * bounded by cfg pwr.rb.vmax.mv below; the raw code exists in the
+	 * manifest so a technician can SEE that it is refused rather than
+	 * wonder whether the tool forgot it.
 	 */
 	out->rb_code_min = 1U;
 	out->rb_code_max = 0U;
@@ -655,11 +745,32 @@ static int prov_ilk(void *user, mp_ilk_state_t *out)
 	out->rb_ov_latched = (alarms & FAULT_ALARM_BIT(FAULT_ALARM_RB_OV)) != 0U;
 	out->relay_blocked = (alarms & FAULT_RELAY_DISQUALIFY_DEFAULT) != 0U;
 
-	/* DISP_EN and the supervisor's liveness gate are platform state. Leaving
-	 * disp_on false with a fresh change stamp makes the off-time interlock
-	 * hold, and liveness_ok false makes the WDT interlock refuse. */
-	out->disp_on = false;
-	out->disp_changed_ms = (uint32_t)k_uptime_get_32();
+	/*
+	 * DISP_EN: observed (above). Before any snapshot has been published the
+	 * state reads "off, and it changed just now", which holds the off-time
+	 * interlock — the conservative answer for an unknown rail.
+	 */
+	out->disp_on = disp_seen && disp_on_last;
+	out->disp_changed_ms = disp_seen ? disp_changed_ms
+					 : (uint32_t)k_uptime_get_32();
+
+	/*
+	 * `sys.wdt.en` / `sys.wdt.kick`: a FAIL-SAFE STUB, and both halves of
+	 * that are true, so neither is dressed up as the other.
+	 *
+	 * Stub: the supervisor's liveness gate is not published anywhere this
+	 * area can read. core/pwrseq is handed it as `pwrseq_in_t::liveness_ok`
+	 * on every 4 Hz pass, but sts_pwrseq_snap_t does not carry it, so there
+	 * is no measurement to report and `false` is not one.
+	 *
+	 * Fail-safe: `false` is nevertheless the right refusal. Arming the
+	 * external TPS3430 window watchdog while firmware cannot show the
+	 * liveness gate is healthy risks a window violation and a board reset —
+	 * FMT §5.5 states the rule as "arming requires the supervisor's liveness
+	 * gate healthy", and an unknown gate is not a healthy one. Making this
+	 * an observation means adding `liveness_ok` to the platform's published
+	 * snapshot; until then the refusal stands and says why.
+	 */
 	out->liveness_ok = false;
 	return 0;
 }
@@ -922,11 +1033,35 @@ static int prov_auth(void *user, const char *user_name, const char *secret,
 
 /* ------------------------------------------------------- object accessors */
 
+/*
+ * ===========================================================================
+ * THE DISPATCH, AND WHAT THE MANIFEST SAYS ABOUT IT
+ * ===========================================================================
+ *
+ * obj_read(), obj_apply() and obj_pulse() below ARE the definition of
+ * MP_OF_DEFERRED: the manifest carries that bit on exactly the objects these
+ * three do not handle, so a host generating its UI from the manifest (FMT §4)
+ * can tell a control that works from one that will refuse. Nothing enforces
+ * that at compile time — the manifest is core/mp and this is Zephyr glue — so
+ * tests/host/test_mp_deferred.c reads this file, brace-matched and
+ * function-scoped, derives the handled set from the dispatch, and fails the
+ * build if the flag and the code disagree. Wire a setter here and that suite
+ * tells you which manifest row to clear.
+ *
+ * -ENOTSUP therefore means exactly one thing on this seam: nothing is wired.
+ * A wired object whose reading is momentarily unavailable answers -EIO, never
+ * -ENOTSUP — which is why the health and quality blocks below are entered
+ * whether or not their snapshot landed.
+ * ===========================================================================
+ */
+
 static int obj_read(void *user, size_t obj, mp_val_t *out)
 {
 	const mp_obj_t *o = mp_obj_at(obj);
 	sts_health_t hs;
 	quality_block_t q;
+	bool hit;
+	bool have;
 
 	ARG_UNUSED(user);
 	if (o == NULL) {
@@ -981,137 +1116,169 @@ static int obj_read(void *user, size_t obj, mp_val_t *out)
 		out->valid = true;
 		return 0;
 	}
+	/*
+	 * The two tunnels and the K1 relay: read-backs for objects whose
+	 * actuation is wired, so a host is not left setting a control it cannot
+	 * confirm. All three are this area's own state or one snapshot call, and
+	 * all three are what a technician is looking at while commissioning the
+	 * FE-5680A serial path (../docs open item: J6.8/J6.9 direction).
+	 */
+	if (strcmp(o->id, "gnss.tunnel") == 0) {
+		out->i = sts_mp_tunnel_gnss_open() ? 1 : 0;
+		out->valid = true;
+		return 0;
+	}
+	if (strcmp(o->id, "ref.rb.tunnel") == 0) {
+		out->i = sts_mp_tunnel_rb_open() ? 1 : 0;
+		out->valid = true;
+		return 0;
+	}
+	if (strcmp(o->id, "ref.rb.serial") == 0) {
+		sts_rb_serial_t rb;
 
-	if (sts_health_snapshot(&hs) == 0) {
-		if (strcmp(o->id, "sensor.temp.osc") == 0) {
-			out->i = hs.tmp_osc_mc;
-			out->valid = hs.tmp_osc_valid;
-			return 0;
+		if (sts_rb_serial_status(&rb) != 0) {
+			return -EIO;
 		}
-		if (strcmp(o->id, "sensor.temp.amb") == 0) {
-			out->i = hs.tmp_amb_mc;
-			out->valid = hs.tmp_amb_valid;
-			return 0;
+		out->i = (int32_t)rb.mode;
+		out->valid = true;
+		return 0;
+	}
+	/*
+	 * cfg-backed objects, generically by key.
+	 *
+	 * `obj.set` on one of these already worked — mp_rpc.c's cfg_write()
+	 * stages and commits it — while `obj.get` answered MP_E_NOTSUP, so a
+	 * host could write `pwr.rb.vmax.mv` and had no way to read back the
+	 * ceiling every VCC_RB request is then clamped to. Keyed off the flag
+	 * rather than off the two ids, so a future cfg-backed object is readable
+	 * the day it is added.
+	 */
+	if ((o->flags & MP_OF_CFG) != 0U) {
+		uint64_t v = 0U;
+
+		if ((sts_cfg() == NULL) ||
+		    (cfg_get_u64(sts_cfg(), o->cfg_key, &v) != 0)) {
+			return -EIO;
 		}
-		if (strcmp(o->id, "sensor.temp.die") == 0) {
-			out->i = hs.die_mc;
-			out->valid = hs.die_valid;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.humidity") == 0) {
-			out->i = hs.humidity_mpct;
-			out->valid = hs.humidity_valid;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.fan.rpm") == 0) {
-			out->i = (int32_t)hs.fan_rpm;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.fan.duty") == 0) {
-			out->i = (int32_t)hs.fan_duty_pct;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.poe.class") == 0) {
-			out->i = (int32_t)hs.poe_class;
-			out->valid = (hs.poe_class != 0U);
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.poe.draw_mw") == 0) {
-			out->i = (int32_t)hs.poe_draw_mw;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.bkp.pg") == 0) {
-			out->u = (hs.bkp_stm_pg ? 1U : 0U) |
-				 (hs.bkp_gps_pg ? 2U : 0U);
-			out->valid = true;
-			return 0;
-		}
+		out->i = (int32_t)v;
+		out->valid = true;
+		return 0;
 	}
 
-	if (sts_quality_snapshot(&q) == 0) {
-		if (strcmp(o->id, "sensor.timing.stratum") == 0) {
-			out->i = (int32_t)q.stratum;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.timing.lock") == 0) {
-			out->i = (int32_t)q.lock_state;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.timing.ref") == 0) {
-			out->i = (int32_t)q.active_ref;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.timing.pps_ns") == 0) {
-			out->i = q.last_pps_off_ns;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.timing.freq_ppb") == 0) {
-			out->f = q.freq_err_ppb;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.timing.adev_1s") == 0) {
-			out->f = q.adev_1s;
-			out->valid = (q.adev_1s != 0.0f);
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.timing.adev_10s") == 0) {
-			out->f = q.adev_10s;
-			out->valid = (q.adev_10s != 0.0f);
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.timing.adev_100s") == 0) {
-			out->f = q.adev_100s;
-			out->valid = (q.adev_100s != 0.0f);
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.timing.holdover_s") == 0) {
-			out->i = (int32_t)q.holdover_elapsed_s;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.timing.root_disp_ns") == 0) {
-			out->i = (int32_t)quality_ns_from_ntp_short(
-				q.root_disp_q16);
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.gnss.fix") == 0) {
-			out->i = (int32_t)q.gnss_fix;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.gnss.sv_used") == 0) {
-			out->i = (int32_t)q.gnss_sv_used;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.gnss.sv_visible") == 0) {
-			out->i = (int32_t)q.gnss_sv_visible;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.gnss.tacc_ns") == 0) {
-			out->i = (int32_t)q.gnss_tacc_ns;
-			out->valid = true;
-			return 0;
-		}
-		if (strcmp(o->id, "sensor.ocxo.vc") == 0) {
-			out->i = q.vc_sense_mv;
-			out->valid = ((q.flags &
-				       QUALITY_FLAG_VC_SENSE_VALID) != 0U);
-			return 0;
-		}
+	/*
+	 * The housekeeping sweep's objects.
+	 *
+	 * The block is entered whether or not the snapshot landed, and that is
+	 * the point: these ids ARE wired, so a sweep that has not run yet must
+	 * answer -EIO ("no reading") and not -ENOTSUP ("no such feature"). The
+	 * old shape put the id tests inside the snapshot's success branch and
+	 * fell through to -ENOTSUP, which told a host the board had no
+	 * thermometer whenever I2C was momentarily busy — and would have made
+	 * the MP_OF_DEFERRED contract above false at runtime.
+	 */
+	have = (sts_health_snapshot(&hs) == 0);
+	if (!have) {
+		memset(&hs, 0, sizeof(hs));
+	}
+	hit = true;
+	if (strcmp(o->id, "sensor.temp.osc") == 0) {
+		out->i = hs.tmp_osc_mc;
+		out->valid = have && hs.tmp_osc_valid;
+	} else if (strcmp(o->id, "sensor.temp.amb") == 0) {
+		out->i = hs.tmp_amb_mc;
+		out->valid = have && hs.tmp_amb_valid;
+	} else if (strcmp(o->id, "sensor.temp.die") == 0) {
+		out->i = hs.die_mc;
+		out->valid = have && hs.die_valid;
+	} else if (strcmp(o->id, "sensor.humidity") == 0) {
+		out->i = hs.humidity_mpct;
+		out->valid = have && hs.humidity_valid;
+	} else if (strcmp(o->id, "sensor.fan.rpm") == 0) {
+		out->i = (int32_t)hs.fan_rpm;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.fan.duty") == 0) {
+		out->i = (int32_t)hs.fan_duty_pct;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.poe.class") == 0) {
+		out->i = (int32_t)hs.poe_class;
+		out->valid = have && (hs.poe_class != 0U);
+	} else if (strcmp(o->id, "sensor.poe.draw_mw") == 0) {
+		out->i = (int32_t)hs.poe_draw_mw;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.bkp.pg") == 0) {
+		out->u = (hs.bkp_stm_pg ? 1U : 0U) | (hs.bkp_gps_pg ? 2U : 0U);
+		out->valid = have;
+	} else {
+		hit = false;
+	}
+	if (hit) {
+		return have ? 0 : -EIO;
 	}
 
-	/* Everything else needs a platform accessor that does not exist yet. */
+	/* The §3.8 quality block's objects, on the same rule. */
+	have = (sts_quality_snapshot(&q) == 0);
+	if (!have) {
+		quality_block_init(&q);
+	}
+	hit = true;
+	if (strcmp(o->id, "sensor.timing.stratum") == 0) {
+		out->i = (int32_t)q.stratum;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.timing.lock") == 0) {
+		out->i = (int32_t)q.lock_state;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.timing.ref") == 0) {
+		out->i = (int32_t)q.active_ref;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.timing.pps_ns") == 0) {
+		out->i = q.last_pps_off_ns;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.timing.freq_ppb") == 0) {
+		out->f = q.freq_err_ppb;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.timing.adev_1s") == 0) {
+		out->f = q.adev_1s;
+		out->valid = have && (q.adev_1s != 0.0f);
+	} else if (strcmp(o->id, "sensor.timing.adev_10s") == 0) {
+		out->f = q.adev_10s;
+		out->valid = have && (q.adev_10s != 0.0f);
+	} else if (strcmp(o->id, "sensor.timing.adev_100s") == 0) {
+		out->f = q.adev_100s;
+		out->valid = have && (q.adev_100s != 0.0f);
+	} else if (strcmp(o->id, "sensor.timing.holdover_s") == 0) {
+		out->i = (int32_t)q.holdover_elapsed_s;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.timing.root_disp_ns") == 0) {
+		out->i = (int32_t)quality_ns_from_ntp_short(q.root_disp_q16);
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.gnss.fix") == 0) {
+		out->i = (int32_t)q.gnss_fix;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.gnss.sv_used") == 0) {
+		out->i = (int32_t)q.gnss_sv_used;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.gnss.sv_visible") == 0) {
+		out->i = (int32_t)q.gnss_sv_visible;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.gnss.tacc_ns") == 0) {
+		out->i = (int32_t)q.gnss_tacc_ns;
+		out->valid = have;
+	} else if (strcmp(o->id, "sensor.ocxo.vc") == 0) {
+		out->i = q.vc_sense_mv;
+		out->valid = have &&
+			     ((q.flags & QUALITY_FLAG_VC_SENSE_VALID) != 0U);
+	} else {
+		hit = false;
+	}
+	if (hit) {
+		return have ? 0 : -EIO;
+	}
+
+	/*
+	 * Nothing is wired behind this object. The manifest says so in advance —
+	 * every id that reaches here carries MP_OF_DEFERRED — so a host was
+	 * never offered it as a working reading.
+	 */
 	return -ENOTSUP;
 }
 
@@ -1140,6 +1307,33 @@ static int obj_apply(void *user, size_t obj, const int32_t *value)
 	}
 	if (strcmp(o->id, "ref.rb.tunnel") == 0) {
 		return sts_mp_tunnel_set_rb((value != NULL) && (*value != 0));
+	}
+
+	/*
+	 * The K1 DPDT relay, RS-232 (0) / direct CMOS (1) — the manifest enum in
+	 * that order, which is rb_serial_mode_t's order and the relay's reset
+	 * state.
+	 *
+	 * This is the one control a technician most needs for the FE-5680A
+	 * commissioning item the project docs still carry open ("J6.8/J6.9 Tx/Rx
+	 * direction for the specific surplus variant"): the fitted variant
+	 * decides whether the housekeeping port speaks RS-232 through U46 or
+	 * CMOS directly, and getting it wrong is silent — the link simply never
+	 * answers. The setter has existed in sts_app.h all along with matching
+	 * semantics; nothing called it from here.
+	 *
+	 * A release returns the relay to RS-232, which is both the documented
+	 * fail-safe (docs/rb_rs232_interface.md) and rb_serial_init()'s own reset
+	 * position, so a lease that lapses cannot leave the port in the
+	 * commissioning position nobody chose. -EBUSY comes back while a raw
+	 * tunnel holds the port; core reports it as MP_E_BUSY, which is the
+	 * retryable answer — throwing a relay under a live passthrough would
+	 * corrupt whatever the host is mid-transaction with.
+	 */
+	if (strcmp(o->id, "ref.rb.serial") == 0) {
+		uint8_t mode = ((value != NULL) && (*value != 0)) ? 1U : 0U;
+
+		return sts_rb_serial_set_mode(mode);
 	}
 
 	/*
@@ -1200,9 +1394,38 @@ static int obj_pulse(void *user, size_t obj, uint32_t ms)
 		return sts_pwrseq_ov_clear();
 	default:
 		/* Every other pulsable object is a platform-owned pin with no
-		 * seam yet; see the TODO block. */
+		 * seam yet, and each one carries MP_OF_DEFERRED so the host was
+		 * told before it offered the button — see the dispatch note
+		 * above obj_read(). */
 		return -ENOTSUP;
 	}
+}
+
+/**
+ * Does this image's actuation reach @p obj? (mp_wiring_t::obj_supported)
+ *
+ * Answered straight out of the manifest's MP_OF_DEFERRED bit rather than from a
+ * second list of ids, because a second list is a second truth and this whole
+ * change exists because one of them was missing. The bit is maintained against
+ * obj_apply()/obj_pulse() above by tests/host/test_mp_deferred.c, so wiring a
+ * setter and clearing its manifest row is one edit that moves both the host's
+ * UI and this gate.
+ *
+ * Its job is ORDERING. Without it, `obj.override gnss.safeboot` — G3, and
+ * nothing behind it — takes the typed phrase, holds, takes the nonce back,
+ * consumes the arm in mp_ovr_guard(), and only then answers "not supported".
+ * With it, core refuses before guard_or_fail() runs and the ceremony is
+ * untouched.
+ */
+static int prov_obj_supported(void *user, size_t obj)
+{
+	const mp_obj_t *o = mp_obj_at(obj);
+
+	ARG_UNUSED(user);
+	if (o == NULL) {
+		return -EINVAL;
+	}
+	return ((o->flags & MP_OF_DEFERRED) != 0U) ? -ENOTSUP : 0;
 }
 
 static int diag_action(void *user, uint8_t test, uint8_t step,
@@ -1742,6 +1965,25 @@ void sts_mp_tick(void)
 
 	mp_tick_miss_run = 0U;
 	/*
+	 * The display rail's change stamp, sampled on every pass rather than
+	 * only when an interlock is evaluated.
+	 *
+	 * MP_ILK_DISP_OFF asks how long the rail has been off, and a stamp taken
+	 * only at request time can never answer that — it would report the
+	 * transition as having happened at the moment of the request. Folding the
+	 * published snapshot in here gives the term a real 4 Hz history for as
+	 * long as the engine has been running. Cheap and lock-free
+	 * (sts_pwrseq_snapshot() is a seqlock read), and inside the lock the
+	 * pass already holds.
+	 */
+	{
+		sts_pwrseq_snap_t ps;
+
+		if (sts_pwrseq_snapshot(&ps) == 0) {
+			disp_observe_locked(&ps);
+		}
+	}
+	/*
 	 * Firmware vetoes first, ahead of both the link transition and the tick.
 	 *
 	 * All three can revert the same lease, and whichever runs first owns the
@@ -2092,6 +2334,12 @@ int sts_mp_start(void)
 	w.apply = obj_apply;
 	w.obj_read = obj_read;
 	w.pulse = obj_pulse;
+	/*
+	 * Without this the manifest's honesty flag would be advisory: the host
+	 * would render a deferred control greyed out and a scripted client that
+	 * ignored the flag would still burn a G3 arm discovering the same thing.
+	 */
+	w.obj_supported = prov_obj_supported;
 	w.diag = diag_action;
 	w.cfg_commit = prov_cfg_commit;
 	w.auth = prov_auth;
