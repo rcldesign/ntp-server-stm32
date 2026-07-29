@@ -233,6 +233,14 @@ typedef struct {
 
 	/* supervisor */
 	bool liveness_ok; /**< every registered liveness participant is fed */
+	/*
+	 * WDT_EN (PC12) is DE-ASSERTED — the external TPS3430 is not watching a
+	 * window, so a console-injected WDI edge cannot collide with the
+	 * supervisor's cadence. MP_ILK_WDT_OFF's whole term, and the unknown
+	 * reading is `false`: memset() zeroes this struct, so a glue that cannot
+	 * observe the pin refuses the pulse rather than timing it by luck.
+	 */
+	bool wdt_off;
 
 	/* timing */
 	bool disc_parked; /**< the discipline loop is parked (DAC free) */

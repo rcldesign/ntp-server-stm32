@@ -86,6 +86,8 @@ static const ilk_info_t ilks[MP_ILK_COUNT] = {
 	  "clock handoff needs EXTREF_MON in band and RB_LOCK asserted" },
 	{ MP_ILK_DAC_PARK, "dac.park",
 	  "the discipline loop must be parked before the DAC may be driven" },
+	{ MP_ILK_WDT_OFF, "wdt.off",
+	  "WDI may be pulsed only with the external watchdog disabled" },
 };
 
 static const ilk_info_t *ilk_info(uint32_t bit)
@@ -276,8 +278,28 @@ const mp_obj_t mp_objs[] = {
 	  .desc = "Q3 sustain latch: board cold-cycle, PSE-driven recovery (PE15)" },
 
 	/* ------------------------------------------------ §6.2 reference --- */
+	/*
+	 * THE CLOCK MUX, AND WHY IT IS LEASED RATHER THAN WRITABLE.
+	 *
+	 * PB6 selects which 10 MHz reaches PH0, which is the HSE bypass input
+	 * SYSCLK is derived from. Moving it under a live HSE feed skips the HSI
+	 * bridge and glitches the system clock (spec §3.5), so the actuation is
+	 * refsel's bracketed handoff — PARK_DISCIPLINE, mux flip, UNPARK — and
+	 * never a pin write.
+	 *
+	 * F_LEASE for a reason specific to this object's value space. The
+	 * standing request refsel consults is THREE-valued (AUTO / force-OCXO /
+	 * force-EXTREF) while the manifest object is {ocxo, rb}, so there is no
+	 * value of this object that means AUTO. `obj.set` creates no lease, so a
+	 * bare write would pin the reference to a level with nothing able to
+	 * restore the automatic behaviour — a box repaired months ago still
+	 * running on its OCXO because nobody remembered, which is the failure
+	 * sts_app.h refuses to give a cfg key for. A lease can be released, and
+	 * mp_glue.c saves the pre-lease request verbatim so the release puts
+	 * AUTO back when AUTO is what was there.
+	 */
 	{ .id = "ref.mux.sel", .kind = MP_KIND_ENUM, .guard = MP_GUARD_G3,
-	  .group = MP_GRP_REF, .flags = F_RW_D, .min = 0, .max = 1, .step = 1,
+	  .group = MP_GRP_REF, .flags = F_LEASE, .min = 0, .max = 1, .step = 1,
 	  .enums = "ocxo,rb", .ilk = MP_ILK_MUX_GUARD, .net = "MUX_SEL",
 	  .desc = "U52 74LVC1G157 clock mux -> PH0 HSE bypass (PB6)" },
 	/*
@@ -438,13 +460,38 @@ const mp_obj_t mp_objs[] = {
 	  .step = 1, .unit = U_PCT, .ilk = MP_ILK_FAN_FLOOR,
 	  .net = "FAN_PWM",
 	  .desc = "25 kHz fan PWM, TIM15_CH1; idle/fault state is full speed (PE5)" },
+	/*
+	 * THE EXTERNAL WATCHDOG, AND WHY THE TWO ROWS DO NOT SHARE AN INTERLOCK.
+	 *
+	 * `sys.wdt.en` is F_LEASE rather than F_RW for the reason the tunnels
+	 * are: `obj.set` creates no lease, so a bare write that dropped WDT_EN
+	 * would leave the TPS3430 disarmed with nothing in the system able to
+	 * re-arm it — not the dead-man, not a link drop, not `session.close`.
+	 * The watchdog's fail-safe direction is ON, so the release direction is
+	 * the protected one and it has to be reachable.
+	 *
+	 * MP_ILK_WDT_LIVE belongs here and only here: "do not arm a watchdog you
+	 * cannot prove you are feeding". It guards the ASSERT direction only, so
+	 * disarming stays available while the liveness gate is unknown — which
+	 * is exactly the state a technician needs to reach before pulsing WDI.
+	 *
+	 * `sys.wdt.kick` carries MP_ILK_WDT_OFF INSTEAD. MP_ILK_WDT_LIVE on this
+	 * row was inverted in effect: m_obj_pulse() evaluates every pulse
+	 * against a hardcoded request of 1, so the liveness bit refused the
+	 * edge while the supervisor was deliberately withholding kicks (the pin
+	 * idle — a harmless pulse) and GRANTED it while the supervisor was
+	 * kicking on the 920-1360 ms cadence, where an arbitrary-phase edge
+	 * inside tWDL(min) = 680 ms is a runaway fault that drives WDO_N ->
+	 * POE_KILL and drops the board's own PoE port. See mp_manifest.h over
+	 * MP_ILK_WDT_OFF and docs/sts1000_external_wdt.md §4.
+	 */
 	{ .id = "sys.wdt.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G3,
-	  .group = MP_GRP_SYSTEM, .flags = F_RW_D, .ilk = MP_ILK_WDT_LIVE,
+	  .group = MP_GRP_SYSTEM, .flags = F_LEASE, .ilk = MP_ILK_WDT_LIVE,
 	  .net = "WDT_EN",
 	  .desc = "U64 TPS3430 external windowed watchdog enable (PC12)" },
 	{ .id = "sys.wdt.kick", .kind = MP_KIND_PULSE, .guard = MP_GUARD_G3,
-	  .group = MP_GRP_SYSTEM, .flags = F_PULSE_D, .min = 1, .max = 10,
-	  .step = 1, .unit = U_MS, .ilk = MP_ILK_WDT_LIVE, .net = "WDT_KICK",
+	  .group = MP_GRP_SYSTEM, .flags = F_PULSE, .min = 1, .max = 10,
+	  .step = 1, .unit = U_MS, .ilk = MP_ILK_WDT_OFF, .net = "WDT_KICK",
 	  .desc = "U64 WDI refresh; normally only the supervisor drives it (PB2)" },
 	{ .id = "sys.nor.reset", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
 	  .group = MP_GRP_SYSTEM, .flags = F_RWL_D, .net = "NOR_RST_N",

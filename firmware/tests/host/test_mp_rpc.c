@@ -303,6 +303,7 @@ static void ilk_permissive(void)
 	g_ilk.rb_vmax_mv = 15000U;
 	g_ilk.rb_code_max = 200U;
 	g_ilk.liveness_ok = true;
+	g_ilk.wdt_off = true;
 	g_ilk.disc_parked = true;
 	g_ilk.extref_ok = true;
 	g_ilk.rb_lock = true;
@@ -2179,8 +2180,17 @@ static void test_obj_pulse(void)
 	(void)call(req);
 	TEST_ASSERT_EQUAL_INT64(MP_E_NOTSUP, err_code());
 
-	/* A pulse still passes the object's interlocks. */
-	g_ilk.liveness_ok = false;
+	/*
+	 * A pulse still passes the object's interlocks — and against the bit
+	 * that actually guards this row. `sys.wdt.kick` carries MP_ILK_WDT_OFF,
+	 * not MP_ILK_WDT_LIVE: m_obj_pulse() below evaluates every pulse against
+	 * a hardcoded request of 1, so a `req != 0` bit like the liveness gate
+	 * inverts on a pulse — refusing the edge while the supervisor withholds
+	 * kicks and granting it while the supervisor is kicking, which is when a
+	 * console edge cold-cycles the board. Setting `liveness_ok` here would
+	 * therefore prove nothing about this object.
+	 */
+	g_ilk.wdt_off = false;
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"obj.pulse\","
 		       "\"params\":{\"id\":\"sys.wdt.kick\",\"ms\":1,"
@@ -2203,7 +2213,7 @@ static void test_obj_pulse(void)
 	}
 
 	/* A failing pulse callback is reported. */
-	g_ilk.liveness_ok = true;
+	g_ilk.wdt_off = true;
 	g_pulse_rc = -EIO;
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"obj.pulse\","

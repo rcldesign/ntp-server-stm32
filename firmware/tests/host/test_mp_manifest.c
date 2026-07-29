@@ -417,7 +417,7 @@ static void test_interlocks_are_attached_where_they_must_be(void)
 		{ "ref.relay.hold", MP_ILK_RELAY_OK },
 		{ "pwr.disp.en", MP_ILK_DISP_OFF },
 		{ "sys.wdt.en", MP_ILK_WDT_LIVE },
-		{ "sys.wdt.kick", MP_ILK_WDT_LIVE },
+		{ "sys.wdt.kick", MP_ILK_WDT_OFF },
 		{ "ref.mux.sel", MP_ILK_MUX_GUARD },
 		{ "ref.ocxo.vc_mv", MP_ILK_DAC_PARK },
 		{ "ref.ocxo.dac_code", MP_ILK_DAC_PARK },
@@ -437,6 +437,64 @@ static void test_interlocks_are_attached_where_they_must_be(void)
 						 o->ilk & expect[i].must,
 						 expect[i].id);
 	}
+}
+
+/**
+ * `sys.wdt.kick` must NOT carry MP_ILK_WDT_LIVE, and the reason is a hazard.
+ *
+ * The table above proves an interlock is PRESENT; nothing there can prove one
+ * is absent, and for this row absence is the property that matters.
+ * m_obj_pulse() evaluates every PULSE against a hardcoded request of 1
+ * (mp_rpc.c), and MP_ILK_WDT_LIVE refuses only `req != 0`. On a pulse object
+ * that composition inverts: the edge is REFUSED while the supervisor is
+ * deliberately withholding kicks — WDI idle, the pulse harmless — and GRANTED
+ * while the supervisor is kicking on the TPS3430's 920-1360 ms cadence, where a
+ * console edge arrives at an arbitrary phase and one inside tWDL(min) = 680 ms
+ * is a runaway fault: WDO_N for ~200 ms, POE_KILL, and the board drops its own
+ * PoE port (docs/sts1000_external_wdt.md §4).
+ *
+ * It stays on `sys.wdt.en`, where it is correct and where it guards the assert
+ * direction only, so disarming remains reachable with the gate unknown — which
+ * is the state a technician has to reach before the pulse is permitted at all.
+ */
+static void test_the_wdi_pulse_is_not_gated_on_liveness(void)
+{
+	int kick = mp_obj_find("sys.wdt.kick");
+	int en = mp_obj_find("sys.wdt.en");
+
+	TEST_ASSERT_TRUE(kick >= 0);
+	TEST_ASSERT_TRUE(en >= 0);
+
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, mp_obj_at((size_t)kick)->ilk & MP_ILK_WDT_LIVE,
+		"`sys.wdt.kick` carries MP_ILK_WDT_LIVE again, which on a PULSE "
+		"grants the edge exactly while the supervisor is kicking");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		MP_ILK_WDT_OFF, mp_obj_at((size_t)kick)->ilk & MP_ILK_WDT_OFF,
+		"the WDI pulse lost its `watchdog must be disabled` interlock");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		MP_ILK_WDT_LIVE, mp_obj_at((size_t)en)->ilk & MP_ILK_WDT_LIVE,
+		"`sys.wdt.en` lost the liveness gate; do not arm a watchdog you "
+		"cannot show you are feeding");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, mp_obj_at((size_t)en)->ilk & MP_ILK_WDT_OFF,
+		"`sys.wdt.en` gained MP_ILK_WDT_OFF, which would refuse every "
+		"arm and every disarm from an already-armed state");
+
+	/*
+	 * Both are leases, not writes. `obj.set` creates no lease, so a bare
+	 * write that disarmed the watchdog would leave it disarmed with nothing
+	 * — not the dead-man, not a link drop, not `session.close` — able to put
+	 * it back, and the fail-safe direction for this pin is ON.
+	 */
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, mp_obj_at((size_t)en)->flags & MP_OF_WRITE,
+		"`sys.wdt.en` became writable; a set creates no lease and the "
+		"watchdog would stay disarmed");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		(uint32_t)MP_OF_OVERRIDE,
+		mp_obj_at((size_t)en)->flags & MP_OF_OVERRIDE,
+		"`sys.wdt.en` stopped being leasable, so nothing can restore it");
 }
 
 /**
@@ -1072,6 +1130,7 @@ int main(void)
 	RUN_TEST(test_no_g0_object_can_mutate);
 	RUN_TEST(test_guard_classes_of_the_dangerous_objects);
 	RUN_TEST(test_interlocks_are_attached_where_they_must_be);
+	RUN_TEST(test_the_wdi_pulse_is_not_gated_on_liveness);
 	RUN_TEST(test_a_lease_only_actuator_is_never_writable);
 	RUN_TEST(test_the_deferred_flag_is_published);
 

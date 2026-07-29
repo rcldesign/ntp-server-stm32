@@ -1022,6 +1022,60 @@ int sts_pwrseq_poe_kill(void);
  * MP_MIRROR_F_IDENTIFY reports). 0 stops it. Safe from any thread. */
 void sts_supervisor_identify(uint32_t duration_ms);
 
+/* ---- external watchdog U64 TPS3430 (WDT_EN PC12, WDT_KICK PB2) ---------- */
+/*
+ * The maintenance seam behind `sys.wdt.en` and `sys.wdt.kick`. supervisor.c is
+ * the single writer of both pins and owns the kick cadence, so nothing outside
+ * it may touch them — a raw write is not a smaller version of these calls, it
+ * is the runaway fault they exist to prevent.
+ *
+ * The TPS3430 window is 920-1360 ms between WDI falling edges and anything
+ * faster than tWDL(min) = 680 ms is a RUNAWAY fault: WDO_N asserts for ~200 ms,
+ * drives POE_KILL, and the board drops its own PoE port
+ * (docs/sts1000_external_wdt.md §4).
+ */
+
+/* Arm or disarm WDT_EN.
+ *
+ * @p enable false drops the pin AND stops the kicker, so the two cannot
+ * disagree about whether a window is open.
+ *
+ * @p enable true REPLAYS the stage-9 arm sequence — one WDI edge, the cadence
+ * seeded from that same instant, then WDT_EN asserted — so the first window
+ * opens already fed. This is why `sys.wdt.en` is leased rather than writable:
+ * the watchdog's fail-safe direction is ON, and a lease that lapses has to be
+ * able to put it back.
+ *
+ * Idempotent in both directions. Not thread-restricted, but see the note in
+ * supervisor.c: the kicker thread is stopped before the cadence is re-seeded.
+ *
+ * @retval 0        Applied (or already in that state).
+ * @retval -ENODEV  The supervisor never initialised, or (enable) the kicker
+ *                  thread was never started.
+ * @retval <0       The GPIO write failed; the pin did not move. */
+int sts_supervisor_wdt_enable(bool enable);
+
+/* Is WDT_EN asserted? The read-back for `sys.wdt.en`, and the measurement
+ * behind mp_ilk_state_t::wdt_off.
+ *
+ * @retval 0        *armed is the state supervisor.c has driven PC12 to.
+ * @retval -ENODEV  The supervisor never initialised; *armed is set to TRUE,
+ *                  because an unknown watchdog must be read as watching.
+ * @retval -EINVAL  @p armed is NULL. */
+int sts_supervisor_wdt_state(bool *armed);
+
+/* Drive ONE maintenance WDI edge on PB2 — the actuator behind `sys.wdt.kick`.
+ *
+ * Refused with -EPERM unless the watchdog is disarmed, because a console edge
+ * has an arbitrary phase against the supervisor's cadence and one landing
+ * inside tWDL(min) cold-cycles the board. The console refuses the same request
+ * one seam earlier through MP_ILK_WDT_OFF; this is the backstop for every other
+ * caller.
+ *
+ * @retval 0        The edge was driven.
+ * @retval -EPERM   The watchdog is armed, or the supervisor never initialised. */
+int sts_supervisor_wdt_kick(void);
+
 /* ---- status RGB D5 (TIM4_CH1..3) — read-back and maintenance override ---- */
 /*
  * supervisor.c is the single writer of PD12/PD13/PD14 and it re-drives them on

@@ -427,6 +427,122 @@ int sts_supervisor_arm(void)
 
 	return 0;
 }
+/*
+ * ---------------------------------------------------------------------------
+ * The maintenance seam: `sys.wdt.en` and `sys.wdt.kick`
+ * ---------------------------------------------------------------------------
+ * Both exist so a technician can scope the PB2 edge, and both are written here
+ * rather than as raw gpio_pin_set_dt() calls from the console thread, because
+ * the pin is only half of what has to move.
+ *
+ * WDT_EN carries a CADENCE with it. sts_supervisor_arm() above kicks once and
+ * seeds pwrseq's window from that same instant precisely so the first window
+ * opens already fed; a bare gpio_pin_set_dt(&wdt_en, 1) on override release
+ * would raise WDT_EN mid-cadence with no seed, and the kicker's next serviced
+ * kick would land on its 50 ms poll rather than a full period later — a runaway
+ * fault, the same class the file banner describes. So re-enabling REPLAYS that
+ * sequence.
+ *
+ * Disabling clears `armed` as well as dropping the pin. That is not bookkeeping:
+ * wdt_entry() polls `armed` and pwrseq_wdt_service() is what decides a kick, so
+ * leaving it set would have the kicker keep driving WDI at cadence into a
+ * TPS3430 that is not watching — harmless in itself, but it also means the
+ * re-arm's own seed would be fighting a window pwrseq still believed was open.
+ */
+
+int sts_supervisor_wdt_state(bool *armed)
+{
+	if (armed == NULL) {
+		return -EINVAL;
+	}
+	if (!super.ready) {
+		/*
+		 * Unknown, and the caller must read that as "watching". The
+		 * console turns this into mp_ilk_state_t::wdt_off = false,
+		 * which refuses the WDI pulse — the only answer for a pin
+		 * nothing has configured.
+		 */
+		*armed = true;
+		return -ENODEV;
+	}
+	*armed = super.armed;
+	return 0;
+}
+
+int sts_supervisor_wdt_enable(bool enable)
+{
+	int rc;
+
+	if (!super.ready) {
+		return -ENODEV;
+	}
+
+	if (!enable) {
+		/*
+		 * Order matters: stop the kicker first, then drop the pin. The
+		 * reverse leaves a window in which WDI is still being driven at
+		 * cadence with WDT_EN already low, which is the state the
+		 * violation counter cannot distinguish from a second writer.
+		 */
+		super.armed = false;
+		rc = gpio_pin_set_dt(&wdt_en, 0);
+		if (rc != 0) {
+			LOG_ERR("WDT_EN de-assert failed (%d)", rc);
+			return rc;
+		}
+		sts_log(LOGR_SUB_SYS, LOGR_WARN,
+			"external watchdog DISABLED by maintenance override");
+		return 0;
+	}
+
+	if (super.armed) {
+		return 0; /* idempotent, and re-seeding here would be a second
+			   * cadence origin for a window already open */
+	}
+	if (!super.wdt_thread_started) {
+		LOG_ERR("refusing to arm WDT_EN with no kicker thread");
+		return -ENODEV;
+	}
+
+	/* The arm sequence, replayed — kick, seed from that same instant, then
+	 * assert. See sts_supervisor_arm(). */
+	wdt_kick_once();
+	(void)pwrseq_wdt_arm(&super.wdt, k_uptime_get_32());
+
+	rc = gpio_pin_set_dt(&wdt_en, 1);
+	if (rc != 0) {
+		LOG_ERR("WDT_EN assert failed (%d)", rc);
+		return rc;
+	}
+
+	super.armed = true;
+	sts_log(LOGR_SUB_SYS, LOGR_NOTICE,
+		"external watchdog re-armed after maintenance override");
+	return 0;
+}
+
+int sts_supervisor_wdt_kick(void)
+{
+	/*
+	 * A single maintenance edge on WDI. Refused unless the watchdog is not
+	 * watching — sts_super_wdi_pulse_allowed() holds the reasoning, and the
+	 * console's MP_ILK_WDT_OFF refuses the same request one seam earlier so
+	 * a technician gets a named interlock rather than an errno.
+	 *
+	 * The duplication is deliberate. This entry point is reachable from
+	 * anything inside the image, and a permission that lives only in the
+	 * caller is a permission a second caller does not have.
+	 */
+	if (!sts_super_wdi_pulse_allowed(super.ready, super.armed)) {
+		return -EPERM;
+	}
+
+	wdt_kick_once();
+	sts_log(LOGR_SUB_SYS, LOGR_NOTICE,
+		"WDI pulsed by maintenance override (watchdog disabled)");
+	return 0;
+}
+
 
 /* --------------------------------------------------------------- step --- */
 

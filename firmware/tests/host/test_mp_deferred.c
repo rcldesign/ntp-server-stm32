@@ -352,12 +352,28 @@ static void derive_dispatch(void)
 	/*
 	 * The release short-circuit must stay BELOW every id branch. Above them
 	 * it would answer 0 for a release of an object nothing implements, which
-	 * is harmless, and — far from harmless — it would make this scan read
-	 * `value == NULL` as a wired path.
+	 * is harmless, and — far from harmless — it would swallow the releases
+	 * that DO something: `sys.wdt.en` re-arms the external watchdog on
+	 * release and `ref.mux.sel` puts the pre-lease reference request back,
+	 * and neither would ever run again.
+	 *
+	 * The needle is the short-circuit's whole shape rather than the bare
+	 * `if (value == NULL)`, because those two branches now test the release
+	 * direction inside themselves — that is what a protected release IS —
+	 * and the first textual match would otherwise be one of them. Pinned to
+	 * exactly one occurrence so the specificity cannot be traded for a
+	 * second, earlier copy.
 	 */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U,
+		count_in(&ap, "if (value == NULL) {\n\t\treturn 0;\n\t}\n"
+			      "\treturn -ENOTSUP;"),
+		"obj_apply()'s release short-circuit changed shape; re-read "
+		"what a release now has to reach before relaxing this");
 	TEST_ASSERT_TRUE_MESSAGE(
 		offset_in(&ap, "sts_recov_bool_action(o->id)") <
-			offset_in(&ap, "if (value == NULL)"),
+			offset_in(&ap, "if (value == NULL) {\n\t\treturn 0;\n\t}"
+					"\n\treturn -ENOTSUP;"),
 		"obj_apply()'s release short-circuit moved above the dispatch");
 
 	pu = fn_body("static int obj_pulse(void *user, size_t obj, uint32_t ms)");
@@ -472,18 +488,23 @@ static void test_the_deferred_flag_is_the_dispatch(void)
  *
  * One bit cannot say "actuates but cannot be read back", so the manifest's bit
  * describes the mutation and this residue is where it under-reports. Pinning
- * the residue by name is what keeps it from growing: each of the five has a
+ * the residue by name is what keeps it from growing: each of the six has a
  * structural reason for having nothing to read — `ui.identify` is a write-only
- * beacon, and the other four are momentary pulses whose pin rests deasserted,
+ * beacon, and the other five are momentary pulses whose pin rests deasserted,
  * so the only thing a read could report is "not pulsing right now" — and a
- * sixth would mean somebody wired a setter without a read-back and let the flag
- * quietly become less true.
+ * seventh would mean somebody wired a setter without a read-back and let the
+ * flag quietly become less true.
  *
  * `sys.phy.reset` and `gnss.extint` joined the pulse group when obj_pulse()
  * gained their branches. Neither has a rest state worth publishing: LAN_RST_N
  * is released within 1.5 ms of the call returning, and GPS_EXTINT is a
  * 1 ms edge whose EFFECT is reported by the receiver as UBX-TIM-TM2, not by
  * this seam.
+ *
+ * `sys.wdt.kick` joined for the same reason and is the clearest case of it:
+ * WDI rests low between edges, so a read of PB2 would report "not pulsing"
+ * forever. What a technician actually needs to confirm before pulsing it is
+ * `sys.wdt.en` — the watchdog is not watching — and that object DOES read back.
  */
 static void test_the_write_only_residue_is_exactly_these_five(void)
 {
@@ -493,6 +514,7 @@ static void test_the_write_only_residue_is_exactly_these_five(void)
 		"pwr.rb.ov.reset",
 		"sys.phy.reset",
 		"gnss.extint",
+		"sys.wdt.kick",
 	};
 	size_t i;
 	unsigned int found = 0U;
@@ -521,7 +543,7 @@ static void test_the_write_only_residue_is_exactly_these_five(void)
 	}
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
 		(unsigned int)(sizeof(expect) / sizeof(expect[0])), found,
-		"one of the three named write-only objects now reads back; "
+		"one of the named write-only objects now reads back; "
 		"shrink the list rather than leaving it stale");
 }
 
@@ -839,6 +861,158 @@ static void test_the_rb_ceiling_is_the_one_in_force(void)
 		"a second, unclamped write to rb_vmax_mv appeared");
 }
 
+/* =========================== 5. the two objects that had to move a SEQUENCE = */
+
+/**
+ * `sys.wdt.en` moves a CADENCE, not a level, and its release is protected.
+ *
+ * sts_supervisor_arm() kicks once and seeds pwrseq's window from that same
+ * instant so the first window opens already fed. A bare gpio_pin_set_dt() on
+ * override release would raise WDT_EN mid-cadence with no seed, and the kicker's
+ * next serviced kick would land on its 50 ms poll instead of a full period
+ * later — a TPS3430 runaway fault, WDO_N -> POE_KILL, and the board drops its
+ * own PoE port. So the glue may not touch the pin at all, and the supervisor's
+ * enable path must replay the sequence rather than assert.
+ *
+ * Read rather than asserted behaviourally because neither file is linked by any
+ * host suite. The pin-write assertion is the load-bearing one: it is the single
+ * edit that would turn this object back into the hazard.
+ */
+static void test_the_watchdog_enable_replays_the_arm_sequence(void)
+{
+	span_t b;
+
+	load_source("zephyr/console/mp_glue.c");
+	b = fn_body("static int obj_apply(void *user, size_t obj, const int32_t *value)");
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "sts_supervisor_wdt_enable(*value != 0)"),
+		"`sys.wdt.en` no longer actuates through the supervisor");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&b, "gpio_pin_set_dt"),
+		"obj_apply() writes a GPIO directly; WDT_EN and MUX_SEL both "
+		"carry a sequence the pin alone does not express");
+
+	/*
+	 * The release restores the state saved at grant, and the save happens
+	 * only AFTER a successful apply — a refused or failed grant leaves
+	 * nothing owed a restore. `sts_supervisor_wdt_enable(true)` must NOT
+	 * appear: an unconditional re-arm would start the window against a
+	 * liveness gate that cannot yet be satisfied when the lease was taken
+	 * before stage 9, and the kicker would withhold into a cold cycle.
+	 */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "sts_supervisor_wdt_enable(wdt_en_saved_armed)"),
+		"the `sys.wdt.en` release stopped restoring the state the "
+		"watchdog was in when the lease was taken");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&b, "sts_supervisor_wdt_enable(true)"),
+		"the release re-arms unconditionally; a lease taken before "
+		"stage 9 would arm a watchdog firmware had not armed");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "wdt_en_saved_valid = true;"),
+		"the pre-lease watchdog state is no longer recorded exactly "
+		"once, after the apply that needed it succeeded");
+
+	/* The pulse reaches the supervisor's own permission check. */
+	b = fn_body("static int obj_pulse(void *user, size_t obj, uint32_t ms)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "return sts_supervisor_wdt_kick();"),
+		"`sys.wdt.kick` no longer routes through the seam that refuses "
+		"an edge against an armed watchdog");
+
+	/* And the supervisor replays kick -> seed -> assert, in that order. */
+	load_source("zephyr/platform/supervisor.c");
+	b = fn_body("int sts_supervisor_wdt_enable(bool enable)");
+	TEST_ASSERT_TRUE_MESSAGE(
+		offset_in(&b, "wdt_kick_once();") <
+			offset_in(&b, "pwrseq_wdt_arm(&super.wdt"),
+		"the re-arm seeds the cadence before feeding the window");
+	TEST_ASSERT_TRUE_MESSAGE(
+		offset_in(&b, "pwrseq_wdt_arm(&super.wdt") <
+			offset_in(&b, "gpio_pin_set_dt(&wdt_en, 1)"),
+		"WDT_EN is raised before the cadence is seeded — the runaway "
+		"fault sts_supervisor_arm() exists to avoid");
+	/* Disabling stops the kicker as well as dropping the pin: wdt_entry()
+	 * polls `armed`, so leaving it set would keep driving WDI at cadence
+	 * into a TPS3430 that is not watching, and the re-arm's own seed would
+	 * be fighting a window pwrseq still believed was open. */
+	TEST_ASSERT_TRUE_MESSAGE(
+		offset_in(&b, "super.armed = false;") <
+			offset_in(&b, "gpio_pin_set_dt(&wdt_en, 0)"),
+		"the disable drops WDT_EN before it stops the kicker");
+
+	b = fn_body("int sts_supervisor_wdt_kick(void)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U,
+		count_in(&b, "if (!sts_super_wdi_pulse_allowed(super.ready, "
+			     "super.armed)) {"),
+		"the WDI edge lost its own permission check; the console "
+		"interlock would then be the only thing between a keystroke "
+		"and a cold cycle");
+}
+
+/**
+ * `ref.mux.sel` never becomes a pin write, and its release restores AUTO.
+ *
+ * PB6 selects which 10 MHz reaches PH0, the HSE bypass input SYSCLK derives
+ * from. Flipping it under a live HSE feed skips the HSI bridge and glitches
+ * SYSCLK (spec §3.5), so the actuation is refsel's bracketed handoff —
+ * PARK_DISCIPLINE, mux flip, UNPARK — reached by posting the standing request.
+ *
+ * The save/restore is the subtle half. The pre-lease state is three-valued
+ * (AUTO / force-OCXO / force-EXTREF) while the object's value space is {0,1},
+ * so core cannot hold it: there is no value of the object that means AUTO. The
+ * glue saves sts_ref_override_get() VERBATIM, and a lapsed lease therefore
+ * returns a box that was running AUTO to AUTO rather than pinning it to
+ * whichever level happened to be active — the failure sts_app.h refuses to give
+ * a cfg key for.
+ */
+static void test_the_clock_mux_goes_through_refsel_and_restores_verbatim(void)
+{
+	span_t b;
+
+	load_source("zephyr/console/mp_glue.c");
+	b = fn_body("static int obj_apply(void *user, size_t obj, const int32_t *value)");
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "uint8_t prev = sts_ref_override_get();"),
+		"the pre-lease reference request is no longer sampled");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "rc = sts_ref_override_set(mux_sel_saved_req);"),
+		"the `ref.mux.sel` release no longer replays the saved request "
+		"verbatim, so a lease taken on AUTO would lapse to a level");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "mux_sel_saved_req = prev;"),
+		"the saved request is not the value read before the apply");
+	/*
+	 * `1` is EXTREF, not a force-rubidium that does not exist: AUTO is what
+	 * engages the Rb when the guards allow, and EXTREF is the only request
+	 * that deterministically drives MUX_SEL to input B.
+	 */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "(uint8_t)STS_REF_REQ_EXTREF"),
+		"`ref.mux.sel = 1` no longer selects input B explicitly");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "(uint8_t)STS_REF_REQ_OCXO"),
+		"`ref.mux.sel = 0` no longer pins the OCXO");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&b, "STS_REF_REQ_AUTO"),
+		"an apply asks for AUTO; AUTO is a state the RELEASE restores, "
+		"not a value this two-valued object can request");
+
+	/* The read reports the ACTIVE reference, never the request. */
+	b = fn_body("static int obj_read(void *user, size_t obj, mp_val_t *out)");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&b, "sts_ref_override_get()"),
+		"`ref.mux.sel` reads back its own request; \"requested rb, "
+		"running ocxo\" is the normal reading and the object is named "
+		"for the selector, not the intent");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "q.active_ref == (uint8_t)QUALITY_REF_OCXO"),
+		"the mux read-back no longer resolves the active reference");
+}
+
 /* ------------------------------------------------------------------- runner */
 
 int main(void)
@@ -859,6 +1033,9 @@ int main(void)
 
 	RUN_TEST(test_the_rb_serial_relay_is_wired);
 	RUN_TEST(test_the_rb_ceiling_is_the_one_in_force);
+
+	RUN_TEST(test_the_watchdog_enable_replays_the_arm_sequence);
+	RUN_TEST(test_the_clock_mux_goes_through_refsel_and_restores_verbatim);
 
 	return UNITY_END();
 }

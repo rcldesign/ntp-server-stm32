@@ -86,6 +86,32 @@ static inline uint32_t sts_super_wdt_liveness(uint32_t stale_mask)
 }
 
 /**
+ * May a MAINTENANCE WDI edge be driven right now?
+ *
+ * This is not the cadence question — pwrseq_wdt_service() owns that for the
+ * supervisor's own kicks. This is the console's `sys.wdt.kick`, an edge whose
+ * PHASE relative to the supervisor's last kick is arbitrary by construction,
+ * because nothing synchronises a technician's keystroke to a 920-1360 ms
+ * window. Land it inside tWDL(min) = 680 ms of the last kick and the TPS3430
+ * calls it a RUNAWAY fault: WDO_N asserts for ~200 ms, drives POE_KILL, and the
+ * board drops its own PoE port (docs/sts1000_external_wdt.md §4).
+ *
+ * So there is exactly one state in which the edge is harmless — WDT_EN
+ * de-asserted, no window being watched, no cadence to collide with — and the
+ * answer for every other state, INCLUDING "the supervisor never initialised and
+ * cannot say", is no. `ready` is therefore a term rather than an assumption:
+ * an uninitialised supervisor has not configured PB2 either, and refusing is
+ * the only reading of an unknown pin that cannot cold-cycle the board.
+ *
+ * The console-side interlock MP_ILK_WDT_OFF says the same thing one seam out,
+ * so a caller reaching sts_supervisor_wdt_kick() directly is refused too.
+ */
+static inline bool sts_super_wdi_pulse_allowed(bool ready, bool armed)
+{
+	return ready && !armed;
+}
+
+/**
  * Should this tick log the liveness loss?
  *
  * Only while armed (before that a stale participant is just a thread that has

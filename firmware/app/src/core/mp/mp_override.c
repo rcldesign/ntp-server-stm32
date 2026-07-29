@@ -197,6 +197,25 @@ int mp_ilk_eval(size_t obj, int32_t req, const mp_ilk_state_t *st,
 		}
 	}
 
+	if ((mask & MP_ILK_WDT_OFF) != 0U) {
+		/*
+		 * No `req != 0` term, unlike MP_ILK_WDT_LIVE above, and that is
+		 * the point of the bit existing.
+		 *
+		 * m_obj_pulse() evaluates every pulse against a hardcoded
+		 * request of 1, so a bit written as "refuse the assert
+		 * direction" is, on a PULSE object, "refuse whenever the
+		 * positive precondition does not hold" — which is what this
+		 * one wants anyway: a WDI edge IS an assertion, there is no
+		 * de-assert direction to exempt, and the only safe state for
+		 * one is a watchdog that is not watching.
+		 */
+		if (!st->wdt_off) {
+			out->failed = MP_ILK_WDT_OFF;
+			return -EPERM;
+		}
+	}
+
 	if ((mask & MP_ILK_MUX_GUARD) != 0U) {
 		/* Selecting the OCXO (0) is the fail-safe direction and always
 		 * allowed; selecting input B needs both guards (spec §3.5). */

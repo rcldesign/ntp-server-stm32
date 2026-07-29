@@ -114,9 +114,22 @@ const char *mp_guard_name(uint8_t g);
 #define MP_ILK_TUNNEL (1U << 8)    /**< suspends firmware's use of that UART */
 #define MP_ILK_MUX_GUARD (1U << 9) /**< clock handoff needs extref + rb_lock */
 #define MP_ILK_DAC_PARK (1U << 10) /**< discipline must be parked first */
+/*
+ * The WDI pulse's own precondition, and the reason it is not MP_ILK_WDT_LIVE.
+ *
+ * A console-injected edge on WDT_KICK lands at an ARBITRARY phase of the
+ * supervisor's 920-1360 ms cadence. Anything inside tWDL(min) = 680 ms of the
+ * supervisor's last kick is a TPS3430 runaway fault: WDO_N asserts for ~200 ms,
+ * drives POE_KILL, and the board drops its own PoE port
+ * (docs/sts1000_external_wdt.md 4). So the pulse is safe in exactly one state -
+ * WDT_EN de-asserted, nothing watching the window, no cadence to collide with -
+ * and that is a different question from "may this watchdog be armed", which is
+ * what MP_ILK_WDT_LIVE answers for `sys.wdt.en`.
+ */
+#define MP_ILK_WDT_OFF (1U << 11) /**< WDI pulse needs WDT_EN de-asserted */
 
 /** Number of defined interlocks. */
-#define MP_ILK_COUNT 11U
+#define MP_ILK_COUNT 12U
 
 /** Every defined interlock bit. */
 #define MP_ILK_ALL ((1U << MP_ILK_COUNT) - 1U)
@@ -206,12 +219,13 @@ const char *mp_group_name(uint8_t g);
  *
  * One bit cannot say more than that. Where an object both mutates and reads,
  * the bit describes the MUTATION, because that is the operation whose absence
- * a technician discovers by acting on the board. Three objects are today
+ * a technician discovers by acting on the board. Six objects are today
  * mutable-and-wired with no read-back accessor — `ui.identify`,
- * `pwr.poe.kill`, `pwr.rb.ov.reset`, the first a write-only beacon and the
- * other two momentary pulses with no state to read — and
- * tests/host/test_mp_deferred.c pins that set by name so it cannot silently
- * grow.
+ * `pwr.poe.kill`, `pwr.rb.ov.reset`, `sys.phy.reset`, `gnss.extint` and
+ * `sys.wdt.kick`: the first a write-only beacon and the other five momentary
+ * pulses whose pin rests deasserted, so the only thing a read could report is
+ * "not pulsing right now" — and tests/host/test_mp_deferred.c pins that set by
+ * name so it cannot silently grow.
  *
  * The bit describes WIRING, not availability. An object without it answers
  * every operation it declares; it may still report -EIO when a sensor sweep

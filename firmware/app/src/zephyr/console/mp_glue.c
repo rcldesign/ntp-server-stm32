@@ -918,6 +918,31 @@ static int prov_ilk(void *user, mp_ilk_state_t *out)
 	 * snapshot; until then the refusal stands and says why.
 	 */
 	out->liveness_ok = false;
+
+	/*
+	 * MP_ILK_WDT_OFF, and unlike the term above this one IS a measurement.
+	 *
+	 * `sys.wdt.kick` used to carry MP_ILK_WDT_LIVE, which on a PULSE object
+	 * is evaluated against a hardcoded request of 1 — so it refused the edge
+	 * while the supervisor was withholding kicks (WDI idle, the pulse
+	 * harmless) and granted it while the supervisor was kicking on the
+	 * 920-1360 ms cadence, where an arbitrary-phase edge inside
+	 * tWDL(min) = 680 ms drives WDO_N -> POE_KILL and the board drops its own
+	 * PoE port. The interlock was inverted in effect and dormant only because
+	 * the object was deferred; wiring it as written would have made it live.
+	 *
+	 * What replaces it is the one state in which the edge is harmless: the
+	 * TPS3430 is not watching. supervisor.c is the single writer of PC12 and
+	 * answers -ENODEV before it has configured the pin, and that path sets
+	 * *armed = true — so an unknown watchdog reads as watching and the pulse
+	 * is refused. There is no reading of this term that opens the hazard.
+	 */
+	{
+		bool wdt_armed = true;
+
+		out->wdt_off = (sts_supervisor_wdt_state(&wdt_armed) == 0) &&
+			       !wdt_armed;
+	}
 	return 0;
 }
 
@@ -1180,6 +1205,27 @@ static int prov_auth(void *user, const char *user_name, const char *secret,
 /* ------------------------------------------------------- object accessors */
 
 /*
+ * PRE-LEASE STATE, held here because core cannot hold it.
+ *
+ * mp_override.c reverts a lapsed lease by calling obj_apply() with a NULL
+ * value; it does not remember what the object read before the lease, and for
+ * these two it could not usefully. `sys.wdt.en`'s restore is a SEQUENCE (kick,
+ * seed, assert), not a level, and `ref.mux.sel`'s pre-lease state is
+ * three-valued — AUTO / force-OCXO / force-EXTREF — while the object's value
+ * space is {0,1}, so "the value before the lease" is not expressible as one.
+ *
+ * Both slots are written only after the apply that needed them has succeeded,
+ * so a refused or failed grant leaves nothing owed a restore, and both are
+ * cleared by the release that consumes them. Every access is on the console
+ * thread under the engine lock, the same discipline disp_seen/disp_on_last
+ * above follow.
+ */
+static bool wdt_en_saved_valid;
+static bool wdt_en_saved_armed;
+static bool mux_sel_saved_valid;
+static uint8_t mux_sel_saved_req;
+
+/*
  * ===========================================================================
  * THE DISPATCH, AND WHAT THE MANIFEST SAYS ABOUT IT
  * ===========================================================================
@@ -1434,6 +1480,54 @@ static int obj_read(void *user, size_t obj, mp_val_t *out)
 	}
 	if (strcmp(o->id, "ref.rb.tunnel") == 0) {
 		out->i = sts_mp_tunnel_rb_open() ? 1 : 0;
+		out->valid = true;
+		return 0;
+	}
+	/*
+	 * MUX_SEL, read as the reference ACTUALLY feeding PH0 — never as the
+	 * standing request.
+	 *
+	 * The two part company by design and for as long as refsel's guards take
+	 * to debounce: sts_app.h states it outright ("requested rb, running
+	 * ocxo" is the normal reading), and the object whose net is `MUX_SEL`
+	 * has to answer for the pin, not for the intent. `sensor.timing.ref`
+	 * publishes the same field at full resolution; this narrows it onto the
+	 * mux's two inputs, which is what the enum {ocxo, rb} names.
+	 *
+	 * QUALITY_REF_RB and QUALITY_REF_EXTREF are BOTH input B — one selector
+	 * pin, two things that can be plugged into the SMA — so both read 1.
+	 * QUALITY_REF_NONE is the pre-publication value: the discipline loop has
+	 * not run, so there is nothing to report and `valid` says so rather than
+	 * defaulting to the OCXO and claiming a pin state nobody has observed.
+	 */
+	if (strcmp(o->id, "ref.mux.sel") == 0) {
+		if (sts_quality_snapshot(&q) != 0) {
+			return -EIO;
+		}
+		out->i = ((q.active_ref == (uint8_t)QUALITY_REF_RB) ||
+			  (q.active_ref == (uint8_t)QUALITY_REF_EXTREF))
+				 ? 1
+				 : 0;
+		out->valid = (q.active_ref == (uint8_t)QUALITY_REF_OCXO) ||
+			     (q.active_ref == (uint8_t)QUALITY_REF_RB) ||
+			     (q.active_ref == (uint8_t)QUALITY_REF_EXTREF);
+		return 0;
+	}
+	/*
+	 * WDT_EN, read as the state supervisor.c has DRIVEN PC12 to rather than
+	 * as the lease's request: the object exists so a technician can confirm
+	 * the TPS3430 stopped watching before pulsing WDI, and the request is
+	 * not evidence of that. Before the supervisor initialises there is no
+	 * pin to report, so -EIO — never -ENOTSUP, which on this seam means
+	 * "nothing is wired" (see the dispatch note above).
+	 */
+	if (strcmp(o->id, "sys.wdt.en") == 0) {
+		bool armed = true;
+
+		if (sts_supervisor_wdt_state(&armed) != 0) {
+			return -EIO;
+		}
+		out->i = armed ? 1 : 0;
 		out->valid = true;
 		return 0;
 	}
@@ -1872,6 +1966,128 @@ static int obj_apply(void *user, size_t obj, const int32_t *value)
 	}
 
 	/*
+	 * =====================================================================
+	 * THE EXTERNAL WATCHDOG: NOT A PIN WRITE, AND THE RELEASE IS PROTECTED
+	 * =====================================================================
+	 *
+	 * WDT_EN carries a CADENCE, not just a level. sts_supervisor_arm() kicks
+	 * once and seeds pwrseq's window from that same instant precisely so the
+	 * first window opens already fed; raising PC12 with a bare
+	 * gpio_pin_set_dt() would arm mid-cadence with no seed and the kicker's
+	 * next serviced kick would land on its 50 ms poll instead of a full
+	 * period later — a TPS3430 runaway fault, WDO_N -> POE_KILL, and the
+	 * board drops its own PoE port. sts_supervisor_wdt_enable() replays the
+	 * sequence; this seam never touches the pin.
+	 *
+	 * The RELEASE direction is the one that matters, which is why the object
+	 * is leased rather than writable: `obj.set` creates no lease, so a bare
+	 * write that disarmed the watchdog would leave it disarmed with nothing
+	 * — not the dead-man, not a link drop, not `session.close` — able to put
+	 * it back.
+	 *
+	 * What a release restores is the state the watchdog was in when the
+	 * lease was TAKEN, not an unconditional "on", and the difference is a
+	 * hazard rather than a nicety. A lease taken before pwrseq reaches stage
+	 * 9 finds the watchdog disarmed and every liveness participant not yet
+	 * registered; arming it on release would start the window against a
+	 * liveness gate that cannot yet be satisfied, the kicker would withhold,
+	 * and the box would cold-cycle itself — the exact failure the whole
+	 * arrangement exists to avoid. In the only case where the lease actually
+	 * DISABLED something the saved state is "armed", so the release re-arms:
+	 * fail-safe protected, without inventing an arm firmware never made.
+	 */
+	if (strcmp(o->id, "sys.wdt.en") == 0) {
+		bool armed = true;
+		int rc;
+
+		if (value == NULL) {
+			if (!wdt_en_saved_valid) {
+				return 0; /* no lease of ours to put back */
+			}
+			rc = sts_supervisor_wdt_enable(wdt_en_saved_armed);
+			if (rc == 0) {
+				wdt_en_saved_valid = false;
+			}
+			return rc;
+		}
+		if (sts_supervisor_wdt_state(&armed) != 0) {
+			return -EIO;
+		}
+		rc = sts_supervisor_wdt_enable(*value != 0);
+		if (rc != 0) {
+			/* The pin did not move, so nothing is owed a restore. */
+			return rc;
+		}
+		if (!wdt_en_saved_valid) {
+			wdt_en_saved_armed = armed;
+			wdt_en_saved_valid = true;
+		}
+		return 0;
+	}
+	/*
+	 * =====================================================================
+	 * THE CLOCK MUX: refsel's BRACKETED HANDOFF, NEVER A PIN WRITE
+	 * =====================================================================
+	 *
+	 * PB6 selects which 10 MHz reaches PH0, the HSE bypass input SYSCLK is
+	 * derived from. Moving it under a live HSE feed skips the HSI bridge and
+	 * glitches the system clock (spec §3.5), so this posts the standing
+	 * REQUEST and lets the discipline thread run the handoff refsel owns —
+	 * REFSEL_ACT_PARK_DISCIPLINE, the mux flip, then UNPARK. The guards are
+	 * not bypassed by any of it: an out-of-band 10 MHz or an unasserted lock
+	 * line leaves the machine on the OCXO (sts_app.h, "There is no force").
+	 *
+	 * `1` maps to STS_REF_REQ_EXTREF rather than to a "force rubidium" that
+	 * does not exist. The manifest spells the enum {ocxo, rb} because that is
+	 * what the two mux inputs carry on this board, but the request space is
+	 * AUTO / force-OCXO / force-EXTREF: AUTO is what engages the Rb when the
+	 * guards allow, and EXTREF is the only request that DETERMINISTICALLY
+	 * drives MUX_SEL to input B, which is what an object named for the
+	 * selector has to mean.
+	 *
+	 * SAVE/RESTORE is the subtle half, and it is why the slot lives here
+	 * rather than in core. The pre-lease state is three-valued while this
+	 * object's value space is {0,1}, so there is no value of the object that
+	 * means AUTO and core could not express the restore even if it held one.
+	 * sts_ref_override_get() is therefore saved VERBATIM and replayed on
+	 * release: a lease taken on a box running AUTO returns it to AUTO, not to
+	 * whichever level happened to be active when the technician looked.
+	 *
+	 * sts_web.c writes the same atomic. There is no torn state — it is an
+	 * atomic_t — but the two are unordered, so a REST write landing while a
+	 * lease is held is overwritten by the lease's next apply and, either way,
+	 * the release replays the value saved at grant. The lease wins, which is
+	 * the intended precedence for a G3 maintenance hold.
+	 */
+	if (strcmp(o->id, "ref.mux.sel") == 0) {
+		uint8_t prev = sts_ref_override_get();
+		int rc;
+
+		if (value == NULL) {
+			if (!mux_sel_saved_valid) {
+				return 0; /* no lease of ours to put back */
+			}
+			rc = sts_ref_override_set(mux_sel_saved_req);
+			if (rc == 0) {
+				mux_sel_saved_valid = false;
+			}
+			return rc;
+		}
+		rc = sts_ref_override_set((*value != 0)
+						  ? (uint8_t)STS_REF_REQ_EXTREF
+						  : (uint8_t)STS_REF_REQ_OCXO);
+		if (rc != 0) {
+			/* The request did not move, so nothing is owed a
+			 * restore and the saved slot stays as it was. */
+			return rc;
+		}
+		if (!mux_sel_saved_valid) {
+			mux_sel_saved_req = prev;
+			mux_sel_saved_valid = true;
+		}
+		return 0;
+	}
+	/*
 	 * The locate beacon. A release (value == NULL) and an explicit 0 both
 	 * stop it, so the LED cannot outlive the lease that asked for it — which
 	 * is what makes MP_MIRROR_F_IDENTIFY, the flag the mirror already
@@ -1944,6 +2160,32 @@ static int obj_pulse(void *user, size_t obj, uint32_t ms)
 	}
 	if (strcmp(o->id, "gnss.extint") == 0) {
 		return sts_gnss_extint_pulse();
+	}
+
+	/*
+	 * The maintenance WDI edge on PB2.
+	 *
+	 * `sys.wdt.kick` is the one object on this seam whose interlock had to
+	 * be REPLACED before it could be wired. It carried MP_ILK_WDT_LIVE,
+	 * which m_obj_pulse() evaluates against a hardcoded request of 1: that
+	 * refused the edge exactly when the supervisor was withholding kicks and
+	 * WDI was idle — the harmless case — and granted it exactly when the
+	 * supervisor was kicking on the TPS3430's 920-1360 ms cadence, where a
+	 * console edge lands at an arbitrary phase and one inside
+	 * tWDL(min) = 680 ms is a runaway fault: WDO_N for ~200 ms, POE_KILL,
+	 * and the board drops its own PoE port. MP_ILK_WDT_OFF replaces it and
+	 * demands the state in which the edge is harmless — WDT_EN de-asserted.
+	 *
+	 * The width is dropped for the reason the two pulses above drop theirs:
+	 * WDI is edge-triggered and the assert width is the supervisor's own
+	 * CONFIG_STS1000_WDT_KICK_WIDTH_US, not a number a console may choose.
+	 *
+	 * sts_supervisor_wdt_kick() re-asks the same question at the pin's own
+	 * seam and answers -EPERM if the watchdog is armed, so the permission
+	 * does not live only in the caller.
+	 */
+	if (strcmp(o->id, "sys.wdt.kick") == 0) {
+		return sts_supervisor_wdt_kick();
 	}
 
 	switch (sts_recov_pulse_action(o->id)) {

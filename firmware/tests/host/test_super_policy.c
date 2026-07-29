@@ -85,6 +85,38 @@ static void test_a_permitted_kick_sets_every_pwrseq_liveness_bit(void)
 	TEST_ASSERT_TRUE((live & (uint32_t)PWRSEQ_LIVE_HOUSEKEEPING) != 0U);
 }
 
+/**
+ * A MAINTENANCE WDI edge is permitted in exactly one state.
+ *
+ * `sys.wdt.kick` exists so a technician can scope the PB2 edge. It is safe only
+ * with WDT_EN de-asserted: a console edge has an arbitrary phase against the
+ * supervisor's 920-1360 ms cadence — nothing synchronises a keystroke to it —
+ * and one landing inside tWDL(min) = 680 ms of the last kick is a TPS3430
+ * RUNAWAY fault: WDO_N asserts for ~200 ms, drives POE_KILL, and the board drops
+ * its own PoE port (docs/sts1000_external_wdt.md §4).
+ *
+ * `ready` is a term rather than an assumption because an uninitialised
+ * supervisor has not configured PB2 either. Refusing is the only reading of an
+ * unknown pin that cannot cold-cycle the board, so the truth table has exactly
+ * one true cell.
+ */
+static void test_a_maintenance_wdi_edge_needs_the_watchdog_disabled(void)
+{
+	/* The one permitted cell: initialised, and not watching. */
+	TEST_ASSERT_TRUE(sts_super_wdi_pulse_allowed(true, false));
+
+	/* Armed — the hazard. This is the assertion the whole interlock is for. */
+	TEST_ASSERT_FALSE_MESSAGE(
+		sts_super_wdi_pulse_allowed(true, true),
+		"a maintenance WDI edge was permitted against an ARMED "
+		"watchdog; that is the board cold-cycling itself");
+
+	/* Unknown — the supervisor never initialised, so neither pin has a
+	 * state to reason about. Refuse in both columns. */
+	TEST_ASSERT_FALSE(sts_super_wdi_pulse_allowed(false, false));
+	TEST_ASSERT_FALSE(sts_super_wdi_pulse_allowed(false, true));
+}
+
 /* Liveness loss is logged at CRIT from a 4 Hz tick, so it must be edge-driven
  * and armed-gated or it buries its own cause in the ring. */
 static void test_stale_logging_is_edge_driven_and_armed_gated(void)
@@ -566,6 +598,7 @@ int main(void)
 
 	RUN_TEST(test_a_single_stale_participant_withholds_the_kick);
 	RUN_TEST(test_a_permitted_kick_sets_every_pwrseq_liveness_bit);
+	RUN_TEST(test_a_maintenance_wdi_edge_needs_the_watchdog_disabled);
 	RUN_TEST(test_stale_logging_is_edge_driven_and_armed_gated);
 	RUN_TEST(test_violation_reporting_is_change_driven);
 	RUN_TEST(test_violation_word_names_the_right_side_of_the_window);

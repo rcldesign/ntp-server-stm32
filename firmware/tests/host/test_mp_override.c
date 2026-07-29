@@ -162,6 +162,7 @@ static void ilk_permissive(mp_ilk_state_t *st)
 	st->disp_on = true;
 	st->disp_changed_ms = 0U;
 	st->liveness_ok = true;
+	st->wdt_off = true;
 	st->disc_parked = true;
 	st->extref_ok = true;
 	st->rb_lock = true;
@@ -1205,21 +1206,83 @@ static void test_ilk_display_minimum_off_time(void)
 static void test_ilk_wdt_arm_needs_a_healthy_liveness_gate(void)
 {
 	size_t en = obj_of("sys.wdt.en");
-	size_t kick = obj_of("sys.wdt.kick");
 	mp_ilk_state_t st;
 	mp_ilk_res_t res;
 
 	ilk_permissive(&st);
 	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(en, 1, &st, 0U, &res));
-	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(kick, 1, &st, 0U, &res));
 
 	st.liveness_ok = false;
 	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(en, 1, &st, 0U, &res));
 	TEST_ASSERT_EQUAL_UINT32(MP_ILK_WDT_LIVE, res.failed);
-	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(kick, 1, &st, 0U, &res));
 
-	/* Disarming is allowed regardless. */
+	/* Disarming is allowed regardless — and it has to be, because it is the
+	 * state a WDI pulse requires and the liveness gate is not observable
+	 * from the console today (mp_glue.c, prov_ilk). */
 	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(en, 0, &st, 0U, &res));
+
+	/* The liveness gate says nothing about the WDI pulse. */
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(obj_of("sys.wdt.kick"), 1, &st, 0U,
+					     &res));
+}
+
+/**
+ * THE ASSERTION 4b EXISTS FOR: a WDI pulse is refused while the watchdog is on.
+ *
+ * `sys.wdt.kick` used to carry MP_ILK_WDT_LIVE, and on a PULSE object that is
+ * inverted in effect. m_obj_pulse() evaluates every pulse against a hardcoded
+ * request of 1 (mp_rpc.c), and MP_ILK_WDT_LIVE refuses only `req != 0` — so the
+ * edge was refused precisely when the supervisor was withholding kicks and WDI
+ * was idle (harmless), and granted precisely when the supervisor was kicking on
+ * the TPS3430's 920-1360 ms cadence. A console edge has an arbitrary phase
+ * against that cadence; one landing inside tWDL(min) = 680 ms of the last kick
+ * is a RUNAWAY fault — WDO_N asserts for ~200 ms, drives POE_KILL, and the board
+ * drops its own PoE port (docs/sts1000_external_wdt.md §4).
+ *
+ * MP_ILK_WDT_OFF is the replacement and it has no `req` term at all: a WDI edge
+ * IS an assertion, there is no de-assert direction to exempt, and the only safe
+ * state for one is a watchdog that is not watching.
+ */
+static void test_ilk_wdi_pulse_is_refused_while_the_watchdog_is_armed(void)
+{
+	size_t kick = obj_of("sys.wdt.kick");
+	mp_ilk_state_t st;
+	mp_ilk_res_t res;
+
+	/* Armed: refused, and named as the interlock a technician can act on. */
+	ilk_permissive(&st);
+	st.wdt_off = false;
+	TEST_ASSERT_EQUAL_INT_MESSAGE(
+		-EPERM, mp_ilk_eval(kick, 1, &st, 0U, &res),
+		"a WDI edge was granted against an ARMED watchdog; that is the "
+		"board cold-cycling itself");
+	TEST_ASSERT_EQUAL_UINT32(MP_ILK_WDT_OFF, res.failed);
+	TEST_ASSERT_EQUAL_STRING("wdt.off", mp_ilk_name(res.failed));
+
+	/* Disabled: granted — this is the bench capability the bit buys. */
+	st.wdt_off = true;
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(kick, 1, &st, 0U, &res));
+
+	/*
+	 * The liveness gate is orthogonal now. An unhealthy gate is exactly when
+	 * the supervisor stops kicking, so a pulse against a DISABLED watchdog
+	 * stays permitted, and a healthy gate does not buy a pulse against an
+	 * ARMED one.
+	 */
+	st.liveness_ok = false;
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval(kick, 1, &st, 0U, &res));
+	st.liveness_ok = true;
+	st.wdt_off = false;
+	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(kick, 1, &st, 0U, &res));
+	TEST_ASSERT_EQUAL_UINT32(MP_ILK_WDT_OFF, res.failed);
+
+	/*
+	 * A glue that cannot produce a snapshot refuses too: mp_ilk_eval()'s
+	 * NULL-state path reports the lowest declared bit, which for this row is
+	 * the only bit. An unobservable watchdog is a watching one.
+	 */
+	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(kick, 1, NULL, 0U, &res));
+	TEST_ASSERT_EQUAL_UINT32(MP_ILK_WDT_OFF, res.failed);
 }
 
 static void test_ilk_clock_mux_guard(void)
@@ -2410,6 +2473,7 @@ int main(void)
 	RUN_TEST(test_ilk_relay_cannot_be_forced_over_a_live_fault);
 	RUN_TEST(test_ilk_display_minimum_off_time);
 	RUN_TEST(test_ilk_wdt_arm_needs_a_healthy_liveness_gate);
+	RUN_TEST(test_ilk_wdi_pulse_is_refused_while_the_watchdog_is_armed);
 	RUN_TEST(test_ilk_clock_mux_guard);
 	RUN_TEST(test_ilk_dac_needs_the_loop_parked);
 	RUN_TEST(test_ilk_tunnel_reports_a_consequence_not_a_refusal);
