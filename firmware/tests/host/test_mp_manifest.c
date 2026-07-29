@@ -440,7 +440,7 @@ static void test_interlocks_are_attached_where_they_must_be(void)
 }
 
 /**
- * A tunnel is a LEASED thing, so it may be overridden and never written.
+ * An actuator only a lease RELEASE can un-do is never `obj.set`-able.
  *
  * `gnss.tunnel` and `ref.rb.tunnel` carried MP_OF_WRITE, and m_obj_set() checks
  * only that flag — so `obj.set gnss.tunnel true` reached obj_apply(), called
@@ -450,18 +450,90 @@ static void test_interlocks_are_attached_where_they_must_be(void)
  * consequence rather than a refusal, so nothing stopped it. The grandmaster
  * lost GNSS until a reboot.
  *
- * Stated over the INTERLOCK rather than over the three ids, because the rule is
- * about what MP_ILK_TUNNEL means: it suspends firmware's use of a port, and
- * only a lease can put that back. A fourth tunnel object added later is covered
- * the day it declares the interlock.
+ * This guard was stated over MP_ILK_TUNNEL, and that scoping was the hole.
+ * `ref.rb.serial` is the same defect — `obj.set` threw the K1 RS-232/CMOS relay
+ * with no lease, nothing re-asserts PE4 after rb_serial_init(), and the
+ * deferred restore in platform/rb_serial.c only arms when an OPEN TUNNEL
+ * refuses a move, so a `set` to CMOS with no tunnel open stranded the fail-safe
+ * — yet the row declares no interlock and so sat outside the very rule that
+ * existed to catch it. The rule is therefore stated as what it always was: an
+ * object whose apply moves something only a RELEASE puts back must not carry
+ * MP_OF_WRITE.
+ *
+ * Two halves, because only one of them can be derived from the row:
+ *
+ *   - Derived. MP_ILK_TUNNEL means "firmware's use of a port is suspended",
+ *     which is un-doable by definition, so every object declaring it must
+ *     appear below. A fourth tunnel is covered the day it declares the
+ *     interlock, whether or not anyone remembers this test.
+ *   - Named. An un-doable actuator with no interlock — `ref.rb.serial` today —
+ *     is indistinguishable from an ordinary GPIO in the manifest, so it is
+ *     listed by hand. The list is exact in both directions: dropping a name
+ *     fails on the derived half or on the tunnel roll-call below, and adding
+ *     MP_OF_WRITE to a listed row fails here.
+ *
+ * What this cannot do is recognise the NEXT interlock-less latch on the day it
+ * is written; that is a review judgement. What it does do is stop an existing
+ * member from quietly regaining MP_OF_WRITE, which is how both defects landed.
  */
-static void test_a_tunnel_object_is_never_writable(void)
+static const char *const g_lease_only_actuators[] = {
+	"gnss.tunnel",
+	"ref.rb.tunnel",
+	"sys.smp.tunnel",
+	/* Not a tunnel, and that is the point — see above. */
+	"ref.rb.serial",
+};
+
+static bool is_lease_only_actuator(const char *id)
+{
+	size_t k;
+
+	for (k = 0U; k < (sizeof(g_lease_only_actuators) /
+			  sizeof(g_lease_only_actuators[0]));
+	     k++) {
+		if (strcmp(id, g_lease_only_actuators[k]) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void test_a_lease_only_actuator_is_never_writable(void)
 {
 	static const char *const tunnels[] = { "gnss.tunnel", "ref.rb.tunnel",
 					       "sys.smp.tunnel" };
+	const size_t n_actuators = sizeof(g_lease_only_actuators) /
+				   sizeof(g_lease_only_actuators[0]);
+	const size_t n_tunnels = sizeof(tunnels) / sizeof(tunnels[0]);
 	size_t i;
 	unsigned int with_ilk = 0U;
 
+	for (i = 0U; i < n_actuators; i++) {
+		int idx = mp_obj_find(g_lease_only_actuators[i]);
+		const mp_obj_t *o;
+		size_t k;
+
+		TEST_ASSERT_TRUE_MESSAGE(idx >= 0, g_lease_only_actuators[i]);
+		o = mp_obj_at((size_t)idx);
+
+		/* The rule. */
+		TEST_ASSERT_EQUAL_UINT_MESSAGE(
+			0U, (unsigned int)(o->flags & MP_OF_WRITE), o->id);
+		/* ...and it must still be reachable the leased way, or the
+		 * narrowing would have removed the feature instead of the bug. */
+		TEST_ASSERT_TRUE_MESSAGE((o->flags & MP_OF_OVERRIDE) != 0U,
+					 o->id);
+
+		/* A duplicate would let a dropped name hide inside the count. */
+		for (k = 0U; k < i; k++) {
+			TEST_ASSERT_TRUE_MESSAGE(
+				strcmp(g_lease_only_actuators[k],
+				       g_lease_only_actuators[i]) != 0,
+				o->id);
+		}
+	}
+
+	/* The derived half: no MP_ILK_TUNNEL object may be absent from it. */
 	for (i = 0U; i < mp_obj_count(); i++) {
 		const mp_obj_t *o = mp_obj_at(i);
 
@@ -469,18 +541,11 @@ static void test_a_tunnel_object_is_never_writable(void)
 			continue;
 		}
 		with_ilk++;
-		TEST_ASSERT_EQUAL_UINT_MESSAGE(
-			0U, (unsigned int)(o->flags & MP_OF_WRITE), o->id);
-		/* ...and it must still be reachable the leased way, or the
-		 * narrowing would have removed the feature instead of the bug. */
-		TEST_ASSERT_TRUE_MESSAGE((o->flags & MP_OF_OVERRIDE) != 0U,
-					 o->id);
+		TEST_ASSERT_TRUE_MESSAGE(is_lease_only_actuator(o->id), o->id);
 	}
-	TEST_ASSERT_EQUAL_UINT((unsigned int)(sizeof(tunnels) /
-					      sizeof(tunnels[0])),
-			       with_ilk);
+	TEST_ASSERT_EQUAL_UINT((unsigned int)n_tunnels, with_ilk);
 
-	for (i = 0U; i < (sizeof(tunnels) / sizeof(tunnels[0])); i++) {
+	for (i = 0U; i < n_tunnels; i++) {
 		int idx = mp_obj_find(tunnels[i]);
 
 		TEST_ASSERT_TRUE_MESSAGE(idx >= 0, tunnels[i]);
@@ -1007,7 +1072,7 @@ int main(void)
 	RUN_TEST(test_no_g0_object_can_mutate);
 	RUN_TEST(test_guard_classes_of_the_dangerous_objects);
 	RUN_TEST(test_interlocks_are_attached_where_they_must_be);
-	RUN_TEST(test_a_tunnel_object_is_never_writable);
+	RUN_TEST(test_a_lease_only_actuator_is_never_writable);
 	RUN_TEST(test_the_deferred_flag_is_published);
 
 	RUN_TEST(test_no_io_expander_anywhere);

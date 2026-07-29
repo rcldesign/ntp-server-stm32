@@ -305,8 +305,26 @@ const mp_obj_t mp_objs[] = {
 	  .group = MP_GRP_REF, .flags = F_RW_D, .ilk = MP_ILK_RELAY_OK,
 	  .net = "HOLDOVER_ALARM_RELAY",
 	  .desc = "K2 holdover/alarm relay; high = energized = healthy (PA6)" },
+	/*
+	 * LEASE-ONLY, for the shared reason the rail rows above give: `obj.set`
+	 * creates no lease, so nothing in the system can put K1 back — not the
+	 * dead-man, not a link drop, not `session.close`, not `mp_mode_exit`.
+	 * Nothing re-asserts PE4 after rb_serial_init(), so a `set` to CMOS
+	 * stranded the RS-232 fail-safe until somebody typed the opposite `set`.
+	 *
+	 * The deferred fail-safe restore in platform/rb_serial.c does NOT cover
+	 * this: that latch only arms when a move to RS-232 is REFUSED by an open
+	 * tunnel, and a `set` to CMOS with no tunnel open simply succeeds.
+	 *
+	 * Not an asynchronous apply — sts_rb_serial_set_mode() blocks for the
+	 * 20 ms relay settle and answers 0 or -EBUSY — so this row is lease-only
+	 * for the un-doability reason alone. test_mp_manifest.c's
+	 * test_a_lease_only_actuator_is_never_writable is the guard, and it is
+	 * scoped to that rule rather than to MP_ILK_TUNNEL for exactly this
+	 * reason: this row carries no interlock and sat outside the old one.
+	 */
 	{ .id = "ref.rb.serial", .kind = MP_KIND_ENUM, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_REF, .flags = F_RW, .min = 0, .max = 1, .step = 1,
+	  .group = MP_GRP_REF, .flags = F_LEASE, .min = 0, .max = 1, .step = 1,
 	  .enums = "rs232,cmos", .net = "RB_RS232_CMOS_SW",
 	  .desc = "K1 relay: FE-5680A serial level select, RS-232 fail-safe (PE4)" },
 	{ .id = "ref.rb.tunnel", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,

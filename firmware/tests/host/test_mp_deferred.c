@@ -44,6 +44,7 @@
 
 #include "mp/mp.h"
 #include "mp/mp_manifest.h"
+#include "zephyr/platform/sts_rbguard.h"
 #include "zephyr/console/sts_recovery_policy.h"
 
 #ifndef STS_APP_SRC_DIR
@@ -778,6 +779,65 @@ static void test_the_rb_serial_relay_is_wired(void)
 			     "? 1U : 0U;"),
 		"the K1 release no longer resolves to the RS-232 fail-safe");
 }
+/**
+ * The VCC_RB ceiling the interlock clamps against is the one IN FORCE.
+ *
+ * `prov_ilk()` filled `mp_ilk_state_t::rb_vmax_mv` straight from cfg
+ * `pwr.rb.vmax.mv`, whose schema range is 4510..24450 mV, while the rail is
+ * actually held to pwrseq_cfg_t::rb_vmax_mv — which sts_rb_vmax_decide() caps at
+ * STS_RB_VMAX_MV_CEILING. The two sat up to 9.45 V apart.
+ *
+ * The gap was a LIE rather than a hazard, which is what makes it worth a guard:
+ * the platform's bound is authoritative and holds, so an override to 20000 mV
+ * against a 22000 mV cfg ceiling was answered `value: 20000, clamped: false`,
+ * driven to <=15000 by the drain, and auto-reverted 250 ms later by
+ * MP_ILK_RB_VERIFY as "VCC_RB out of window" — a reply that told a technician
+ * his setpoint took, followed by a rail fault that did not exist.
+ *
+ * Read from the source, not asserted behaviourally, for the reason the whole
+ * back half of this file gives: mp_glue.c is not linked by any host suite. The
+ * scan is paired with the two properties that make the clamp mean something —
+ * that the constant is genuinely inside the published envelope, so it bites, and
+ * that it fits the field it is narrowed into.
+ */
+static void test_the_rb_ceiling_is_the_one_in_force(void)
+{
+	span_t b;
+	int vset = mp_obj_find("pwr.rb.vset_mv");
+
+	/* The clamp is not a no-op: the hardware ceiling sits strictly inside
+	 * the envelope the manifest publishes, so there is a band of cfg values
+	 * for which the two numbers genuinely differ. */
+	TEST_ASSERT_TRUE(vset >= 0);
+	TEST_ASSERT_TRUE_MESSAGE(
+		(int32_t)STS_RB_VMAX_MV_CEILING <
+			mp_obj_at((size_t)vset)->max,
+		"the hardware ceiling no longer bites inside the published "
+		"VCC_RB envelope — this guard would pass vacuously");
+	TEST_ASSERT_TRUE_MESSAGE(
+		(int32_t)STS_RB_VMAX_MV_CEILING >=
+			mp_obj_at((size_t)vset)->min,
+		"the hardware ceiling fell below the setpoint floor; "
+		"MP_ILK_RB_VMAX now refuses every request");
+	TEST_ASSERT_TRUE(STS_RB_VMAX_MV_CEILING <= UINT16_MAX);
+
+	load_source("zephyr/console/mp_glue.c");
+	b = fn_body("static int prov_ilk(void *user, mp_ilk_state_t *out)");
+
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U,
+		count_in(&b, "if (vmax > (uint64_t)STS_RB_VMAX_MV_CEILING) {"),
+		"prov_ilk() no longer caps cfg pwr.rb.vmax.mv at the ceiling "
+		"the sequencer actually runs");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "vmax = (uint64_t)STS_RB_VMAX_MV_CEILING;"),
+		"the cap is tested but no longer applied");
+	/* Still exactly one narrowing into the u16 field, and it is the one the
+	 * cap above bounds — not a second, unclamped path. */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "out->rb_vmax_mv = (uint16_t)vmax;"),
+		"a second, unclamped write to rb_vmax_mv appeared");
+}
 
 /* ------------------------------------------------------------------- runner */
 
@@ -798,6 +858,7 @@ int main(void)
 	RUN_TEST(test_the_display_stamp_is_sampled_by_the_tick);
 
 	RUN_TEST(test_the_rb_serial_relay_is_wired);
+	RUN_TEST(test_the_rb_ceiling_is_the_one_in_force);
 
 	return UNITY_END();
 }

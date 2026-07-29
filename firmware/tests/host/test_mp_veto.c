@@ -1567,6 +1567,239 @@ static void test_the_producer_is_lock_free_and_always_armed(void)
 		"the veto was gated on a channel subscription: firmware must "
 		"withdraw an override whether or not anyone is watching");
 }
+/**
+ * Taking `pwr.rb.gate` OFF schedules no VCC_RB read-back.
+ *
+ * MP_ILK_RB_VERIFY set `out->verify` unconditionally, so a lease that closes
+ * Q25 armed a rail read-back too. Nothing about that request raises the rail —
+ * the gate disconnects VCC_RB_G from the FE-5680A, it does not move the buck
+ * output INA228 0x47 measures — and `rb_expected_mv` is 0 for as long as the
+ * platform has not read the digipot wiper back. verify_one() therefore compared
+ * a live rail against 0 mV +-100, dropped the lease at MP_RB_VERIFY_DELAY_MS as
+ * "VCC_RB out of window", and charged a `verify_failures` count to a request
+ * that could not have moved anything.
+ *
+ * Both halves are asserted: the decision at the interlock, and the consequence
+ * on a real lease in a real tick — because the decision alone would pass just as
+ * well if mp_ovr_tick() had stopped honouring it.
+ */
+static void test_a_gate_off_request_arms_no_read_back(void)
+{
+	uint32_t sid = session();
+	mp_ilk_res_t res;
+	int gate = mp_obj_find("pwr.rb.gate");
+	int vset = mp_obj_find("pwr.rb.vset_mv");
+
+	TEST_ASSERT_TRUE(gate >= 0);
+	TEST_ASSERT_TRUE(vset >= 0);
+
+	/* ---------------------------------------------- the decision --- */
+
+	/* ON can raise the rail, so it still earns a read-back... */
+	memset(&res, 0, sizeof(res));
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval((size_t)gate, 1, &g_ilk, g_now,
+					     &res));
+	TEST_ASSERT_TRUE_MESSAGE(res.verify,
+				 "the gate-ON read-back was lost with the fix");
+
+	/* ...and so does a setpoint. `pwr.rb.vset_mv` floors at RB_MV_MIN and
+	 * mp_ovr_grant() range-checks the RAW request before calling the
+	 * interlock, so a setpoint can never arrive here as 0 and gating on
+	 * `req` cannot cost it its read-back. */
+	memset(&res, 0, sizeof(res));
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval((size_t)vset, 12000, &g_ilk, g_now,
+					     &res));
+	TEST_ASSERT_TRUE_MESSAGE(res.verify,
+				 "the setpoint read-back was lost with the fix");
+	TEST_ASSERT_EQUAL_INT(-ERANGE,
+			      mp_ovr_grant(&g_c.ovr, (size_t)vset, 0, 0U, sid,
+					   &g_ilk, g_now, &res));
+
+	/* OFF cannot. */
+	memset(&res, 0, sizeof(res));
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval((size_t)gate, 0, &g_ilk, g_now,
+					     &res));
+	TEST_ASSERT_FALSE_MESSAGE(res.verify,
+				  "a gate-OFF request still arms a VCC_RB "
+				  "read-back");
+}
+
+/**
+ * ...and the lease that request creates survives the read-back deadline.
+ *
+ * The companion to the interlock decision above, split from it so that neither
+ * half can carry the other: Unity aborts a test at its first failure, so a
+ * single test would have proved only whichever assertion came first. This is
+ * the half that shows the CONSEQUENCE — mp_ovr_tick() auto-reverting a lease,
+ * and charging a `verify_failures` count, for a request that cannot have moved
+ * the rail it is being judged against.
+ */
+static void test_a_gate_off_lease_survives_the_read_back_deadline(void)
+{
+	uint32_t sid = session();
+	size_t obj;
+
+	/*
+	 * The state that made this bite, established BEFORE the grant: a BOOL
+	 * object's `verify_expect_mv` is captured from `rb_expected_mv` at grant
+	 * time, so a platform that has not yet read the digipot wiper back —
+	 * sts_pwrseq_rb_expected_mv() answering 0 while `dp_known` is false —
+	 * freezes an expectation of 0 mV into the lease. The rail itself is up
+	 * and perfectly healthy at 14 V.
+	 */
+	g_ilk.rb_expected_mv = 0;
+	g_ilk.vcc_rb_mv = 14000;
+
+	obj = hold("pwr.rb.gate", 0, sid);
+
+	g_now += MP_RB_VERIFY_DELAY_MS + 1U;
+	TEST_ASSERT_EQUAL_INT(0, mp_ovr_tick(&g_c.ovr, &g_ilk, g_now));
+
+	TEST_ASSERT_NOT_NULL_MESSAGE(
+		mp_ovr_lease(&g_c.ovr, obj),
+		"a gate-OFF lease was auto-reverted by a read-back it should "
+		"never have scheduled");
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, g_c.ovr.verify_failures,
+		"a request that cannot move the rail was charged a verify "
+		"failure");
+}
+
+/**
+ * A VCC_RB ceiling below the setpoint FLOOR is refused, not clamped past.
+ *
+ * MP_ILK_RB_VMAX's millivolt branch clamps down to `hi` and then up to
+ * `o->min`. When `hi < o->min` the second clamp runs last and wins, so the value
+ * leaves the interlock ABOVE the ceiling that was supposed to bound it — and
+ * mp_obj_check_value() waves it through, because it re-checks the manifest
+ * envelope, which is not the envelope being escaped. The CODE branch beside it
+ * already refused its own inverted window; the MV branch did not.
+ *
+ * HONESTLY UNREACHABLE THROUGH THE GLUE TODAY, and this test does not pretend
+ * otherwise: it injects `rb_vmax_mv` directly, because prov_ilk() cannot
+ * currently produce the state. cfg `pwr.rb.vmax.mv` floors at 4510 mV, which is
+ * exactly RB_MV_MIN, and a failed cfg read yields 0 — which the `hi <= 0`
+ * refusal above already catches. The value of pinning it is that the two bounds
+ * are independent numbers in two different files: move the cfg floor down, or
+ * the manifest floor up, and this becomes live with nothing else changing.
+ */
+static void test_a_ceiling_below_the_floor_is_refused(void)
+{
+	mp_ilk_res_t res;
+	int vset = mp_obj_find("pwr.rb.vset_mv");
+	int32_t floor_mv;
+
+	TEST_ASSERT_TRUE(vset >= 0);
+	floor_mv = mp_obj_at((size_t)vset)->min;
+
+	/* The premise: today the two bounds coincide, so nothing in the shipped
+	 * configuration can reach the branch below. Stated as an assertion so
+	 * that the day it stops being true, this test says so. */
+	TEST_ASSERT_EQUAL_INT32_MESSAGE(
+		4510, floor_mv,
+		"the setpoint floor moved; re-check whether the inverted-window "
+		"refusal is now reachable from cfg");
+
+	/* An in-force ceiling one millivolt under the floor. */
+	g_ilk.rb_vmax_mv = (uint16_t)(floor_mv - 1);
+
+	memset(&res, 0, sizeof(res));
+	TEST_ASSERT_EQUAL_INT_MESSAGE(
+		-EPERM,
+		mp_ilk_eval((size_t)vset, floor_mv, &g_ilk, g_now, &res),
+		"an inverted VCC_RB window was clamped instead of refused");
+	TEST_ASSERT_EQUAL_UINT32(MP_ILK_RB_VMAX, res.failed);
+
+	/* And the refusal is the WINDOW, not the request: a ceiling at the
+	 * floor is a degenerate but valid window and still clamps normally. */
+	g_ilk.rb_vmax_mv = (uint16_t)floor_mv;
+	memset(&res, 0, sizeof(res));
+	TEST_ASSERT_EQUAL_INT(0, mp_ilk_eval((size_t)vset, 12000, &g_ilk, g_now,
+					     &res));
+	TEST_ASSERT_EQUAL_INT32(floor_mv, res.value);
+	TEST_ASSERT_TRUE(res.clamped);
+}
+
+/**
+ * The rubidium subject withdraws the SETPOINT as well as the two enables.
+ *
+ * It did not, and the header's reason for leaving it out — that
+ * MP_ILK_RB_VERIFY's read-back "drops it on its own" — was false. The read-back
+ * is ONE-SHOT: verify_one() clears `verify_at_ms` the first time the rail
+ * matches and nothing re-arms it, so a shed rung or an OV latch 30 s into a
+ * 600 s lease finds nothing pending and leaves a setpoint lease standing over a
+ * rail that is gone, still claiming the millivolts a technician asked for.
+ *
+ * The one-shot property is asserted here rather than taken on trust, because it
+ * is the whole reason the id has to be in the list.
+ */
+static void test_the_rb_subject_withdraws_the_setpoint_too(void)
+{
+	const char *const *ids;
+	size_t n = 0U;
+	size_t i;
+	bool found = false;
+	uint32_t sid = session();
+	size_t obj;
+	const mp_lease_t *l;
+
+	ids = sts_mp_veto_objects(STS_MP_VETO_RB_RAIL, &n);
+	TEST_ASSERT_NOT_NULL(ids);
+	for (i = 0U; i < n; i++) {
+		if (strcmp(ids[i], "pwr.rb.vset_mv") == 0) {
+			found = true;
+		}
+	}
+	TEST_ASSERT_TRUE_MESSAGE(found,
+				 "the rubidium veto no longer withdraws the "
+				 "VCC_RB setpoint lease");
+	/* The OV subject is the same list, so it is covered by the same fix. */
+	ids = sts_mp_veto_objects(STS_MP_VETO_RB_OV, &n);
+	TEST_ASSERT_NOT_NULL(ids);
+	found = false;
+	for (i = 0U; i < n; i++) {
+		if (strcmp(ids[i], "pwr.rb.vset_mv") == 0) {
+			found = true;
+		}
+	}
+	TEST_ASSERT_TRUE(found);
+
+	/*
+	 * Why it has to be in the list: the read-back fires once and disarms.
+	 */
+	obj = hold("pwr.rb.vset_mv", 12000, sid);
+	l = mp_ovr_lease(&g_c.ovr, obj);
+	TEST_ASSERT_NOT_NULL(l);
+	TEST_ASSERT_TRUE_MESSAGE(l->verify_at_ms != 0U,
+				 "the setpoint grant armed no read-back at all");
+
+	/* One healthy read-back at the deadline... */
+	g_ilk.vcc_rb_mv = 12000;
+	g_now += MP_RB_VERIFY_DELAY_MS + 1U;
+	TEST_ASSERT_EQUAL_INT(0, mp_ovr_tick(&g_c.ovr, &g_ilk, g_now));
+	TEST_ASSERT_NOT_NULL(mp_ovr_lease(&g_c.ovr, obj));
+	TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+		0U, l->verify_at_ms,
+		"the read-back did not disarm, so this test's premise is stale");
+
+	/*
+	 * ...and now the rail goes away. Nothing re-arms, so the lease stands
+	 * over a rail that is not there: only the veto can withdraw it.
+	 *
+	 * 8x the read-back delay, not minutes: the dead-man is
+	 * MP_KEEPALIVE_TTL_MS (5 s) and a lease dropped by a lapsed session
+	 * would look exactly like a re-armed read-back doing its job.
+	 */
+	g_ilk.vcc_rb_mv = 0;
+	g_now += MP_RB_VERIFY_DELAY_MS * 8U;
+	TEST_ASSERT_EQUAL_INT(0, mp_ovr_tick(&g_c.ovr, &g_ilk, g_now));
+	TEST_ASSERT_EQUAL_UINT32(0U, l->verify_at_ms);
+	TEST_ASSERT_NOT_NULL_MESSAGE(
+		mp_ovr_lease(&g_c.ovr, obj),
+		"the read-back re-armed itself, which would make the header's "
+		"old claim true and this list entry unnecessary");
+	TEST_ASSERT_EQUAL_UINT32(0U, g_c.ovr.verify_failures);
+}
 
 /* --------------------------------------------------------------------- main */
 
@@ -1583,6 +1816,10 @@ int main(void)
 	RUN_TEST(test_the_drain_claims_the_mask_before_it_works);
 	RUN_TEST(test_the_latch_then_refuses_a_regrant);
 
+	RUN_TEST(test_a_gate_off_request_arms_no_read_back);
+	RUN_TEST(test_a_gate_off_lease_survives_the_read_back_deadline);
+	RUN_TEST(test_a_ceiling_below_the_floor_is_refused);
+	RUN_TEST(test_the_rb_subject_withdraws_the_setpoint_too);
 	RUN_TEST(test_every_vetoed_object_exists);
 	RUN_TEST(test_every_reason_fits_the_wire);
 	RUN_TEST(test_only_the_off_direction_raises_a_veto);

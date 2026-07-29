@@ -73,22 +73,31 @@
  *     grant and once at revert — so an override cannot fight the park list at
  *     the pin, and FMT §5.1.3 reverts everything at the next boot anyway.
  *
- *   - THE VCC_RB SETPOINT objects are not in the RUBIDIUM RAIL row, which is a
- *     narrower statement than it used to be here. pwrseq's rail drop is
- *     RB_PWR_EN and RB_VCC_GATE; it does not touch the digipot, so a setpoint
- *     lease is not contrary to THAT action, and `pwr.rb.vset_mv` additionally
- *     carries MP_ILK_RB_VERIFY, so mp_ovr_tick()'s read-back drops it on its
- *     own ("VCC_RB out of window") once the rail goes away. What it IS contrary
- *     to is pwrseq writing the wiper itself, in stage 8 — and that is
- *     DELIBERATELY still not mapped, on the rule stated above rather than by
- *     omission: PWRSEQ_ACT_DIGIPOT_WRITE runs on every bring-up, so a subject
- *     for it would raise a veto on every boot and make `mp status`'s veto
- *     counters mean nothing. The residue is the same shape as the ON-direction
- *     caveat and is covered the same way — the read-back reports the code the
- *     part actually holds (sts_pwrseq_rb_expected_mv), and if the rewrite moves
- *     the RAIL, MP_ILK_RB_VERIFY drops the lease on its own. `pwr.rb.pot.code`
- *     is in neither: it is refused outright (mp_glue.c prov_ilk), so no lease
- *     on it can exist to withdraw.
+ *   - THE VCC_RB SETPOINT `pwr.rb.vset_mv` IS in the RUBIDIUM RAIL row, and the
+ *     argument for leaving it out was simply wrong. pwrseq's rail drop is
+ *     RB_PWR_EN and RB_VCC_GATE and does not touch the digipot, so a setpoint
+ *     lease is not contrary to the WRITE — but it is contrary to the CLAIM, and
+ *     a lease is a claim: it says the rail is at the millivolts the technician
+ *     asked for. Once RB_VCC_GATE is open that claim is false, and a stale
+ *     claim on a rail is exactly what the veto path exists to withdraw.
+ *
+ *     What used to stand here was "MP_ILK_RB_VERIFY's read-back drops it on its
+ *     own". IT DOES NOT. The read-back is ONE-SHOT: verify_one() clears
+ *     `verify_at_ms` the first time the rail matches and nothing re-arms it
+ *     (mp_override.c), so a shed rung or an OV latch 30 s into a 600 s lease
+ *     finds no read-back pending and leaves the setpoint lease standing. Adding
+ *     the id makes the claim true rather than documenting the hole.
+ *
+ *     What is still DELIBERATELY not mapped is pwrseq writing the wiper itself,
+ *     in stage 8 — on the rule stated above rather than by omission:
+ *     PWRSEQ_ACT_DIGIPOT_WRITE runs on every bring-up, so a subject for it would
+ *     raise a veto on every boot and make `mp status`'s veto counters mean
+ *     nothing. That residue is the same shape as the ON-direction caveat and is
+ *     covered the same way — the read-back reports the code the part actually
+ *     holds (sts_pwrseq_rb_expected_mv), and a rewrite that moves the rail while
+ *     a read-back is still pending drops the lease. `pwr.rb.pot.code` is in
+ *     neither: it is refused outright (mp_glue.c prov_ilk), so no lease on it
+ *     can exist to withdraw.
  *
  * ---------------------------------------------------------------------------
  * Why the reason strings are constants here and not passed by the caller
@@ -241,6 +250,15 @@ static inline const char *const *sts_mp_veto_objects(sts_mp_veto_t s,
 	static const char *const rb[] = {
 		"pwr.rb.en",   /* RB_PWR_EN    PB7 */
 		"pwr.rb.gate", /* RB_VCC_GATE  PB1 */
+		/*
+		 * The SETPOINT, not just the two enables. A lease on it
+		 * claims the rail sits at the millivolts it asked for, and
+		 * that claim outlives the rail: the MP_ILK_RB_VERIFY
+		 * read-back is one-shot and is long since cleared by the
+		 * time a shed rung or an OV latch drops the gate. See the
+		 * header note above.
+		 */
+		"pwr.rb.vset_mv", /* VCC_RB via U43 MCP41U83 */
 	};
 	static const char *const ant[] = {
 		"pwr.ant.bias.en", /* ANT_BIAS_EN PC9 */

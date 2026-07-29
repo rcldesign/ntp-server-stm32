@@ -241,6 +241,28 @@ int mp_ilk_eval(size_t obj, int32_t req, const mp_ilk_state_t *st,
 				out->failed = MP_ILK_RB_VMAX;
 				return -EPERM;
 			}
+			if (hi < o->min) {
+				/*
+				 * The same inverted-window refusal the CODE
+				 * branch above makes, and for the same reason:
+				 * with the ceiling below the manifest FLOOR the
+				 * two clamps fight, the floor runs second and
+				 * wins, and the value leaves this block ABOVE
+				 * `hi`. mp_obj_check_value() then passes it —
+				 * it re-checks the manifest envelope, which is
+				 * not the envelope being escaped — so the clamp
+				 * would have silently published a rail above
+				 * the configured ceiling.
+				 *
+				 * Unreachable while cfg pwr.rb.vmax.mv floors
+				 * at 4510 mV and `pwr.rb.vset_mv` floors at
+				 * RB_MV_MIN, i.e. the same number; live the
+				 * moment either bound moves, which is what this
+				 * refusal is for.
+				 */
+				out->failed = MP_ILK_RB_VMAX;
+				return -EPERM;
+			}
 			if (out->value > hi) {
 				out->value = hi;
 				out->clamped = true;
@@ -265,7 +287,30 @@ int mp_ilk_eval(size_t obj, int32_t req, const mp_ilk_state_t *st,
 		out->tunnel = (req != 0);
 	}
 	if ((mask & MP_ILK_RB_VERIFY) != 0U) {
-		out->verify = true;
+		/*
+		 * Only a request that can MOVE the rail earns a read-back.
+		 *
+		 * This was unconditional, so a lease taking `pwr.rb.gate` OFF
+		 * scheduled a VCC_RB read-back as well. Nothing about that
+		 * request raises the rail — Q25 disconnects VCC_RB_G from the
+		 * FE-5680A, it does not change the buck output INA228 0x47
+		 * measures — and `rb_expected_mv` is 0 whenever the platform
+		 * has not read the digipot wiper back, so verify_one() compared
+		 * a live ~14 V rail against 0 mV +-100, dropped the lease at
+		 * MP_RB_VERIFY_DELAY_MS, blamed a request that cannot have
+		 * moved the rail, and burned a `verify_failures` count on the
+		 * way.
+		 *
+		 * `req`, not `out->value`, and not a kind test: the only two
+		 * objects carrying this interlock are `pwr.rb.gate` (BOOL, so
+		 * req == 0 is the off direction) and `pwr.rb.vset_mv`, whose
+		 * floor is RB_MV_MIN — mp_ovr_grant() range-checks the RAW
+		 * request against the manifest envelope BEFORE calling this, so
+		 * a setpoint of 0 is refused there and never reaches here. A
+		 * setpoint request therefore always arrives non-zero and always
+		 * keeps its read-back.
+		 */
+		out->verify = (req != 0);
 	}
 
 	return 0;

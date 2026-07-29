@@ -582,6 +582,13 @@ void mp_ovr_disarm(mp_ovr_ctx_t *c);
  * @retval -EPERM    An interlock refused; @p res->failed names it.
  * @retval -ENOLINK  Link down or session invalid.
  * @retval -ENOSPC   Lease table full.
+ * @retval -EBUSY    The apply callback answered -EBUSY: something else already
+ *                   holds the resource. NOT a veto — no MP_OVR_EV_VETO and
+ *                   `vetoes` does not move — because on the path that produces
+ *                   it the something else is the technician's own other lease
+ *                   (hold `ref.rb.serial`, open `ref.rb.tunnel`, re-command the
+ *                   relay). mp_map_errno() maps it to MP_E_BUSY, the retryable
+ *                   answer, whose remedy is "close the tunnel and re-issue".
  * @retval -EACCES   The apply callback vetoed a value it understood.
  */
 int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
