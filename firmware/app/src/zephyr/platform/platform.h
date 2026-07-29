@@ -504,7 +504,24 @@ int rb_serial_tunnel_open(rb_serial_tunnel_cb_t cb, void *user);
  */
 int rb_serial_tunnel_write(const uint8_t *data, size_t len);
 
-/** Give the port back. Idempotent. */
+/**
+ * Give the port back, and pay any deferred K1 restore.
+ *
+ * Idempotent: with no tunnel open it does nothing and succeeds. But it is not
+ * necessarily side-effect free — a move to the RS-232 fail-safe position that
+ * rb_serial_set_mode() refused while the tunnel held the port is honoured here,
+ * after the port is released, and it blocks for RB_SERIAL_RELAY_SETTLE_MS when
+ * it is. See sts_rb_serial_policy.h.
+ *
+ * @retval 0        Port released; nothing was owed, or the deferred restore was
+ *                  performed.
+ * @retval -ENODEV  Not initialised.
+ * @retval other    The port WAS released, but the deferred restore could not
+ *                  drive the relay: a GPIO error, passed through. The obligation
+ *                  is discharged either way rather than left standing for an
+ *                  unrelated later close, so K1 is where rb_serial_mode() says
+ *                  and a caller that cares must re-issue the move.
+ */
 int rb_serial_tunnel_close(void);
 
 /** True while a tunnel holds the port. */

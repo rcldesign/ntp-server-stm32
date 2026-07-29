@@ -1877,55 +1877,73 @@ static span_t fn_body(const char *sig)
 /**
  * A release refused because a tunnel held UART7 must still reach the relay.
  *
- * Two halves and one ordering, all three load-bearing:
+ * The RULE now lives in platform/sts_rb_serial_policy.h and is EXECUTED by
+ * tests/host/test_rb_serial_policy.c: which moves a live tunnel refuses, which
+ * of those refusals is owed, why the RS-232 and CMOS directions are not
+ * symmetric, and why an unconditional restore on close would be worse than the
+ * bug it replaced. It had to move to be testable at all — rb_serial.c needs a
+ * devicetree, a UART ISR and k_msleep() to link, so everything that could be
+ * said about it from here was said by reading its text.
  *
- *   set_mode()      still refuses under a live tunnel (the refusal is correct
- *                   and must not be "fixed" by removing it), and records the
- *                   debt — but only for the RS-232 direction, so a refused CMOS
- *                   command stays refused rather than firing minutes later.
- *   tunnel_close()  pays it, and clears it, so a hardware failure does not
- *                   become a standing obligation to fire in a later session.
- *   the order       the discharge is BELOW the `tunnel_cb` retraction, because
- *                   set_mode() refuses whenever a tunnel holds the port and
- *                   would otherwise refuse itself and re-arm the latch.
+ * What is left for a scan is the half no host suite can see: that rb_serial.c
+ * still ASKS the policy instead of keeping a second copy of the decision, and
+ * that the two steps of the close sit either side of the retraction —
+ *
+ *   set_mode()      hands the live tunnel state to sts_rb_move_decide() and
+ *                   arms the latch under STS_RB_MOVE_OWE. The direction test
+ *                   itself appears nowhere in this file: a copy here is a copy
+ *                   nothing executes, and the two are then free to disagree.
+ *   tunnel_close()  reads sts_rb_close_decide() BEFORE retracting `tunnel_cb`
+ *                   (afterwards the policy sees no tunnel, answers
+ *                   STS_RB_CLOSE_NOTHING, and the debt disappears with nothing
+ *                   failing) and pays it AFTER (beforehand set_mode() refuses
+ *                   itself and re-arms the latch it was called to discharge).
  */
 static void test_a_release_refused_by_a_tunnel_is_paid_at_tunnel_close(void)
 {
 	span_t sm;
 	span_t tc;
+	size_t decide;
 	size_t retract;
 
 	load_source("zephyr/platform/rb_serial.c");
 
-	/* --- half 1: the refusal remembers what it refused ---------------- */
+	/* --- half 1: the refusal asks, and honours the answer ------------- */
 	sm = fn_body("int rb_serial_set_mode(uint8_t mode)");
 
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
-		1U, count_in(&sm, "return -EBUSY;"),
-		"rb_serial_set_mode() no longer refuses under a live tunnel, so "
-		"K1 can be thrown mid-passthrough");
+		1U,
+		count_in(&sm, "sts_rb_move_decide(mode, rb.tunnel_cb != NULL)"),
+		"rb_serial_set_mode() no longer puts the live tunnel state to "
+		"the policy, so whether K1 can be thrown mid-passthrough is "
+		"decided by something no suite executes");
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
-		1U, count_in(&sm, "rb.restore_rs232_on_close = true;"),
+		1U, count_in(&sm, "rb.relay.restore_rs232_on_close = true;"),
 		"a release refused by the tunnel is dropped on the floor again: "
 		"K1 stays where the previous grant put it, with no lease left "
 		"to move it");
 	TEST_ASSERT_TRUE_MESSAGE(
-		offset_in(&sm, "if (rb.tunnel_cb != NULL) {") <
-			offset_in(&sm, "rb.restore_rs232_on_close = true;"),
-		"the deferred restore is being recorded outside the tunnel "
-		"refusal it exists for");
-	TEST_ASSERT_TRUE_MESSAGE(
-		offset_in(&sm, "if (mode == (uint8_t)RB_SERIAL_MODE_RS232) {") <
-			offset_in(&sm, "rb.restore_rs232_on_close = true;"),
-		"the deferral lost its RS-232-only guard, so a refused CMOS "
-		"command now throws the relay into the commissioning position "
-		"some time after it was rejected");
+		offset_in(&sm, "case STS_RB_MOVE_OWE:") <
+			offset_in(&sm,
+				  "rb.relay.restore_rs232_on_close = true;"),
+		"the deferred restore is being recorded outside the verdict it "
+		"exists for");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&sm, "case STS_RB_MOVE_REFUSE:"),
+		"the refusal that owes NOTHING is gone, so either every refused "
+		"move now defers or none does — and the asymmetry is the whole "
+		"design");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&sm, "mode == (uint8_t)RB_SERIAL_MODE_RS232"),
+		"the RS-232-only guard was copied back into rb_serial.c, where "
+		"no host suite can execute it and it is free to drift from the "
+		"policy that is executed");
 
 	/* --- half 2: the close pays it, and only once -------------------- */
 	tc = fn_body("int rb_serial_tunnel_close(void)");
 
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
-		1U, count_in(&tc, "if (rb.restore_rs232_on_close) {"),
+		1U, count_in(&tc, "if (act == STS_RB_CLOSE_RESTORE) {"),
 		"rb_serial_tunnel_close() no longer discharges the deferred "
 		"restore, so a dead-man revert during a tunnel leaves K1 in the "
 		"commissioning position");
@@ -1934,19 +1952,26 @@ static void test_a_release_refused_by_a_tunnel_is_paid_at_tunnel_close(void)
 			     "rb_serial_set_mode((uint8_t)RB_SERIAL_MODE_RS232)"),
 		"the discharge no longer commands the relay back to RS-232");
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
-		1U, count_in(&tc, "rb.restore_rs232_on_close = false;"),
+		1U, count_in(&tc, "rb.relay.restore_rs232_on_close = false;"),
 		"the latch is never cleared, so one refused release arms every "
 		"future tunnel close");
 
-	/* --- the ordering that makes the discharge possible at all ------- */
+	/* --- the two orderings that make the discharge possible at all --- */
+	decide = offset_in(&tc, "sts_rb_close_decide(rb.tunnel_cb != NULL,");
 	retract = offset_in(&tc, "rb.tunnel_cb = NULL;");
+
+	TEST_ASSERT_TRUE_MESSAGE(
+		decide < retract,
+		"the close asks the policy AFTER retracting tunnel_cb, where it "
+		"sees no tunnel, answers STS_RB_CLOSE_NOTHING, and the debt "
+		"vanishes without anything failing");
 	TEST_ASSERT_TRUE_MESSAGE(
 		retract < offset_in(&tc, "rb_serial_set_mode("),
 		"the deferred restore moved above the tunnel_cb retraction, "
 		"where set_mode() refuses itself and re-arms the latch it was "
 		"called to discharge");
 	TEST_ASSERT_TRUE_MESSAGE(
-		retract < offset_in(&tc, "if (rb.restore_rs232_on_close) {"),
+		retract < offset_in(&tc, "if (act == STS_RB_CLOSE_RESTORE) {"),
 		"the latch is tested before the port is given back");
 }
 

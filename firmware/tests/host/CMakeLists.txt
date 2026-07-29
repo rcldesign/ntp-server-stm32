@@ -460,6 +460,16 @@ module_deps(mp_events mp fault ina228 logring util)
 # requires and a stream subscriber does not provide.
 module_deps(mp_veto mp pwrseq ina228 logring util)
 
+# `rb_serial_policy` (app/src/zephyr/platform/sts_rb_serial_policy.h) is the K1
+# RS-232/CMOS relay rule: which moves a live raw tunnel refuses, which of those
+# refusals is *owed* and paid when the tunnel closes, and why the two directions
+# are not symmetric. It sits in a header because platform/rb_serial.c cannot be
+# linked here — devicetree, a UART ISR and k_msleep() — so the rule that keeps a
+# dead-man revert from stranding K1 in a commissioning position had no executable
+# test at all, only a scan of the .c's text. Zephyr-free by construction, hence
+# the empty dependency list.
+module_deps(rb_serial_policy)
+
 # `mp_deferred` is the manifest's honesty flag, MP_OF_DEFERRED, against the
 # dispatch that defines it. FMT §4 has the host generate its whole UI from the
 # manifest, so an object that is published and then answers -ENOTSUP is a

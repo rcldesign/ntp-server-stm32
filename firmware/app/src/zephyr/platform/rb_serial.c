@@ -70,43 +70,19 @@
  * the one party here nobody can ask. That refusal is correct and it stays.
  *
  * It had one consequence nobody had followed through, and it stranded the
- * relay. The maintenance override engine reverts its leases in slot order and a
- * release that fails is counted and then forgotten (core/mp lease_drop()). So:
- * lease K1 to CMOS, open a tunnel, pull the USB cable. The dead-man releases the
- * K1 lease first, that release lands here as set_mode(RS232), it is refused
- * because the tunnel is still open, and the *next* release closes the tunnel.
- * Nothing then owns the relay and nothing ever moves it: the board runs on with
- * UART7 in a commissioning position no lease holds, and FE-5680A housekeeping
- * telemetry is silently dead until somebody reboots it.
+ * relay: an override release that lands here during a tunnel is refused, the
+ * engine counts the failure and forgets it, and the *next* release closes the
+ * tunnel — leaving K1 in a commissioning position no lease holds. So a refused
+ * move TO THE FAIL-SAFE POSITION is remembered and performed by
+ * rb_serial_tunnel_close(), while a refused move away from it is simply refused.
  *
- * So a refused move TO THE FAIL-SAFE POSITION is remembered and performed by
- * rb_serial_tunnel_close(). The asymmetry is the whole design:
- *
- *   RS-232 refused  ->  deferred, and applied on close. It is the reset
- *                       position, the documented fail-safe
- *                       (docs/rb_rs232_interface.md) and what rb_serial_init()
- *                       leaves the relay in. Something asked for the safe
- *                       state and could not have it *yet*; honouring it at the
- *                       first moment it is possible is what "fail-safe" means.
- *
- *   CMOS refused    ->  just refused. Leaving the fail-safe position is a
- *                       deliberate commissioning act for a specific FE variant.
- *                       A technician who was told -EBUSY must re-issue it
- *                       knowingly; a relay that quietly threw itself into the
- *                       commissioning position some minutes after the command
- *                       that asked for it was rejected would be worse than the
- *                       bug this replaces.
- *
- * Restoring UNCONDITIONALLY on close was the obvious alternative and it is
- * wrong, because a K1 lease and a tunnel lease are independent and simultaneous
- * by design — set CMOS *because* the variant needs CMOS, then tunnel to talk to
- * it. Closing only the tunnel would then yank the relay back to RS-232 while
- * that lease still stood, undoing the technician's commissioning decision in
- * the middle of their session and leaving core/mp's lease table claiming a
- * position the pin no longer holds. Nothing here can see the lease table, so
- * "restore only what was actually asked for" is the strongest invariant this
- * side of the seam can carry — and it needs no help from the layer or the
- * ordering that releases the lease.
+ * THAT RULE IS NOT DECIDED HERE. It lives in sts_rb_serial_policy.h — the
+ * asymmetry, why an unconditional restore on close would be worse than the bug,
+ * why the discharge must follow the retraction — and tests/host executes it
+ * there, which is the only place it can be executed at all: this file needs a
+ * devicetree, an ISR and k_msleep() to link. What stays here is the state the
+ * policy describes (rb.relay), the pin, the settle, and the ordering of the two
+ * steps in rb_serial_tunnel_close().
  */
 
 #include <errno.h>
@@ -121,10 +97,21 @@
 
 #include "fwupd/rb_fwupd.h"
 #include "zephyr/platform/platform.h"
+#include "zephyr/platform/sts_rb_serial_policy.h"
 #include "zephyr/platform/sts_rbguard.h"
 #include "zephyr/sts_app.h"
 
 LOG_MODULE_REGISTER(sts_rb_serial, CONFIG_STS1000_LOG_LEVEL);
+
+/*
+ * The policy restates the two relay positions rather than including platform.h,
+ * which drags in devicetree and the GPIO API and would put it out of reach of
+ * tests/host. These are what hold the two enumerations together: this file is
+ * the one translation unit that sees both.
+ */
+BUILD_ASSERT((int)STS_RB_POS_RS232 == (int)RB_SERIAL_MODE_RS232);
+BUILD_ASSERT((int)STS_RB_POS_CMOS == (int)RB_SERIAL_MODE_CMOS);
+BUILD_ASSERT((int)STS_RB_POS__COUNT == (int)RB_SERIAL_MODE__COUNT);
 
 #define ZEPHYR_USER DT_PATH(zephyr_user)
 #define RB_UART_NODE DT_NODELABEL(uart7)
@@ -151,7 +138,6 @@ static struct {
 	bool ready;
 	/** RB_LOCK is asserted when the pin reads LOW. Set from cfg. */
 	bool lock_active_low;
-	uint8_t mode; /**< rb_serial_mode_t */
 
 	/* receive ring, written from the UART ISR */
 	uint8_t ring[RB_RX_RING];
@@ -171,15 +157,15 @@ static struct {
 	void *volatile tunnel_user;
 
 	/*
-	 * A move to the RS-232 fail-safe position was asked for and refused
-	 * because the tunnel held the port; rb_serial_tunnel_close() owes it.
-	 * See "The deferred fail-safe restore" in the file header.
+	 * Where the relay stands, and whether a fail-safe restore is owed.
+	 * sts_rb_serial_policy.h owns what those mean and what changes them; this
+	 * file owns the pin they describe.
 	 *
 	 * Deliberately NOT volatile: unlike the two fields above it is never
-	 * touched by the ISR. It is set and consumed by the same thread-context
-	 * callers that already write rb.mode and the relay pin without a lock.
+	 * touched by the ISR. It is written by the same thread-context callers
+	 * that already drive the relay pin without a lock.
 	 */
-	bool restore_rs232_on_close;
+	sts_rb_relay_t relay;
 
 	uint32_t tx_bytes;
 	uint32_t rx_bytes;
@@ -240,17 +226,23 @@ int rb_serial_init(bool lock_active_low)
 		return -ENODEV;
 	}
 
-	rc = gpio_pin_configure_dt(&rb_mode, GPIO_OUTPUT_INACTIVE);
+	/*
+	 * Reset the model first and drive the pin to what it says, so the reset
+	 * position comes from the one place that defines it. INACTIVE on an
+	 * active-high pin is LOW, which is the RS-232 path through U46 — the
+	 * documented default. A CMOS-direct variant is an explicit commissioning
+	 * decision, never a reset state, and neither is an inherited obligation:
+	 * sts_rb_relay_reset() clears the deferred restore in the same breath.
+	 */
+	sts_rb_relay_reset(&rb.relay);
+
+	rc = gpio_pin_configure_dt(&rb_mode, sts_rb_relay_pin_active(rb.relay.pos)
+						     ? GPIO_OUTPUT_ACTIVE
+						     : GPIO_OUTPUT_INACTIVE);
 	if (rc != 0) {
 		LOG_ERR("RB_RS232_CMOS_SW configure: %d", rc);
 		return rc;
 	}
-	/*
-	 * INACTIVE on an active-high pin is LOW, which is the RS-232 path through
-	 * U46 — the documented default. A CMOS-direct variant is an explicit
-	 * commissioning decision, never a reset state.
-	 */
-	rb.mode = (uint8_t)RB_SERIAL_MODE_RS232;
 
 	rc = gpio_pin_configure_dt(&rb_lock, GPIO_INPUT);
 	if (rc != 0) {
@@ -262,7 +254,6 @@ int rb_serial_init(bool lock_active_low)
 	rb.head = 0U;
 	rb.tail = 0U;
 	rb.tunnel_cb = NULL;
-	rb.restore_rs232_on_close = false;
 
 	uart_irq_callback_user_data_set(rb_uart, uart_cb, NULL);
 	uart_irq_rx_enable(rb_uart);
@@ -280,42 +271,47 @@ int rb_serial_set_mode(uint8_t mode)
 	if (!rb.ready) {
 		return -ENODEV;
 	}
-	if (mode >= (uint8_t)RB_SERIAL_MODE__COUNT) {
+	/*
+	 * The verdict — and the deferral behind it — belongs to
+	 * sts_rb_serial_policy.h, which tests/host executes. What is left here is
+	 * the pin, the settle and the log line.
+	 */
+	switch (sts_rb_move_decide(mode, rb.tunnel_cb != NULL)) {
+	case STS_RB_MOVE_INVALID:
 		return -EINVAL;
-	}
-	if (rb.tunnel_cb != NULL) {
+	case STS_RB_MOVE_OWE:
 		/*
-		 * Refused — the relay must not move under a live passthrough.
-		 * But a refused move to the fail-safe position is owed, not
+		 * Refused — the relay must not move under a live passthrough —
+		 * but a refused move to the fail-safe position is owed, not
 		 * cancelled: without this, an override release that lands here
 		 * during a tunnel leaves K1 in the commissioning position with
-		 * no lease holding it and nothing left to move it. The whole
-		 * argument, including why the CMOS direction is NOT deferred, is
-		 * in "The deferred fail-safe restore" at the top of this file.
+		 * no lease holding it and nothing left to move it.
+		 * rb_serial_tunnel_close() pays it.
 		 */
-		if (mode == (uint8_t)RB_SERIAL_MODE_RS232) {
-			rb.restore_rs232_on_close = true;
-			LOG_WRN("rb: RS-232 restore refused (tunnel open), "
-				"deferred to tunnel close");
-		}
+		rb.relay.restore_rs232_on_close = true;
+		LOG_WRN("rb: RS-232 restore refused (tunnel open), "
+			"deferred to tunnel close");
 		return -EBUSY;
+	case STS_RB_MOVE_REFUSE:
+		/* CMOS under a tunnel: refused outright, and owed nothing. The
+		 * asymmetry is argued in the policy header. */
+		return -EBUSY;
+	case STS_RB_MOVE_APPLY:
+	default:
+		break;
 	}
 
 	/*
-	 * No "already in this mode" short-circuit, deliberately. It would save
-	 * RB_SERIAL_RELAY_SETTLE_MS on a redundant command — 20 ms on an action
-	 * a human initiates — and would cost the one case where the write has to
-	 * happen anyway: rb.mode is only updated *after* a successful
-	 * gpio_pin_set_dt(), so a failed write leaves the cached mode and the pin
-	 * disagreeing, and a short-circuit keyed on the cache would then refuse
-	 * to retry the write that is the fix. Idempotent and correct beats 20 ms.
+	 * No "already in this position" short-circuit — see sts_rb_move_decide().
+	 * rb.relay.pos is only updated *after* a successful gpio_pin_set_dt(), so
+	 * a failed write deliberately leaves the model and the pin disagreeing:
+	 * that is what makes the next attempt retry the write that is the fix.
 	 */
-	rc = gpio_pin_set_dt(&rb_mode,
-			     (mode == (uint8_t)RB_SERIAL_MODE_CMOS) ? 1 : 0);
+	rc = gpio_pin_set_dt(&rb_mode, sts_rb_relay_pin_active(mode) ? 1 : 0);
 	if (rc != 0) {
 		return rc;
 	}
-	rb.mode = mode;
+	rb.relay.pos = mode;
 	/*
 	 * The relay is a mechanical DPDT part: give the contacts time to settle
 	 * before anything is driven through them, or the first frame goes out
@@ -330,7 +326,7 @@ int rb_serial_set_mode(uint8_t mode)
 
 uint8_t rb_serial_mode(void)
 {
-	return rb.mode;
+	return rb.relay.pos;
 }
 
 /*
@@ -534,12 +530,17 @@ int rb_serial_tunnel_write(const uint8_t *data, size_t len)
 
 int rb_serial_tunnel_close(void)
 {
+	sts_rb_close_act_t act;
 	int rc = 0;
 
 	if (!rb.ready) {
 		return -ENODEV;
 	}
-	if (rb.tunnel_cb == NULL) {
+
+	act = sts_rb_close_decide(rb.tunnel_cb != NULL,
+				  rb.relay.restore_rs232_on_close);
+	if (act == STS_RB_CLOSE_NOTHING) {
+		/* No tunnel to give back. Idempotent, by contract. */
 		return 0;
 	}
 
@@ -554,22 +555,22 @@ int rb_serial_tunnel_close(void)
 	LOG_INF("rb: raw tunnel closed, normal UART7 use resumed");
 
 	/*
-	 * Pay the deferred fail-safe restore, if one is owed.
+	 * Pay the deferred fail-safe restore, if the policy said one is owed.
 	 *
 	 * AFTER tunnel_cb is retracted, and that ordering is the mechanism, not
-	 * a tidiness preference: rb_serial_set_mode() refuses whenever a tunnel
-	 * holds the port, so calling it any earlier would refuse itself and
-	 * re-arm the very latch it is meant to discharge.
+	 * a tidiness preference: sts_rb_move_decide() refuses whenever a tunnel
+	 * holds the port, so calling set_mode() any earlier would refuse itself
+	 * and re-arm the very latch it is meant to discharge. The verdict is read
+	 * above, before the retraction, precisely so the retraction cannot change
+	 * the answer between deciding and acting.
 	 *
-	 * The latch is cleared whether or not the move succeeds. A relay that
-	 * could not be driven is a hardware fault worth one loud line, not a
-	 * standing obligation to fire at an arbitrary later close in some
-	 * unrelated session. The port is given back either way — the tunnel is
+	 * The latch is cleared whether or not the move succeeds — see
+	 * STS_RB_CLOSE_RESTORE. The port is given back either way: the tunnel is
 	 * already closed above, and no GPIO failure may be allowed to keep a
 	 * passthrough alive.
 	 */
-	if (rb.restore_rs232_on_close) {
-		rb.restore_rs232_on_close = false;
+	if (act == STS_RB_CLOSE_RESTORE) {
+		rb.relay.restore_rs232_on_close = false;
 		rc = rb_serial_set_mode((uint8_t)RB_SERIAL_MODE_RS232);
 		if (rc != 0) {
 			LOG_ERR("rb: deferred K1 restore to RS-232 failed: %d",
