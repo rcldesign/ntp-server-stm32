@@ -76,11 +76,11 @@ This is the contract between firmware and the board: for each net, what the soft
 |Net (pin)                                                            |Peripheral                     |Software role & behavior                                                                                                                                                                                                                                                                                                      |
 |---------------------------------------------------------------------|-------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 |`OSC_IN` (PH0)                                                       |HSE bypass ← mux output        |Disciplined 10 MHz system reference. PLL configured **identically** for OCXO or Rb (both 10 MHz). On a mux switch, firmware bridges SYSCLK to HSI, reselects HSE, re-locks PLL (§3.5).                                                                                                                                        |
-|`OCXO Vc` (PA4)                                                      |DAC1_OUT1                      |Control output of the OCXO loop. 0–3.3 V scaled to the ±0.4 ppm pull; **center 1.65 V**. Slew-limited; never written from any thread but `discipline`. On holdover the last good value is frozen. When Rb is the active reference the DAC holds OCXO at its last disciplined value (keeps the fallback warm and near-correct).|
+|`OCXO Vc` (PA4)                                                      |DAC1_OUT1                      |Control output of the OCXO loop. 0–3.3 V scaled to the ±0.4 ppm pull; **center 1.65 V**. Slew-limited; **never written from any thread but `discipline`** — including the maintenance override, which is *posted* by the console and *drained* by `discipline` (§3.3). On holdover the last good value is frozen. When Rb is the active reference the DAC holds OCXO at its last disciplined value (keeps the fallback warm and near-correct).|
 |`OCXO Vc sense` (PA3)                                                |ADC1_INP15                     |Loop self-test + aging trend. Read each control tick; compare commanded vs sensed Vc (open-loop/DAC-fault detection); long-term drift of Vc-at-lock = oscillator aging metric.                                                                                                                                                |
 |`GPS PPS` (PA0)                                                      |TIM2_CH1 input capture (32-bit)|Primary phase reference. Capture timestamp of each GPS 1PPS against the reference-clock-derived timer; sawtooth-corrected (§3.2). The single most important measurement in the system.                                                                                                                                        |
 |`GPS TIMEPULSE2` (PC6)                                               |TIM3_CH1 input capture         |Redundant/aux PPS: cross-check against PA0, detect receiver PPS anomalies, and serve as the F9T cable-delay differential reference.                                                                                                                                                                                           |
-|`MUX_SEL` (PB6)                                                      |GPIO out                       |Reference select: 0 = OCXO (boot default), 1 = Rb. Driven only by the reference state machine (§3.5) with the glitchless sequence.                                                                                                                                                                                            |
+|`MUX_SEL` (PB6)                                                      |GPIO out                       |Reference select: 0 = OCXO (boot default), 1 = Rb. Driven only by the reference state machine (§3.5) with the glitchless sequence. A maintenance request sets the state machine's *standing reference request*; it never writes the pin (§3.5).                                                                                 |
 |`EXTREF_MON` (PB14)                                                  |TIM12_CH1 capture              |Rb-clock presence + frequency gate. Declares input-B “valid” only when edges advance **and** measured frequency ∈ 10 MHz ± band. Precondition for switching to Rb; loss forces immediate revert.                                                                                                                              |
 |`RB_LOCK` (PB13)                                                     |GPIO in, EXTI13                |Rb lock-good. Second precondition for using Rb; de-assert → immediate fail-safe revert to OCXO. Debounced.                                                                                                                                                                                                                    |
 |`RB_PWR_EN` (PB7)                                                    |GPIO out → buck EN             |Enables/stages the Rb rail. Sequenced after OCXO warm + supercaps charged (PoE budget, §10.3). Drives closed-loop rail verify on INA228 #6 before the Rb is trusted.                                                                                                                                                          |
@@ -235,6 +235,37 @@ The disciplined 10 MHz on `PH0` clocks the PLL → 250 MHz SYSCLK and, through t
 - **Telemetry:** publish phase error, frequency error, Vc (commanded + sensed via PA3), loop state, and Allan-deviation estimates (τ = 1, 10, 100 s) at 1 Hz.
 - **Locked criteria:** |phase error| and its variance under thresholds for N consecutive seconds, OCXO warm (INA228 #5 + TMP117 #1), GPS time-locked. Only then advertise stratum-1.
 
+**PA4 has one writer and two paths.** `discipline` is the only thread that writes DAC1_OUT1 —
+that rule is absolute and is not relaxed by the maintenance surface. What exists now is a
+second *path* to the same writer: the console posts a Vc override into the sequencer mailbox
+and the **discipline thread drains it**, on its own pass, in its own context. Nothing on the
+console side touches the pin. The two paths differ only in what they may command:
+
+| Path | Writer | Rule |
+|---|---|---|
+| Automatic — the loop, both park freezes, the boot centre | `discipline` | Records the code as the *release target*, and **stands aside while an override is held**. Without that, a parked loop re-emits its frozen code every second and undoes a technician's Vc within one PPS period. |
+| Maintenance override (`ref.ocxo.vc_mv` / `ref.ocxo.dac_code`) | `discipline`, draining the mailbox | Only while the loop is **parked** (re-checked at drain time, not only at grant time, because the loop can resume between the two). The two objects are two *views* of one actuator and are mutually exclusive; the drain records which view owns the override, so a release from the other view re-drives nothing. |
+
+A read-back of Vc comes from **the pin**, not from the published quality block: the quality
+block reports what the loop last *commanded*, which is the frozen code while an override holds
+the pin elsewhere.
+
+**The loop has two independent park latches, and resumes only when both are clear.**
+
+| Latch | Set by | Cleared by |
+|---|---|---|
+| Power-fail | the PFI ISR's park request (§10.3) | the PFI service, once PE8 has read de-asserted for its dwell |
+| Maintenance | a `ref.disc.park` lease | releasing that lease, or its dead-man |
+
+They are two latches rather than one shared flag because one would let either direction defeat
+the other: a PFI recovery must not resume the loop under a technician's live Vc override, and a
+maintenance release must not resume it into a browning-out rail. Every unpark path — both of
+these, plus refsel's handoff bracket (§3.5), which is *transient* rather than latched — goes
+through the same gate, so whoever clears the last holder is the one that actually resumes.
+Releasing the maintenance park while a Vc override is held is refused; a *lapsed* park lease
+cannot be refused (a release that can fail is a dead-man that cannot fire), so the drain instead
+drops the override together with the park and reports that lease withdrawn.
+
 ### 3.4 Rb management
 
 - The Rb is an **FE-5680A** standalone rubidium reference. Firmware does **not** steer it; it sequences power, reads health over UART7, and watches `RB_LOCK` + `EXTREF_MON` for a valid, in-band 10 MHz before the mux may select it.
@@ -252,6 +283,8 @@ States: `OCXO_ACTIVE` (boot default) ⇄ `RB_ACTIVE`, plus `EXTREF_ACTIVE` (hous
 - **Rb → OCXO** immediately if **either** condition drops (fail-safe). Hysteresis on re-engage prevents flapping.
 - **Glitchless switch (firmware, not a glitch-free mux IC):** the mux is a **plain 74LVC1G157 selector (U52)** — deliberately, because a dedicated glitch-free mux completes on the *outgoing* clock's edges and hangs if that source has stopped (the exact Rb-failure case). Sequence: bridge SYSCLK to HSI, command `MUX_SEL` (PB6), let the selector switch, reselect HSE, re-lock PLL, resume; the STM32 **CSS** catches a dead source. Both inputs are 10 MHz so PLL config is unchanged; the disciplined PTP clock free-wheels on HSI for the few ms of changeover and is re-aligned after.
 - The OCXO is never powered down; on `RB_ACTIVE` its DAC holds last-good so it remains an instantly-available warm fallback.
+- **Handoff bracket.** The action list opens with a discipline **park** and closes with an **unpark** around the mux flip. Both run in the discipline thread, so there is no concurrency against the loop; the park is *transient*, not one of §3.3's two latches, and the unpark goes through the same gate — a flip that completes while a power-fail or maintenance park stands must not resume steering just because refsel is finished with the pin.
+- **A maintenance reference request is a request, not a pin write.** It sets the same standing request the state machine already arbitrates (auto / force-OCXO / force-external), so the guards above are not bypassed: an out-of-band 10 MHz or an unasserted `RB_LOCK` leaves the machine on the OCXO. The request space is 3-valued while a control object's value space is 2-valued, so a lease saves and replays the prior request **verbatim** — a lease taken on a box running AUTO returns it to AUTO, not to whichever level happened to be active. What is reported back is the **active** reference, not the request; "requested external, running OCXO" is the normal reading when the guards have not passed.
 
 ### 3.6 Holdover engine
 
@@ -515,10 +548,21 @@ Closed debug in production; signed-only firmware + anti-rollback; least-privileg
 
 PI loop on enclosure temp (TMP117 #2) with oscillator temp (TMP117 #1) and die temp as inputs; drives `FAN_PWM (PE5)` 25 kHz; RPM from `FAN_TACH (PA15)`. Hysteresis + minimum duty for bearing life; **fail-safe full-speed** if the loop or MCU stalls (undriven PWM = max). Fan stall/under-speed → alarm + trap.
 
+**Resting state = maximum airflow, and a maintenance override cannot lower it.** The invariant
+(`ARCHITECTURE.md` §10 invariant 9) fixes the fan at full for every moment firmware has no live
+opinion, so a hung MCU cannot cook the box. Two consequences bind the override:
+
+- The override is a **floor**, not a level. The pin holds `max(loop, floor)`, so a lease can raise the fan and can never hold it below what the thermal loop is asking for as the enclosure heats. The floor is clamped against the loop's *own* last answer, including the fail-safe duty a declined step commands — a floor below the state the box is already in is not a floor.
+- A **release resolves to full airflow**, not to the loop's last answer. A just-lapsed lease is exactly a moment with no live opinion: the loop's answer is up to a second stale and, on a step the loop declined, is not a measurement of anything. The next 1 Hz step re-establishes the regulated duty, so the cost is bounded at one second of a fan running too fast — against the alternative of a fan running too slow in a box nobody is watching.
+
+Both decisions live in the policy header beside the loop, not in the Zephyr glue, so a host suite
+executes them rather than a source scan reading them.
+
 ### 10.3 Power sequencing & faults
 
 - **Boot order:** main 3.3 V (3V3_STM — housekeeping I²C, NOR all come up here, no gating) → release held-in-reset digital devices in order (`NOR_RST_N` PE10 → HIGH first; `LAN_RST_N` PD10 after rails+25 MHz; `DISP_RST` PA10 when UI wanted) → GPS (`GPS_PWR_EN`) + antenna bias (`ANT_BIAS_EN`) → display/touch (`DISP_EN`, when UI is needed) → OCXO warm → (when warranted) the **guarded Rb sequence** (safe digipot code → `RB_PWR_EN` → INA228 #6 0x47 verify → `RB_VCC_GATE`, §3.4). Sequencing keeps the cold-start peak inside the granted PoE budget (§ pin map 6); if PoE class can’t cover the Rb, defer/deny `RB_PWR_EN` and flag. The display rail is deferrable/low-priority — drop `DISP_EN` first under PoE pressure. Full ordered bring-up: interface ref §2.
-- **`PFI (PE8)`** ISR: persist volatile critical state, park the DAC, prepare for brownout (supercap covers the window).
+- **`PFI (PE8)`** ISR: persist volatile critical state, park the DAC, prepare for brownout (supercap covers the window). The ISR only *requests* the park — `discipline` owns the context and does the work, and the DAC keeps holding its last code meanwhile, which is the parked behaviour. Recovery is latched, not edge-driven: the park clears only after PE8 has read de-asserted for its dwell, and even then the loop resumes only if the maintenance latch (§3.3) is also clear. The persisted Vc is the value **the pin actually holds**, so a maintenance Vc override standing across a power-fail is what gets recorded (§15.2).
+- **`WDT_EN (PC12)`** is a **cadence, not a level.** Arming kicks once and seeds the supervisor's window from that same instant, so the first window opens already fed; raising the pin mid-cadence with no seed is a TPS3430 runaway fault → `WDO_N` → `POE_KILL` → the board drops its own PoE port. Disarming clears the armed flag *before* dropping the pin so the kicker stops cleanly. A maintenance lease on the watchdog restores the state it found on release, never an unconditional re-arm: a lease taken before the enable stage finds it disarmed with the liveness participants not yet all registered, and arming on release would open the window against a gate that cannot yet be satisfied. A console-injected `WDT_KICK` edge is permitted **only** with `WDT_EN` de-asserted — at any other phase it can land inside tWDL(min) and cause the runaway it is meant to test for.
 - **PoE monitor** (`POE_NCL/NCM/LCF`): track class/event/fault; gate Rb enable; trap on fault.
 - **`POE_KILL (PE15)`** for commanded cold cycle; also hardware-OR’d from WDT/thermal/latched faults. The supervisor task kicks `WDT_KICK (PB2)` only when timing/network/housekeeping liveness all pass.
 
@@ -657,3 +701,23 @@ than trusted.
   counter as attestation evidence rather than the boot gate). What remains is the *release
   process*: the counter is a security epoch, not a build number, so a human has to decide
   when a release warrants a bump.
+- **The supervisor's liveness gate is not published across the platform→console seam.** The
+  sequencer is handed it on every 4 Hz pass, but the published snapshot does not carry it, so
+  the maintenance interlock that gates *arming* the external watchdog answers a hardcoded
+  "not healthy". That refusal is fail-safe and is the right answer for an unknown gate — but
+  it is a refusal, not a measurement, and it has a live consequence: a watchdog **disarmed by
+  a maintenance lease cannot be re-armed through that object while the lease is held**. The
+  route back to armed is to release the lease, whose restore path is deliberately not
+  interlock-evaluated. Closing this means adding the term to the published snapshot.
+- **A Vc override standing across a power-fail is what the fast-save records.** §10.3's
+  fast-save notes the code on every DAC write, and a maintenance override is a DAC write, so
+  a lease held through a PFI park persists the override rather than the loop's last good Vc.
+  Arguably correct — it is what the oven is actually seeing at the instant power failed — but
+  it is a consequence of where the record is taken rather than a decision anyone made, and it
+  should be decided explicitly.
+- **The two Vc objects advertise `wired` before they can answer.** The pin-state accessor
+  reports "no reading" until the discipline thread has started, so a read of either view
+  answers `MP_E_IO` in the window between the manifest being served and the loop's first
+  pass. `MP_E_IO` is deliberately distinct from `MP_E_NOTSUP` ("not implemented") and the
+  window is short, but a host that reads the manifest at boot sees a control it cannot yet
+  read back.

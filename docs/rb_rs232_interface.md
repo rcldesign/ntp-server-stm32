@@ -394,10 +394,63 @@ meaning of a `RB_LOCK` level cannot be assumed.
 - Default to **low** at boot and hold low until the link level has been confirmed.
 - This is a **set-once-at-integration** selection in practice — the FE is a fixed
   external unit characterized once. There is no operational reason to toggle it at
-  runtime; treat it as a commissioning/config setting, not a live control.
+  runtime; treat it as a commissioning/config setting, not a live control. The field
+  maintenance surface exposes it as a **lease**, never a plain write: an override is
+  reverted by the dead-man, a link drop or session close, whereas a bare write would
+  leave the relay in the commissioning position with nothing able to return it —
+  nothing re-asserts PE4 after `rb_serial_init()`. Refusals and the deferred restore:
+  §7.2a.
 - **Determine the correct mode at commissioning,** not by guesswork: with the relay in
   RS-232 (default), attempt a known transaction (e.g. Request Frequency Offset, 0x2D).
   If it fails, the unit may be CMOS — switch the relay and retry. Persist the result.
+
+### 7.2a Moving K1 under a raw tunnel — the deferred fail-safe restore
+
+A mode change is **refused while a raw UART7 passthrough holds the port**: throwing a
+mechanical DPDT relay under a live passthrough breaks whatever the host is mid-transaction
+with, and the host is the one party firmware cannot ask. That refusal is correct in both
+directions. What the two directions do *not* share is what is owed afterwards.
+
+| Requested position | Tunnel open | Verdict | Owed at tunnel close |
+|---|---|---|---|
+| RS-232 (fail-safe) | no | apply | — |
+| RS-232 (fail-safe) | yes | refuse, `-EBUSY` | **yes** — the move is latched and paid by the close |
+| CMOS (commissioning) | no | apply | — |
+| CMOS (commissioning) | yes | refuse, `-EBUSY` | **no** — refused outright |
+
+**Why RS-232 is owed.** It is the reset position, the power-on default and this document's
+documented fail-safe. Something asked for the safe state and could not have it *yet*;
+honouring it at the first moment it becomes possible is what "fail-safe" means. Without the
+latch, a maintenance lease released while a tunnel is still open leaves K1 in the
+commissioning position with no lease holding it and nothing left able to move it — the board
+runs on with FE-5680A housekeeping telemetry silently dead until somebody reboots it. That is
+reachable in ordinary use: lease K1 to CMOS, open a tunnel, pull the cable; the K1 release
+lands first and is refused, and the *next* release closes the tunnel.
+
+**Why CMOS is not owed.** Leaving the fail-safe position is a deliberate commissioning act for
+a specific FE variant. A technician told `-EBUSY` must re-issue it knowingly. A relay that
+quietly threw itself into the commissioning position some minutes after the command asking for
+it was rejected would be worse than the bug the latch replaces.
+
+**Why the close does not simply restore unconditionally.** A K1 lease and a tunnel lease are
+independent and simultaneous by design — set CMOS *because* the variant needs CMOS, then tunnel
+to talk to it. Restoring on every close would yank the relay out from under a standing CMOS
+lease, undoing the commissioning decision mid-session and leaving the maintenance lease table
+claiming a position the pin no longer holds. "Restore only what was actually asked for" is the
+strongest invariant this layer can carry without seeing the lease table.
+
+**Ordering is the mechanism, not tidiness.** The close retracts the tunnel callback **first**,
+then pays the deferred move. Issued any earlier, the deferred move hits the same refusal that
+armed the latch, refuses itself, re-arms, and the relay never moves. The verdict is read
+*before* the retraction so the retraction cannot change the answer between deciding and acting.
+The latch is cleared whether or not the move succeeds, and the port is given back either way —
+no GPIO failure may keep a passthrough alive. `rb_serial_tunnel_close()` can therefore return a
+GPIO error; it is no longer merely "give the port back, idempotent".
+
+The decision itself is Zephyr-free (`sts_rb_serial_policy.h`, beside `sts_rbguard.h`) so a host
+suite executes it; the `.c` keeps only the GPIO write, the contact settle, the ISR and the ring.
+This is deliberate: the file cannot link into a host suite, and a source scan can tell that a
+rule is present but not that it is correct.
 
 ### 7.3 Inversion handling
 

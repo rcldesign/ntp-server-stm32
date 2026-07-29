@@ -166,6 +166,13 @@ refdes.**
   the supervisor task — **only** when timing, network, and housekeeping threads all
   report healthy. A windowed WDT means kicking unconditionally on a timer defeats
   the purpose; the kick must be gated on liveness.
+- The supervisor is PB2's **single writer**. A maintenance-injected edge is permitted
+  **only with `WDT_EN` de-asserted** — at any other time it lands at an arbitrary phase of
+  the cadence and an edge inside tWDL(min) = 680 ms of the previous one is a runaway fault,
+  i.e. the console would cold-cycle the board it is connected to. With the watchdog off
+  there is no window and no cadence to collide with, which makes the edge a usable bench
+  probe. An *unknown* watchdog state reads as armed, so the pulse is refused before the pin
+  has been configured.
 
 ### 7.2 Arm sequence (`WDT_EN`, PC12)
 1. Boot with PC12 left to its reset Hi-Z (R213 holds the WDT disabled).
@@ -189,10 +196,25 @@ for a debug session rather than frozen:
   set before release of reset. Firmware reads `CoreDebug->DHCSR & C_DEBUGEN` early
   and, if a debugger is present, **skips arming** the external WDT (leaves PC12 low →
   WDT disabled). No mid-boot race.
-- **Live toggle:** a console command (e.g. `dev wd ext off|on`) drives PC12 directly.
-  Because it is a direct GPIO, this works even with the I²C bus wedged. Gate the
-  command behind **debug-auth** (`sec` group) so a fielded unit cannot have its board
-  watchdog switched off without authorization.
+- **Live toggle:** exposed as the maintenance object `sys.wdt.en` at guard **G3**, which is
+  the "gate it behind authorization" requirement made concrete — a typed phrase and a hold.
+  Two properties of it are load-bearing and neither is a bare pin write:
+  - **It is a lease, never a plain write.** A write creates nothing that can put the
+    watchdog back, so a fielded unit could be left unwatched by a tool that walked away.
+    A lease is reverted by the dead-man, a link drop, session close or mode exit.
+  - **Arming replays the sequence in §7.2, never `WDT_EN` high on its own.** `WDT_EN`
+    carries a cadence: the arm kicks once and seeds the window from that same instant so
+    the first window opens already fed. Raising PC12 mid-cadence with no seed is the same
+    runaway class as an unscheduled WDI edge. Disarming clears the supervisor's armed flag
+    **before** dropping the pin, so the kick loop stops cleanly rather than kicking a
+    watchdog that is no longer watching.
+  A release restores the state the watchdog was in when the lease was taken — **not** an
+  unconditional re-arm. A lease taken before the supervisor has all its liveness
+  participants registered finds the watchdog disarmed, and arming on release would open the
+  window against a gate that cannot yet be satisfied: the kicker withholds, and the board
+  cold-cycles itself. Where the lease actually disabled something, the saved state is
+  *armed*, so the release does re-enable.
+  Because PC12 is a direct GPIO, all of this still works with the I²C bus wedged.
 - While disabled, `WDO` stays high and `POE_KILL` is not asserted regardless of WDI,
   so halts/single-stepping are safe.
 

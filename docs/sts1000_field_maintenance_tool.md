@@ -204,36 +204,54 @@ exists at G3 and is compiled out of release builds.
 ## 4. Capability manifest
 
 Served by the device, versioned by content hash, cached by FMT keyed on (fw version,
-hash). Abridged shape:
+hash). `hello` advertises the envelope; `manifest.get` pages the object array. As emitted:
 
 ```json
-{
-  "schema": 1, "fw": "0.2.0", "hw": "sts1000-lqfp144",
+{ "ver": 1, "hash": 3735928559, "total": 92, "from": 0, "count": 12,
+  "next": 12, "done": false, "encoding": "identity",
   "objects": [
-    { "id": "led.rgb.status", "kind": "rgb_pwm", "guard": "G0",
-      "caps": {"channels":["r","g","b"], "modes":["auto","override"]},
-      "desc": "Front-panel status RGB (D5, TIM4 CH1-3, common-anode low-side NPN)" },
-    { "id": "rail.vcc_rb", "kind": "rail", "guard": "G2",
-      "caps": {"transfer":"24.45 - 6.645*Vctrl", "set_range_mv":[4510,15000],
-               "step_code":1, "monitor":"ina228.vcc_rb"},
-      "interlocks": ["rb_vmax","rb_ov_clear","ocxo_warm","supercap_ok","measured_ceiling"] },
-    { "id": "gpio.rb_vcc_gate", "kind": "gpio_out", "guard": "G2", "default": "off" }
-  ],
-  "sensors": [ {"id":"ina228.panel_led","addr":"0x4C","rail":"panel_led_5v",
-                "channels":["v","i","p","dietemp"],"shunt_mohm":150,
-                "current_lsb_na":520.833,"fs_ma":273.1} ],
-  "streams": [...], "diags": [...], "buttons": [...], "components": [...]
-}
+    { "id": "ui.rgb.mode", "kind": "enum", "group": "panel", "guard": "G1",
+      "flags": ["read","override"], "min": 0, "max": 5, "step": 1,
+      "enum": ["auto","off","green","amber","red","blue-pulse"],
+      "net": "LED_R/G/B",
+      "desc": "D5 status RGB pattern; auto returns it to the fault policy" },
+    { "id": "pwr.rb.vset_mv", "kind": "mv", "group": "power", "guard": "G2",
+      "flags": ["read","override"], "min": 4510, "max": 24450, "step": 78,
+      "unit": "mV", "net": "VCC_RB",
+      "ilk": ["rb.vmax","rb.ov","rb.verify"],
+      "desc": "U43 MCP41U83 digipot setpoint; 24.45 - 6.645*VCTRL" },
+    { "id": "sensor.rail.panel_5v", "kind": "rail", "group": "sensor",
+      "guard": "G0", "flags": ["read"], "net": "V_PANEL_LED", "dev": "U54",
+      "shunt": "R199", "addr": 76, "shunt_uohm": 150000, "fs_ua": 273067,
+      "desc": "..." }
+  ] }
 ```
+
+Field notes — the emitted key set is exactly this; there is no `caps` object and no
+`default`:
+
+| Key | Meaning |
+|---|---|
+| `flags` | `read`, `write`, `override`, `pulse`, `active-low`, `cfg`, `deferred` — the operations the object accepts, and §4.1's honesty bit |
+| `ilk` | Interlock **names** (`rb.vmax`, `dac.sole`, `wdt.off`, …), omitted when the object carries none. §5.5 |
+| `min`/`max`/`step` | Emitted only for kinds that have a range; `step` only when non-zero |
+| `unit`, `enum` | Emitted only when the object has them |
+| `cfg` | The cfg key id, emitted only for `cfg`-flagged objects |
+| `net` | Canonical net name from the peripheral map. A `rail` object emits the INA228 block instead — `net`, `dev`, `shunt`, `addr`, `shunt_uohm`, `fs_ua` — and a logical object such as `ui.lamp.test` emits no `net` at all |
+| `desc` | Carries the schematic designator, so the GUI cross-links to the schematic |
 
 Rules:
 - Every object the firmware can touch **must** appear. FMT renders unknown `kind`s as
   generic get/set widgets, so new firmware features are usable without a tool release.
-- `guard`, `interlocks` and limits are **enforced device-side**; the manifest copy lets
+- `guard`, `ilk` and limits are **enforced device-side**; the manifest copy lets
   the UI annotate before the user tries.
-- Strings carry designators (D5, K2, U44…) so the GUI cross-links to the schematic.
-- `set_range_mv` for `rail.vcc_rb` is **derived at runtime** from the configured
-  `pwr.rb.vmax_mv` — it is not a fixed 10–18 V window.
+- The published `min`/`max` for `pwr.rb.vset_mv` is the supply's **full electrical range**
+  (4510–24450 mV), not the configured window: the tool has to be able to show an operator
+  that the ceiling is a *setting*, and the ceiling is itself an object (`pwr.rb.vmax_mv`).
+  The `rb.vmax` interlock clamps every request to it at set time (§5.5).
+- The manifest is served **uncompressed** and says so (`"encoding": "identity"`, and
+  `"gzip": false` in the `hello` envelope). The spec's gzip path is optional and no
+  compressor is linked, so a host is told rather than left to infer it from a missing field.
 
 ### 4.1 `deferred` — the manifest says which controls are not implemented
 
@@ -248,13 +266,30 @@ at the bench. The device says so in advance: every object's `flags` array carrie
 | Scope | An object declaring `write`, `override` or `pulse` is `deferred` when **none** of its mutations reaches an actuator. A read-only object is `deferred` when `obj.get` cannot answer it. One bit cannot say more, so for an object that both mutates and reads the flag describes the **mutation** — the operation whose absence a technician discovers by acting on the board. |
 | Enforcement | Not advisory. `obj.set`, `obj.override` and `obj.pulse` refuse a deferred object with `MP_E_NOTSUP` **before the guard runs**, so an unimplemented G3 object cannot spend a typed phrase and a hold before admitting it does nothing, and an unimplemented G2 object cannot spend the typed device serial. |
 | Not availability | An object *without* the flag answers every operation it declares. It may still return `MP_E_IO` when a sensor sweep has not landed — deliberately a different error from `MP_E_NOTSUP`, which now means exactly one thing board-wide: *not implemented*. |
-| Under-report | Three objects mutate but have no read-back: `ui.identify` (a write-only beacon) and `pwr.poe.kill` / `pwr.rb.ov.reset` (momentary pulses whose pin rests deasserted). They are not `deferred` — their control works — and the set is pinned by name in `tests/host/test_mp_deferred.c` so it cannot grow silently. |
+| Under-report | Six objects mutate but have no read-back: `ui.identify` (a write-only beacon) and `pwr.poe.kill` / `pwr.rb.ov.reset` / `sys.phy.reset` / `gnss.extint` / `sys.wdt.kick` (momentary pulses whose pin rests deasserted, so the only thing a read could report is "not pulsing now"). They are not `deferred` — their control works — and the set is pinned by name in `tests/host/test_mp_deferred.c` so it cannot grow silently. What a technician confirms before pulsing `sys.wdt.kick` is `sys.wdt.en`, which does read back. |
 
-As built: **41 of 91** objects carry `deferred` — 30 of the 39 mutable objects and 11
-read-only sensors. The nine objects with an actuator behind them are `ui.panel.duty`,
-`ui.identify`, `ref.rb.serial`, `gnss.tunnel`, `ref.rb.tunnel` (apply), `pwr.poe.kill`,
-`pwr.rb.ov.reset` (pulse) and `pwr.rb.vmax_mv`, `pwr.poe.budget_mw` (cfg-backed writes).
-`obj.get` answers **47 of 91**. The four sensors added last — `sensor.rb.lock`,
+As built: **20 of 92** objects carry `deferred` — 9 of the 40 mutable objects and 11
+read-only sensors. **31 mutable objects reach an actuator**; `obj.get` answers
+**66 of 92**. The wired mutations, by route:
+
+| Route | Objects |
+|---|---|
+| `obj_apply`, synchronous | `ui.identify`, `ref.rb.serial`, `gnss.tunnel`, `ref.rb.tunnel`, `ref.mux.sel`, `sys.wdt.en` |
+| `obj_apply`, sequencer mailbox (18 rows) | `pwr.gps.en`, `pwr.ant.bias.en`, `pwr.disp.en`, `pwr.panel.led.en`, `pwr.rb.gate`, `pwr.rb.vset_mv`, `ref.term.en`, `ref.disc.park`, `ref.ocxo.vc_mv`, `ref.ocxo.dac_code`, `ui.panel.duty`, `ui.disp.bl`, `ui.rgb.mode`, `ui.rgb.r`, `ui.rgb.g`, `ui.rgb.b`, `ui.lamp.test`, `sys.fan.duty` |
+| `obj_pulse` | `pwr.poe.kill`, `pwr.rb.ov.reset`, `sys.phy.reset`, `gnss.extint`, `sys.wdt.kick` |
+| `cfg_write` (`mp_rpc.c`, not the glue) | `pwr.rb.vmax_mv`, `pwr.poe.budget_mw` |
+
+The nine mutable objects still deferred, by reason: **no accessor crosses the area seam**
+(`sys.nor.reset`, `gnss.dsel`); **the interlock refuses on purpose** (`pwr.rb.pot.code`,
+§5.5); **the seam is open** (`pwr.rb.en`, `ref.relay.hold`, `sys.smp.tunnel`, `gnss.reset`,
+`gnss.safeboot`, `ui.disp.reset`). `pwr.rb.en` is the one rail of its group that stays
+deferred and it is not oversight: a lease on PB7 cannot honour the Rb enable order
+(spec §3.4) in either direction — raising it energizes the FE from a rail nothing
+re-verified while `RB_VCC_GATE` is already asserted, lowering it drops the supply under a
+connected load — and its release has nowhere honest to go. The eleven deferred sensors are
+the 1 kHz scan's own inputs, which are not published object-by-object.
+
+The four sensors added last — `sensor.rb.lock`,
 `sensor.rb.ov`, `sensor.extref.hz`, `sensor.pwrseq.stage` — are copies from the same
 `sts_pwrseq_snap_t` seqlock read the mux-guard interlock already takes, so the signal
 behind a refusal is now visible beside it. `rb.lock` is `RB_LOCK` (PB13) with the
@@ -332,12 +367,24 @@ not pass through the action queue:
 
 | Firmware action | Subject | Objects withdrawn | Reason on the wire |
 |---|---|---|---|
-| `RB_PWR_DIS` / `RB_VCC_GATE_DIS` with `pwrseq_ov_latched()` | `RB_OV` | `pwr.rb.en`, `pwr.rb.gate` | `Rb 26 V OV latch tripped` |
-| `RB_PWR_DIS` / `RB_VCC_GATE_DIS` otherwise (intent withdrawn, rail out of window, shed rung 3) | `RB_RAIL` | `pwr.rb.en`, `pwr.rb.gate` | `pwrseq dropped the Rb rail` |
+| `RB_PWR_DIS` / `RB_VCC_GATE_DIS` with `pwrseq_ov_latched()` | `RB_OV` | `pwr.rb.en`, `pwr.rb.gate`, `pwr.rb.vset_mv` | `Rb 26 V OV latch tripped` |
+| `RB_PWR_DIS` / `RB_VCC_GATE_DIS` otherwise (intent withdrawn, rail out of window, shed rung 3) | `RB_RAIL` | `pwr.rb.en`, `pwr.rb.gate`, `pwr.rb.vset_mv` | `pwrseq dropped the Rb rail` |
 | `ANT_BIAS_DIS`, and the supervisor's latched-short write | `ANT_BIAS` | `pwr.ant.bias.en` | `antenna bias short latched` |
 | `DISP_DIS` (shed rung 1, stage fail-action) | `DISPLAY` | `pwr.disp.en` | `display shed (power/thermal)` |
 | `PANEL_LED_DIS` (shed rung 2, stage fail-action) | `PANEL_LED` | `pwr.panel.led.en`, `ui.panel.duty` | `panel LED shed (power/thermal)` |
 | `GPS_PWR_DIS` (stage fail-action) | `GPS_RAIL` | `pwr.gps.en` | `pwrseq dropped the GPS rail` |
+
+**The VCC_RB setpoint is in the rubidium rows, and a lease is a claim rather than a write.**
+`pwrseq`'s rail drop is `RB_PWR_EN` and `RB_VCC_GATE`; it does not touch the digipot, so a
+setpoint lease is not contrary to the *write* — but it is contrary to the *claim*, which is that
+the rail sits at the millivolts the technician asked for. Once `RB_VCC_GATE` is open that claim
+is false, and a stale claim on a dead rail is exactly what the veto path exists to withdraw. The
+read-back does **not** drop it unaided: `MP_ILK_RB_VERIFY` is one-shot — the verify time is
+cleared the first time the rail matches and nothing re-arms it — so a shed rung 30 s into a 600 s
+lease finds no read-back pending and leaves the setpoint standing. What is still deliberately
+unmapped is `pwrseq` writing the wiper itself in stage 8, on the rule below: it runs on every
+bring-up, so a subject for it would raise a veto on every boot and make the counters meaningless.
+`pwr.rb.pot.code` is in neither list — it is refused outright, so no lease on it can exist.
 
 Only the **off** direction is mapped. Firmware bringing a load up under a lease that wants
 it off is the weaker symmetrical case and mapping it would fire a veto on every bring-up,
@@ -374,17 +421,24 @@ be dropped — a lost veto is an override left standing against a dead rail.
 
 ### 5.5 Hard interlocks (device-enforced, non-overridable)
 
-| Interlock | Rule |
-|---|---|
-| **VCC_RB setpoint** | Three independent defenses: (a) an out-of-range wiper code resolves to the **safe-low** end, never maximum; (b) a commanded setpoint whose *expected* rail exceeds `pwr.rb.vmax_mv` is refused; (c) the **measured** rail on INA228 0x47 must be ≤ `pwr.rb.vmax_mv` — a check that consults no digipot code, so a runaway rail cannot validate itself. Refused outright if RB_OV_DET is latched. Post-set read-back verify with auto-revert. |
-| RB_PWR_EN on | Refused unless OCXO warm and supercap PG good and PoE headroom covers the Rb cold start. |
-| RB_VCC_GATE | Only after the safe-precharge rail *and* the operating-setpoint rail have both verified in-window. Teardown is always gate-before-supply. |
-| POE_KILL | UI must display the latch consequence (recovery may require a PSE port cycle). No pulse shorter than the documented off-time. |
-| Fan override | Duty floor from the thermal loop; the over-temp ladder always wins; a stalled loop forces 100 %. |
-| K2 holdover relay | Force-de-energize (assert alarm downstream) allowed; force-energized-while-fault refused. |
-| DISP_EN | Soft-start fault-mask window enforced; minimum off-time before re-enable. |
-| Watchdog | Arming requires the supervisor's liveness gate healthy. `diag.wdt_test` uses the sanctioned window-violation test, never a raw disable. |
-| GNSS/Rb passthrough | Suspends firmware's own use of that UART, flags the reference suspect, and auto-restores on tunnel close. **Leased only** — see below. |
+Fourteen bits, published per object so the tool can explain a refusal before it happens.
+
+| Interlock | Bit(s) | Rule |
+|---|---|---|
+| **VCC_RB setpoint** | `rb.vmax`, `rb.ov`, `rb.verify` | Three independent defenses: (a) an out-of-range wiper code resolves to the **safe-low** end, never maximum; (b) a commanded setpoint whose *expected* rail exceeds `pwr.rb.vmax_mv` is refused; (c) the **measured** rail on INA228 0x47 must be ≤ `pwr.rb.vmax_mv` — a check that consults no digipot code, so a runaway rail cannot validate itself. Refused outright if RB_OV_DET is latched. Post-set read-back verify with auto-revert. The clamp the reply quotes is `sts_pwrseq_rb_vmax_mv()` — the same field `sts_rb_code_for_mv()` bounds every drained setpoint against — so the ceiling a technician is quoted is the one the sequencer will honour, and there is one number rather than two policies. |
+| RB_PWR_EN on | `rb.warm`, `rb.ov` | Refused unless OCXO warm and supercap PG good and PoE headroom covers the Rb cold start. |
+| RB_VCC_GATE | `rb.ov`, `rb.verify` | Only after the safe-precharge rail *and* the operating-setpoint rail have both verified in-window. Teardown is always gate-before-supply. `rb_expected_mv` is the rail the **read-back wiper** implies, and 0 when the platform does not know — never the configured ceiling, which would auto-revert every gate lease on a unit whose operating setpoint sits more than `MP_RB_VERIFY_TOL_PCT` from it. The read-back is armed on `req != 0` only: opening Q25 disconnects `VCC_RB_G` from the FE and does not move the buck output INA228 0x47 measures, so an unconditional verify compared a live rail against `rb_expected_mv` and dropped the lease for a request that cannot have changed it. |
+| POE_KILL | — | UI must display the latch consequence (recovery may require a PSE port cycle). No pulse shorter than the documented off-time. |
+| Fan override | `fan.floor` | The override is a **floor**, not a level: the pin holds `max(thermal loop, floor)`, so a lease raises the fan and can never hold it below what the loop asks for as the box heats. The over-temp ladder always wins; a stalled loop forces 100 %. The floor clamps against the loop's own last answer *including* the fail-safe duty a declined step commands — a floor below the state the box is already in is not a floor. |
+| K2 holdover relay | `relay.ok` | Force-de-energize (assert alarm downstream) allowed; force-energized-while-fault refused. |
+| DISP_EN | `disp.offtime` | Soft-start fault-mask window enforced; `MP_DISP_MIN_OFF_MS` (1000 ms) minimum off-time before re-enable. The interlock refuses a **grant** that would break it. A **release** is never refusable — the dead-man takes the same path and a release that could fail is a dead-man that cannot fire — so a release that would *raise* the rail is **deferred** in the mailbox until the off-time has elapsed, and re-executed on a later pass. Dropping the rail, or holding it down, never waits. The clock is `pwrseq_rail_t::off_ms`, stamped on the high→low edge by the pin's single writer; the console's 250 ms level sampling cannot see an off-then-on inside one pass. Bounded by construction: the wait is inside `MP_APPLY_SETTLE_MS`, so a deferred grant still settles before the lease watchdog would drop it. |
+| Watchdog arm | `wdt.liveness` | Arming requires the supervisor's liveness gate healthy. `diag.wdt_test` uses the sanctioned window-violation test, never a raw disable. |
+| Watchdog WDI edge | `wdt.off` | A console-injected edge on `WDT_KICK` (PB2) lands at an arbitrary phase of the supervisor's kick cadence (nominal 1.10 s, valid window 920–1360 ms); an edge arriving within tWDL(min) = 680 ms of the previous one is a TPS3430 runaway fault → `WDO_N` for ~200 ms → `POE_KILL`, and the board drops its own PoE port (`sts1000_external_wdt.md` §4). The pulse is therefore gated on `WDT_EN` **de-asserted** — the one state in which the edge is harmless — and the refusal has no `req` term, because an edge is an assertion with no de-assert direction to exempt. An unknown watchdog reads as *watching*: `sts_supervisor_wdt_state()` answers `-ENODEV` before PC12 is configured and that path reports armed. |
+| Clock mux | `mux.guard` | `EXTREF_MON` in band **and** `RB_LOCK` asserted, both read as hardware (below). The write itself never touches PB6 — it sets the reference state machine's standing request (§6.3). |
+| OCXO Vc | `dac.park`, `dac.sole` | `ref.ocxo.vc_mv` and `ref.ocxo.dac_code` are refused unless the discipline loop is **parked**, and refused while the *other* view of DAC1_OUT1 is leased. The two views are one actuator: leased together with different values, whichever settled last would be the pin and the other lease would report a Vc the oven has never seen. `dac.sole` is judged on the lease register, not on the pin, because the pin's override bit lags a grant by one drain. |
+| Discipline park | `dac.idle` | `ref.disc.park = 0` is refused while either Vc object is leased — releasing the park under a live override would leave the loop and the console fighting for PA4. `req == 0` only: taking or re-taking the park is never the dangerous direction. It covers the **deliberate** release; the involuntary one (a lapsed lease reaches `obj_apply()` with a NULL value and no interlock is evaluated on that path) is closed in the discipline thread's drain, which drops the override *with* the park and settles the Vc row REFUSED. |
+| GNSS/Rb passthrough | `tunnel` | Suspends firmware's own use of that UART, flags the reference suspect, and auto-restores on tunnel close. **Leased only** — see below. |
+| K1 RS-232/CMOS relay | — | `ref.rb.serial` is refused with `MP_E_BUSY` while a raw tunnel holds UART7. A refused move **to RS-232** is owed and paid when the tunnel closes; a refused move to CMOS is simply refused (`docs/rb_rs232_interface.md` §7.2a). |
 
 **What each interlock actually measures, and which terms are still refusals.** An
 interlock evaluated from a *derived* value is not an interlock. `MP_ILK_MUX_GUARD`
@@ -397,28 +451,42 @@ half: `rb_lock` ← `RB_LOCK` (PB13, per-unit polarity applied) and `extref_ok` 
 `EXTREF_MON` (PB14/TIM12) measured *and* in band — the two hardware signals spec §3.5
 names for the handoff. Same defect class as the panel's `rb_locked`.
 
-Three terms still refuse unconditionally. Each now says which kind it is:
+Where each term's value comes from, and what it costs when the answer is not a measurement:
 
-| Term | Verdict | Why |
+| Term | Verdict | Detail |
 |---|---|---|
-| `pwr.rb.pot.code` (`rb_code_min > rb_code_max`) | **Deliberate, permanent** | The safe wiper window needs `pwrseq`'s VCC_RB transfer function and safe-code bounds, neither of which crosses `sts_app.h`. This is the one object where guessing is unacceptable — a raw code outside the envelope can destroy the FE-5680A. `pwr.rb.vset_mv`, bounded by cfg `pwr.rb.vmax.mv`, is the supported route; the raw code stays published so a technician can *see* it is refused. |
-| `sys.wdt.en` / `sys.wdt.kick` (`liveness_ok = false`) | **Fail-safe stub**, and both halves are true | *Stub:* the supervisor's liveness gate is published nowhere this area can read — `pwrseq_in_t::liveness_ok` exists but `sts_pwrseq_snap_t` does not carry it, so `false` is not a measurement. *Fail-safe:* it is nevertheless the right answer — arming the TPS3430 window watchdog with the gate unknown risks a window violation and a board reset, and an unknown gate is not a healthy one. Making it an observation means adding the term to the published snapshot. |
-| `pwr.disp.en` (`MP_ILK_DISP_OFF`) | **Was a stub; now observed** | `disp_on` was hard `false` and `disp_changed_ms` was re-taken as *now* on every evaluation, so `since(now, changed) == 0` and the minimum-off-time term could never be satisfied — a refusal with no operating point is not a fail-safe. `disp_on` now comes from `sts_pwrseq_snap_t::display_on` and the change stamp is folded on each console pass inside the lock the tick already holds: 250 ms resolution against a 1000 ms minimum, epoch = MP start, so a rail that went off earlier reads as having gone off at engine start (longer wait, never shorter). |
+| `pwr.rb.pot.code` (`rb_code_min > rb_code_max`) | **Deliberate, permanent refusal** | The safe wiper window needs `pwrseq`'s VCC_RB transfer function and safe-code bounds, neither of which crosses `sts_app.h`. This is the one object where guessing is unacceptable — a raw code outside the envelope can destroy the FE-5680A. `pwr.rb.vset_mv`, bounded by cfg `pwr.rb.vmax.mv`, is the supported route; the raw code stays published so a technician can *see* it is refused. An inverted window is `mp_ilk_eval()`'s "cannot compute" and answers `-EPERM`. |
+| `sys.wdt.en` (`liveness_ok = false`) | **Fail-safe stub** | *Stub:* the supervisor's liveness gate is published nowhere this area can read — `pwrseq_in_t::liveness_ok` exists but `sts_pwrseq_snap_t` does not carry it, so `false` is not a measurement. *Fail-safe:* it is nevertheless the right refusal — arming the TPS3430 window watchdog with the gate unknown risks a window violation and a board reset. **Consequence:** the interlock refuses `req != 0`, so a watchdog disarmed by a lease cannot be re-armed *through the object* while that lease is held. The route back to armed is to **release the lease**, which restores the pre-lease state and is not interlock-evaluated. Making this an observation means adding `liveness_ok` to the published snapshot. |
+| `sys.wdt.kick` (`wdt.off`) | **Observed** | Reads `sts_supervisor_wdt_state()` — the level supervisor.c has driven PC12 to, with `-ENODEV` (pin not yet configured) reported as *armed*. It previously carried `wdt.liveness`, which on a PULSE object is evaluated against a hardcoded `req = 1`: that granted the edge exactly while the supervisor was kicking and refused it while WDI was idle — inverted in effect, and dormant only because the object was deferred. |
+| `pwr.disp.en` (`disp.offtime`) | **Observed** | `disp_on` ← `sts_pwrseq_snap_t::display_on`; the change stamp is folded on each console pass inside the lock the tick already holds — 250 ms resolution against a 1000 ms minimum, epoch = MP start, so a rail that went off earlier reads as having gone off at engine start (longer wait, never shorter). The release path uses the pin's own edge stamp instead (table above), because a level sampled once per pass cannot see an off-then-on inside one pass. |
+| `dac.sole`, `dac.idle` | **Observed, from the lease register** | Not the same shortcut `mux.guard` was corrected for. `mux.guard` asks a question about *hardware* and was answered with the loop's choice between two hardware signals; these ask a question about *leases* — may this be granted while that is held — and `mp_ovr_lease()` is where that fact lives. The pin's `overridden` bit is downstream of the register and lags it by one drain, so reading the pin would let a second grant through the window between a grant and the discipline thread's next pass. |
 
-**A tunnel is opened by `obj.override` and by nothing else.** `gnss.tunnel`,
-`ref.rb.tunnel` and `sys.smp.tunnel` are `read`+`override`; none carries `write`.
-`m_obj_set()` checks only the `write` flag, so while they carried it `obj.set
-gnss.tunnel true` reached `sts_mp_tunnel_set_gnss(true)` → `sts_gnss_uart_suspend()` and
-parked `gnssmgr` in `GNSSMGR_ST_FW_UPDATE` while creating **no lease** — that is
-`obj.override`'s job. `mp_ovr_revert_all()` therefore had nothing to revert on the
-dead-man, on a link drop, on `session.close` or on mode exit, and `MP_ILK_TUNNEL` is a
-*consequence* rather than a refusal, so nothing blocked it: the grandmaster lost GNSS
-until a reboot or a deliberate `obj.set … false`. Dropping `write` is what makes the
-lease mandatory and the dead-man effective. `tests/host/test_mp_manifest.c` states the
-rule over the interlock — no object declaring `MP_ILK_TUNNEL` may be writable — so a
-fourth tunnel object is covered the day it is added, and `obj.set` consequently never
-owes the host a `reference_suspect` flag (`res.tunnel` is reachable only from
-`obj.override`, which does report it).
+**A leased-only actuator is never writable, and the rule is broader than tunnels.**
+`F_LEASE` is `read` + `override`, deliberately without `write`. Two independent reasons put
+an object there, and either one is sufficient:
+
+| Reason | Rule | Objects |
+|---|---|---|
+| **Asynchronous apply** | The write is posted to the thread that owns the pin and answers `MP_APPLY_PENDING`. `obj.override`'s reply can say so — that is what `verify_pending` means, and `mp_ovr_tick()` drops the lease if the write never lands — but `obj.set`'s reply has **no field that can admit a write landing a sequencer pass later**, so a `set` could only report an effect that had not happened yet. Refusing the method is honest; answering it would not be. | The 18 mailbox rows |
+| **Not un-doable without a lease** | `obj.set` creates **no lease**, so nothing in the system can put the actuator back — not the dead-man, not a link drop, not `session.close`, not `mp_mode_exit`. An actuator whose commanded state must not outlive the session must therefore be unreachable from `obj.set` at all. | The three tunnels; `ref.rb.serial`; `sys.wdt.en` |
+
+`ref.rb.serial` is the case where only the second reason applies — its apply is synchronous,
+unlike the mailbox rows. While it was `F_RW`, `obj.set` threw the K1 relay with no lease, and
+nothing re-asserts PE4 after `rb_serial_init()`: the deferred fail-safe restore does not cover
+it either, because that latch arms only when a move *to* RS-232 is refused by an open tunnel,
+and an `obj.set` to CMOS with no tunnel simply succeeds. `sys.wdt.en` is the same shape with a
+worse outcome — a bare write disarming the watchdog would leave nothing able to re-arm it.
+
+`tests/host/test_mp_manifest.c` states the rule as
+`test_a_lease_only_actuator_is_never_writable` over `{gnss.tunnel, ref.rb.tunnel,
+sys.smp.tunnel, ref.rb.serial}`, with the tunnel half **derived** — every object declaring
+`MP_ILK_TUNNEL` must appear in the list — so a fourth tunnel is caught whether or not anyone
+remembers the test, while the interlock-less member is named. A guard scoped to `MP_ILK_TUNNEL`
+alone is exactly what let `ref.rb.serial` walk past for a release. `sys.wdt.en` is pinned
+separately, in the test that splits the two watchdog interlocks.
+
+A consequence of the rule: `obj.set` never owes the host a `reference_suspect` flag, because
+`res.tunnel` is reachable only from `obj.override`, which does report it.
 
 **An unimplemented object is refused, not vetoed, and it is refused first.** `obj.set` /
 `obj.override` / `obj.pulse` consult the manifest's `deferred` bit (§4.1) *before*
@@ -431,6 +499,17 @@ veto work exists to make meaningful. `-ENOTSUP` out of an apply now passes throu
 its identity intact: no event, no counter. A refusal firmware *understood* (any other
 errno) is still a veto.
 
+### 5.6 Residual behaviours
+
+Consequences of the design above that are real, bounded, and not decided by anyone in
+particular. Recorded so a technician meeting one recognises it instead of chasing it.
+
+| Behaviour | Bound | Why it is not simply a bug |
+|---|---|---|
+| The two Vc objects advertise **wired** before they can answer. `sts_disc_dac_state()` reports "no reading" until the discipline thread has started, so `obj.get` on `ref.ocxo.vc_mv` / `ref.ocxo.dac_code` answers `MP_E_IO` in the window between the manifest being served and the loop's first pass. | Until the discipline thread starts. | `MP_E_IO` is deliberately distinct from `MP_E_NOTSUP` (§4.1, "not availability") and is the correct answer for a reading that has not landed. The alternative — reading the commanded value out of the quality block — is the thing the pin read-back exists to avoid. |
+| A **Vc lease held across a PFI park** keeps the pin at the override value, so the power-fail fast-save records the override rather than the loop's last good Vc. | One power-fail event. | It is what the oven is actually seeing at the instant power fails, which is arguably the right thing to persist — but it is a consequence of *where* the record is taken (every DAC write, and an override is a DAC write), not a decision anyone made. It should be decided explicitly. |
+| `sys.wdt.en` **cannot be re-armed through its own interlock** while a lease is held, because `liveness_ok` is reported unconditionally false (§5.5). | The lease. | The route back to armed is to **release the lease**, which restores the pre-lease state and is deliberately not interlock-evaluated. So the capability is reachable; it is the *direct* re-arm that is not. Closing this means publishing the liveness gate across the platform→console seam. |
+
 ---
 
 ## 6. Control surface
@@ -441,11 +520,11 @@ Guard class in brackets. All objects are also readable.
 
 | Object | Control |
 |---|---|
-| Status RGB **D5** [G0] | auto/override; colour + brightness; per-channel duty; blink/pulse patterns; identify (blue pulse). *Correction: designator is D5, not D36.* |
-| Panel illumination [G0] | PANEL_LED_EN on/off (RT9742) + duty on **PE0/LPTIM2_CH2**; ramp test; live current from INA228 **0x4C**, duty-normalized |
-| Display backlight [G0] | duty 0–100 % (PE6, TIM15_CH2 — shares TIM15's 25 kHz period with the fan), blank/wake |
+| Status RGB **D5** [G0] | auto/override; colour + brightness; per-channel duty; blink/pulse patterns; identify (blue pulse). `ui.rgb.mode` and the three leg objects (`ui.rgb.r`, `.g`, `.b`) are leased mailbox rows; the mode/leg resolution lives in `sts_super_policy.h`, executed by a host suite rather than decided inline in `supervisor.c`. *Correction: designator is D5, not D36.* |
+| Panel illumination [G0] | PANEL_LED_EN on/off (RT9742) + duty on **PE0/LPTIM2_CH2**; ramp test; live current from INA228 **0x4C**, duty-normalized. `pwr.panel.led.en` and `ui.panel.duty` share a setter, so both release to **off** — the documented exception to "a release re-drives firmware's own automatic level", because two releases must not disagree about one pin pair |
+| Display backlight [G0] | `ui.disp.bl` duty 0–100 % (PE6, TIM15_CH2 — shares TIM15's 25 kHz period with the fan), blank/wake. A **foreign** mailbox row: `ui_display.c` rewrites TIM15_CH2 on every render frame, so the `ui` thread claims, executes and settles it. Housekeeping draining it would make housekeeping a second writer of the pin *and* of `ui_display.c`'s last-programmed cache |
 | Display panel [G1] | DISP_EN cycle, DISP_RST pulse, test patterns (bars/gradient/pixel-walk/white/black), draw text |
-| Lamp test [G0] | `obj.pulse` — all lamps + backlight full for N s |
+| Lamp test [G0] | `ui.lamp.test` — leased through the mailbox, not called from the `ui` thread. `UI_ACTION_LAMP_TEST` went direct to `sts_panel_led_set()` and so bypassed the shed check, letting the front-panel lamp test re-energize a panel rail the ladder had dropped for a power or thermal reason. The two `sts_panel_led_set(0)` calls before `sys_reboot()` stay direct: dark is never refused, and a mailbox request would not drain in the 50 ms before the reset |
 | Buttons/encoder/touch [G1] | live capture: every press/release/detent/touch coordinate streamed; test mode suppresses normal UI navigation |
 | Reed switch (PROX_WAKE) | read-only, live |
 
@@ -459,8 +538,9 @@ Guard class in brackets. All objects are also readable.
 | Rb OV latch [G2] | view RB_OV_DET (PE3); pulse RB_OV_RESET (PD3) |
 | GPS_PWR_EN [G1] | receiver power-cycle (warm start preserved by V_BCKP) |
 | ANT_BIAS_EN [G1] | antenna bias with INA228 0x45 live current + open/short classifier |
-| DISP_EN [G1] | display 5 V rail |
-| WDT_EN [G2] | external TPS3430 arm/disarm (boot-disabled default) |
+| DISP_EN [G1] | display 5 V rail; minimum off-time enforced on the grant and deferred (never refused) on the release |
+| WDT_EN [G3] | external TPS3430 arm/disarm (boot-disabled default). `sys.wdt.en` is **leased**, and the apply is `sts_supervisor_wdt_enable()` — never a bare `gpio_pin_set_dt()` on PC12, because WDT_EN carries a **cadence**: enable replays `sts_supervisor_arm()`'s kick-then-seed-then-assert so the first window opens already fed, and disable clears `super.armed` **before** dropping the pin so the kicker thread stops cleanly. A release restores the state the watchdog was in when the lease was taken, **not** an unconditional re-arm — a lease taken before `pwrseq` stage 9 finds it disarmed with the liveness participants not yet all registered, and arming on release would open the TPS3430 window against a gate that cannot yet be satisfied, the kicker would withhold, and the board would cold-cycle itself |
+| WDI edge [G3] | `sys.wdt.kick` `obj.pulse` on PB2, gated on `WDT_EN` de-asserted (`wdt.off`). A bench capability: scope the edge with the watchdog off |
 | POE_KILL [G3] | commanded cold cycle, with latch warning |
 | NOR_RST_N [G2] | SPI-NOR reset |
 | Supercap backup | **read-only digital power-good only** (BKP_STM_PG PF14, BKP_GPS_PG PF15). *Correction: there is no supercap SoC ADC — the TPS61094 managers are autonomous and firmware sees PG bits.* |
@@ -470,12 +550,13 @@ Guard class in brackets. All objects are also readable.
 
 | Object | Control |
 |---|---|
-| Discipline loop [G1] | auto/hold; bounded manual Vc; loop time-constant select; re-lock; park/unpark |
-| Reference select (MUX_SEL) [G1] | OCXO / external with the firmware HSI-bridge sequence (never a bare pin write); shows EXTREF_MON measured frequency + validity |
-| REF_TERM_EN [G1] | 50 Ω terminate / high-Z (default terminated) |
+| Discipline park [G3] | `ref.disc.park` — a leased **latch** on the discipline loop, and the object that makes the two Vc views reachable at all (`dac.park` gates them on a parked loop, and interlocks are evaluated *before* apply, so an implied park cannot satisfy the interlock gating the write that would cause it). It is a second latch **beside** the PFI one, not a shared flag: the loop resumes only when **both** are clear, which stops a PFI recovery resuming under a technician's override and stops a maintenance release resuming into a browning-out rail. It reads the **loop's state** (`QUALITY_FLAG_PARKED`), not this object's request, so "parked, no lease held" — a PFI park, or refsel's handoff bracket — is a real reading. Loop time-constant select and re-lock: §13.1 |
+| OCXO Vc [G3] | `ref.ocxo.vc_mv` and `ref.ocxo.dac_code` — two **views of one actuator** (DAC1_OUT1, PA4), one row each, mutually excluded by `dac.sole`. Leased only, and drained by the **discipline thread**: nothing on the console side touches PA4. A parked loop re-emits its frozen code every second, so the automatic path stands aside while an override is held and remembers the release target — without that a technician's Vc reverts within one PPS period. The read-back comes from **the pin**, not from `quality_block_t`, which reports what `core/disc` *commanded* and would answer a write with the value it had just replaced. `code→mv→code` is stable to one unit in both directions, not exact: 4096 codes map through 3301 whole millivolts |
+| Reference select (MUX_SEL) [G3] | `ref.mux.sel` — posted as the standing **reference request** through `sts_ref_override_set()`; it never touches PB6, because flipping the selector under a live HSE feed skips the HSI bridge and glitches SYSCLK (spec §3.5). `1` maps to force-**EXTREF**, the only request that deterministically drives MUX_SEL to input B; AUTO is what engages the Rb when the guards allow. The read reports the **actual active reference** from `quality_block_t`, not the request — "requested rb, running ocxo" is the normal reading for an object named after the selector — and `QUALITY_REF_NONE` reads `valid = false` rather than defaulting to OCXO and claiming a pin state nobody observed. Save/restore is **3-valued and verbatim**: a lease taken on a box running AUTO lapses back to AUTO, not to a level. Shows EXTREF_MON measured frequency + validity |
+| REF_TERM_EN [G1] | 50 Ω terminate / high-Z; releases to **terminated**, because the board boots that way through R176 |
 | 1PPS output | ETH_PPS_OUT (PB5) from the MAC PTP unit, buffered by U71 to J15; PTP-clock configurable, no separate buffer enable |
 | Holdover relay K2 [G2] | view; force-alarm test (fail-safe semantics displayed) |
-| Rb (FE-5680A) [G2] | power (§6.2); K1 RS-232/CMOS relay (PE4, default RS-232) — **`ref.rb.serial` is wired**, set and read-back, through `sts_rb_serial_set_mode()`/`sts_rb_serial_status()`; a release returns the relay to the RS-232 fail-safe, and `-EBUSY` (`MP_E_BUSY`) comes back while a raw tunnel holds the port. This is the control the open FE-5680A commissioning item (J6.8/J6.9 direction) needs. RB_LOCK polarity config bit; frequency-offset read + guarded EFC trim (§9.4) |
+| Rb (FE-5680A) [G2] | power (§6.2); K1 RS-232/CMOS relay (PE4, default RS-232) — **`ref.rb.serial` is wired**, set and read-back, through `sts_rb_serial_set_mode()`/`sts_rb_serial_status()`; **leased, never writable** (§5.5). A release returns the relay to the RS-232 fail-safe; `-EBUSY` (`MP_E_BUSY`) comes back while a raw tunnel holds the port, and a move to RS-232 refused that way is **owed and paid when the tunnel closes** (`docs/rb_rs232_interface.md` §7.2a). This is the control the open FE-5680A commissioning item (J6.8/J6.9 direction) needs. RB_LOCK polarity config bit; frequency-offset read + guarded EFC trim (§9.4) |
 
 ### 6.4 GNSS
 
@@ -491,7 +572,7 @@ Guard class in brackets. All objects are also readable.
 
 | Object | Control |
 |---|---|
-| Fan [G0] | auto/override duty (floor-clamped), tach RPM live, stall alarm |
+| Fan [G2] | `sys.fan.duty` — leased; the override is a **floor**, so the pin holds `max(loop, floor)` and a lease can raise the fan but never hold it below what the thermal loop asks. A **release resolves to full airflow**, not to the loop's last answer: `ARCHITECTURE.md` §10 invariant 9 fixes the resting state at maximum airflow for every moment firmware has no live opinion, and a just-lapsed lease is exactly such a moment. Cost is bounded at one second of over-cooling until the next 1 Hz step. Both halves live in `sts_fan_policy.h` (`sts_fan_resolve()`, `sts_fan_ovr_apply()`) rather than inline in `hk.c`, so they are executed by a host suite instead of read by a source scan. Tach RPM live, stall alarm |
 | E-compass [G1] | in-enclosure hard/soft-iron calibration; heading + raw XYZ live |
 | Ethernet | read-only PHY link/speed/duplex + counters; [G1] PHY reset |
 | Services [G1] | NTP / NTS / PTP / SNMP / web enable/disable/restart + client counters |
@@ -829,7 +910,7 @@ code exists, is unit-tested on the host, and links into the signed image.
 |---|---|
 | Frame mux (COBS + CRC16, channel dispatch, `mp enter/exit`) | in tree |
 | Manifest generator (build-time table → runtime JSON + content hash) | in tree |
-| Override engine (lease table, dead-man, revert hooks, veto reporting) | in tree, and the **firmware veto is now raised** (§5.4), and a refusal that is not a veto no longer claims to be one: an apply answering `-ENOTSUP` returns `MP_E_NOTSUP` with no `MP_OVR_EV_VETO` and no `vetoes` increment (§5.5). The three tunnel objects lost `MP_OF_WRITE`, closing a path where `obj.set` stood a UART down and created no lease for the dead-man to revert (§5.5). `platform/pwrseq_exec.c`'s action executor maps six OFF actions to a veto subject through the Zephyr-free `console/sts_mp_veto_policy.h`, `sts_mp_veto()` stages it as one atomic bit, and `sts_mp_tick()` withdraws the matching leases inside the engine lock it already holds — no second timed lock wait, so `sts_console.c`'s `BUILD_ASSERT` budget is unchanged. Verified reachable in the linked image, not merely present: `sts_mp_tick → bl mp_veto → b.w mp_ovr_veto` (a **tail call**, so no `bl` appears on the second edge) and `pwrseq_drain → bl sts_mp_veto`. `tests/host/test_mp_veto.c` drives the *condition* — `RB_OV_DET` on a real `pwrseq_in_t`, the real stage machine's decision to shut the rubidium down — not `mp_ovr_veto()` directly |
+| Override engine (lease table, dead-man, revert hooks, veto reporting) | in tree, and the **firmware veto is now raised** (§5.4), and a refusal that is not a veto no longer claims to be one: an apply answering `-ENOTSUP` returns `MP_E_NOTSUP` with no `MP_OVR_EV_VETO` and no `vetoes` increment (§5.5). Lease-only actuators are not writable at all (§5.5) — the three tunnels, `ref.rb.serial` and `sys.wdt.en` — closing paths where `obj.set` commanded an actuator and created no lease for the dead-man to revert. A refused **release** is no longer counted and forgotten: the K1 relay's fail-safe restore is latched and paid by the tunnel close (§6.3), and a failed **re-grant** over a live lease now exits through the release path rather than zeroing the slot in place, which used to leave the pin where the previous grant put it with no lease left for the dead-man, the tick or a later release to act on. `-EBUSY` passes through with its identity: telling a technician "safety supervision refused you" when the truth is "you already hold this" is the same mis-attribution as the `-ENOTSUP` case. A mailbox request half and its outcome half are **bound to one lease** — a post discards an unread outcome and counts it in `discarded`, so a technician revising an override before the next console tick can no longer have the previous request's `APPLIED` receipt credited to the new lease and stand for a whole 600 s TTL asserting a pin level the board does not have. `platform/pwrseq_exec.c`'s action executor maps six OFF actions to a veto subject through the Zephyr-free `console/sts_mp_veto_policy.h`, `sts_mp_veto()` stages it as one atomic bit, and `sts_mp_tick()` withdraws the matching leases inside the engine lock it already holds — no second timed lock wait, so `sts_console.c`'s `BUILD_ASSERT` budget is unchanged. Verified reachable in the linked image, not merely present: `sts_mp_tick → bl mp_veto → b.w mp_ovr_veto` (a **tail call**, so no `bl` appears on the second edge) and `pwrseq_drain → bl sts_mp_veto`. `tests/host/test_mp_veto.c` drives the *condition* — `RB_OV_DET` on a real `pwrseq_in_t`, the real stage machine's decision to shut the rubidium down — not `mp_ovr_veto()` directly |
 | Sessions + guard/interlock evaluation | in tree, authenticating through `sts_aaa_check()` so the credential store and lockout table are shared with the console and web planes; role floor enforced per §5.3, fail-closed at role `none`. Interlock **state** is no longer derived where it can be measured: `MP_ILK_MUX_GUARD`'s two terms came from one field (`quality_block_t::active_ref`) and were mutually exclusive, making `ref.mux.sel = 1` unsatisfiable — they now read `RB_LOCK` (PB13) and `EXTREF_MON` (PB14/TIM12) from `sts_pwrseq_snap_t`, and `MP_ILK_DISP_OFF` reads `display_on` with a change stamp sampled on the console pass. The two terms that still refuse unconditionally are classified in §5.5 |
 | Streams (telemetry/PPS/log/event/mirror CBOR) | in tree, and now **fed**. The NMEA/UBX/passthrough tees are driven from `platform/gnss.c` and `platform/rb_serial.c` (`sts_mp_tee_*`), and the event channel has producers for all five board-side kinds — see the row below |
 | Event channel 0x09 producers (§7.5) | in tree. `platform/io_scan.c` stages `fault`/`button`/`prox`/`touch` from the 1 kHz scan and `sts_app.c`'s `sts_alarm_set()` stages `alarm` on each active-state transition; `console/mp_events.c` is the bounded staging queue between them and the drain in `sts_mp_tick()`. Before this, **`mp_post_event()` had no caller and was absent from `zephyr.elf`** — five of the eight kinds could not be produced at all, and a subscriber heard silence through a power-good drop, an alarm, a button press and a door event. `touch` is assert-only because core/fault emits no release event; the `override` **veto** sub-kind is raised by the firmware-veto seam — see the override-engine row above |
@@ -837,11 +918,11 @@ code exists, is unit-tested on the host, and links into the signed image.
 | Tunnels (UART7, rubidium) | in tree, and the rubidium is **genuinely stood down**. The obstacle this row used to describe — `rb_serial_tunnel_open()` demands an **ISR-context** byte sink, and the only useful sink reached `uart_poll_out()` through a mutex — is what `console/mp_tunnel.c` was built to solve: the sink stages a bounded copy into a ring under a `k_spinlock` and `sts_mp_tick()` frames it on the console supervisor. While the tunnel holds UART7, `rb_serial_ops()`'s transmit path answers `-EBUSY` (`platform/rb_serial.c:316`), the RX ISR routes every octet to the tunnel sink instead of the parser ring (`:162`), and `rb_serial_set_mode()` refuses to throw the K1 relay (`:226`). Firmware is **not** a second reader or writer for the duration |
 | Diag runner + support bundle | in tree |
 | Multi-IC update orchestrator + inventory | in tree |
-| Capability manifest content | 91 objects (power 12, reference 7, gnss 5, panel 9, system 6, sensor 52); every object carries guard, caps, interlocks and its schematic designator, and now its **`deferred`** bit (§4.1). 41 objects are published-and-refused: 30 of the 39 mutable ones and 11 read-only sensors. `MP_OF_DEFERRED` existed, was emitted by `emit_flags()`, and was set by **zero objects** — so a host generating its UI from the manifest rendered a board's worth of controls of which 8 worked. The bit is derived from `mp_glue.c`'s dispatch by `tests/host/test_mp_deferred.c`, which fails the build in either direction, and it is enforced: `mp_wiring_t::obj_supported` refuses a deferred object **before** `mp_ovr_guard()` consumes a G3 arm |
+| Capability manifest content | **92 objects** (power 12, reference 8, gnss 5, panel 9, system 6, sensor 52); every object carries guard, caps, interlocks and its schematic designator, plus its **`deferred`** bit (§4.1). **20** are published-and-refused: 9 of the 40 mutable ones and 11 read-only sensors; **31 mutable objects reach an actuator** and `obj.get` answers **66**. Fourteen interlock bits. The `deferred` bit is derived from `mp_glue.c`'s dispatch by `tests/host/test_mp_deferred.c`, which fails the build in either direction, and it is enforced: `mp_wiring_t::obj_supported` refuses a deferred object **before** `mp_ovr_guard()` consumes a G3 arm. The deferred set is pinned **by name** rather than by a numeric floor — the floor had to be edited every time the thing it measured improved, and a list fails on an un-wiring as well as on an un-listed wiring, and says which |
 | Guard escalation | cumulative: G0 session → G1 `ack` → G2 typed device serial + interlocks → G3 phrase + hold |
 | Dead-man revert | keepalive TTL 5 s, checked by `sts_mp_tick()` on the **250 ms** console-supervisor loop (`sts_console.c:CONSOLE_PERIOD_MS`), so a keepalive that stops reverts in **≈5.25 s typical and ≤6.95 s worst case** — the earlier "100 ms tick, ≈5.1 s" described neither the tick nor the bound. The worst case is 5 s TTL plus the longest gap between two *successful* ticks, which `sts_console.c`'s `BUILD_ASSERT` pins at `(STS_MP_TICK_MISS_MAX + 1) × (250 + STS_MP_TICK_LOCK_MS) + STS_FWUPD_STEP_BUDGET_MS` = `6 × 300 + 150` = 1950 ms, inside `MP_TICK_MAX_MS` (2000). `session.close` and mode-exit revert **synchronously** on the request thread. **A link drop reverts synchronously when the engine is idle — the ordinary case — and otherwise within one tick**: `sts_mp_notify_link()` runs on the console supervisor, which shares its pass with `sts_mp_tick()`, and that pass has exactly one timed lock wait to spend, so the notification tries `K_NO_WAIT` and parks the transition rather than adding a second (which would take the worst case to 2250 ms and break the assertion it was meant to protect). `mp status` counts the deferrals. **BREAK does not revert anything, because no BREAK reaches this transport** (§2.1). 16 leases, no allocation |
 | Diag registry | 14 tests; a failing step does not abort the run (a technician wants the whole picture); verdicts rank PASS < SKIP < FAIL < ERROR |
-| Footprint | 54.3 KB flash, 24.5 KB RAM — **over the §11 aim** of 24 KB/12 KB. Structural to the scope (91 objects, 29 methods, 14 tests, 12 channels); the manifest's const string table is 13.2 KB and is the single biggest reduction lever (string pool, or the spec's optional gzip path) |
+| Footprint | 54.3 KB flash, 24.5 KB RAM — **over the §11 aim** of 24 KB/12 KB. Structural to the scope (92 objects, 29 methods, 14 tests, 12 channels); the manifest's const string table is 13.2 KB and is the single biggest reduction lever (string pool, or the spec's optional gzip path) |
 | Host application (§10) | **not started** — specified only |
 | SMP tunnel (ch 0x06) | framing implemented; **no MCUmgr binding yet** — frames arrive but are not dispatched |
 | `sec.attest` diag | present, returns not-supported until the ATECC binding is wired |
@@ -940,6 +1021,8 @@ the NOR is absent; and the full 640 KB SRAM enablement.
 - [ ] Measure sustained CDC throughput on H563 FS with DMA; sizes the NMEA+UBX+10 Hz+mirror headroom claim
 - [x] ~~INA228 address↔rail discrepancy~~ — **closed**: the map in §7.1 is authoritative (GPS is 0x4A because SHT45 owns 0x44; OCXO 0x46, VCC_RB 0x47)
 - [x] ~~I/O-expander objects (`EXP_RESET`, "U47 PortA" PG bits)~~ — **closed**: no expander exists; PG/fault inputs are a direct 1 kHz GPIOF/GPIOG scan
+- [ ] **Publish the supervisor liveness gate across the platform→console seam** so `wdt.liveness` becomes an observation rather than a fail-safe constant. Today `sys.wdt.en` cannot be re-armed through its own interlock while a lease is held (§5.5, §5.6); the term is `pwrseq_in_t::liveness_ok` and what it needs is a field on the published snapshot
+- [ ] **Decide what the PFI fast-save should persist when a Vc override is standing** — currently the override, because the record is taken on every DAC write (§5.6). Either outcome is defensible; neither has been chosen
 - [ ] Decide whether `debug.reg` ships in release firmware or bring-up builds only (current: compiled out of release)
 - [ ] K2 contact-verify method — coil current only, or add a downstream sense net (schematic question)
 - [ ] Enumerate the FE-5680A opcode set to wrap beyond the 0x2D frequency-offset family, per surplus variant

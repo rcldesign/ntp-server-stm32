@@ -286,6 +286,25 @@ frozen; when Rb is the active reference the DAC holds OCXO at its last disciplin
 fallback warm). C98/C99/C101 are **0.1 µF C0G, 1210** on the Vc path (X7R would FM-modulate the
 carrier) — settled as-built; no firmware constraint.
 
+**The maintenance surface does not create a second writer of PA4.** A field-maintenance Vc
+override is *posted* by the console thread into the sequencer mailbox and *drained by
+`discipline`* on its own pass — the pin is still written from one thread only. The override is
+accepted only while the loop is **parked**, and the park is re-checked at drain time as well as
+at grant time, because the loop can resume between the two (a refsel handoff closing its
+bracket, or a power-fail recovery) and a Vc write into a running loop is overwritten within the
+second. While an override is held the automatic path **stands aside** and remembers the release
+target; without that, a parked loop re-emitting its frozen code every second would undo the
+override within one PPS period. Read-back of Vc is taken **from the pin**, not from the
+published quality block, which reports what the loop last *commanded*.
+
+**Two park latches, and the loop resumes only when both are clear.** The power-fail latch (PFI,
+PE8 → §6) and the maintenance latch (a `ref.disc.park` lease) are independent; refsel's handoff
+bracket is a third, *transient*, park. One shared flag would let either direction defeat the
+other — a PFI recovery resuming the loop under a live Vc override, or a maintenance release
+resuming it into a browning-out rail — so every unpark path goes through one gate and whoever
+clears the last holder is the one that resumes. The PFI fast-save records the code **the pin
+actually holds**, so a Vc override standing across a power failure is the value persisted.
+
 **PPS handling.** Cross-check PA0 vs PC6; reject outliers with a median/MAD gate before the edge
 enters the loop. Full-scale DAC = OCXO ±0.4 ppm pull; 1 LSB ≪ holdover spec.
 
@@ -296,6 +315,28 @@ dead source. Switch **OCXO→Rb only when** `EXTREF_MON` (PB14/TIM12) confirms a
 **and** `RB_LOCK` (PB13) is asserted, held past a debounce window. Switch **Rb→OCXO immediately** if
 **either** fails; hysteresis on re-engage prevents flap. `CLK_OUT` (PH0) is the disciplined 10 MHz
 into the HSE-bypass input. `10MHz_RF_OUT` (J9) and `1PPS_OUT` (J15) are the buffered distribution.
+A maintenance reference selection sets the state machine's **standing request** (auto / force-OCXO
+/ force-external) and never writes PB6; the guards above are not bypassed by it.
+
+### 3.1 Pin ownership under the maintenance surface
+
+Every pin the field-maintenance surface can move keeps **exactly one runtime writer**. Where the
+owning thread is not the caller, the request goes through the 4 Hz sequencer mailbox and the
+owning thread claims, executes and settles it. Four rows are *foreign* — drained by a thread
+other than housekeeping — and they are the rows whose pins have a different single writer.
+
+| Pin(s) | Single writer | How a maintenance request reaches it |
+|---|---|---|
+| PA4 `OCXO_VC` | `discipline` | Mailbox, foreign row, drained by `discipline`; loop must be parked |
+| PB6 `MUX_SEL` | refsel action executor (in `discipline` context) | Standing reference request, never a pin write |
+| PE6 `DISP_BL` (TIM15_CH2) | `ui` (rewritten every render frame) | Mailbox, foreign row, drained by `ui` |
+| PE5 `FAN_PWM` (TIM15_CH1) | `housekeeping` | Mailbox; the override is a **floor**, never a level |
+| PC0 `PANEL_LED_EN`, PE0 panel duty | `housekeeping` | Mailbox; the pair shares a setter, so **both release to off** |
+| PC8/PC9/PC11 rail enables, PB1 `RB_VCC_GATE`, PC10 `REF_TERM_EN`, PD12-14 RGB | `housekeeping` | Mailbox |
+| PE4 `RB_RS232_CMOS_SW` | `rb_serial` | Direct, synchronous; refused while a tunnel holds UART7 (§9) |
+| PC12 `WDT_EN` | `supervisor` | Direct, via the arm/disarm sequence — never a bare pin write (§7) |
+| PB2 `WDT_KICK` | `supervisor` | `obj.pulse`, permitted **only** with `WDT_EN` de-asserted (§7) |
+| PD10 `LAN_RST_N`, PD6 `GPS_EXTINT` | the accessor being called | Direct pulse on the console thread — not posted, because the accessor *is* the pin's only runtime writer and each pulse completes before the call returns. `LAN_RST_N` is asserted for `STS1000_PHY_RESET_ASSERT_US` (default 500 µs, ≥ the LAN8742AI 100 µs minimum), released, then a recovery wait. Neither has a rest state worth reading back (§4.1) |
 
 ---
 
@@ -490,11 +531,11 @@ the 1 kHz scan is fast enough and avoids EXTI-line contention.
 | **Rb rail** | INA228 **0x47** *before trusting rail*; `RB_LOCK` (PB13); `EXTREF_MON` (PB14) | VCC_RB in 24.45−6.645·VCTRL envelope; lock asserted | Never set RB_PWR_EN before a safe digipot code. Rail out of band → don't gate VCC_RB. Set OV/digipot per FE Vmax (C125–C128 are 50 V as-built). |
 | **Rb OV latch** | `RB_OV_DET` (PE3, polled) | low (idle) | On trip: latch already killed U40 autonomously; log, then pulse `RB_OV_RESET` (PD3) HIGH to clear after cause cleared. |
 | **PoE** | INA228 0x40 *(current + voltage)*; `POE_PG`/PG7; `POE_NCM/LCF/NCL` (PC2/3/7); PFI (PE8) | class covers load | If budget can't cover Rb → defer/deny RB_PWR_EN. `PFI`→persist+park. `POE_KILL` latches via Q3 sustain. |
-| **Watchdog** | supervisor liveness (timing+network+housekeeping) | all healthy | Kick `WDT_KICK` (PB2) **only** if all pass; windowed WDT catches both stall and runaway. `WDT_EN` (PC12) HIGH after init. Timeout → HW `POE_KILL`. |
+| **Watchdog** | supervisor liveness (timing+network+housekeeping) | all healthy | Kick `WDT_KICK` (PB2) **only** if all pass; windowed WDT catches both stall and runaway. `WDT_EN` (PC12) HIGH after init, and **only through the arm sequence** — kick, seed the window from that same instant, then assert — never a bare pin write, or the first window opens unfed. Disarm clears the armed flag **before** dropping the pin so the kicker stops cleanly. A console-injected WDI edge is permitted only with `WDT_EN` de-asserted: at any other time it lands at an arbitrary phase of the supervisor's cadence and an edge within tWDL(min) = 680 ms of the previous one is a runaway fault → `WDO_N` → `POE_KILL`. Timeout → HW `POE_KILL`. |
 | **Antenna** | `GPS_ANT_DETECT`, `GPS_ANT_SHORT` (via F9T + comparators U25), INA228 0x45 (R89 150 mΩ, 520.833 nA/LSB), `V_ANT_EN_FAULT` (PF8) | ~15–30 mA present, no short | Foldback ≈182 mA autonomous; on short/open alarm + optionally hard-cut `ANT_BIAS_EN` (PC9). |
 | **Panel LED** | INA228 0x4C duty-normalized (R199 150 mΩ); `PANEL_LED_FAULT` (PF12) | I_avg/duty ≈ 126–132 mA all-on | Deviation → LED-string fault (open/short). |
 | **Rails (general)** | INA228 0x41/0x42/0x43/0x46; PG lines (PG0–PG7, PF14/15) | good | Rail drop → alarm. All eight PG bits usable (R266 fitted). |
-| **Thermal** | TMP117 0x48 (enclosure) + 0x49 (osc) + die temp | in band | PI fan loop on PE5; over-temp → alarm; loop stall → fan full-speed (fail-safe). |
+| **Thermal** | TMP117 0x48 (enclosure) + 0x49 (osc) + die temp | in band | PI fan loop on PE5; over-temp → alarm; loop stall → fan full-speed (fail-safe). **Resting state = maximum airflow** for any moment firmware has no live opinion. A maintenance override is a **floor**, not a level — the pin holds `max(loop, floor)`, clamped against the loop's own answer including the fail-safe duty a declined step commands — and a release resolves to **full airflow**, not to the loop's last answer. |
 | **Supercaps** | BKP_STM_PG (PF14), BKP_GPS_PG (PF15) digital PG only | charged | On VIN loss, managers boost from supercap (autonomous); firmware watches PG + ephemeris window (~4 h). |
 
 ---
@@ -532,7 +573,11 @@ Firmware MUST arbitrate the shared bus (mutex) and reconfigure CPOL/CPHA/speed p
 
 **RS-232 Rb path.** SN65C3221E U46 transceiver + DPDT relay K1 (G6K-2F-Y) selects RS-232 vs CMOS:
 - `RB_RS232_CMOS_SW` (PE4): default **low = RS-232** (relay de-energized, fail-safe). Set HIGH for
-  CMOS-level operation only if the FE variant needs it.
+  CMOS-level operation only if the FE variant needs it. A move is **refused while a raw tunnel
+  holds UART7** — throwing a mechanical relay under a live passthrough corrupts whatever the host
+  is mid-transaction with. A move *to* RS-232 refused that way is **owed and paid when the tunnel
+  closes**, after the tunnel callback is retracted; a move to CMOS is simply refused. Rationale and
+  both directions: `rb_rs232_interface.md` §7.2a.
 - Serial: MCU TX = `RB_RX`/PB4 (UART7_TX, **NJTRST → SWD-only**); MCU RX = `RB_TX`/PE7
   (UART7_RX). Confirm FE J6-8/J6-9 direction per surplus variant before trusting.
 - `RB_LOCK` (PB13): opto U48 (APC-817) inverting → **lock polarity is a firmware config bit**;
@@ -583,12 +628,24 @@ Driverless CDC-ACM console with full command/control parity to the web API; trac
 10. **OCXO Vc dielectric.** C98/C99/C101 are **0.1 µF C0G 1210** as-built (never X7R — microphonics
     FM-modulate the carrier). Settled; no firmware or BOM action.
 11. **`MUX_SEL` handoff.** Never write PB6 outside the reference state machine; always use the
-    HSI-bridge + CSS glitchless sequence and the dual guard (EXTREF_MON + RB_LOCK).
+    HSI-bridge + CSS glitchless sequence and the dual guard (EXTREF_MON + RB_LOCK). A maintenance
+    reference selection sets the machine's **standing request**, never the pin.
 12. **`OCXO_VC` (PA4) single-writer.** Only the `discipline` thread writes the DAC; it must never
-    float (R121 holds 1.65 V, but firmware must not tri-state it during normal operation).
+    float (R121 holds 1.65 V, but firmware must not tri-state it during normal operation). This
+    holds for the maintenance surface too — an override is *posted* by the console and *drained by
+    `discipline`*, so the pin keeps one writer. Overrides are accepted only into a **parked** loop,
+    and the park is re-checked at drain time as well as at grant time (§3).
 13. **5V-tolerance.** PG3 (pulled to 5 V) and PG7 (2.75–3.13 V divider node) are on 5 V-tolerant Port-G
     pins; the PG5 divider keeps its node ≈2.66 V from node N ≈2.98 V (loaded OCXO_PSU_PG; PG5 not FT
     — in range, > VIH).
+14. **Fan resting state = full.** PE5's idle/fault state is maximum airflow, in hardware and in
+    firmware. A maintenance override is a floor and can only raise it; a release goes to full, not
+    to the loop's last answer (§7).
+15. **`WDT_EN` (PC12) carries a cadence, not a level.** Arm only through the kick-seed-assert
+    sequence, and permit a console `WDT_KICK` (PB2) edge only with `WDT_EN` de-asserted (§7).
+16. **One writer per pin, including under maintenance.** Every field-maintenance request reaches
+    its pin through the pin's existing owner — see the ownership table in §3.1. Adding a control
+    means adding a mailbox row and an executor in the owning thread, never a second writer.
 
 ---
 
