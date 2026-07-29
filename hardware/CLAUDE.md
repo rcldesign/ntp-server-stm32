@@ -169,7 +169,9 @@ All ADCRANGE=1 (±40.96 mV FS); Vishay **WSL** 1 % metal strip, 1206/0.25 W exce
 
 ## Conventions
 
-- **Editor: vi only** for CLI text editing — never pico/nano.
+- **Editor: vi only in commands handed to the user to run** — never pico/nano. This applies
+  *solely* to CLI commands written for the user to execute themselves. Agents and subagents
+  edit files with their own tooling and are under **no** vi requirement.
 - Review by **designator and pin** (R199, U54.3, PA10), not node labels.
 - When a part or value changes, update the owning subsystem doc **and** propagate the delta to
   the peripheral map / checklist in the same change; keep docs mutually consistent.

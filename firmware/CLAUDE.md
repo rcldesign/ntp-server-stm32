@@ -180,7 +180,9 @@ first real build, and record the Zephyr SDK version here.
 
 ## Conventions
 
-- **Editor: vi only** for CLI text editing — never pico/nano.
+- **Editor: vi only in commands handed to the user to run** — never pico/nano. This applies
+  *solely* to CLI commands written for the user to execute themselves. Agents and subagents
+  edit files with their own tooling and are under **no** vi requirement.
 - Spec keywords are normative: **MUST/SHALL**, **SHOULD**, **MAY** (spec §0).
 - Net names in DT and code match the canonical peripheral-map names exactly.
 - Validation/CI expectations live in spec §14 (ADEV/MDEV, sawtooth proof, holdover model,
