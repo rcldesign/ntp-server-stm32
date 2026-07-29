@@ -1699,6 +1699,47 @@ int32_t sts_pwrseq_rb_expected_mv(void)
 	return known ? pwrseq_rb_expected_mv(&pwrseq_cfg.rb_xfer, code) : 0;
 }
 
+/*
+ * The VCC_RB ceiling IN FORCE — the same field, not a second derivation.
+ *
+ * `pwrseq_cfg.rb_vmax_mv` is what sts_rb_code_for_mv() bounds every drained
+ * maintenance setpoint against (pwrseq_mbox_apply_vset), so publishing that
+ * field is what makes the console's clamp and the drain's clamp one number by
+ * construction. Re-deriving it from cfg cannot work: sts_rb_vmax_decide() has
+ * two arms, and the second one — REFUSE a ceiling below the fixed operating
+ * setpoint, keep pwrseq's own default, which is HIGHER than cfg — needs
+ * `default_mv` and `operating_mv`, both pwrseq internals.
+ *
+ * No lock, and the difference from sts_pwrseq_rb_expected_mv() above is the
+ * point: `dp_code`/`dp_known` are observations the drain rewrites on every pass,
+ * while `pwrseq_cfg` is assigned exactly once, from the envelope pwrseq_init()
+ * ACCEPTED, and never again. The `pwrseq_started` guard is what orders this read
+ * after that single write, because it is set after it.
+ */
+uint32_t sts_pwrseq_rb_vmax_mv(void)
+{
+	if (!pwrseq_started) {
+		/*
+		 * 0 is the FAIL-SAFE answer, not a placeholder, and it is chosen
+		 * rather than defaulted. mp_ilk_eval()'s MP_ILK_RB_VMAX branch
+		 * refuses a ceiling of 0 (`hi <= 0` -> -EPERM), so an unknown
+		 * envelope DENIES every VCC_RB request instead of publishing a
+		 * window — the same convention, and the same 0, that
+		 * sts_pwrseq_rb_expected_mv() uses for "not known yet".
+		 *
+		 * It is also the truthful answer: with the sequencer not started
+		 * the mailbox refuses the setpoint row outright, so any window
+		 * published here could only ever promise a setpoint that nothing
+		 * would execute. Returning the built-in default instead would be
+		 * strictly more permissive than the cfg-derived value this
+		 * replaced, which is the one direction that must not move.
+		 */
+		return 0U;
+	}
+
+	return pwrseq_cfg.rb_vmax_mv;
+}
+
 /**
  * Drain the mailbox. Housekeeping-thread context only, after pwrseq_drain().
  *

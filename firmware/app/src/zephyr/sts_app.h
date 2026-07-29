@@ -1634,6 +1634,25 @@ int sts_pwrseq_req_settle(uint8_t req, bool applied, uint8_t err, int32_t value,
  *         degenerate; the caller must treat 0 as "unknown", not as 0 V. */
 int32_t sts_pwrseq_rb_expected_mv(void);
 
+/* The VCC_RB ceiling the sequencer is HOLDING THE RAIL TO, millivolts.
+ *
+ * The bound `mp_ilk_state_t::rb_vmax_mv` has to carry, and an accessor rather
+ * than a shared constant because the console cannot re-derive it. cfg
+ * `pwr.rb.vmax.mv` is only the REQUEST; the platform binds it through
+ * sts_rb_vmax_decide(), which has two arms — it clamps a value above
+ * STS_RB_VMAX_MV_CEILING DOWN, and it REFUSES one below the fixed operating
+ * setpoint, keeping pwrseq's own default, which is HIGHER than what was asked
+ * for. Quoting the ceiling models the first arm only, so the interlock could
+ * still clamp tighter than the drain and quote a technician a ceiling lower than
+ * the board would accept. This is the number itself: the very field
+ * sts_rb_code_for_mv() bounds every drained setpoint against.
+ *
+ * @return 0 when the sequencer never started. "Unknown", not "0 V" and not "no
+ *         ceiling": MP_ILK_RB_VMAX refuses on it (`hi <= 0`), which is the
+ *         fail-safe direction and matches the state — the mailbox refuses the
+ *         setpoint row before the sequencer starts anyway. */
+uint32_t sts_pwrseq_rb_vmax_mv(void);
+
 /* ---- FE-5680A serial link (UART7 + the K1 RS-232/CMOS relay) ------------- */
 /*
  * The Rb housekeeping port, as an operator sees it. The FE-5680A variant fitted

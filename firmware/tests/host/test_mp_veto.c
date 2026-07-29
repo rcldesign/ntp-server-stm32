@@ -1677,11 +1677,15 @@ static void test_a_gate_off_lease_survives_the_read_back_deadline(void)
  *
  * HONESTLY UNREACHABLE THROUGH THE GLUE TODAY, and this test does not pretend
  * otherwise: it injects `rb_vmax_mv` directly, because prov_ilk() cannot
- * currently produce the state. cfg `pwr.rb.vmax.mv` floors at 4510 mV, which is
- * exactly RB_MV_MIN, and a failed cfg read yields 0 — which the `hi <= 0`
- * refusal above already catches. The value of pinning it is that the two bounds
- * are independent numbers in two different files: move the cfg floor down, or
- * the manifest floor up, and this becomes live with nothing else changing.
+ * currently produce the state. What prov_ilk() publishes is
+ * sts_pwrseq_rb_vmax_mv(), the in-force pwrseq_cfg_t::rb_vmax_mv, and
+ * sts_rb_vmax_decide() cannot land that below RB_MV_MIN: a configured ceiling
+ * under the fixed operating setpoint — which is far above 4510 mV — is refused
+ * and replaced by pwrseq's own default. The only other answer is 0, an
+ * unstarted sequencer, which the `hi <= 0` refusal above already catches. The
+ * value of pinning it is that the two bounds are independent numbers in two
+ * different files: move the operating setpoint down, or the manifest floor up,
+ * and this becomes live with nothing else changing.
  */
 static void test_a_ceiling_below_the_floor_is_refused(void)
 {

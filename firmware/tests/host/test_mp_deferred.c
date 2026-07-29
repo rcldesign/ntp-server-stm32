@@ -1050,25 +1050,36 @@ static void test_the_rb_serial_relay_is_wired(void)
 		"the K1 release no longer resolves to the RS-232 fail-safe");
 }
 /**
- * The VCC_RB ceiling the interlock clamps against is the one IN FORCE.
+ * The VCC_RB ceiling the interlock clamps against is ASKED OF the sequencer.
  *
- * `prov_ilk()` filled `mp_ilk_state_t::rb_vmax_mv` straight from cfg
- * `pwr.rb.vmax.mv`, whose schema range is 4510..24450 mV, while the rail is
- * actually held to pwrseq_cfg_t::rb_vmax_mv — which sts_rb_vmax_decide() caps at
- * STS_RB_VMAX_MV_CEILING. The two sat up to 9.45 V apart.
+ * `prov_ilk()` filled `mp_ilk_state_t::rb_vmax_mv` from cfg `pwr.rb.vmax.mv`,
+ * whose schema range is 4510..24450 mV, while the rail is actually held to
+ * pwrseq_cfg_t::rb_vmax_mv. Re-applying STS_RB_VMAX_MV_CEILING here closed the
+ * arm of sts_rb_vmax_decide() that LIED — an override to 20000 mV against a
+ * 22000 mV cfg ceiling answered `value: 20000, clamped: false`, driven to
+ * <=15000 by the drain and auto-reverted 250 ms later by MP_ILK_RB_VERIFY as
+ * "VCC_RB out of window", a reply that told a technician his setpoint took
+ * followed by a rail fault that did not exist.
  *
- * The gap was a LIE rather than a hazard, which is what makes it worth a guard:
- * the platform's bound is authoritative and holds, so an override to 20000 mV
- * against a 22000 mV cfg ceiling was answered `value: 20000, clamped: false`,
- * driven to <=15000 by the drain, and auto-reverted 250 ms later by
- * MP_ILK_RB_VERIFY as "VCC_RB out of window" — a reply that told a technician
- * his setpoint took, followed by a rail fault that did not exist.
+ * It could not close the other arm. decide() also REFUSES a ceiling below the
+ * fixed operating setpoint and keeps pwrseq's own default, which is HIGHER than
+ * cfg; a console quoting the constant then clamps tighter than the drain and
+ * quotes a technician a ceiling lower than the board would take. Safe, still
+ * untrue, and unmodellable from here — `default_mv` and `operating_mv` are
+ * pwrseq internals. So the console stopped deriving the number and started
+ * reading it.
  *
- * Read from the source, not asserted behaviourally, for the reason the whole
- * back half of this file gives: mp_glue.c is not linked by any host suite. The
- * scan is paired with the two properties that make the clamp mean something —
- * that the constant is genuinely inside the published envelope, so it bites, and
- * that it fits the field it is narrowed into.
+ * This half pins the CONSUMER: prov_ilk() takes the ceiling from
+ * sts_pwrseq_rb_vmax_mv() and from nowhere else — no cfg key, no constant. The
+ * producer is pinned separately below, so that Unity's abort-at-first-failure
+ * cannot let one half hide the other.
+ *
+ * READ, NOT EXECUTED, for the reason the whole back half of this file gives:
+ * mp_glue.c is linked by no host suite. The scan asserts the text of the fix;
+ * it does not run it. It is paired with the two properties that keep the clamp
+ * meaningful — that the hardware ceiling really does sit inside the published
+ * envelope, so an in-force value can genuinely differ from what the manifest
+ * advertises, and that it fits the u16 field it is narrowed into.
  */
 static void test_the_rb_ceiling_is_the_one_in_force(void)
 {
@@ -1095,18 +1106,117 @@ static void test_the_rb_ceiling_is_the_one_in_force(void)
 	b = fn_body("static int prov_ilk(void *user, mp_ilk_state_t *out)");
 
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "uint32_t vmax = sts_pwrseq_rb_vmax_mv();"),
+		"prov_ilk() no longer takes the VCC_RB ceiling from the "
+		"sequencer that is enforcing it");
+	/*
+	 * And calls it exactly ONCE. Zephyr's MIN() is
+	 * `(((a) < (b)) ? (a) : (b))`, so passing the call as `a` evaluates it
+	 * twice — the comparison reads the sequencer, the result reads it again.
+	 * `pwrseq_started` flips once, from the bring-up thread, while prov_ilk()
+	 * runs on the console thread; two reads straddling that instant publish
+	 * a ceiling neither read returned. Verified against the shipped ELF: the
+	 * un-hoisted form really did emit two `bl sts_pwrseq_rb_vmax_mv`.
+	 */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "sts_pwrseq_rb_vmax_mv()"),
+		"the sequencer is read more than once for one published "
+		"ceiling — check for a MIN()/ternary double evaluation");
+	/*
+	 * And it does not ALSO derive one. Either of these coming back is the
+	 * original defect returning: the cfg key is the request rather than the
+	 * bound, and re-applying the constant models one of decide()'s two arms.
+	 * Comments are blanked by load_source(), so the prose above the fix in
+	 * mp_glue.c — which names both — cannot satisfy these.
+	 */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&b, "0x0703U"),
+		"prov_ilk() reads cfg pwr.rb.vmax.mv again — that is the "
+		"REQUEST, not the ceiling in force");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&b, "STS_RB_VMAX_MV_CEILING"),
+		"prov_ilk() re-applies the hardware ceiling, which models only "
+		"the clamping arm of sts_rb_vmax_decide()");
+	/* Exactly one write into the u16 field, and it is the bounded one. The
+	 * bound is UINT16_MAX — the FIELD, not the envelope — because a second
+	 * envelope bound here is the thing being removed. */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "out->rb_vmax_mv"),
+		"a second write to rb_vmax_mv appeared");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
 		1U,
-		count_in(&b, "if (vmax > (uint64_t)STS_RB_VMAX_MV_CEILING) {"),
-		"prov_ilk() no longer caps cfg pwr.rb.vmax.mv at the ceiling "
-		"the sequencer actually runs");
+		count_in(&b, "out->rb_vmax_mv = (uint16_t)MIN(vmax, "
+			     "(uint32_t)UINT16_MAX);"),
+		"the write to rb_vmax_mv is no longer the bounded narrowing of "
+		"the value read from the sequencer");
+}
+
+/**
+ * The ceiling the platform PUBLISHES is the field the drain clamps with.
+ *
+ * The producer half of the property above, split from it because Unity aborts a
+ * test at its first failure and these are two independent ways for the fix to
+ * rot. sts_pwrseq_rb_vmax_mv() is only worth reading if it returns
+ * pwrseq_cfg_t::rb_vmax_mv itself — the exact field pwrseq_mbox_apply_vset()
+ * hands sts_rb_code_for_mv() — because that identity is what makes the
+ * interlock's clamp and the sequencer's clamp one number by construction rather
+ * than by two files agreeing on a constant.
+ *
+ * The second property is the FAIL-SAFE. Before pwrseq_start() the in-force
+ * envelope is unknown, and the accessor must answer 0: MP_ILK_RB_VMAX refuses a
+ * ceiling of 0 (`hi <= 0` -> -EPERM, executed in test_mp_override.c), so an
+ * unknown envelope denies every VCC_RB request. Returning pwrseq_cfg_default()'s
+ * value instead would be strictly MORE permissive than the cfg-derived number
+ * this replaced, on a board whose sequencer has not run — and the FE-5680A is
+ * the one load where a too-high rail is not recoverable (../CLAUDE.md, "Rb
+ * digipot in a buck FB node").
+ *
+ * READ, NOT EXECUTED: pwrseq_exec.c is a Zephyr translation unit and is linked
+ * by no host suite either. The scan proves the text, not the behaviour.
+ */
+static void test_the_published_rb_ceiling_is_the_drains_own_field(void)
+{
+	span_t acc;
+	span_t drain;
+
+	load_source("zephyr/platform/pwrseq_exec.c");
+
+	acc = fn_body("uint32_t sts_pwrseq_rb_vmax_mv(void)");
+	drain = fn_body("static bool pwrseq_mbox_apply_vset(bool release, "
+			"int32_t value, uint8_t *out_err,");
+
+	/* One field, both sides. */
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
-		1U, count_in(&b, "vmax = (uint64_t)STS_RB_VMAX_MV_CEILING;"),
-		"the cap is tested but no longer applied");
-	/* Still exactly one narrowing into the u16 field, and it is the one the
-	 * cap above bounds — not a second, unclamped path. */
+		1U, count_in(&acc, "return pwrseq_cfg.rb_vmax_mv;"),
+		"the published ceiling is no longer pwrseq's own in-force "
+		"field");
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
-		1U, count_in(&b, "out->rb_vmax_mv = (uint16_t)vmax;"),
-		"a second, unclamped write to rb_vmax_mv appeared");
+		1U, count_in(&drain, "pwrseq_cfg.rb_vmax_mv"),
+		"the drain no longer bounds the setpoint against the field the "
+		"console publishes — the two clamps have separated");
+
+	/* The unknown answer is 0, and it is 0 rather than anything wider. */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&acc, "if (!pwrseq_started) {"),
+		"the accessor no longer distinguishes an unstarted sequencer "
+		"from a known envelope");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&acc, "return 0U;"),
+		"the unknown VCC_RB ceiling stopped answering 0, which is the "
+		"only value MP_ILK_RB_VMAX refuses on");
+	TEST_ASSERT_TRUE_MESSAGE(
+		offset_in(&acc, "!pwrseq_started") <
+			offset_in(&acc, "return pwrseq_cfg.rb_vmax_mv;"),
+		"the in-force field is returned before the unstarted sequencer "
+		"is ruled out");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&acc, "pwrseq_cfg_default"),
+		"the unknown ceiling now answers the built-in default, which is "
+		"MORE permissive than the cfg-derived value it replaced");
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		0U, count_in(&acc, "STS_RB_VMAX_MV_CEILING"),
+		"the accessor publishes the hardware constant instead of the "
+		"envelope actually in force");
 }
 
 /* =========================== 5. the two objects that had to move a SEQUENCE = */
@@ -1283,6 +1393,7 @@ int main(void)
 
 	RUN_TEST(test_the_rb_serial_relay_is_wired);
 	RUN_TEST(test_the_rb_ceiling_is_the_one_in_force);
+	RUN_TEST(test_the_published_rb_ceiling_is_the_drains_own_field);
 
 	RUN_TEST(test_the_watchdog_enable_replays_the_arm_sequence);
 	RUN_TEST(test_the_clock_mux_goes_through_refsel_and_restores_verbatim);

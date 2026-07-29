@@ -1041,8 +1041,9 @@ static void test_ilk_vcc_rb_is_clamped_to_the_configured_ceiling(void)
 	TEST_ASSERT_EQUAL_INT32(mp_obj_at(obj)->min, res.value);
 	TEST_ASSERT_TRUE(res.clamped);
 
-	/* A zero ceiling means the glue could not read cfg: refuse, do not
-	 * fall back to the electrical maximum. */
+	/* A zero ceiling means the glue does not know the envelope in force —
+	 * sts_pwrseq_rb_vmax_mv() answering 0 for a sequencer that has not
+	 * started. Refuse; do not fall back to the electrical maximum. */
 	st.rb_vmax_mv = 0U;
 	TEST_ASSERT_EQUAL_INT(-EPERM, mp_ilk_eval(obj, 12000, &st, 0U, &res));
 	TEST_ASSERT_EQUAL_UINT32(MP_ILK_RB_VMAX, res.failed);

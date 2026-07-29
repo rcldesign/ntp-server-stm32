@@ -221,7 +221,6 @@
 #include "console/sts_recovery_policy.h"
 #include "fault/fault.h"
 #include "ina228/ina228.h"
-#include "zephyr/platform/sts_rbguard.h"
 #include "zephyr/sts_app.h"
 
 /*
@@ -757,7 +756,6 @@ static int prov_ilk(void *user, mp_ilk_state_t *out)
 	sts_pwrseq_snap_t ps;
 	bool have_ps;
 	uint64_t alarms = sts_alarms_active();
-	uint64_t vmax = 15000U;
 
 	ARG_UNUSED(user);
 	memset(out, 0, sizeof(*out));
@@ -840,50 +838,61 @@ static int prov_ilk(void *user, mp_ilk_state_t *out)
 	}
 
 	/*
-	 * The ceiling that is IN FORCE, not the raw cfg value.
+	 * The ceiling that is IN FORCE — asked of the sequencer, not rebuilt
+	 * from cfg.
 	 *
 	 * This bounds every VCC_RB request through MP_ILK_RB_VMAX (the manifest
 	 * publishes the wider electrical range), so it has to be the same number
-	 * the rail is actually held to. It was not. cfg `pwr.rb.vmax.mv` has a
-	 * schema range of 4510..24450 mV, but the platform binds
-	 * pwrseq_cfg_t::rb_vmax_mv through sts_rb_vmax_decide(), which caps it at
-	 * STS_RB_VMAX_MV_CEILING — 15000 mV, what the FE-5680A this board is
-	 * built around can survive. The two sat up to 9.45 V apart.
+	 * the rail is actually held to. cfg `pwr.rb.vmax.mv` is not that number
+	 * and never was: its schema range is 4510..24450 mV and it is only the
+	 * REQUEST, which the platform binds through sts_rb_vmax_decide() before
+	 * pwrseq_init() ever sees it.
 	 *
-	 * The gap was a LIE rather than a hazard, which is what made it worth
-	 * closing: the platform's bound is authoritative and holds. An admin sets
-	 * 22000, a technician overrides `pwr.rb.vset_mv` to 20000, the interlock
-	 * does not clamp, the reply says `value: 20000, clamped: false`, the
-	 * drain puts the rail at <=15000, and 250 ms later MP_ILK_RB_VERIFY drops
-	 * the lease as "VCC_RB out of window" — sending a technician after a rail
-	 * fault that does not exist, on a reply that told him the setpoint took.
+	 * Reading cfg here and re-applying STS_RB_VMAX_MV_CEILING modelled ONE of
+	 * that function's two arms. It closed the arm that lied outright: an
+	 * admin sets 22000, a technician overrides `pwr.rb.vset_mv` to 20000, the
+	 * interlock does not clamp, the reply says `value: 20000, clamped:
+	 * false`, the drain puts the rail at <=15000, and 250 ms later
+	 * MP_ILK_RB_VERIFY drops the lease as "VCC_RB out of window" — sending a
+	 * technician after a rail fault that does not exist, on a reply that told
+	 * him the setpoint took. It did NOT model the other arm: a ceiling below
+	 * the fixed operating setpoint is REFUSED, and pwrseq keeps its own
+	 * default, which is HIGHER than the configured value. There the console
+	 * clamped tighter than the drain and quoted a technician a smaller
+	 * ceiling than the board would have accepted — safe, but still untrue,
+	 * and unmodellable here because `default_mv` and `operating_mv` are
+	 * pwrseq internals.
 	 *
-	 * The cap is applied here rather than read back from the sequencer
-	 * because nothing publishes pwrseq_cfg_t::rb_vmax_mv; sts_rbguard.h's
-	 * constant is the same authority pwrseq_exec.c clamps with, so this is
-	 * one bound quoted twice, not a second policy. That leaves ONE case of
-	 * sts_rb_vmax_decide() unmodelled: it also REFUSES a ceiling below the
-	 * fixed operating setpoint and keeps pwrseq's own default, which is
-	 * HIGHER than the configured value. Not reproducing that is safe in the
-	 * only direction that matters — core then clamps tighter than the
-	 * platform, and a request the interlock has already lowered is one the
-	 * drain will honour, so the reply stays true. The direction that lied is
-	 * the one now closed.
+	 * sts_pwrseq_rb_vmax_mv() ends both arms at once, by construction rather
+	 * than by coincidence: it returns pwrseq_cfg_t::rb_vmax_mv itself — the
+	 * field sts_rb_code_for_mv() bounds every drained setpoint against — so
+	 * there is now one number and no second policy. Its 0 (sequencer not
+	 * started) is the unknown MP_ILK_RB_VMAX already refuses on, which is
+	 * both fail-safe and accurate: the mailbox refuses the setpoint row in
+	 * that state anyway.
+	 *
+	 * The narrowing is bounded by the FIELD, not by the envelope, and that is
+	 * deliberate. Re-clamping to STS_RB_VMAX_MV_CEILING here would put the
+	 * console back in the business of second-guessing the sequencer — the
+	 * exact bug being removed — because sts_rb_vmax_decide() does not clamp
+	 * the default it substitutes on a refusal, so a default that ever rose
+	 * above the ceiling would have this quietly under-reporting again.
+	 * UINT16_MAX is about representability rather than about policy: it
+	 * cannot disagree with the platform, it only stops the cast wrapping.
+	 *
+	 * Taken into a LOCAL FIRST, and that is not style. Zephyr's MIN() is
+	 * `(((a) < (b)) ? (a) : (b))`, so a call passed as `a` is evaluated
+	 * twice — once to decide the comparison and once to produce the result.
+	 * `pwrseq_started` flips exactly once, from the bring-up thread, while
+	 * this runs on the console thread; two calls straddling that instant
+	 * would compare 0 and publish the envelope, or the reverse, and the
+	 * published ceiling would be a number no single read of the sequencer
+	 * ever returned. One call, one answer.
 	 */
-	if ((sts_cfg() != NULL) &&
-	    (cfg_get_u64(sts_cfg(), 0x0703U, &vmax) == 0)) {
-		BUILD_ASSERT(STS_RB_VMAX_MV_CEILING <= UINT16_MAX,
-			     "the VCC_RB ceiling must fit mp_ilk_state_t::"
-			     "rb_vmax_mv");
-		if (vmax > (uint64_t)STS_RB_VMAX_MV_CEILING) {
-			vmax = (uint64_t)STS_RB_VMAX_MV_CEILING;
-		}
-		/* Bounded by the clamp above rather than by the cfg schema, so
-		 * the narrowing is safe by construction and stays safe if the
-		 * schema row ever widens past 65535. */
-		out->rb_vmax_mv = (uint16_t)vmax;
-	} else {
-		out->rb_vmax_mv = 0U; /* unknown -> rb.vmax refuses */
+	{
+		uint32_t vmax = sts_pwrseq_rb_vmax_mv();
+
+		out->rb_vmax_mv = (uint16_t)MIN(vmax, (uint32_t)UINT16_MAX);
 	}
 	/*
 	 * THE CEILING AND THE EXPECTED RAIL ARE DIFFERENT NUMBERS, and this
