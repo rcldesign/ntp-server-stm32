@@ -193,8 +193,28 @@ const mp_obj_t mp_objs[] = {
 	  .group = MP_GRP_POWER, .flags = F_RW_D, .ilk = MP_ILK_DISP_OFF,
 	  .net = "DISP_EN",
 	  .desc = "U33 RT9742 5V_DISP + PCA9306 enable (PC11)" },
+	/*
+	 * The first rail wired through the parameterised sequencer mailbox
+	 * (zephyr/platform/sts_pwrseq_req.h), and therefore LEASE-ONLY: no
+	 * MP_OF_WRITE, for the reason test_mp_manifest.c states over the tunnel
+	 * objects and for one more that is specific to a rail.
+	 *
+	 * The shared reason: `obj.set` creates no lease, so nothing in the
+	 * system can put the rail back — not the dead-man, not a link drop, not
+	 * `session.close`. FMT §5.1.2 makes an override a lease precisely so
+	 * that nothing stays commanded after the tool walks away, and a power
+	 * rail is the last object that should be exempt from it.
+	 *
+	 * The specific reason: the write is asynchronous. It is posted to the
+	 * housekeeping thread, which owns every rail pin, and answers
+	 * MP_APPLY_PENDING. `obj.override`'s reply can say so — that is what
+	 * `verify_pending` means and mp_ovr_tick() drops the lease if the write
+	 * never lands — but `obj.set`'s reply has no such field, so a `set`
+	 * could only report an effect that had not happened yet. Refusing the
+	 * method is honest; answering it would not be.
+	 */
 	{ .id = "pwr.panel.led.en", .kind = MP_KIND_BOOL,
-	  .guard = MP_GUARD_G1, .group = MP_GRP_POWER, .flags = F_RW_D,
+	  .guard = MP_GUARD_G1, .group = MP_GRP_POWER, .flags = F_LEASE,
 	  .net = "PANEL_LED_EN",
 	  .desc = "U55 RT9742 panel-LED 5 V rail enable (PC0)" },
 	{ .id = "pwr.rb.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,

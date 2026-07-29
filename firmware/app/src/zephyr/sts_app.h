@@ -1022,6 +1022,90 @@ int sts_pwrseq_poe_kill(void);
  * MP_MIRROR_F_IDENTIFY reports). 0 stops it. Safe from any thread. */
 void sts_supervisor_identify(uint32_t duration_ms);
 
+/* ---- parameterised sequencer requests ----------------------------------- */
+/*
+ * The three entry points above post single BITS of one atomic word, which works
+ * only because each is idempotent: retrying a retry or clearing a cleared latch
+ * is a no-op, so coalescing two into one is correct rather than a lost message.
+ * A general object setter cannot use that mechanism — it must carry
+ * (object, value), which a bitmask cannot express.
+ *
+ * This is that mechanism: a small mailbox with one slot per requestable object,
+ * posted from any thread and drained on the SAME 4 Hz housekeeping pass as the
+ * bits, so every rail keeps exactly one writer. The queue itself is
+ * platform/sts_pwrseq_req.h, which also states the concurrency discipline (a
+ * spinlock and a bounded copy, never a mutex) and the collision rule.
+ *
+ * Consequence, stated rather than hidden: a request takes effect up to one
+ * housekeeping tick (250 ms) after it is posted, and its outcome reaches the
+ * requesting area up to one of ITS passes after that. Callers that must not
+ * claim the pin moved before it did — the Maintenance Protocol's obj.override
+ * is one — use sts_pwrseq_req_take() to confirm, and treat a request that never
+ * settles as a failure. Nothing here blocks, in either direction.
+ */
+
+/* One row per object the mailbox can carry. Keyed by this enum rather than by
+ * anything the console owns, so the platform area needs no object table.
+ * STS_PWRSEQ_REQ_NONE is 0 and is never a valid request. */
+typedef enum {
+	STS_PWRSEQ_REQ_NONE = 0,
+	/* PANEL_LED_EN (PC0). Value 0 drops the rail; non-zero raises it at the
+	 * duty already programmed, or full brightness if that is 0 — the RT9742
+	 * enable and the LPTIM2_CH2 duty share one setter (sts_panel_led_set),
+	 * so the two cannot be commanded apart. `ui.panel.duty` is the dimmer. */
+	STS_PWRSEQ_REQ_PANEL_LED_EN,
+	STS_PWRSEQ_REQ_COUNT
+} sts_pwrseq_req_id_t;
+
+/* What became of a drained request. */
+typedef enum {
+	STS_PWRSEQ_REQ_OUT_NONE = 0,  /* nothing unread */
+	STS_PWRSEQ_REQ_OUT_APPLIED,   /* the actuator took it */
+	STS_PWRSEQ_REQ_OUT_REFUSED,   /* the sequencer would not */
+	STS_PWRSEQ_REQ_OUT_COUNT
+} sts_pwrseq_req_out_t;
+
+/* Why the sequencer refused. Carried as an enum and resolved to a sentence by
+ * sts_pwrseq_req_reason(), so no pointer crosses the thread boundary. */
+typedef enum {
+	STS_PWRSEQ_REQ_ERR_NONE = 0,
+	STS_PWRSEQ_REQ_ERR_STAGE, /* the stage that owns the rail is not done */
+	STS_PWRSEQ_REQ_ERR_SHED,  /* the load is shed (power/thermal ladder) */
+	STS_PWRSEQ_REQ_ERR_HW,    /* the actuator itself returned an error */
+	STS_PWRSEQ_REQ_ERR_COUNT
+} sts_pwrseq_req_err_t;
+
+typedef struct {
+	uint8_t  outcome;    /* sts_pwrseq_req_out_t */
+	uint8_t  err;        /* sts_pwrseq_req_err_t; NONE unless REFUSED */
+	int32_t  value;      /* the value that actually reached the actuator */
+	uint32_t settled_ms; /* when the drain settled it */
+} sts_pwrseq_req_result_t;
+
+/* Post a request for @p req. @p value NULL returns the object to
+ * firmware-automatic control, exactly as it does for an override apply.
+ *
+ * Never blocks. A request for the same object that has not yet drained is
+ * REPLACED — last writer wins, because two values for one object before a drain
+ * are one intent revised, not two events — and the replacement is counted.
+ * Requests for different objects never interact and the mailbox cannot overflow.
+ *
+ * @retval 0        Posted; it will be applied within one housekeeping tick.
+ * @retval -EINVAL  @p req is not a request id.
+ * @retval -ENODEV  The sequencer never started, so nothing would drain it. */
+int sts_pwrseq_req_post(uint8_t req, const int32_t *value);
+
+/* Take @p req's unread outcome, if any. Take rather than peek: an outcome
+ * reported twice would withdraw a lease the first report already withdrew.
+ *
+ * @retval true   @p out written.
+ * @retval false  Nothing unread, or a bad argument. */
+bool sts_pwrseq_req_take(uint8_t req, sts_pwrseq_req_result_t *out);
+
+/* The sentence for a refusal reason, for the event channel and the audit log.
+ * NULL when @p err is not a real refusal reason. */
+const char *sts_pwrseq_req_reason(uint8_t err);
+
 /* ---- FE-5680A serial link (UART7 + the K1 RS-232/CMOS relay) ------------- */
 /*
  * The Rb housekeeping port, as an operator sees it. The FE-5680A variant fitted

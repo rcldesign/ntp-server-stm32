@@ -177,6 +177,16 @@ module_deps(super_policy pwrseq fault quality ina228 util)
 # destroy the rubidium.
 module_deps(rbguard     pwrseq fault ina228 util)
 
+# `pwrseq_req` (platform/sts_pwrseq_req.h) — the parameterised request mailbox
+# that lets a management thread command a rail without writing its pin. It is
+# the seam between the console area and the single writer of every rail, so the
+# suite links `mp` for the real lease table, RPC layer and event stream, and
+# drives them against the real mailbox header. `mp` carries cfg, logring,
+# quality, ina228 and fwupd with it; `pwrseq` is NOT a link dependency — the
+# suite mirrors pwrseq_exec.c's drain rather than running the stage machine,
+# which test_mp_veto.c already does.
+module_deps(pwrseq_req  mp util)
+
 # `gnss_tee` is the same idea for the platform area's NMEA/UBX run classifier
 # (app/src/zephyr/platform/gnss_tee.h): the split that decides which of the
 # maintenance tool's two capture channels each received byte belongs to. It runs

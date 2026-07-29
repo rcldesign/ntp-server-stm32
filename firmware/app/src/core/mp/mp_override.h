@@ -140,6 +140,60 @@ const char *mp_role_name(uint8_t role);
 #define MP_RB_VERIFY_TOL_PCT 10U
 #endif
 
+/**
+ * How long a lease may stay UNSETTLED before it is reverted as failed.
+ *
+ * A glue whose actuator lives on another thread answers MP_APPLY_PENDING and
+ * confirms later with mp_ovr_settled(); until it does, the lease exists but the
+ * pin has not moved, and the reply says so (see MP_APPLY_PENDING). This is the
+ * deadline on "later", and past it the lease is dropped exactly as a failed
+ * VCC_RB read-back is — same event, same fail-safe reading of silence.
+ *
+ * 3000 ms is set from the worst case the shipped glue can actually produce, not
+ * picked round: the request is drained on the platform's 250 ms sequencer pass,
+ * and the confirmation is taken on the console supervisor's own pass, which
+ * mp_glue.h budgets at up to `(STS_MP_TICK_MISS_MAX + 1) * (250 + 50)` = 1800 ms
+ * between two SUCCESSFUL ticks when the shell thread is contending. 250 + 1800 =
+ * 2050 ms worst case, so a deadline at 3000 ms cannot fire on a merely busy
+ * board — which matters, because a spurious drop here would revert a lease that
+ * was working.
+ */
+#ifndef MP_APPLY_SETTLE_MS
+#define MP_APPLY_SETTLE_MS 3000U
+#endif
+
+/**
+ * mp_ovr_apply_fn's "accepted, but the pin has not moved yet".
+ *
+ * Positive, because both call sites have always tested `rc < 0` for failure and
+ * therefore already treat any positive value as success; this gives that unused
+ * range one documented meaning rather than adding a parameter.
+ *
+ * WHY IT EXISTS. Most of this board's control objects are GPIO/PWM the platform
+ * area owns, and that area is single-writer by construction — every rail is
+ * driven from the housekeeping thread's 4 Hz sequencer pass, because the action
+ * ring it feeds has no lock and a second writer would be appending to a queue
+ * whose consumer is mid-drain. So a glue that routes a write to that thread
+ * cannot report, at return, that the pin moved. It has not.
+ *
+ * Answering 0 anyway would make `obj.override`'s reply claim an effect that has
+ * not happened, which is precisely the class of untruth this protocol's replies
+ * are supposed to be free of. Answering an error would be worse: the override
+ * WAS accepted, and reporting a veto sends a technician looking for an interlock
+ * that did not fire.
+ *
+ * So the lease is granted — the authorisation is immediate and real — and it is
+ * marked unsettled. `mp_ilk_res_t::pending` carries that out to the RPC layer,
+ * which folds it into the reply's existing `verify_pending` key: that key
+ * already means "not confirmed; a check is scheduled and this lease may yet be
+ * dropped", which is exactly the situation. The glue then either calls
+ * mp_ovr_settled() when its drain confirms, or mp_ovr_veto() when the owning
+ * subsystem refuses; silence past MP_APPLY_SETTLE_MS is treated as failure.
+ * That is MP_ILK_RB_VERIFY's read-back-and-revert shape, reused rather than
+ * reinvented.
+ */
+#define MP_APPLY_PENDING 1
+
 /* ------------------------------------------------------- interlock inputs */
 
 /**
@@ -192,6 +246,16 @@ typedef struct {
 	bool clamped;    /**< an interlock reduced the request */
 	bool tunnel;     /**< MP_ILK_TUNNEL applies: reference becomes suspect */
 	bool verify;     /**< MP_ILK_RB_VERIFY applies: schedule a read-back */
+	/**
+	 * The apply answered MP_APPLY_PENDING: the lease is granted but the pin
+	 * has not moved yet.
+	 *
+	 * NOT set by mp_ilk_eval() — it is not an interlock verdict and no
+	 * manifest row declares it. It is written by mp_ovr_grant() from the
+	 * apply callback's return, and it rides in this struct because this is
+	 * already what mp_ovr_grant() hands back to the RPC layer for the reply.
+	 */
+	bool pending;
 	uint32_t failed; /**< the interlock bit that refused, or 0 */
 } mp_ilk_res_t;
 
@@ -252,6 +316,11 @@ typedef struct {
 	/* MP_ILK_RB_VERIFY bookkeeping */
 	uint32_t verify_at_ms; /**< 0 = nothing pending */
 	int32_t verify_expect_mv;
+	/**
+	 * MP_APPLY_PENDING bookkeeping: the instant past which an unconfirmed
+	 * apply is treated as failed. 0 = settled (the ordinary case).
+	 */
+	uint32_t settle_by_ms;
 } mp_lease_t;
 
 /* -------------------------------------------------------------- callbacks */
@@ -322,6 +391,10 @@ typedef struct {
 	uint32_t refusals;      /**< guard or interlock refusals */
 	uint32_t release_errors;
 	uint32_t late_ticks;    /**< ticks later than MP_TICK_MAX_MS */
+	/** Leases that reached the actuator after an MP_APPLY_PENDING grant. */
+	uint32_t settled;
+	/** Leases dropped because an MP_APPLY_PENDING grant never landed. */
+	uint32_t settle_failures;
 } mp_ovr_ctx_t;
 
 /**
@@ -524,6 +597,28 @@ int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
  * @retval -EACCES  The lease belongs to a different session.
  */
 int mp_ovr_release(mp_ovr_ctx_t *c, size_t obj, uint32_t sid, uint32_t now_ms);
+
+/**
+ * Confirm that an MP_APPLY_PENDING grant reached the actuator.
+ *
+ * Called by the glue when its own drain reports the write landed. Clears the
+ * settle deadline so mp_ovr_tick() stops watching the lease; the lease itself,
+ * its value and its TTL are untouched — this reports an observation, it does not
+ * re-grant anything.
+ *
+ * Idempotent, and deliberately so: the glue's outcome queue is last-writer-wins
+ * per object, so a confirmation may legitimately arrive for a lease that has
+ * already settled, and that must not be an error.
+ *
+ * @retval 0        The lease is settled (whether or not it already was).
+ * @retval -EINVAL  @p c is NULL or @p obj is not a manifest index.
+ * @retval -ENOENT  No lease on that object — the usual answer when a lease was
+ *                  released or vetoed between the request and its confirmation.
+ */
+int mp_ovr_settled(mp_ovr_ctx_t *c, size_t obj, uint32_t now_ms);
+
+/** True when @p obj's lease exists and has not yet been confirmed applied. */
+bool mp_ovr_pending(const mp_ovr_ctx_t *c, size_t obj);
 
 /**
  * Firmware veto: the owning subsystem withdraws an override.

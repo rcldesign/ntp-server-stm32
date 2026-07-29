@@ -119,30 +119,40 @@
  *
  *    Most control objects live on GPIO/PWM/DAC the *platform* area owns, and
  *    sts_app.h exposes only sts_panel_led_set(), sts_rb_serial_set_mode(),
- *    sts_supervisor_identify() and the two recovery pulses; the GNSS and Rb
- *    tunnels are this area's own. Nine manifest objects therefore have an
- *    actuator behind them:
+ *    sts_supervisor_identify(), the two recovery pulses and — new — the
+ *    parameterised sequencer mailbox; the GNSS and Rb tunnels are this area's
+ *    own. Ten manifest objects therefore have an actuator behind them:
  *
  *      obj_apply   ui.panel.duty, ui.identify, ref.rb.serial,
- *                  gnss.tunnel, ref.rb.tunnel
+ *                  gnss.tunnel, ref.rb.tunnel, pwr.panel.led.en
  *      obj_pulse   pwr.poe.kill, pwr.rb.ov.reset
  *      cfg_write   pwr.rb.vmax_mv, pwr.poe.budget_mw   (mp_rpc.c, not here)
  *
- *    The other thirty mutable objects answer MP_E_NOTSUP, and forty-one
- *    objects in all carry **MP_OF_DEFERRED** so the host is told which before
- *    it renders them: FMT §4 has the tool generate its UI from the manifest and
- *    hardcode nothing, so an object that is published and refused is a control
- *    a technician tries at a bench and watches fail. The bit also gates the
- *    RPC through mp_wiring_t::obj_supported (prov_obj_supported() below), so an
+ *    The other mutable objects answer MP_E_NOTSUP and carry **MP_OF_DEFERRED**
+ *    so the host is told which before it renders them: FMT §4 has the tool
+ *    generate its UI from the manifest and hardcode nothing, so an object that
+ *    is published and refused is a control a technician tries at a bench and
+ *    watches fail. The bit also gates the RPC through
+ *    mp_wiring_t::obj_supported (prov_obj_supported() below), so an
  *    unimplemented G3 object is refused BEFORE mp_ovr_guard() consumes the
  *    typed-phrase-and-hold arm.
  *
- *    Wiring the remaining thirty is still a platform-area change — a setter
- *    that takes a manifest object index, or per-object accessors in sts_app.h —
- *    and it needs a parameterised pwrseq request path, because the existing
- *    operator entry points post single bits of one atomic word and cannot carry
- *    a value. Whatever lands, tests/host/test_mp_deferred.c fails until the
- *    manifest row is cleared to match.
+ *    THE MECHANISM FOR THE REST NOW EXISTS, and `pwr.panel.led.en` is the one
+ *    object that proves it end to end. The blocker used to be that the
+ *    platform's operator entry points post single bits of one atomic word and
+ *    cannot carry a value; zephyr/platform/sts_pwrseq_req.h is the
+ *    parameterised path that can, and it drains on the same 4 Hz housekeeping
+ *    pass, so every rail keeps exactly one writer. Wiring another object is now
+ *    a row in sts_pwrseq_req_id_t, an executor in pwrseq_exec.c's mailbox
+ *    drain, a branch in obj_apply() and obj_read() here, and the manifest row.
+ *
+ *    Two things that mechanism does NOT decide for the next object, so they do
+ *    not get assumed: whether its OFF direction is unconditionally safe (the
+ *    panel's is, which is why it went first — a rail feeding the timing path is
+ *    not), and whether it may keep MP_OF_WRITE (`pwr.panel.led.en` may not: an
+ *    asynchronous apply has no honest `obj.set` reply, and that row says so).
+ *    Whatever lands, tests/host/test_mp_deferred.c fails until the manifest row
+ *    is cleared to match.
  * ---------------------------------------------------------------------------
  */
 
@@ -1117,6 +1127,24 @@ static int obj_read(void *user, size_t obj, mp_val_t *out)
 		return 0;
 	}
 	/*
+	 * PANEL_LED_EN, read from the actuator rather than from the sequencer's
+	 * belief.
+	 *
+	 * sts_pwrseq_snap_t carries `panel_led_on`, and it is the WRONG source
+	 * here: that is pwrseq's record of having emitted PANEL_LED_EN, and the
+	 * action itself is a no-op in the executor — the rail follows the duty,
+	 * because one setter drives both PC0 and PE0. So the sequencer can
+	 * believe the panel is enabled while the string is dark. What PC0
+	 * actually does is `duty != 0`, which is what this reports, and it is
+	 * also what makes the asynchronous write confirmable: a host that sets
+	 * the override and then reads it back sees the pin, not the intent.
+	 */
+	if (strcmp(o->id, "pwr.panel.led.en") == 0) {
+		out->i = (sts_panel_led_get() != 0U) ? 1 : 0;
+		out->valid = true;
+		return 0;
+	}
+	/*
 	 * The two tunnels and the K1 relay: read-backs for objects whose
 	 * actuation is wired, so a host is not left setting a control it cannot
 	 * confirm. All three are this area's own state or one snapshot call, and
@@ -1349,6 +1377,39 @@ static int obj_apply(void *user, size_t obj, const int32_t *value)
 		/* A release restores the UI's own brightness policy; with no
 		 * accessor for it, 0 %% is the safe resting state. */
 		return sts_panel_led_set(duty);
+	}
+
+	/*
+	 * PANEL_LED_EN (PC0) — the first object routed through the parameterised
+	 * sequencer mailbox, and the reason that mailbox exists.
+	 *
+	 * It is NOT written here. Every rail pin has exactly one writer, the
+	 * housekeeping thread's 4 Hz sequencer pass, and this is the console
+	 * thread. The hazard is not merely a torn write: pwrseq raises
+	 * STS_MP_VETO_PANEL_LED *before* it executes PANEL_LED_DIS, so a write
+	 * issued from here could land after the veto drain and re-light a panel
+	 * whose lease had already been withdrawn — an override outliving the
+	 * firmware decision that overruled it.
+	 *
+	 * So the value is posted and the drain performs it, up to 250 ms later.
+	 * MP_APPLY_PENDING is what makes that latency honest rather than hidden:
+	 * mp_ovr_grant() marks the lease unsettled, the reply's `verify_pending`
+	 * says so, mp_veto_drain_locked()'s companion below confirms or vetoes
+	 * it from the drain's own outcome, and mp_ovr_tick() drops the lease if
+	 * neither happens. Returning 0 here would assert that the pin had moved.
+	 *
+	 * A release (value == NULL) goes through the same mailbox and resolves
+	 * to a dark panel, which is both PWRSEQ_ACT_PANEL_LED_DIS's own state
+	 * and `ui.panel.duty`'s release position — so a lapsed lease cannot
+	 * leave the string lit.
+	 */
+	if (strcmp(o->id, "pwr.panel.led.en") == 0) {
+		int32_t on = ((value != NULL) && (*value != 0)) ? 1 : 0;
+		int rc = sts_pwrseq_req_post(
+			(uint8_t)STS_PWRSEQ_REQ_PANEL_LED_EN,
+			(value != NULL) ? &on : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
 	}
 
 	if (strcmp(o->id, "gnss.tunnel") == 0) {
@@ -1752,6 +1813,103 @@ static void mp_veto_drain_locked(void)
 	}
 }
 
+/* ------------------------------------------- sequencer request outcomes --- */
+
+/*
+ * The manifest object each mailbox row actuates.
+ *
+ * By id and not by index, for the reason sts_mp_veto_policy.h gives for its own
+ * table: the manifest is a build-time array whose ordering is nobody's
+ * contract, and a renamed object must fail at a lookup — loudly, and in the
+ * host suite that resolves every id here — rather than silently settling or
+ * vetoing whatever now sits at a hard-coded position.
+ *
+ * Indexed by sts_pwrseq_req_id_t, so row 0 (STS_PWRSEQ_REQ_NONE) is NULL and
+ * never consulted; that is the same "slot 0 is never a request" convention the
+ * mailbox itself uses.
+ */
+static const char *const mp_req_objects[STS_PWRSEQ_REQ_COUNT] = {
+	[STS_PWRSEQ_REQ_NONE] = NULL,
+	[STS_PWRSEQ_REQ_PANEL_LED_EN] = "pwr.panel.led.en",
+};
+
+/**
+ * Resolve what the 4 Hz sequencer pass did with our requests. **mp_lock held.**
+ *
+ * The consumer half of the mailbox, and the answer to "a request that vanishes
+ * silently is the same defect in a new place". Every drained request lands in
+ * exactly one of three places:
+ *
+ *   APPLIED  mp_ovr_settled() clears the lease's settle deadline. The lease was
+ *            already granted and already reported; this is the confirmation
+ *            that its `verify_pending` can now be believed to have cleared.
+ *   REFUSED  mp_ovr_veto() drops the lease with the sequencer's own reason —
+ *            the existing withdrawal path, so the refusal reaches channel 0x09
+ *            as MP_OVR_EV_VETO and the audit log as a LOGR_WARN line, exactly
+ *            as a shed or an OV latch would.
+ *   NEITHER  nothing drains within MP_APPLY_SETTLE_MS and mp_ovr_tick() drops
+ *            the lease itself. Silence is failure.
+ *
+ * Runs inside the wait sts_mp_tick() already spends, so it adds no timed lock
+ * wait to the supervisor's pass — the same arrangement, and the same reason, as
+ * mp_veto_drain_locked() and mp_event_drain_locked() beside it.
+ */
+static void mp_req_drain_locked(uint32_t now_ms)
+{
+	uint8_t req;
+
+	for (req = (uint8_t)STS_PWRSEQ_REQ_NONE + 1U;
+	     req < (uint8_t)STS_PWRSEQ_REQ_COUNT; req++) {
+		sts_pwrseq_req_result_t r;
+		const char *id = mp_req_objects[req];
+		int obj;
+		int rc;
+
+		if (!sts_pwrseq_req_take(req, &r)) {
+			continue;
+		}
+		if (id == NULL) {
+			LOG_ERR("MP mailbox: request %u names no manifest "
+				"object; its outcome cannot be reported",
+				(unsigned int)req);
+			continue;
+		}
+
+		obj = mp_obj_find(id);
+		if (obj < 0) {
+			/* A manifest rename that missed this table. Loud for
+			 * the same reason mp_veto_drain_locked() is. */
+			LOG_ERR("MP mailbox: manifest has no object `%s`; a "
+				"sequencer outcome cannot be reported",
+				id);
+			continue;
+		}
+
+		if (r.outcome == (uint8_t)STS_PWRSEQ_REQ_OUT_APPLIED) {
+			rc = mp_ovr_settled(&mp.ovr, (size_t)obj, now_ms);
+			/*
+			 * -ENOENT is ordinary and not an error: the lease may
+			 * have been released, vetoed or expired between the
+			 * post and the drain, and an `obj.set`-shaped caller
+			 * would have no lease at all. Nothing to confirm is a
+			 * fine outcome for a write that succeeded.
+			 */
+			if ((rc != 0) && (rc != -ENOENT)) {
+				LOG_ERR("MP mailbox: confirming `%s` failed (%d)",
+					id, rc);
+			}
+			continue;
+		}
+
+		rc = mp_veto(&mp, (size_t)obj, sts_pwrseq_req_reason(r.err));
+		/* -ENOENT is ordinary here too, and for the same reason. */
+		if ((rc != 0) && (rc != -ENOENT)) {
+			LOG_ERR("MP mailbox: withdrawing `%s` failed (%d)", id,
+				rc);
+		}
+	}
+}
+
 void sts_mp_veto_stats(uint32_t *raised, uint32_t *applied)
 {
 	if (raised != NULL) {
@@ -2044,6 +2202,22 @@ void sts_mp_tick(void)
 	 */
 	mp_veto_drain_locked();
 	/*
+	 * Then the sequencer's answers to our own requests — after the vetoes,
+	 * before mp_tick().
+	 *
+	 * After the vetoes because they are the stronger statement: if this pass
+	 * carries both a shed of the panel rail and an "applied" for an override
+	 * on it, the lease must go, and the veto that removes it makes the
+	 * confirmation answer -ENOENT rather than the confirmation resurrecting
+	 * a settled deadline on a lease that is about to be withdrawn.
+	 *
+	 * Before mp_tick() because that is what runs mp_ovr_tick(), which drops
+	 * any lease still unsettled past MP_APPLY_SETTLE_MS. A confirmation
+	 * arriving on the same pass must be applied first, or a request that did
+	 * land would be reverted for never landing.
+	 */
+	mp_req_drain_locked((uint32_t)k_uptime_get_32());
+	/*
 	 * Before mp_tick(), not after: a parked link drop is a dead-man failure
 	 * that has already happened, and applying it first means this pass's
 	 * mp_ovr_tick() runs against the true link state instead of reverting the
@@ -2229,6 +2403,38 @@ static int cmd_mp_status(const struct shell *sh, size_t argc, char **argv)
 		sts_mp_veto_stats(&raised, &applied);
 		shell_print(sh, "veto seam    %u raised, %u drained",
 			    (unsigned int)raised, (unsigned int)applied);
+	}
+	{
+		unsigned int unconfirmed = 0U;
+		size_t i;
+
+		/*
+		 * The sequencer mailbox, from the lease table's side.
+		 *
+		 * `unconfirmed` is the number of overrides whose write has been
+		 * posted but not yet seen to land, and it is the answer to the
+		 * question a technician actually asks at the bench: "I set it
+		 * and nothing happened — is it still in flight, or did the
+		 * board refuse it?" Normally 0 or 1 and only for the ~250 ms
+		 * between the request and the sequencer's next pass; a value
+		 * that stays up means the housekeeping thread is not running,
+		 * and `never landed` is then about to climb.
+		 *
+		 * Bounded by the manifest size (below 128) times the lease
+		 * table (16), on a shell command that already holds the engine
+		 * lock — cheap enough to prefer the public predicate over
+		 * reaching into mp_lease_t.
+		 */
+		for (i = 0U; i < mp_obj_count(); i++) {
+			if (mp_ovr_pending(&mp.ovr, i)) {
+				unconfirmed++;
+			}
+		}
+		shell_print(sh,
+			    "req mailbox  %u unconfirmed, %u settled, "
+			    "%u never landed",
+			    unconfirmed, (unsigned int)mp.ovr.settled,
+			    (unsigned int)mp.ovr.settle_failures);
 	}
 	mp_engine_unlock();
 

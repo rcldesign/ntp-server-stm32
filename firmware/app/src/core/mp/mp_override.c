@@ -340,7 +340,18 @@ static void lease_drop(mp_ovr_ctx_t *c, mp_lease_t *l, uint8_t ev,
 
 	l->obj1 = 0U;
 	l->verify_at_ms = 0U;
+	l->settle_by_ms = 0U;
 
+	/*
+	 * A release may itself answer MP_APPLY_PENDING — the revert of a
+	 * platform-owned pin goes through the same mailbox the grant did — and
+	 * that is not an error: `rc < 0` is the failure test, so a pending
+	 * release counts as released. It is correct to drop the lease here
+	 * regardless. The pin's fail-safe direction is always available (the
+	 * glue never refuses an off/release), and a lease core could not clear
+	 * because the glue was slow would be worse than one whose last write is
+	 * still in flight.
+	 */
 	rc = c->apply(c->apply_user, obj, NULL);
 	if (rc < 0) {
 		c->release_errors++;
@@ -711,6 +722,7 @@ int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
 		if (l->obj1 == (uint16_t)(obj + 1U)) {
 			l->obj1 = 0U;
 			l->verify_at_ms = 0U;
+			l->settle_by_ms = 0U;
 		}
 		/*
 		 * -ENOTSUP is NOT a veto, and the difference is what a
@@ -755,6 +767,24 @@ int mp_ovr_grant(mp_ovr_ctx_t *c, size_t obj, int32_t value, uint32_t ttl_ms,
 	l->granted_ms = now_ms;
 	l->deadline_ms = now_ms + ttl_ms;
 
+	/*
+	 * MP_APPLY_PENDING: the glue accepted the value but its actuator lives
+	 * on another thread, so the pin has NOT moved. The lease stands — the
+	 * authorisation is real and immediate — and it is marked unsettled so
+	 * the reply can say so and mp_ovr_tick() can drop it if the write never
+	 * lands. See MP_APPLY_PENDING in the header for the whole argument.
+	 */
+	if (rc == MP_APPLY_PENDING) {
+		res->pending = true;
+		l->settle_by_ms = now_ms + MP_APPLY_SETTLE_MS;
+		if (l->settle_by_ms == 0U) {
+			l->settle_by_ms = 1U; /* 0 means "settled" */
+		}
+	} else {
+		res->pending = false;
+		l->settle_by_ms = 0U;
+	}
+
 	if (res->verify) {
 		l->verify_at_ms = now_ms + MP_RB_VERIFY_DELAY_MS;
 		if (l->verify_at_ms == 0U) {
@@ -794,6 +824,35 @@ int mp_ovr_release(mp_ovr_ctx_t *c, size_t obj, uint32_t sid, uint32_t now_ms)
 	lease_drop(c, l, (uint8_t)MP_OVR_EV_RELEASE, NULL);
 	c->releases++;
 	return 0;
+}
+
+int mp_ovr_settled(mp_ovr_ctx_t *c, size_t obj, uint32_t now_ms)
+{
+	mp_lease_t *l;
+
+	(void)now_ms;
+
+	if ((c == NULL) || (mp_obj_at(obj) == NULL)) {
+		return -EINVAL;
+	}
+	l = lease_of(c, obj);
+	if (l == NULL) {
+		return -ENOENT;
+	}
+	/* Only the first confirmation counts, so the counter measures grants
+	 * that landed rather than how often the glue repeated itself. */
+	if (l->settle_by_ms != 0U) {
+		l->settle_by_ms = 0U;
+		c->settled++;
+	}
+	return 0;
+}
+
+bool mp_ovr_pending(const mp_ovr_ctx_t *c, size_t obj)
+{
+	const mp_lease_t *l = mp_ovr_lease(c, obj);
+
+	return (l != NULL) && (l->settle_by_ms != 0U);
 }
 
 int mp_ovr_veto(mp_ovr_ctx_t *c, size_t obj, const char *reason,
@@ -859,6 +918,31 @@ static bool deadman_ok(const mp_ovr_ctx_t *c, uint32_t now_ms)
 		return false;
 	}
 	return since(now_ms, c->sess.keepalive_ms) <= c->sess.ttl_ms;
+}
+
+/**
+ * Judge one unsettled apply. Returns true when the lease was dropped.
+ *
+ * Silence is failure, the same reading verify_one() gives an unavailable
+ * read-back: a lease whose write never reached the pin is a lease that is
+ * lying about the board, and it must not stand until its TTL runs out. The
+ * glue clears this by calling mp_ovr_settled(); a refusal it hears about
+ * sooner comes back through mp_ovr_veto() and drops the lease before this
+ * deadline is ever reached.
+ */
+static bool settle_one(mp_ovr_ctx_t *c, mp_lease_t *l, uint32_t now_ms)
+{
+	if (l->settle_by_ms == 0U) {
+		return false;
+	}
+	if (!reached(now_ms, l->settle_by_ms)) {
+		return false;
+	}
+
+	c->settle_failures++;
+	lease_drop(c, l, (uint8_t)MP_OVR_EV_VERIFY_FAIL,
+		   "override never reached the pin");
+	return true;
 }
 
 /** Judge one pending VCC_RB read-back. Returns true when the lease was dropped. */
@@ -948,6 +1032,16 @@ int mp_ovr_tick(mp_ovr_ctx_t *c, const mp_ilk_state_t *st, uint32_t now_ms)
 			lease_drop(c, l, (uint8_t)MP_OVR_EV_EXPIRE,
 				   "lease expired");
 			c->expiries++;
+			n++;
+			continue;
+		}
+		/*
+		 * Before the read-back, because an override that never reached
+		 * the pin cannot be judged by reading the rail it never moved:
+		 * verify_one() would report the rubidium's window as the reason
+		 * a panel LED failed.
+		 */
+		if (settle_one(c, l, now_ms)) {
 			n++;
 			continue;
 		}

@@ -55,6 +55,7 @@
 #include "console/mp_glue.h"
 #include "zephyr/platform/platform.h"
 #include "zephyr/platform/sts_pwrseq_pub.h"
+#include "zephyr/platform/sts_pwrseq_req.h"
 #include "zephyr/platform/sts_rbguard.h"
 #include "zephyr/sts_app.h"
 
@@ -196,6 +197,10 @@ static uint32_t pwrseq_fault_snapshot(void)
  * declaration, not the definition's type.
  */
 static bool pwrseq_service_requests(uint32_t now_ms);
+
+/* Same arrangement, same reason: the parameterised mailbox is defined with the
+ * other operator-request plumbing but is drained from the tick above it. */
+static void pwrseq_service_mailbox(uint32_t now_ms);
 
 /*
  * @p out_extref_hz / @p out_extref_valid hand the raw EXTREF_MON measurement
@@ -668,11 +673,22 @@ void sts_pwrseq_step(uint32_t now_ms)
 			pwrseq_drain();
 		}
 		pwrseq_publish(&in, extref_hz, extref_valid, faults);
+		pwrseq_service_mailbox(now_ms);
 		return;
 	}
 
 	pwrseq_drain();
 	pwrseq_publish(&in, extref_hz, extref_valid, faults);
+
+	/*
+	 * Last, and on both exits. After pwrseq_drain() so a request cannot
+	 * outrank this tick's shed or fail-action, and after the publish so the
+	 * snapshot describes exactly what pwrseq_step() decided. On the bail
+	 * path too: a mailbox that only drained when the sequencer accepted its
+	 * input would strand an override's release — including the dead-man's —
+	 * for as long as the input stayed bad.
+	 */
+	pwrseq_service_mailbox(now_ms);
 
 	sts_liveness_feed(pwrseq_liveness_id);
 }
@@ -737,6 +753,10 @@ void sts_pwrseq_rb_quiesce_from_isr(void)
  * retry, clearing a cleared latch, killing an already-killed rail are all
  * no-ops) so coalescing two requests into one is the correct behaviour, not a
  * lost message.
+ *
+ * The PARAMETERISED mailbox below is the other half of the same idea, for the
+ * requests that carry a value and therefore cannot be a bit. Both drain on this
+ * one pass, so every rail still has exactly one writer.
  */
 #define PWRSEQ_REQ_RB_RETRY BIT(0)
 #define PWRSEQ_REQ_OV_CLEAR BIT(1)
@@ -796,6 +816,202 @@ static bool pwrseq_service_requests(uint32_t now_ms)
 	}
 
 	return acted;
+}
+
+/* ------------------------------------ the parameterised request mailbox --- */
+
+/*
+ * Storage and the lock. The queue mechanics, the collision rule and the whole
+ * argument for a spinlock rather than a mutex or a seqlock are in
+ * sts_pwrseq_req.h; this is the part that needs Zephyr.
+ *
+ * The lock is held only across the header's bounded struct copies — never
+ * across sts_panel_led_set(), which is claim-execute-settle for the same reason
+ * sts_mp_evq.h peeks, sends and only then discards.
+ */
+static sts_pwrseq_reqq_t pwrseq_mbox;
+static struct k_spinlock pwrseq_mbox_lock;
+
+int sts_pwrseq_req_post(uint8_t req, const int32_t *value)
+{
+	k_spinlock_key_t key;
+	int rc;
+
+	if (!sts_pwrseq_req_id_ok(req)) {
+		return -EINVAL;
+	}
+	/*
+	 * Refused rather than queued when the sequencer has not started: the
+	 * drain lives on its pass, so a request posted now would sit in the
+	 * mailbox with nothing to execute it and no outcome would ever come
+	 * back. The caller can act on -ENODEV; it cannot act on silence.
+	 */
+	if (!pwrseq_started) {
+		return -ENODEV;
+	}
+
+	key = k_spin_lock(&pwrseq_mbox_lock);
+	rc = sts_pwrseq_reqq_post(&pwrseq_mbox, req, (value == NULL),
+				  (value != NULL) ? *value : 0,
+				  k_uptime_get_32());
+	k_spin_unlock(&pwrseq_mbox_lock, key);
+
+	return rc;
+}
+
+bool sts_pwrseq_req_take(uint8_t req, sts_pwrseq_req_result_t *out)
+{
+	k_spinlock_key_t key;
+	bool got;
+
+	key = k_spin_lock(&pwrseq_mbox_lock);
+	got = sts_pwrseq_reqq_take(&pwrseq_mbox, req, out);
+	k_spin_unlock(&pwrseq_mbox_lock, key);
+
+	return got;
+}
+
+const char *sts_pwrseq_req_reason(uint8_t err)
+{
+	return sts_pwrseq_req_reason_of(err);
+}
+
+/**
+ * Execute one claimed PANEL_LED_EN request. Housekeeping-thread context only.
+ *
+ * PANEL_LED_EN (PC0) is not in pwrseq_outputs[] — panel_pwm.c owns the pin, and
+ * pwrseq reaches it by calling sts_panel_led_set() from PWRSEQ_ACT_PANEL_LED_*
+ * exactly as this does. That is precisely why the request has to arrive here
+ * rather than being written from the console thread: the two would otherwise
+ * interleave, and worse, pwrseq raises STS_MP_VETO_PANEL_LED *before* it
+ * executes PANEL_LED_DIS, so a console-thread write landing after the veto
+ * drain would re-light a panel whose lease had already been withdrawn.
+ *
+ * @param out_err  Receives the refusal reason when this returns false.
+ * @param out_val  Receives the value that actually reached the actuator.
+ */
+static bool pwrseq_mbox_apply_panel(bool release, int32_t value,
+				    uint8_t *out_err, int32_t *out_val)
+{
+	pwrseq_status_t st;
+	bool want_on = !release && (value != 0);
+	uint8_t duty;
+
+	*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_NONE;
+	*out_val = 0;
+
+	/*
+	 * OFF and release are never refused. Taking a load DOWN cannot be
+	 * contrary to firmware — it is the direction the shed ladder, the
+	 * fail-actions and the dead-man all move in — so the fail-safe answer is
+	 * always available, which is what makes a lapsed lease reliable.
+	 */
+	if (!want_on) {
+		if (sts_panel_led_set(0) != 0) {
+			*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_HW;
+			return false;
+		}
+		return true;
+	}
+
+	if (pwrseq_status(&pwrseq, &st) != 0) {
+		*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_STAGE;
+		return false;
+	}
+
+	/*
+	 * Firmware wins, and it says which of the two ways it is winning. Shed
+	 * and not-yet-reached both leave panel_led_on false, but they are
+	 * different sentences for a technician: one means the board is over
+	 * budget or hot, the other means the sequencer has not got there.
+	 */
+	if (st.shed >= (uint8_t)PWRSEQ_SHED_PANEL_LED) {
+		*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_SHED;
+		return false;
+	}
+	if (!st.panel_led_on) {
+		*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_STAGE;
+		return false;
+	}
+
+	/*
+	 * The rail enable and the dimmer share one setter, so "on" needs a duty.
+	 * Whatever is already programmed, or full brightness when that is 0 —
+	 * a rail commanded on that stayed dark would be a control reporting
+	 * success while the panel showed nothing.
+	 */
+	duty = sts_panel_led_get();
+	if (duty == 0U) {
+		duty = 100U;
+	}
+	if (sts_panel_led_set(duty) != 0) {
+		*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_HW;
+		return false;
+	}
+
+	*out_val = 1;
+	return true;
+}
+
+/**
+ * Drain the mailbox. Housekeeping-thread context only, after pwrseq_drain().
+ *
+ * After, not before, and it is load-bearing: this pass's shed or fail-action has
+ * already run, so an override asking for a load firmware has just taken down is
+ * refused on this tick rather than granted and withdrawn on the next.
+ */
+static void pwrseq_service_mailbox(uint32_t now_ms)
+{
+	uint8_t req;
+
+	for (req = (uint8_t)STS_PWRSEQ_REQ_NONE + 1U;
+	     req < (uint8_t)STS_PWRSEQ_REQ_COUNT; req++) {
+		k_spinlock_key_t key;
+		uint8_t err = (uint8_t)STS_PWRSEQ_REQ_ERR_NONE;
+		int32_t applied = 0;
+		int32_t value = 0;
+		bool release = false;
+		bool ok = false;
+
+		key = k_spin_lock(&pwrseq_mbox_lock);
+		ok = sts_pwrseq_reqq_claim(&pwrseq_mbox, req, &release, &value);
+		k_spin_unlock(&pwrseq_mbox_lock, key);
+
+		if (!ok) {
+			continue;
+		}
+
+		/* Outside the lock: this is where the pin actually moves. */
+		switch ((sts_pwrseq_req_id_t)req) {
+		case STS_PWRSEQ_REQ_PANEL_LED_EN:
+			ok = pwrseq_mbox_apply_panel(release, value, &err,
+						     &applied);
+			break;
+		default:
+			/*
+			 * A row added to the enum with no executor. Refused
+			 * rather than ignored, so the gap surfaces as a failed
+			 * override instead of a request that vanishes.
+			 */
+			ok = false;
+			err = (uint8_t)STS_PWRSEQ_REQ_ERR_STAGE;
+			break;
+		}
+
+		key = k_spin_lock(&pwrseq_mbox_lock);
+		(void)sts_pwrseq_reqq_settle(
+			&pwrseq_mbox, req,
+			ok ? (uint8_t)STS_PWRSEQ_REQ_OUT_APPLIED
+			   : (uint8_t)STS_PWRSEQ_REQ_OUT_REFUSED,
+			err, applied, now_ms);
+		k_spin_unlock(&pwrseq_mbox_lock, key);
+
+		if (!ok) {
+			LOG_WRN("pwrseq mailbox: request %u refused (%s)",
+				(unsigned int)req,
+				sts_pwrseq_req_reason_of(err));
+		}
+	}
 }
 
 int sts_pwrseq_ov_clear(void)

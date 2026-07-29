@@ -1093,6 +1093,24 @@ static int m_obj_set(mp_ctx_t *c, const mp_json_t *p, int params, mp_jw_t *w)
 	} else {
 		rc = -ENOTSUP;
 	}
+	/*
+	 * MP_APPLY_PENDING has no honest answer on THIS method, so it is refused
+	 * rather than reported as done.
+	 *
+	 * A pending apply means the pin has not moved yet (mp_override.h).
+	 * `obj.override` can say that — its reply carries `verify_pending` and
+	 * its lease is dropped by mp_ovr_tick() if the write never lands — but
+	 * this reply has neither field nor lease, so the only two things it
+	 * could do are lie or refuse. It refuses, loudly and by name, so that
+	 * wiring an asynchronous actuator behind a WRITABLE object fails at the
+	 * bench instead of silently reporting success; the fix is to drop
+	 * MP_OF_WRITE from that object, which is what `pwr.panel.led.en` does
+	 * and what the tunnel objects did before it.
+	 */
+	if (rc > 0) {
+		mp_fail(c, MP_E_NOTSUP, "apply is asynchronous; use obj.override");
+		return MP_E_NOTSUP;
+	}
 	if (rc != 0) {
 		mp_fail(c, mp_map_errno(rc), "apply");
 		return mp_map_errno(rc);
@@ -1211,7 +1229,26 @@ static int m_obj_override(mp_ctx_t *c, const mp_json_t *p, int params,
 		(void)mp_jw_kv_str(w, "id", o->id);
 		(void)mp_jw_kv_i64(w, "value", res.value);
 		(void)mp_jw_kv_bool(w, "clamped", res.clamped);
-		(void)mp_jw_kv_bool(w, "verify_pending", res.verify);
+		/*
+		 * `verify_pending` covers BOTH unconfirmed cases, and no new key
+		 * is added for the second one.
+		 *
+		 * The key has always meant "this override is not confirmed; a
+		 * check is scheduled and the lease may yet be dropped, watch
+		 * channel 0x09". MP_ILK_RB_VERIFY produced that state by
+		 * scheduling a VCC_RB read-back; MP_APPLY_PENDING produces the
+		 * identical state for a different reason — the actuator is on
+		 * the platform's sequencer thread and the pin has not moved yet
+		 * (mp_override.h). A host that handles the key correctly for one
+		 * handles it correctly for the other, because the required
+		 * behaviour is the same: do not treat the value as in effect.
+		 *
+		 * Reporting `false` here for a pending apply is the alternative,
+		 * and it is the thing that must not happen — it would assert
+		 * that a pin moved when it has not.
+		 */
+		(void)mp_jw_kv_bool(w, "verify_pending",
+				    res.verify || res.pending);
 		if (res.tunnel) {
 			/* §5.5: a tunnel suspends firmware's use of the port, so
 			 * the reference it feeds must be treated as suspect. */
