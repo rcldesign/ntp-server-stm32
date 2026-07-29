@@ -330,9 +330,9 @@ static void derive_dispatch(void)
 	 * bus must not report itself as a feature the board does not have.
 	 */
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
-		2U, count_in(&rd, "return have ? 0 : -EIO;"),
-		"obj_read()'s health/quality blocks no longer distinguish `no "
-		"reading yet` from `no such feature`");
+		3U, count_in(&rd, "return have ? 0 : -EIO;"),
+		"obj_read()'s health/quality/pwrseq blocks no longer "
+		"distinguish `no reading yet` from `no such feature`");
 	TEST_ASSERT_EQUAL_UINT_MESSAGE(
 		1U, count_in(&rd, "return -ENOTSUP;"),
 		"obj_read() has more than one unwired exit; the deferred set "

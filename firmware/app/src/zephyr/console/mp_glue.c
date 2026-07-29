@@ -128,7 +128,7 @@
  *      obj_pulse   pwr.poe.kill, pwr.rb.ov.reset
  *      cfg_write   pwr.rb.vmax_mv, pwr.poe.budget_mw   (mp_rpc.c, not here)
  *
- *    The other thirty mutable objects answer MP_E_NOTSUP, and forty-five
+ *    The other thirty mutable objects answer MP_E_NOTSUP, and forty-one
  *    objects in all carry **MP_OF_DEFERRED** so the host is told which before
  *    it renders them: FMT §4 has the tool generate its UI from the manifest and
  *    hardcode nothing, so an object that is published and refused is a control
@@ -1272,6 +1272,55 @@ static int obj_read(void *user, size_t obj, mp_val_t *out)
 	}
 	if (hit) {
 		return have ? 0 : -EIO;
+	}
+
+	/*
+	 * The sequencer's OBSERVED half, on the same rule.
+	 *
+	 * These four are hardware the board already samples every 4 Hz pass and
+	 * publishes through the seqlock prov_ilk() above reads for the mux
+	 * guard — RB_LOCK (PB13) and EXTREF_MON (PB14/TIM12) with the per-unit
+	 * polarity and the in-band verdict already applied, RB_OV_DET (PE3) as
+	 * the pin reads right now, and the bring-up stage machine's position.
+	 * Leaving them unreadable while the same snapshot decided an interlock
+	 * two functions up was the awkward half of the deferred accounting: a
+	 * technician diagnosing a unit that will not come up could see the
+	 * refusal and not the signal behind it.
+	 *
+	 * `rb_lock_pin` is deliberately NOT quality_block_t::active_ref — that
+	 * is what the discipline loop SELECTED. A unit whose FE has dropped lock
+	 * but has not been switched away yet differs between the two, and that
+	 * difference is the diagnosis (sts_app.h, sts_pwrseq_snap_t).
+	 */
+	{
+		sts_pwrseq_snap_t ps;
+
+		have = (sts_pwrseq_snapshot(&ps) == 0) && ps.started;
+		if (!have) {
+			memset(&ps, 0, sizeof(ps));
+		}
+		hit = true;
+		if (strcmp(o->id, "sensor.rb.lock") == 0) {
+			out->i = ps.rb_lock_pin ? 1 : 0;
+			out->valid = have;
+		} else if (strcmp(o->id, "sensor.rb.ov") == 0) {
+			out->i = ps.rb_ov_det ? 1 : 0;
+			out->valid = have;
+		} else if (strcmp(o->id, "sensor.extref.hz") == 0) {
+			out->i = (int32_t)ps.extref_hz;
+			/* The measurement is published whether or not it is
+			 * trustworthy; `valid` is the freshness verdict, so a
+			 * stale reading is shown as stale rather than as 0 Hz. */
+			out->valid = have && ps.extref_valid;
+		} else if (strcmp(o->id, "sensor.pwrseq.stage") == 0) {
+			out->i = (int32_t)ps.stage;
+			out->valid = have;
+		} else {
+			hit = false;
+		}
+		if (hit) {
+			return have ? 0 : -EIO;
+		}
 	}
 
 	/*

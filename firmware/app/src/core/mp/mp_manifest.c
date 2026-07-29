@@ -139,7 +139,7 @@ const char *mp_ilk_reason(uint32_t bit)
  * the only thing that stops the bit rotting the first time someone wires a
  * setter and forgets the row.
  *
- * Spelled as names rather than `F_RW | MP_OF_DEFERRED` on forty-five rows so
+ * Spelled as names rather than `F_RW | MP_OF_DEFERRED` on forty-one rows so
  * the table stays a table and the deferred rows read in the same column as
  * everything else.
  *
@@ -440,13 +440,13 @@ const mp_obj_t mp_objs[] = {
 
 	/* Discrete inputs outside the scan. */
 	{ .id = "sensor.rb.lock", .kind = MP_KIND_BOOL, .group = MP_GRP_SENSOR,
-	  .flags = F_RO_D, .net = "RB_LOCK",
+	  .flags = F_RO, .net = "RB_LOCK",
 	  .desc = "FE-5680A lock via U48 opto (PB13)" },
 	{ .id = "sensor.rb.ov", .kind = MP_KIND_BOOL, .group = MP_GRP_SENSOR,
-	  .flags = F_RO_D, .net = "RB_OV_DET",
+	  .flags = F_RO, .net = "RB_OV_DET",
 	  .desc = "autonomous 26 V OV latch state (PE3)" },
 	{ .id = "sensor.extref.hz", .kind = MP_KIND_SCALAR,
-	  .group = MP_GRP_SENSOR, .flags = F_RO_D, .min = 0, .max = 20000000,
+	  .group = MP_GRP_SENSOR, .flags = F_RO, .min = 0, .max = 20000000,
 	  .unit = U_HZ, .net = "EXTREF_MON",
 	  .desc = "TIM12_CH1 capture of the mux B input (PB14)" },
 	{ .id = "sensor.pfi", .kind = MP_KIND_BOOL, .group = MP_GRP_SENSOR,
@@ -522,7 +522,7 @@ const mp_obj_t mp_objs[] = {
 	  .enums = "unknown,ok,open,short,off",
 	  .desc = "antenna supervisor: MON-RF + PD4 + INA228 0x45 fused" },
 	{ .id = "sensor.pwrseq.stage", .kind = MP_KIND_SCALAR,
-	  .group = MP_GRP_SENSOR, .flags = F_RO_D, .min = 0, .max = 15,
+	  .group = MP_GRP_SENSOR, .flags = F_RO, .min = 0, .max = 15,
 	  .desc = "bring-up stage machine position (interface ref §2)" },
 	/*
 	 * The active-alarm mask. Bits 0..31 are the scanned signals (fault_sig_t)
