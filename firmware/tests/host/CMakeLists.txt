@@ -182,10 +182,14 @@ module_deps(rbguard     pwrseq fault ina228 util)
 # the seam between the console area and the single writer of every rail, so the
 # suite links `mp` for the real lease table, RPC layer and event stream, and
 # drives them against the real mailbox header. `mp` carries cfg, logring,
-# quality, ina228 and fwupd with it; `pwrseq` is NOT a link dependency — the
-# suite mirrors pwrseq_exec.c's drain rather than running the stage machine,
-# which test_mp_veto.c already does.
-module_deps(pwrseq_req  mp util)
+# quality, ina228 and fwupd with it. The suite mirrors pwrseq_exec.c's drain
+# rather than running the stage machine, which test_mp_veto.c already does —
+# but `pwrseq` IS linked, because the VCC_RB setpoint row is computed with the
+# real transfer function (pwrseq_rb_expected_mv / pwrseq_cfg_default) through
+# sts_rbguard.h's inverse. A modelled transfer function would let this suite
+# agree with itself about the one number that can destroy the FE-5680A.
+# `fault` comes with sts_rbguard.h's own includes.
+module_deps(pwrseq_req  mp pwrseq fault util)
 
 # `gnss_tee` is the same idea for the platform area's NMEA/UBX run classifier
 # (app/src/zephyr/platform/gnss_tee.h): the split that decides which of the

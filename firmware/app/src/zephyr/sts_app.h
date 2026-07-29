@@ -1046,7 +1046,28 @@ void sts_supervisor_identify(uint32_t duration_ms);
 
 /* One row per object the mailbox can carry. Keyed by this enum rather than by
  * anything the console owns, so the platform area needs no object table.
- * STS_PWRSEQ_REQ_NONE is 0 and is never a valid request. */
+ * STS_PWRSEQ_REQ_NONE is 0 and is never a valid request.
+ *
+ * WHAT A ROW MEANS, for every row below and for any that is added.
+ *
+ *   value != 0  drive the load ON. Honoured only while the SEQUENCER'S OWN
+ *               commanded level for that pin is also on; otherwise refused with
+ *               a reason. Firmware decides what may be energised, and a request
+ *               that could raise a load the sequencer has shed, has not reached,
+ *               or has taken down as a fail-action would be an override
+ *               outranking the safety supervision it is supposed to sit under.
+ *   value == 0  drive it OFF. Never refused. Taking a load down cannot be
+ *               contrary to firmware — it is the direction the shed ladder, the
+ *               fail-actions and the dead-man all move in — and that is what
+ *               makes a lapsed lease reliable.
+ *   release     return the pin to FIRMWARE-AUTOMATIC control, i.e. re-drive it
+ *               to the level the sequencer last commanded. NOT "off": a lease
+ *               on the GPS rail that lapsed into a dead receiver would be a
+ *               dead-man that broke the box it was protecting.
+ *
+ * The one deliberate exception is the panel pair, whose release resolves to a
+ * dark panel — see STS_PWRSEQ_REQ_PANEL_DUTY.
+ */
 typedef enum {
 	STS_PWRSEQ_REQ_NONE = 0,
 	/* PANEL_LED_EN (PC0). Value 0 drops the rail; non-zero raises it at the
@@ -1054,6 +1075,37 @@ typedef enum {
 	 * enable and the LPTIM2_CH2 duty share one setter (sts_panel_led_set),
 	 * so the two cannot be commanded apart. `ui.panel.duty` is the dimmer. */
 	STS_PWRSEQ_REQ_PANEL_LED_EN,
+	/*
+	 * PANEL_LED_PWM (PE0), the dimmer — `ui.panel.duty`, value 0..100.
+	 *
+	 * Its RELEASE resolves to 0, not to the sequencer's configured duty, and
+	 * that is the one place this mailbox does not restore firmware's level.
+	 * The reason is that PC0 and PE0 have one setter: a release restoring the
+	 * configured duty would re-light a panel that STS_PWRSEQ_REQ_PANEL_LED_EN's
+	 * release had just darkened, and two leases lapsing in one drain would
+	 * land on whichever row ran last. 0 is what both rows already resolve to,
+	 * it is PWRSEQ_ACT_PANEL_LED_DIS's own state, and it is what this object
+	 * released to before it was routed through the mailbox.
+	 */
+	STS_PWRSEQ_REQ_PANEL_DUTY,
+	/* GPS_PWR_EN (PC8) — U22 LT3045 3V3_GPS. Re-raising it reboots the
+	 * receiver, so the drain also tells gnssmgr its configuration is gone. */
+	STS_PWRSEQ_REQ_GPS_EN,
+	/* ANT_BIAS_EN (PC9) — U27 RT9742 antenna bias-T. */
+	STS_PWRSEQ_REQ_ANT_BIAS_EN,
+	/* DISP_EN (PC11) — U33 RT9742 5V_DISP + PCA9306. */
+	STS_PWRSEQ_REQ_DISP_EN,
+	/* RB_VCC_GATE (PB1) — Q25, connects VCC_RB_G to the FE-5680A. */
+	STS_PWRSEQ_REQ_RB_GATE,
+	/*
+	 * The VCC_RB setpoint in millivolts, written to the U43 digipot.
+	 *
+	 * Not a load, so the ON/OFF reading above does not apply: `value` is the
+	 * requested rail and a release restores the code the sequencer last
+	 * commanded. Refused while stage 8 owns the digipot and while the FE is
+	 * gated onto the rail — see the drain in pwrseq_exec.c.
+	 */
+	STS_PWRSEQ_REQ_RB_VSET_MV,
 	STS_PWRSEQ_REQ_COUNT
 } sts_pwrseq_req_id_t;
 
@@ -1072,6 +1124,17 @@ typedef enum {
 	STS_PWRSEQ_REQ_ERR_STAGE, /* the stage that owns the rail is not done */
 	STS_PWRSEQ_REQ_ERR_SHED,  /* the load is shed (power/thermal ladder) */
 	STS_PWRSEQ_REQ_ERR_HW,    /* the actuator itself returned an error */
+	/*
+	 * The FE-5680A is connected to VCC_RB, so its setpoint may not move.
+	 *
+	 * Appended rather than folded into ERR_STAGE because they send a
+	 * technician to different places: ERR_STAGE means "wait, or find out why
+	 * the sequencer stopped", this one means "open the gate first". It is
+	 * also the refusal that keeps a maintenance setpoint change off a live
+	 * rubidium, which is the whole reason `pwr.rb.vset_mv` can be offered at
+	 * all (../../CLAUDE.md, "Rb digipot in a buck FB node").
+	 */
+	STS_PWRSEQ_REQ_ERR_GATED,
 	STS_PWRSEQ_REQ_ERR_COUNT
 } sts_pwrseq_req_err_t;
 
@@ -1105,6 +1168,43 @@ bool sts_pwrseq_req_take(uint8_t req, sts_pwrseq_req_result_t *out);
 /* The sentence for a refusal reason, for the event channel and the audit log.
  * NULL when @p err is not a real refusal reason. */
 const char *sts_pwrseq_req_reason(uint8_t err);
+
+/* The PIN behind a mailbox row, right now.
+ *
+ * THE SEQUENCER'S BELIEF IS THE WRONG SOURCE and this is the accessor that
+ * exists to say so. sts_pwrseq_snap_t publishes `gps_on`, `display_on`,
+ * `ant_bias_on`, `rb_gated` — pwrseq's record of what it commanded — and a
+ * maintenance lease moves these pins WITHOUT telling pwrseq, deliberately, so
+ * that its commanded level stays the thing a release restores. The consequence
+ * is that the snapshot and the board disagree for as long as a lease is held,
+ * and a host confirming its own override against the snapshot would read back
+ * its request rather than its effect.
+ *
+ * So an override's read-back reports the pin. This is the same lesson
+ * `pwr.panel.led.en` records against `panel_led_on` (see obj_read in
+ * mp_glue.c), generalised to the four GPIO rails the mailbox drives.
+ *
+ * @param req  An sts_pwrseq_req_id_t naming a GPIO rail row: GPS_EN,
+ *             ANT_BIAS_EN, DISP_EN or RB_GATE.
+ * @return     The pin's logical level. False for any other row (the panel pair
+ *             is read through sts_panel_led_get(), the setpoint through
+ *             sts_pwrseq_rb_expected_mv()), for a pin that is not ready, and
+ *             before the sequencer starts. */
+bool sts_pwrseq_rail_on(uint8_t req);
+
+/* The rail voltage the digipot code currently PROGRAMMED implies, millivolts.
+ *
+ * The read-back for `pwr.rb.vset_mv`, and the honest source for
+ * mp_ilk_state_t::rb_expected_mv — whose own comment already says "rail voltage
+ * the programmed code implies". The console previously filled that field with
+ * cfg `pwr.rb.vmax.mv`, the CEILING, which is a different number: a unit
+ * running at the stage-8 operating setpoint with its ceiling configured
+ * anywhere else would fail MP_ILK_RB_VERIFY's +-10 % read-back on every grant
+ * of `pwr.rb.gate` — an interlock refusing correct hardware.
+ *
+ * @return 0 when the sequencer never started or the transfer function is
+ *         degenerate; the caller must treat 0 as "unknown", not as 0 V. */
+int32_t sts_pwrseq_rb_expected_mv(void);
 
 /* ---- FE-5680A serial link (UART7 + the K1 RS-232/CMOS relay) ------------- */
 /*

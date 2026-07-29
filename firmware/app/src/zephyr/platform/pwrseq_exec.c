@@ -111,6 +111,37 @@ static int pwrseq_liveness_id;
 static bool pwrseq_started;
 
 /*
+ * The configuration pwrseq_init() actually accepted.
+ *
+ * Kept because two things outside the stage machine need it and neither may
+ * guess: the VCC_RB transfer function, which turns a maintenance setpoint in
+ * millivolts into a wiper code, and `rb_vmax_mv`, which is the platform-side
+ * bound on that code. Taken AFTER the init that succeeded, so it is the
+ * envelope in force and not the one that was rejected — pwrseq_load_cfg() can
+ * fall back to the built-in defaults and a stale copy would then let a setpoint
+ * be computed against a ceiling the sequencer is not using.
+ */
+static pwrseq_cfg_t pwrseq_cfg;
+
+/*
+ * The U43 wiper, as two different facts that must not be confused.
+ *
+ * `dp_code` is what the PART holds: written through on every successful write
+ * here and re-read from the device on every sequencer pass
+ * (pwrseq_build_input), so it is an observation and it is what
+ * sts_pwrseq_rb_expected_mv() reports. `dp_known` is false until one of those
+ * has happened — before that the honest answer is "unknown", not "safe-low".
+ *
+ * `dp_auto_code` is what FIRMWARE last commanded, folded from the two digipot
+ * actions, and it is what a released `pwr.rb.vset_mv` lease restores. They
+ * differ exactly while an override holds the setpoint, which is the whole
+ * reason both exist.
+ */
+static uint16_t dp_code;
+static uint16_t dp_auto_code;
+static bool dp_known;
+
+/*
  * The cross-area view (sts_app.h sts_pwrseq_snap_t). Written only from the
  * housekeeping thread's sequencer pass, read lock-free by the console, MP, web,
  * SNMP and panel planes — see sts_pwrseq_pub.h for why it is a seqlock and not
@@ -202,6 +233,11 @@ static bool pwrseq_service_requests(uint32_t now_ms);
  * other operator-request plumbing but is drained from the tick above it. */
 static void pwrseq_service_mailbox(uint32_t now_ms);
 
+/* And the same again for the digipot observation, which is written from the
+ * input build and the action executor above but is guarded by the mailbox
+ * spinlock declared with the mailbox below. */
+static void dp_observe(uint16_t code);
+
 /*
  * @p out_extref_hz / @p out_extref_valid hand the raw EXTREF_MON measurement
  * back to the caller for publication. pwrseq_in_t carries only the in-band
@@ -291,6 +327,14 @@ static void pwrseq_build_input(pwrseq_in_t *in, uint32_t now_ms,
 	if (sts_digipot_get(&dp) == 0) {
 		in->digipot_readback = dp;
 		in->digipot_readback_valid = true;
+		/*
+		 * The same read serves the `pwr.rb.vset_mv` read-back. Folding it
+		 * in here rather than adding a second SPI transfer on the console
+		 * path is not only cheaper: it makes the reported setpoint an
+		 * observation of the PART refreshed at 4 Hz, so a write that did
+		 * not take stops being reported as the value that was asked for.
+		 */
+		dp_observe(dp);
 	}
 
 	in->rb_lock = sts_pwrseq_rb_lock();
@@ -379,6 +423,94 @@ static const fault_sig_t sig_rb[] = {
 
 #define EXPECT_OFF(off, arr) pwrseq_expect_off((off), (arr), ARRAY_SIZE(arr))
 
+/* ------------------------------------------ the mailbox-controlled rails --- */
+
+/*
+ * One GPIO rail a maintenance lease may hold, indexed by sts_pwrseq_req_id_t.
+ *
+ * `auto_on` is THE SEQUENCER'S OWN COMMANDED LEVEL for the pin, and it is the
+ * pivot the whole override policy turns on. It is folded from the same places
+ * firmware drives the pin — pwrseq_exec_action() below and, for PC9,
+ * sts_pwrseq_ant_bias_request() — and it is deliberately NOT updated when a
+ * mailbox request moves the pin. That asymmetry is the design:
+ *
+ *   - an override may only raise a load firmware also wants raised, so a lease
+ *     can never energise something the sequencer has shed, has not reached, or
+ *     has taken down as a fail-action;
+ *   - a RELEASE re-drives the pin to `auto_on`, i.e. to firmware-automatic
+ *     control, rather than to off. A dead-man that left the GPS rail dead would
+ *     have broken the box it exists to protect.
+ *
+ * `shed_at` is only for the refusal SENTENCE: shed and not-yet-reached both
+ * leave `auto_on` false, and they send a technician to different places.
+ *
+ * THREADING. Every field is written and read on the housekeeping thread except
+ * `auto_on` for the antenna row, which the priority-6 GNSS thread writes through
+ * sts_pwrseq_ant_bias_request(). That is a single aligned bool on a single-core
+ * M33 — it cannot tear — and the store is ordered before the atomic_or inside
+ * sts_mp_veto(), so the console cannot learn of the supervisor's cut before the
+ * level it must restore is visible. What remains is a genuine but bounded race:
+ * a release already past its `auto_on` read when the supervisor latches a short
+ * re-drives PC9 high. The RT9742's own current limit and nFLG are what bound
+ * that, and PC9 already had these two writers before the mailbox existed.
+ */
+typedef struct {
+	const struct gpio_dt_spec *gpio;
+	const fault_sig_t *sigs;
+	size_t n_sigs;
+	uint8_t shed_at; /* pwrseq_shed_level_t; PWRSEQ_SHED_NONE = never shed */
+	bool auto_on;
+} pwrseq_rail_t;
+
+static pwrseq_rail_t pwrseq_rails[STS_PWRSEQ_REQ_COUNT] = {
+	[STS_PWRSEQ_REQ_GPS_EN] = { .gpio = &gps_pwr_en,
+				    .sigs = sig_gps,
+				    .n_sigs = ARRAY_SIZE(sig_gps),
+				    .shed_at = (uint8_t)PWRSEQ_SHED_NONE },
+	[STS_PWRSEQ_REQ_ANT_BIAS_EN] = { .gpio = &ant_bias_en,
+					 .sigs = sig_ant,
+					 .n_sigs = ARRAY_SIZE(sig_ant),
+					 .shed_at = (uint8_t)PWRSEQ_SHED_NONE },
+	[STS_PWRSEQ_REQ_DISP_EN] = { .gpio = &disp_en,
+				     .sigs = sig_disp,
+				     .n_sigs = ARRAY_SIZE(sig_disp),
+				     .shed_at = (uint8_t)PWRSEQ_SHED_DISPLAY },
+	/*
+	 * RB_VCC_GATE only, never RB_PWR_EN. `pwr.rb.en` is deliberately absent
+	 * from this table — see the note above sts_pwrseq_req_post().
+	 *
+	 * No expected-off signals: the gate connects a load to VCC_RB, it does
+	 * not gate the rail, so FAULT_SIG_PG_RB_PSU and the 0x47 alert stay
+	 * live and must keep reading. Suppressing them here would mask a buck
+	 * fault for as long as a technician held the gate open.
+	 */
+	[STS_PWRSEQ_REQ_RB_GATE] = { .gpio = &rb_vcc_gate,
+				     .sigs = NULL,
+				     .n_sigs = 0U,
+				     .shed_at = (uint8_t)PWRSEQ_SHED_RB },
+};
+
+/** Drive one rail and keep its expected-off mask in step. */
+static void pwrseq_rail_drive(pwrseq_rail_t *r, bool on)
+{
+	/* Clearing the mask before energising and setting it after de-energising
+	 * is the order pwrseq_exec_action() uses, and it is the one that leaves
+	 * no window in which a real failure reads as expected. */
+	if (on) {
+		pwrseq_expect_off(false, r->sigs, r->n_sigs);
+		pwrseq_set(r->gpio, 1);
+		return;
+	}
+	pwrseq_set(r->gpio, 0);
+	pwrseq_expect_off(true, r->sigs, r->n_sigs);
+}
+
+/** Fold firmware's own command into the rail's automatic level. */
+static void pwrseq_rail_auto(uint8_t req, bool on)
+{
+	pwrseq_rails[req].auto_on = on;
+}
+
 static void pwrseq_exec_action(const pwrseq_act_t *a)
 {
 	sts_mp_veto_t subj;
@@ -450,13 +582,19 @@ static void pwrseq_exec_action(const pwrseq_act_t *a)
 		(void)sts_discipline_start(); /* -EALREADY if platform did it */
 		break;
 
+	/*
+	 * Each rail an override can hold is driven through pwrseq_rail_drive()
+	 * and records firmware's commanded level as it goes, so the mailbox
+	 * drain and this executor cannot drift apart. The pin work is identical
+	 * to what these cases did before; what is new is the one-line record.
+	 */
 	case PWRSEQ_ACT_GPS_PWR_EN:
-		EXPECT_OFF(false, sig_gps);
-		pwrseq_set(&gps_pwr_en, 1);
+		pwrseq_rail_auto((uint8_t)STS_PWRSEQ_REQ_GPS_EN, true);
+		pwrseq_rail_drive(&pwrseq_rails[STS_PWRSEQ_REQ_GPS_EN], true);
 		break;
 	case PWRSEQ_ACT_GPS_PWR_DIS:
-		pwrseq_set(&gps_pwr_en, 0);
-		EXPECT_OFF(true, sig_gps);
+		pwrseq_rail_auto((uint8_t)STS_PWRSEQ_REQ_GPS_EN, false);
+		pwrseq_rail_drive(&pwrseq_rails[STS_PWRSEQ_REQ_GPS_EN], false);
 		break;
 	case PWRSEQ_ACT_GPS_RST_RELEASE:
 		pwrseq_set(&gps_rst, 0); /* active-low: 0 = released */
@@ -465,21 +603,23 @@ static void pwrseq_exec_action(const pwrseq_act_t *a)
 		(void)sts_gnss_notify_reset(k_uptime_get_32());
 		break;
 	case PWRSEQ_ACT_ANT_BIAS_EN:
-		EXPECT_OFF(false, sig_ant);
-		pwrseq_set(&ant_bias_en, 1);
+		pwrseq_rail_auto((uint8_t)STS_PWRSEQ_REQ_ANT_BIAS_EN, true);
+		pwrseq_rail_drive(&pwrseq_rails[STS_PWRSEQ_REQ_ANT_BIAS_EN],
+				  true);
 		break;
 	case PWRSEQ_ACT_ANT_BIAS_DIS:
-		pwrseq_set(&ant_bias_en, 0);
-		EXPECT_OFF(true, sig_ant);
+		pwrseq_rail_auto((uint8_t)STS_PWRSEQ_REQ_ANT_BIAS_EN, false);
+		pwrseq_rail_drive(&pwrseq_rails[STS_PWRSEQ_REQ_ANT_BIAS_EN],
+				  false);
 		break;
 
 	case PWRSEQ_ACT_DISP_EN:
-		EXPECT_OFF(false, sig_disp);
-		pwrseq_set(&disp_en, 1);
+		pwrseq_rail_auto((uint8_t)STS_PWRSEQ_REQ_DISP_EN, true);
+		pwrseq_rail_drive(&pwrseq_rails[STS_PWRSEQ_REQ_DISP_EN], true);
 		break;
 	case PWRSEQ_ACT_DISP_DIS:
-		pwrseq_set(&disp_en, 0);
-		EXPECT_OFF(true, sig_disp);
+		pwrseq_rail_auto((uint8_t)STS_PWRSEQ_REQ_DISP_EN, false);
+		pwrseq_rail_drive(&pwrseq_rails[STS_PWRSEQ_REQ_DISP_EN], false);
 		break;
 	case PWRSEQ_ACT_PANEL_LED_EN:
 		/* The rail-enable is folded into the duty set; a bare enable
@@ -497,9 +637,19 @@ static void pwrseq_exec_action(const pwrseq_act_t *a)
 	/* Stage 8 — guarded rubidium. */
 	case PWRSEQ_ACT_DIGIPOT_WRITE:     /* safe-low precharge code */
 	case PWRSEQ_ACT_DIGIPOT_WRITE_OP:  /* operating code */
+		/*
+		 * Firmware's intent is recorded whether or not the part took it:
+		 * this is what a released `pwr.rb.vset_mv` lease restores, and
+		 * "the code the sequencer wants" is still that code after a
+		 * failed SPI transfer. `dp_code`, which reports what the part
+		 * HOLDS, is only advanced on success.
+		 */
+		dp_auto_code = a->arg;
 		if (sts_digipot_set(a->arg) != 0) {
 			LOG_ERR("pwrseq: digipot write %u failed; Rb sequence halts",
 				a->arg);
+		} else {
+			dp_observe(a->arg);
 		}
 		/*
 		 * Ask housekeeping to re-read VCC_RB now. The window steps that
@@ -534,10 +684,12 @@ static void pwrseq_exec_action(const pwrseq_act_t *a)
 		EXPECT_OFF(true, sig_rb);
 		break;
 	case PWRSEQ_ACT_RB_VCC_GATE_EN:
-		pwrseq_set(&rb_vcc_gate, 1);
+		pwrseq_rail_auto((uint8_t)STS_PWRSEQ_REQ_RB_GATE, true);
+		pwrseq_rail_drive(&pwrseq_rails[STS_PWRSEQ_REQ_RB_GATE], true);
 		break;
 	case PWRSEQ_ACT_RB_VCC_GATE_DIS:
-		pwrseq_set(&rb_vcc_gate, 0);
+		pwrseq_rail_auto((uint8_t)STS_PWRSEQ_REQ_RB_GATE, false);
+		pwrseq_rail_drive(&pwrseq_rails[STS_PWRSEQ_REQ_RB_GATE], false);
 		break;
 	case PWRSEQ_ACT_RB_OV_RESET_PULSE:
 		if (gpio_is_ready_dt(&rb_ov_reset)) {
@@ -832,6 +984,55 @@ static bool pwrseq_service_requests(uint32_t now_ms)
 static sts_pwrseq_reqq_t pwrseq_mbox;
 static struct k_spinlock pwrseq_mbox_lock;
 
+/**
+ * Record the wiper the part now holds. Any thread; two scalar stores.
+ *
+ * Under the mailbox spinlock purely so sts_pwrseq_rb_expected_mv(), which the
+ * console thread calls, cannot observe `dp_known` true against a half-written
+ * `dp_code`. It is not actuation and holds the lock across nothing else — the
+ * discipline sts_pwrseq_req.h states is about the ACTUATION being outside the
+ * lock, not about the lock being reserved for the queue.
+ */
+static void dp_observe(uint16_t code)
+{
+	k_spinlock_key_t key = k_spin_lock(&pwrseq_mbox_lock);
+
+	dp_code = code;
+	dp_known = true;
+	k_spin_unlock(&pwrseq_mbox_lock, key);
+}
+
+/*
+ * WHAT IS DELIBERATELY NOT A ROW HERE: `pwr.rb.en` (RB_PWR_EN, PB7).
+ *
+ * ARCHITECTURE.md §10 invariant 3 fixes the order the rubidium may be brought
+ * up in — safe digipot code (verify readback) -> RB_PWR_EN -> INA 0x47 window
+ * -> RB_VCC_GATE — and an override on this pin cannot honour it in either
+ * direction:
+ *
+ *   ON   is only ever reachable when firmware also commands the rail on, which
+ *        means RB_VCC_GATE is already asserted. Re-raising PB7 there energises
+ *        the FE-5680A from a rail nothing has re-verified, with no precharge:
+ *        precisely the "FE connected before the rail is proven" ordering the
+ *        invariant exists to forbid. core/pwrseq refuses the same shortcut for
+ *        itself — pwrseq_shed_restore() will not emit a bare RB_PWR_EN and says
+ *        why: "a shed-and-restore cycle must not become a back door around it".
+ *   OFF  drops the supply with the load still connected, inverting the
+ *        gate-then-supply order rb_shutdown() and sts_pwrseq_rb_quiesce_from_isr()
+ *        both document.
+ *
+ * And a lease has no honest way back: a release must return the pin to
+ * firmware-automatic control, which for this pin means re-running the guarded
+ * stage-8 sequence — pwrseq_rb_retry(), an OPERATOR action that clears the
+ * rubidium alarms and the deferral. A dead-man revert may not do that on a
+ * board whose technician has walked away.
+ *
+ * `pwr.rb.gate` is the half of the pair that respects the order, so it is the
+ * one that is wired; the supported way to bring the rubidium back is the
+ * existing retry request. The manifest keeps `pwr.rb.en` MP_OF_DEFERRED so a
+ * host is told before it draws the control.
+ */
+
 int sts_pwrseq_req_post(uint8_t req, const int32_t *value)
 {
 	k_spinlock_key_t key;
@@ -954,6 +1155,242 @@ static bool pwrseq_mbox_apply_panel(bool release, int32_t value,
 }
 
 /**
+ * Execute one claimed PANEL_LED_PWM request — the `ui.panel.duty` dimmer.
+ *
+ * Migrated onto the mailbox from a direct sts_panel_led_set() on the console
+ * thread. Two things change for a host and both are improvements:
+ *
+ *   - the write is now up to one 250 ms sequencer pass late, and the reply says
+ *     so through `verify_pending` instead of asserting an effect it had not
+ *     had. That cost the object MP_OF_WRITE: `obj.set` has no field that could
+ *     admit the delay, so it is refused rather than answered.
+ *   - a duty that would re-light a SHED panel is now refused. Written from the
+ *     console thread it simply landed, re-energising a rail the ladder had
+ *     dropped for a power or thermal reason — the same defect
+ *     `pwr.panel.led.en` was routed through this mailbox to close, on the very
+ *     same setter.
+ *
+ * A release resolves to 0, matching PANEL_LED_EN's row and what this object
+ * released to before — see STS_PWRSEQ_REQ_PANEL_DUTY in sts_app.h for why it is
+ * the one row that does not restore firmware's configured level.
+ */
+static bool pwrseq_mbox_apply_duty(bool release, int32_t value, uint8_t *out_err,
+				   int32_t *out_val)
+{
+	pwrseq_status_t st;
+	uint8_t duty;
+
+	*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_NONE;
+	*out_val = 0;
+
+	duty = release ? 0U : (uint8_t)CLAMP(value, 0, 100);
+
+	/* Dark is the fail-safe direction and is never refused, exactly as it is
+	 * for the rail enable this setter shares a pin pair with. */
+	if (duty != 0U) {
+		if (pwrseq_status(&pwrseq, &st) != 0) {
+			*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_STAGE;
+			return false;
+		}
+		if (st.shed >= (uint8_t)PWRSEQ_SHED_PANEL_LED) {
+			*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_SHED;
+			return false;
+		}
+		if (!st.panel_led_on) {
+			*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_STAGE;
+			return false;
+		}
+	}
+
+	if (sts_panel_led_set(duty) != 0) {
+		*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_HW;
+		return false;
+	}
+
+	*out_val = (int32_t)duty;
+	return true;
+}
+
+/**
+ * Execute one claimed GPIO-rail request. Housekeeping-thread context only.
+ *
+ * The whole policy is three lines, and every one of them is stated in the
+ * pwrseq_rail_t comment: ON only where firmware also wants it on, OFF never
+ * refused, release back to firmware's own level.
+ */
+static bool pwrseq_mbox_apply_rail(uint8_t req, bool release, int32_t value,
+				   uint8_t *out_err, int32_t *out_val)
+{
+	pwrseq_rail_t *r = &pwrseq_rails[req];
+	pwrseq_status_t st;
+	bool want;
+	bool was;
+
+	*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_NONE;
+	*out_val = 0;
+
+	if ((r->gpio == NULL) || !gpio_is_ready_dt(r->gpio)) {
+		*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_HW;
+		return false;
+	}
+
+	want = release ? r->auto_on : (value != 0);
+
+	if (want && !r->auto_on) {
+		/*
+		 * Firmware wins, and it says which of the two ways it is winning.
+		 * A shed load and a stage the sequencer has not reached both
+		 * leave `auto_on` false and are different sentences at a bench.
+		 */
+		if ((r->shed_at != (uint8_t)PWRSEQ_SHED_NONE) &&
+		    (pwrseq_status(&pwrseq, &st) == 0) &&
+		    (st.shed >= r->shed_at)) {
+			*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_SHED;
+		} else {
+			*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_STAGE;
+		}
+		return false;
+	}
+
+	was = (gpio_pin_get_dt(r->gpio) == 1);
+	pwrseq_rail_drive(r, want);
+
+	/*
+	 * Re-powering the receiver is a reset it must be told about.
+	 *
+	 * PWRSEQ_ACT_GPS_RST_RELEASE says it for the sequencer's own path — "its
+	 * configuration is gone with the reset; gnssmgr has to know before it
+	 * starts believing NAV messages from the new session" — and a rail an
+	 * override dropped and restored is the same event. Without it gnssmgr
+	 * keeps its ACK bookkeeping and its survey state across a receiver that
+	 * cold-booted, and the sequencer's `gnss_cfg_ack` input stays true for a
+	 * configuration that no longer exists. Same call, same thread as the
+	 * action executor makes it from.
+	 */
+	if (want && !was && (req == (uint8_t)STS_PWRSEQ_REQ_GPS_EN)) {
+		(void)sts_gnss_notify_reset(k_uptime_get_32());
+	}
+
+	*out_val = want ? 1 : 0;
+	return true;
+}
+
+/**
+ * Execute one claimed VCC_RB setpoint request. Housekeeping-thread context only.
+ *
+ * THE TWO REFUSALS ARE THE REASON THIS OBJECT CAN BE OFFERED AT ALL. The root
+ * CLAUDE.md is explicit that a digipot in this buck's feedback node can destroy
+ * the FE-5680A, so a maintenance setpoint is permitted only where it cannot
+ * reach the FE and cannot fight the sequencer:
+ *
+ *   stage 8    the guarded sequence owns the wiper. It writes the safe code,
+ *              verifies the read-back, writes the operating code and judges the
+ *              rail against ITS model of the commanded code; a setpoint landing
+ *              in there fails that verify and abandons the stage.
+ *   gated      the FE is connected. core/pwrseq's post-gate supervisor drops the
+ *              whole rubidium chain the moment VCC_RB leaves the window implied
+ *              by its own `rb_current_code` (pwrseq.c, rb_rail_in_window), so a
+ *              setpoint change against a gated FE would not merely be a step on
+ *              its supply — it would shed the rubidium and raise
+ *              PWRSEQ_ALARM_RB_WINDOW as a consequence of a commanded action.
+ *
+ * What is left is exactly the bench window a technician wants: the buck up, the
+ * FE disconnected, trim the rail and read it back on INA228 0x47.
+ *
+ * The value is bounded HERE as well as by MP_ILK_RB_VMAX in core. The interlock
+ * clamps against a ceiling the console read from cfg; this clamps against the
+ * ceiling the SEQUENCER is running, which sts_rb_vmax_decide() has already
+ * bounded by STS_RB_VMAX_MV_CEILING. The platform does not delegate the last
+ * bound on this rail to a number handed across an area seam.
+ */
+static bool pwrseq_mbox_apply_vset(bool release, int32_t value, uint8_t *out_err,
+				   int32_t *out_val)
+{
+	pwrseq_status_t st;
+	uint16_t code;
+
+	*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_NONE;
+	*out_val = 0;
+
+	if (pwrseq_status(&pwrseq, &st) != 0) {
+		*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_STAGE;
+		return false;
+	}
+
+	if (release) {
+		/* Firmware's own code, whatever it is — the release path is
+		 * never refused, or a lapsed lease would strand the rail at a
+		 * maintenance setpoint. */
+		code = dp_auto_code;
+	} else {
+		if (st.stage == PWRSEQ_STAGE_8_RB) {
+			*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_STAGE;
+			return false;
+		}
+		if (st.rb_gated) {
+			*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_GATED;
+			return false;
+		}
+		code = sts_rb_code_for_mv(&pwrseq_cfg.rb_xfer, value,
+					  pwrseq_cfg.rb_vmax_mv);
+	}
+
+	if (sts_digipot_set(code) != 0) {
+		*out_err = (uint8_t)STS_PWRSEQ_REQ_ERR_HW;
+		return false;
+	}
+	dp_observe(code);
+
+	/*
+	 * Ask housekeeping to re-read VCC_RB now, for the reason the sequencer's
+	 * own digipot writes do: MP_ILK_RB_VERIFY judges this setpoint 250 ms
+	 * from now against the sensor cache, whose unconditional sweep is 1 Hz.
+	 * Without this the read-back could judge a reading taken before the
+	 * write and revert a lease that worked.
+	 */
+	sts_hk_request_ina((uint8_t)INA228_RAIL_VCC_RB);
+
+	*out_val = pwrseq_rb_expected_mv(&pwrseq_cfg.rb_xfer, code);
+	return true;
+}
+
+bool sts_pwrseq_rail_on(uint8_t req)
+{
+	const pwrseq_rail_t *r;
+
+	if (!pwrseq_started || (req >= (uint8_t)STS_PWRSEQ_REQ_COUNT)) {
+		return false;
+	}
+
+	r = &pwrseq_rails[req];
+	if ((r->gpio == NULL) || !gpio_is_ready_dt(r->gpio)) {
+		return false;
+	}
+
+	return gpio_pin_get_dt(r->gpio) == 1;
+}
+
+int32_t sts_pwrseq_rb_expected_mv(void)
+{
+	k_spinlock_key_t key;
+	uint16_t code;
+	bool known;
+
+	if (!pwrseq_started) {
+		return 0;
+	}
+
+	/* Under the mailbox lock so the console cannot read `known` true against
+	 * a code the drain is mid-update on. Two scalars, no I/O. */
+	key = k_spin_lock(&pwrseq_mbox_lock);
+	code = dp_code;
+	known = dp_known;
+	k_spin_unlock(&pwrseq_mbox_lock, key);
+
+	return known ? pwrseq_rb_expected_mv(&pwrseq_cfg.rb_xfer, code) : 0;
+}
+
+/**
  * Drain the mailbox. Housekeeping-thread context only, after pwrseq_drain().
  *
  * After, not before, and it is load-bearing: this pass's shed or fail-action has
@@ -986,6 +1423,21 @@ static void pwrseq_service_mailbox(uint32_t now_ms)
 		case STS_PWRSEQ_REQ_PANEL_LED_EN:
 			ok = pwrseq_mbox_apply_panel(release, value, &err,
 						     &applied);
+			break;
+		case STS_PWRSEQ_REQ_PANEL_DUTY:
+			ok = pwrseq_mbox_apply_duty(release, value, &err,
+						    &applied);
+			break;
+		case STS_PWRSEQ_REQ_GPS_EN:
+		case STS_PWRSEQ_REQ_ANT_BIAS_EN:
+		case STS_PWRSEQ_REQ_DISP_EN:
+		case STS_PWRSEQ_REQ_RB_GATE:
+			ok = pwrseq_mbox_apply_rail(req, release, value, &err,
+						    &applied);
+			break;
+		case STS_PWRSEQ_REQ_RB_VSET_MV:
+			ok = pwrseq_mbox_apply_vset(release, value, &err,
+						    &applied);
 			break;
 		default:
 			/*
@@ -1055,21 +1507,33 @@ void sts_pwrseq_ant_bias_request(bool on)
 		return;
 	}
 
-	/* Single writer per pin: the antenna supervisor decides, this file drives
-	 * (ARCHITECTURE.md §10). Keep the expected-off mask in step with it. */
+	/*
+	 * Single writer per pin: the antenna supervisor decides, this file
+	 * drives (ARCHITECTURE.md §10). The supervisor's decision IS firmware's
+	 * commanded level for PC9 — pwrseq's own `ant_bias_on` does not move
+	 * when gnssmgr cuts the bias — so it is recorded here, and it is what a
+	 * released `pwr.ant.bias.en` lease restores. Without this record a
+	 * lapsed lease would re-energise the bias into a latched short by
+	 * restoring the level pwrseq still believed in.
+	 */
+	pwrseq_rail_auto((uint8_t)STS_PWRSEQ_REQ_ANT_BIAS_EN, on);
+	pwrseq_rail_drive(&pwrseq_rails[STS_PWRSEQ_REQ_ANT_BIAS_EN], on);
+
 	if (on) {
-		EXPECT_OFF(false, sig_ant);
-		pwrseq_set(&ant_bias_en, 1);
 		return;
 	}
-
-	pwrseq_set(&ant_bias_en, 0);
-	EXPECT_OFF(true, sig_ant);
 
 	/*
 	 * The one writer of a rail an override can hold that does NOT pass
 	 * through the action queue, so it carries its own veto rather than
 	 * inheriting pwrseq_exec_action()'s.
+	 *
+	 * THE VETO BELONGS TO THIS DECISION, NOT TO THE PIN WRITE, and that is
+	 * why the mailbox drain drives PC9 through pwrseq_rail_drive() rather
+	 * than by calling this function. Routing an override through here would
+	 * raise STS_MP_VETO_ANT_BIAS on the operator's own request and withdraw
+	 * the lease that had just been granted — one event, two vetoes, and the
+	 * second one aimed at the technician who caused the first.
 	 *
 	 * gnssmgr reaches here only from ant_enter(GNSSMGR_ANT_SHORT), once, on
 	 * the latch — recovery is gnssmgr_ant_reenable() and nothing else — so
@@ -1148,6 +1612,15 @@ int sts_pwrseq_start(uint32_t now_ms)
 			return rc;
 		}
 	}
+
+	/*
+	 * The envelope that is actually in force — after the fallback above, not
+	 * before it. sts_rb_code_for_mv() bounds every maintenance setpoint
+	 * against `rb_vmax_mv` from this copy, so a stale one would let a request
+	 * be computed against a ceiling the sequencer rejected.
+	 */
+	pwrseq_cfg = cfg;
+	dp_auto_code = cfg.digipot_safe_code;
 
 	rc = pwrseq_start(&pwrseq, now_ms);
 	if (rc != 0) {

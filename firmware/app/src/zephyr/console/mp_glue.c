@@ -118,13 +118,15 @@
  * 3. The object write path — and the manifest now SAYS SO, per object.
  *
  *    Most control objects live on GPIO/PWM/DAC the *platform* area owns, and
- *    sts_app.h exposes only sts_panel_led_set(), sts_rb_serial_set_mode(),
- *    sts_supervisor_identify(), the two recovery pulses and — new — the
- *    parameterised sequencer mailbox; the GNSS and Rb tunnels are this area's
- *    own. Ten manifest objects therefore have an actuator behind them:
+ *    sts_app.h exposes only sts_rb_serial_set_mode(), sts_supervisor_identify(),
+ *    the two recovery pulses and the parameterised sequencer mailbox; the GNSS
+ *    and Rb tunnels are this area's own. Fifteen manifest objects therefore
+ *    have an actuator behind them:
  *
- *      obj_apply   ui.panel.duty, ui.identify, ref.rb.serial,
- *                  gnss.tunnel, ref.rb.tunnel, pwr.panel.led.en
+ *      obj_apply   ui.identify, ref.rb.serial, gnss.tunnel, ref.rb.tunnel
+ *      obj_apply   ui.panel.duty, pwr.panel.led.en, pwr.gps.en,
+ *        (mailbox)  pwr.ant.bias.en, pwr.disp.en, pwr.rb.gate,
+ *                  pwr.rb.vset_mv
  *      obj_pulse   pwr.poe.kill, pwr.rb.ov.reset
  *      cfg_write   pwr.rb.vmax_mv, pwr.poe.budget_mw   (mp_rpc.c, not here)
  *
@@ -137,20 +139,29 @@
  *    unimplemented G3 object is refused BEFORE mp_ovr_guard() consumes the
  *    typed-phrase-and-hold arm.
  *
- *    THE MECHANISM FOR THE REST NOW EXISTS, and `pwr.panel.led.en` is the one
- *    object that proves it end to end. The blocker used to be that the
- *    platform's operator entry points post single bits of one atomic word and
- *    cannot carry a value; zephyr/platform/sts_pwrseq_req.h is the
- *    parameterised path that can, and it drains on the same 4 Hz housekeeping
- *    pass, so every rail keeps exactly one writer. Wiring another object is now
- *    a row in sts_pwrseq_req_id_t, an executor in pwrseq_exec.c's mailbox
- *    drain, a branch in obj_apply() and obj_read() here, and the manifest row.
+ *    THE MECHANISM IS zephyr/platform/sts_pwrseq_req.h: a mailbox that carries
+ *    (object, value) and drains on the same 4 Hz housekeeping pass as the
+ *    sequencer's own actions, so every rail keeps exactly one writer. Wiring an
+ *    object is a row in sts_pwrseq_req_id_t, an executor in pwrseq_exec.c's
+ *    mailbox drain, a branch in obj_apply() and obj_read() here, and the
+ *    manifest row.
  *
- *    Two things that mechanism does NOT decide for the next object, so they do
- *    not get assumed: whether its OFF direction is unconditionally safe (the
- *    panel's is, which is why it went first — a rail feeding the timing path is
- *    not), and whether it may keep MP_OF_WRITE (`pwr.panel.led.en` may not: an
- *    asynchronous apply has no honest `obj.set` reply, and that row says so).
+ *    Seven objects ride it. Every one is LEASE-ONLY — an asynchronous apply has
+ *    no honest `obj.set` reply and m_obj_set() refuses a positive apply return
+ *    by name — and every one's release re-drives FIRMWARE'S OWN commanded level
+ *    rather than off, so a lapsed lease cannot leave the receiver dark or the
+ *    antenna unbiased. The panel pair is the one documented exception, because
+ *    PC0 and PE0 share a setter and two releases must not disagree.
+ *
+ *    STILL DEFERRED, AND NOT BY OVERSIGHT. `pwr.rb.en` cannot be leased without
+ *    breaking ARCHITECTURE.md §10 invariant 3 in one direction and rb_shutdown()'s
+ *    documented order in the other, and its release has nowhere honest to go;
+ *    the argument is over the mailbox in pwrseq_exec.c. `pwr.rb.pot.code` is
+ *    refused at the interlock (prov_ilk below). `ref.mux.sel`, the two OCXO Vc
+ *    objects and the two watchdog objects belong to refsel, the discipline
+ *    thread and the supervisor respectively (ARCHITECTURE.md §10.1/§10.2/§10.5)
+ *    and need their own seams, not this one.
+ *
  *    Whatever lands, tests/host/test_mp_deferred.c fails until the manifest row
  *    is cleared to match.
  * ---------------------------------------------------------------------------
@@ -657,15 +668,34 @@ static uint32_t disp_changed_ms;
 /** Fold one published sequencer view into the display change stamp. */
 static void disp_observe_locked(const sts_pwrseq_snap_t *ps)
 {
+	bool on;
+
 	if ((ps == NULL) || !ps->started) {
 		/* Nothing published yet. Leaving the stamp alone keeps
 		 * `disp_seen` false, which prov_ilk() reports as the
 		 * conservative "off, and it just changed". */
 		return;
 	}
-	if (!disp_seen || (disp_on_last != ps->display_on)) {
+
+	/*
+	 * The PIN, not `ps->display_on`.
+	 *
+	 * That field is pwrseq's record of what it commanded, and once
+	 * `pwr.disp.en` became overridable the two stopped being the same thing:
+	 * a lease that drops DISP_EN leaves the sequencer still believing the
+	 * rail is up, so an interlock reading the snapshot would never see the
+	 * off it is measuring. MP_ILK_DISP_OFF would then let a technician
+	 * cycle the rail with no minimum off-time — which is the RT9742 inrush
+	 * and the PCA9306/ST7796 supply sequencing the interlock exists for.
+	 *
+	 * `ps` still gates the sample: before the sequencer starts, the pin is
+	 * not configured and there is nothing to observe.
+	 */
+	on = sts_pwrseq_rail_on((uint8_t)STS_PWRSEQ_REQ_DISP_EN);
+
+	if (!disp_seen || (disp_on_last != on)) {
 		disp_seen = true;
-		disp_on_last = ps->display_on;
+		disp_on_last = on;
 		disp_changed_ms = (uint32_t)k_uptime_get_32();
 	}
 }
@@ -733,7 +763,24 @@ static int prov_ilk(void *user, mp_ilk_state_t *out)
 	} else {
 		out->rb_vmax_mv = 0U; /* unknown -> rb.vmax refuses */
 	}
-	out->rb_expected_mv = (int32_t)out->rb_vmax_mv;
+	/*
+	 * THE CEILING AND THE EXPECTED RAIL ARE DIFFERENT NUMBERS, and this
+	 * field used to carry the wrong one.
+	 *
+	 * mp_override.h defines `rb_expected_mv` as "rail voltage the programmed
+	 * code implies"; it is what MP_ILK_RB_VERIFY compares INA228 0x47
+	 * against, at +-MP_RB_VERIFY_TOL_PCT, for every non-millivolt object
+	 * carrying that interlock — i.e. for `pwr.rb.gate`. Filling it with cfg
+	 * `pwr.rb.vmax.mv` said "the rail should read whatever the ceiling is
+	 * set to", so a unit running at its stage-8 operating setpoint with the
+	 * ceiling configured anywhere more than 10 % away would have every gate
+	 * lease auto-reverted as a read-back failure — an interlock refusing
+	 * correct hardware. It was dormant only because the object could not be
+	 * granted. Now it is a measurement: the platform reports the rail the
+	 * wiper it has actually read back implies, and 0 when it does not know,
+	 * which fails the read-back rather than guessing.
+	 */
+	out->rb_expected_mv = sts_pwrseq_rb_expected_mv();
 
 	/*
 	 * `pwr.rb.pot.code`: a DELIBERATE, PERMANENT refusal, not a stub.
@@ -1145,6 +1192,56 @@ static int obj_read(void *user, size_t obj, mp_val_t *out)
 		return 0;
 	}
 	/*
+	 * The four GPIO rails the mailbox drives, read from the PIN for exactly
+	 * the reason above.
+	 *
+	 * sts_pwrseq_snap_t publishes `gps_on`, `ant_bias_on`, `display_on` and
+	 * `rb_gated`, and every one of them is pwrseq's record of what IT
+	 * commanded. A maintenance lease moves these pins without telling
+	 * pwrseq — deliberately, so that its commanded level stays the thing a
+	 * release restores — so the snapshot disagrees with the board for as
+	 * long as a lease is held, and a host confirming its own override
+	 * against it would read back its request instead of its effect.
+	 */
+	if (strcmp(o->id, "pwr.gps.en") == 0) {
+		out->i = sts_pwrseq_rail_on((uint8_t)STS_PWRSEQ_REQ_GPS_EN) ? 1
+									   : 0;
+		out->valid = true;
+		return 0;
+	}
+	if (strcmp(o->id, "pwr.ant.bias.en") == 0) {
+		out->i = sts_pwrseq_rail_on(
+				 (uint8_t)STS_PWRSEQ_REQ_ANT_BIAS_EN)
+				 ? 1
+				 : 0;
+		out->valid = true;
+		return 0;
+	}
+	if (strcmp(o->id, "pwr.disp.en") == 0) {
+		out->i = sts_pwrseq_rail_on((uint8_t)STS_PWRSEQ_REQ_DISP_EN) ? 1
+									    : 0;
+		out->valid = true;
+		return 0;
+	}
+	if (strcmp(o->id, "pwr.rb.gate") == 0) {
+		out->i = sts_pwrseq_rail_on((uint8_t)STS_PWRSEQ_REQ_RB_GATE) ? 1
+									    : 0;
+		out->valid = true;
+		return 0;
+	}
+	/*
+	 * The VCC_RB setpoint, as the rail voltage the PROGRAMMED wiper implies
+	 * — the platform re-reads the part on every sequencer pass, so a write
+	 * that did not take stops being reported as the value that was asked
+	 * for. 0 means the code is not known yet (no read has succeeded), which
+	 * is reported as an invalid reading rather than as 0 V.
+	 */
+	if (strcmp(o->id, "pwr.rb.vset_mv") == 0) {
+		out->i = sts_pwrseq_rb_expected_mv();
+		out->valid = (out->i > 0);
+		return 0;
+	}
+	/*
 	 * The two tunnels and the K1 relay: read-backs for objects whose
 	 * actuation is wired, so a host is not left setting a control it cannot
 	 * confirm. All three are this area's own state or one snapshot call, and
@@ -1368,46 +1465,92 @@ static int obj_apply(void *user, size_t obj, const int32_t *value)
 		return -EINVAL;
 	}
 
-	/* The panel dimmer is the one output sts_app.h exposes today. */
-	if (strcmp(o->id, "ui.panel.duty") == 0) {
-		uint8_t duty = (value != NULL)
-				       ? (uint8_t)CLAMP(*value, 0, 100)
-				       : 0U;
-
-		/* A release restores the UI's own brightness policy; with no
-		 * accessor for it, 0 %% is the safe resting state. */
-		return sts_panel_led_set(duty);
-	}
-
 	/*
-	 * PANEL_LED_EN (PC0) — the first object routed through the parameterised
-	 * sequencer mailbox, and the reason that mailbox exists.
+	 * =====================================================================
+	 * THE RAILS AND THE PANEL: POSTED TO THE SEQUENCER, NEVER WRITTEN HERE
+	 * =====================================================================
 	 *
-	 * It is NOT written here. Every rail pin has exactly one writer, the
-	 * housekeeping thread's 4 Hz sequencer pass, and this is the console
-	 * thread. The hazard is not merely a torn write: pwrseq raises
-	 * STS_MP_VETO_PANEL_LED *before* it executes PANEL_LED_DIS, so a write
-	 * issued from here could land after the veto drain and re-light a panel
-	 * whose lease had already been withdrawn — an override outliving the
-	 * firmware decision that overruled it.
+	 * Every pin below is driven by the housekeeping thread's 4 Hz sequencer
+	 * pass and this is the console thread. The hazard is not merely a torn
+	 * write: pwrseq raises its firmware veto (sts_mp_veto_of_action) BEFORE
+	 * it executes the matching *_DIS action, so a write issued from here
+	 * could land after the veto drain and re-energise a load whose lease had
+	 * already been withdrawn — an override outliving the firmware decision
+	 * that overruled it.
 	 *
 	 * So the value is posted and the drain performs it, up to 250 ms later.
 	 * MP_APPLY_PENDING is what makes that latency honest rather than hidden:
 	 * mp_ovr_grant() marks the lease unsettled, the reply's `verify_pending`
-	 * says so, mp_veto_drain_locked()'s companion below confirms or vetoes
-	 * it from the drain's own outcome, and mp_ovr_tick() drops the lease if
-	 * neither happens. Returning 0 here would assert that the pin had moved.
+	 * says so, mp_req_drain_locked() below confirms or vetoes it from the
+	 * drain's own outcome, and mp_ovr_tick() drops the lease if neither
+	 * happens. Returning 0 here would assert that the pin had moved.
 	 *
-	 * A release (value == NULL) goes through the same mailbox and resolves
-	 * to a dark panel, which is both PWRSEQ_ACT_PANEL_LED_DIS's own state
-	 * and `ui.panel.duty`'s release position — so a lapsed lease cannot
-	 * leave the string lit.
+	 * Every one of them is therefore LEASE-ONLY in the manifest: `obj.set`
+	 * creates no lease, so nothing — not the dead-man, not a link drop, not
+	 * `session.close` — could put the pin back, and its reply has no field
+	 * that could admit the write has not landed. m_obj_set() refuses a
+	 * positive apply return by name for the same reason.
+	 *
+	 * What a RELEASE means is decided by the drain, not here: for a rail it
+	 * re-drives firmware's own commanded level rather than off, so a lapsed
+	 * lease cannot leave the GPS receiver dark or the antenna unbiased. The
+	 * panel pair is the documented exception (sts_app.h).
 	 */
+	if (strcmp(o->id, "ui.panel.duty") == 0) {
+		int32_t duty = (value != NULL) ? CLAMP(*value, 0, 100) : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_PANEL_DUTY,
+					     (value != NULL) ? &duty : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
 	if (strcmp(o->id, "pwr.panel.led.en") == 0) {
 		int32_t on = ((value != NULL) && (*value != 0)) ? 1 : 0;
 		int rc = sts_pwrseq_req_post(
 			(uint8_t)STS_PWRSEQ_REQ_PANEL_LED_EN,
 			(value != NULL) ? &on : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	if (strcmp(o->id, "pwr.gps.en") == 0) {
+		int32_t on = ((value != NULL) && (*value != 0)) ? 1 : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_GPS_EN,
+					     (value != NULL) ? &on : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	if (strcmp(o->id, "pwr.ant.bias.en") == 0) {
+		int32_t on = ((value != NULL) && (*value != 0)) ? 1 : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_ANT_BIAS_EN,
+					     (value != NULL) ? &on : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	if (strcmp(o->id, "pwr.disp.en") == 0) {
+		int32_t on = ((value != NULL) && (*value != 0)) ? 1 : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_DISP_EN,
+					     (value != NULL) ? &on : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	if (strcmp(o->id, "pwr.rb.gate") == 0) {
+		int32_t on = ((value != NULL) && (*value != 0)) ? 1 : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_RB_GATE,
+					     (value != NULL) ? &on : NULL);
+
+		return (rc == 0) ? MP_APPLY_PENDING : rc;
+	}
+	/*
+	 * The VCC_RB setpoint. `*value` has already been clamped to cfg
+	 * `pwr.rb.vmax.mv` by MP_ILK_RB_VMAX and range-checked against the
+	 * manifest envelope; the platform clamps it AGAIN against the ceiling
+	 * the sequencer is actually running, because the last bound on the rail
+	 * that can destroy the FE-5680A does not belong on this side of an area
+	 * seam. `pwr.rb.pot.code` stays refused — see prov_ilk() above.
+	 */
+	if (strcmp(o->id, "pwr.rb.vset_mv") == 0) {
+		int32_t mv = (value != NULL) ? *value : 0;
+		int rc = sts_pwrseq_req_post((uint8_t)STS_PWRSEQ_REQ_RB_VSET_MV,
+					     (value != NULL) ? &mv : NULL);
 
 		return (rc == 0) ? MP_APPLY_PENDING : rc;
 	}
@@ -1831,6 +1974,12 @@ static void mp_veto_drain_locked(void)
 static const char *const mp_req_objects[STS_PWRSEQ_REQ_COUNT] = {
 	[STS_PWRSEQ_REQ_NONE] = NULL,
 	[STS_PWRSEQ_REQ_PANEL_LED_EN] = "pwr.panel.led.en",
+	[STS_PWRSEQ_REQ_PANEL_DUTY] = "ui.panel.duty",
+	[STS_PWRSEQ_REQ_GPS_EN] = "pwr.gps.en",
+	[STS_PWRSEQ_REQ_ANT_BIAS_EN] = "pwr.ant.bias.en",
+	[STS_PWRSEQ_REQ_DISP_EN] = "pwr.disp.en",
+	[STS_PWRSEQ_REQ_RB_GATE] = "pwr.rb.gate",
+	[STS_PWRSEQ_REQ_RB_VSET_MV] = "pwr.rb.vset_mv",
 };
 
 /**

@@ -128,6 +128,69 @@ static inline void sts_rb_vmax_decide(uint64_t cfg_mv, uint32_t default_mv,
 	out->vmax_mv = vmax;
 }
 
+/**
+ * The digipot code that puts VCC_RB at or below @p want_mv, never above.
+ *
+ * The inverse of pwrseq_rb_expected_mv(), and the reason it lives HERE rather
+ * than beside its forward form in core/pwrseq: this is the arithmetic that
+ * stands between a maintenance setpoint and a destroyed FE-5680A, and this file
+ * is where that class of decision is kept so a host suite can hold it.
+ *
+ * Three properties, each of which is the difference between a rail and a dead
+ * rubidium:
+ *
+ *   1. IT NEVER OVERSHOOTS. VOUT rises with the code (pwrseq_rb_xfer_t), so the
+ *      answer is the LARGEST code whose implied rail is <= the target. Rounding
+ *      to the nearest code would put the rail above the request — and therefore
+ *      possibly above the ceiling — for half of all inputs.
+ *   2. THE CEILING IS APPLIED TO THE TARGET, BEFORE THE SEARCH. Clamping the
+ *      resulting code afterwards would need a second inverse and a second
+ *      chance to get the direction wrong; clamping the millivolts first means
+ *      the search itself cannot return a code above @p vmax_mv.
+ *   3. A DEGENERATE TRANSFER FUNCTION ANSWERS CODE 0. Code 0 is terminal B, the
+ *      minimum rail (4.51 V) and the safe-low power-up direction — the same
+ *      fail-safe pwrseq_digipot_vctrl_mv() applies to an out-of-range code.
+ *
+ * @param x        The as-built transfer function (pwrseq_cfg_t::rb_xfer).
+ * @param want_mv  Requested rail, millivolts. Below the supply's minimum yields
+ *                 code 0, which IS that minimum.
+ * @param vmax_mv  Hard ceiling, millivolts — pwrseq_cfg_t::rb_vmax_mv, which
+ *                 sts_rb_vmax_decide() has already bounded by
+ *                 STS_RB_VMAX_MV_CEILING. 0 is not "no ceiling": it clamps the
+ *                 target to 0 mV and therefore answers code 0.
+ */
+static inline uint16_t sts_rb_code_for_mv(const pwrseq_rb_xfer_t *x,
+					  int32_t want_mv, uint32_t vmax_mv)
+{
+	uint32_t lo = 0U;
+	uint32_t hi;
+	uint32_t best = 0U;
+
+	if ((x == NULL) || (x->steps == 0U)) {
+		return 0U;
+	}
+
+	if ((vmax_mv <= (uint32_t)INT32_MAX) && (want_mv > (int32_t)vmax_mv)) {
+		want_mv = (int32_t)vmax_mv;
+	}
+
+	hi = (uint32_t)x->steps - 1U;
+	while (lo <= hi) {
+		uint32_t mid = lo + ((hi - lo) / 2U);
+
+		if (pwrseq_rb_expected_mv(x, (uint16_t)mid) <= want_mv) {
+			best = mid;
+			lo = mid + 1U;
+		} else if (mid == 0U) {
+			break;
+		} else {
+			hi = mid - 1U;
+		}
+	}
+
+	return (uint16_t)best;
+}
+
 /* ------------------------------------------------------------- PG decode --- */
 
 /**

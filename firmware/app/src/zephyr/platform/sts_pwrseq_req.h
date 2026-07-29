@@ -344,6 +344,8 @@ static inline const char *sts_pwrseq_req_reason_of(uint8_t err)
 		return "load shed (power/thermal)";
 	case STS_PWRSEQ_REQ_ERR_HW:
 		return "actuator refused the write";
+	case STS_PWRSEQ_REQ_ERR_GATED:
+		return "FE is connected to this rail";
 	case STS_PWRSEQ_REQ_ERR_NONE:
 	case STS_PWRSEQ_REQ_ERR_COUNT:
 	default:

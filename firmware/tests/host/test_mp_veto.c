@@ -1450,7 +1450,7 @@ static void test_the_antenna_bias_writer_vetoes_only_on_the_drop(void)
 			offset_in(&b, "sts_mp_veto(STS_MP_VETO_ANT_BIAS)"),
 		"the enable branch no longer precedes the veto");
 	TEST_ASSERT_TRUE_MESSAGE(
-		offset_in(&b, "pwrseq_set(&ant_bias_en, 0)") <
+		offset_in(&b, "pwrseq_rail_drive(") <
 			offset_in(&b, "sts_mp_veto(STS_MP_VETO_ANT_BIAS)"),
 		"the veto is raised before the pin is dropped");
 	/* Exactly two: the not-started guard and the enable path's own. A third
@@ -1460,6 +1460,24 @@ static void test_the_antenna_bias_writer_vetoes_only_on_the_drop(void)
 		2U, count_in(&b, "return;"),
 		"the enable path's early return is gone, so a re-enable would "
 		"now withdraw the override that asked for it");
+	/*
+	 * The supervisor's decision IS firmware's commanded level for PC9, and
+	 * it is recorded as such.
+	 *
+	 * pwrseq's own `ant_bias_on` does not move when gnssmgr cuts the bias,
+	 * so without this record a released `pwr.ant.bias.en` lease would
+	 * restore the level pwrseq still believed in and re-energise the bias
+	 * into a latched short. The drain reads exactly this field.
+	 */
+	TEST_ASSERT_EQUAL_UINT_MESSAGE(
+		1U, count_in(&b, "pwrseq_rail_auto("),
+		"the antenna supervisor no longer records firmware's commanded "
+		"level, so a lapsed lease would restore pwrseq's stale belief");
+	TEST_ASSERT_TRUE_MESSAGE(
+		offset_in(&b, "pwrseq_rail_auto(") <
+			offset_in(&b, "pwrseq_rail_drive("),
+		"the level is recorded after the pin moves, so a drain between "
+		"the two would restore the old one");
 }
 
 /* ---------------------------------------------------------------- mp_glue.c */

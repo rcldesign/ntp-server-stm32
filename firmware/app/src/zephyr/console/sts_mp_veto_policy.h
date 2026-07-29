@@ -49,6 +49,14 @@
  * PANEL_LED_EN before any session can exist). If that case ever needs covering
  * it is a row here, not a redesign.
  *
+ * KNOWN CONSEQUENCE OF THAT ASYMMETRY, now that the rails are grantable: a
+ * lease holding a rail OFF is not withdrawn when a stage brings that rail up.
+ * The pin follows firmware — it always does, because a lease is applied once at
+ * grant and once at revert and never re-asserts itself — so the board is right
+ * and the lease's claim is stale until it lapses or is released, at which point
+ * the drain re-drives firmware's own level anyway. It is visible rather than
+ * hidden: the read-backs report the PIN (mp_glue.c obj_read), not the lease.
+ *
  * NOT mapped, with the evidence, so these are recognisable as decisions:
  *
  *   - THE POWER-FAIL PARK LIST is not given a trigger of its own.
@@ -65,12 +73,22 @@
  *     grant and once at revert — so an override cannot fight the park list at
  *     the pin, and FMT §5.1.3 reverts everything at the next boot anyway.
  *
- *   - THE VCC_RB SETPOINT objects (`pwr.rb.vset_mv`, `pwr.rb.pot.code`) are not
- *     in the rubidium row. pwrseq's rail drop is RB_PWR_EN and RB_VCC_GATE; it
- *     does not touch the digipot, so a setpoint lease is not contrary to an
- *     action that has happened. `pwr.rb.vset_mv` additionally carries
- *     MP_ILK_RB_VERIFY, so mp_ovr_tick()'s read-back drops it on its own
- *     ("VCC_RB out of window") once the rail goes away.
+ *   - THE VCC_RB SETPOINT objects are not in the RUBIDIUM RAIL row, which is a
+ *     narrower statement than it used to be here. pwrseq's rail drop is
+ *     RB_PWR_EN and RB_VCC_GATE; it does not touch the digipot, so a setpoint
+ *     lease is not contrary to THAT action, and `pwr.rb.vset_mv` additionally
+ *     carries MP_ILK_RB_VERIFY, so mp_ovr_tick()'s read-back drops it on its
+ *     own ("VCC_RB out of window") once the rail goes away. What it IS contrary
+ *     to is pwrseq writing the wiper itself, in stage 8 — and that is
+ *     DELIBERATELY still not mapped, on the rule stated above rather than by
+ *     omission: PWRSEQ_ACT_DIGIPOT_WRITE runs on every bring-up, so a subject
+ *     for it would raise a veto on every boot and make `mp status`'s veto
+ *     counters mean nothing. The residue is the same shape as the ON-direction
+ *     caveat and is covered the same way — the read-back reports the code the
+ *     part actually holds (sts_pwrseq_rb_expected_mv), and if the rewrite moves
+ *     the RAIL, MP_ILK_RB_VERIFY drops the lease on its own. `pwr.rb.pot.code`
+ *     is in neither: it is refused outright (mp_glue.c prov_ilk), so no lease
+ *     on it can exist to withdraw.
  *
  * ---------------------------------------------------------------------------
  * Why the reason strings are constants here and not passed by the caller
@@ -246,7 +264,6 @@ static inline const char *const *sts_mp_veto_objects(sts_mp_veto_t s,
 	static const char *const gps[] = {
 		"pwr.gps.en", /* GPS_PWR_EN PC8 */
 	};
-
 	const char *const *ids = NULL;
 	size_t n = 0U;
 

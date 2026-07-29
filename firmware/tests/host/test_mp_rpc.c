@@ -1069,14 +1069,23 @@ static int64_t try_g1(uint32_t sid)
 	return err_code();
 }
 
-/** A G2 action (`obj.set` on pwr.gps.en) with the correct typed serial. */
+/**
+ * A G2 action (`obj.set` on ref.rb.serial) with the correct typed serial.
+ *
+ * The vehicle is `ref.rb.serial` — the K1 RS-232/CMOS relay — and not a power
+ * rail, because every mailbox-driven rail is now LEASE-ONLY: its actuator is
+ * asynchronous, so `obj.set` has no reply that could admit the pin has not
+ * moved and the method is refused before any guard runs. What these tests are
+ * about is the GUARD LADDER, so they need an object whose `obj.set` still
+ * reaches the apply; the guard class (G2) is what has to match, not the pin.
+ */
 static int64_t try_g2_with_serial(uint32_t sid)
 {
 	char req[256];
 
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":91,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"pwr.gps.en\",\"value\":true,"
+		       "\"params\":{\"id\":\"ref.rb.serial\",\"value\":1,"
 		       "\"sid\":%u,\"confirm\":\"%s\"}}",
 		       sid, SERIAL);
 	(void)call(req);
@@ -1446,7 +1455,7 @@ static void test_an_over_long_string_param_is_emptied(void)
 	 * against whatever the stack happened to hold. */
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"pwr.gps.en\",\"value\":true,"
+		       "\"params\":{\"id\":\"ref.rb.serial\",\"value\":1,"
 		       "\"sid\":%u,\"confirm\":\"%s\"}}",
 		       sid, big);
 	(void)call(req);
@@ -1572,7 +1581,7 @@ static void test_obj_set_guard_escalation(void)
 	/* A G2 object needs the typed serial. */
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"pwr.gps.en\",\"value\":true,"
+		       "\"params\":{\"id\":\"ref.rb.serial\",\"value\":1,"
 		       "\"sid\":%u}}",
 		       sid);
 	(void)call(req);
@@ -1580,7 +1589,7 @@ static void test_obj_set_guard_escalation(void)
 
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"pwr.gps.en\",\"value\":true,"
+		       "\"params\":{\"id\":\"ref.rb.serial\",\"value\":1,"
 		       "\"sid\":%u,\"confirm\":\"%s\"}}",
 		       sid, SERIAL);
 	(void)call(req);
@@ -1589,7 +1598,7 @@ static void test_obj_set_guard_escalation(void)
 	/* A wrong serial is refused. */
 	(void)snprintf(req, sizeof(req),
 		       "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"obj.set\","
-		       "\"params\":{\"id\":\"pwr.gps.en\",\"value\":false,"
+		       "\"params\":{\"id\":\"ref.rb.serial\",\"value\":0,"
 		       "\"sid\":%u,\"confirm\":\"WRONG\"}}",
 		       sid);
 	(void)call(req);

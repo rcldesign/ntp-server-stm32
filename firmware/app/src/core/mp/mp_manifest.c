@@ -139,9 +139,9 @@ const char *mp_ilk_reason(uint32_t bit)
  * the only thing that stops the bit rotting the first time someone wires a
  * setter and forgets the row.
  *
- * Spelled as names rather than `F_RW | MP_OF_DEFERRED` on forty-one rows so
- * the table stays a table and the deferred rows read in the same column as
- * everything else.
+ * Spelled as names rather than `F_RW | MP_OF_DEFERRED` on the thirty-five rows
+ * that still carry it, so the table stays a table and the deferred rows read in
+ * the same column as everything else.
  *
  * F_LEASE is the tunnel flag set: readable and OVERRIDABLE, deliberately NOT
  * writable. A tunnel is a leased thing — mp_tunnel.c: "it is opened by the
@@ -183,14 +183,20 @@ const char *mp_ilk_reason(uint32_t bit)
 
 const mp_obj_t mp_objs[] = {
 	/* ---------------------------------------------------- §6.1 power --- */
+	/*
+	 * THE MAILBOX RAILS. Every one of these is driven by the housekeeping
+	 * thread's 4 Hz sequencer pass through zephyr/platform/sts_pwrseq_req.h,
+	 * so every one of them is LEASE-ONLY — see the block over
+	 * `pwr.panel.led.en` below, which states the two reasons in full.
+	 */
 	{ .id = "pwr.gps.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_POWER, .flags = F_RW_D, .net = "GPS_PWR_EN",
+	  .group = MP_GRP_POWER, .flags = F_LEASE, .net = "GPS_PWR_EN",
 	  .desc = "U22 LT3045 3V3_GPS rail enable (PC8)" },
 	{ .id = "pwr.ant.bias.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_POWER, .flags = F_RW_D, .net = "ANT_BIAS_EN",
+	  .group = MP_GRP_POWER, .flags = F_LEASE, .net = "ANT_BIAS_EN",
 	  .desc = "U27 RT9742 antenna bias-T enable (PC9)" },
 	{ .id = "pwr.disp.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_POWER, .flags = F_RW_D, .ilk = MP_ILK_DISP_OFF,
+	  .group = MP_GRP_POWER, .flags = F_LEASE, .ilk = MP_ILK_DISP_OFF,
 	  .net = "DISP_EN",
 	  .desc = "U33 RT9742 5V_DISP + PCA9306 enable (PC11)" },
 	/*
@@ -217,16 +223,32 @@ const mp_obj_t mp_objs[] = {
 	  .guard = MP_GUARD_G1, .group = MP_GRP_POWER, .flags = F_LEASE,
 	  .net = "PANEL_LED_EN",
 	  .desc = "U55 RT9742 panel-LED 5 V rail enable (PC0)" },
+	/*
+	 * `pwr.rb.en` STAYS DEFERRED, and it is the one rail of this group that
+	 * does. ARCHITECTURE.md §10 invariant 3 fixes the order the rubidium may
+	 * be brought up in — safe digipot code (verify readback) -> RB_PWR_EN ->
+	 * INA 0x47 window -> RB_VCC_GATE — and a lease on PB7 cannot honour it
+	 * in either direction: raising it energises the FE from a rail nothing
+	 * re-verified while RB_VCC_GATE is already asserted, and lowering it
+	 * drops the supply under a connected load, inverting the order
+	 * rb_shutdown() and sts_pwrseq_rb_quiesce_from_isr() both document. A
+	 * release has nowhere honest to go either — the only path back is the
+	 * full guarded stage-8 re-entry, which is an operator action that clears
+	 * the rubidium alarms and the deferral, not something a dead-man may do.
+	 * The full argument is in zephyr/platform/pwrseq_exec.c, over the
+	 * mailbox. `pwr.rb.gate` is the half of the pair that respects the
+	 * order, so it is the half that is wired.
+	 */
 	{ .id = "pwr.rb.en", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
 	  .group = MP_GRP_POWER, .flags = F_RW_D,
 	  .ilk = MP_ILK_RB_WARM | MP_ILK_RB_OV, .net = "RB_PWR_EN",
 	  .desc = "U40 MIC28516 rubidium rail enable (PB7)" },
 	{ .id = "pwr.rb.gate", .kind = MP_KIND_BOOL, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_POWER, .flags = F_RW_D,
+	  .group = MP_GRP_POWER, .flags = F_LEASE,
 	  .ilk = MP_ILK_RB_OV | MP_ILK_RB_VERIFY, .net = "RB_VCC_GATE",
 	  .desc = "Q25 gate: connects VCC_RB_G to the FE-5680A (PB1)" },
 	{ .id = "pwr.rb.vset_mv", .kind = MP_KIND_MV, .guard = MP_GUARD_G2,
-	  .group = MP_GRP_POWER, .flags = F_RW_D, .min = RB_MV_MIN,
+	  .group = MP_GRP_POWER, .flags = F_LEASE, .min = RB_MV_MIN,
 	  .max = RB_MV_MAX, .step = 78, .unit = U_MV,
 	  .ilk = MP_ILK_RB_VMAX | MP_ILK_RB_OV | MP_ILK_RB_VERIFY,
 	  .net = "VCC_RB",
@@ -303,8 +325,18 @@ const mp_obj_t mp_objs[] = {
 	  .desc = "USART3 passthrough on channel 0x07 (PD8/PD9)" },
 
 	/* ---------------------------------------------------- §6.4 panel --- */
+	/*
+	 * The dimmer, migrated onto the sequencer mailbox and therefore no
+	 * longer writable. It DID work through `obj.set` — and that is the
+	 * point: it worked by writing PE0 from the console thread, which is the
+	 * single-writer violation `pwr.panel.led.en` was routed through the
+	 * mailbox to close, on the very same setter. Losing MP_OF_WRITE is what
+	 * an asynchronous apply costs; the host uses `obj.override` and reads
+	 * `verify_pending`, and the write is now also refused when it would
+	 * re-light a panel the shed ladder has dropped.
+	 */
 	{ .id = "ui.panel.duty", .kind = MP_KIND_PCT, .guard = MP_GUARD_G1,
-	  .group = MP_GRP_PANEL, .flags = F_RW, .min = 0, .max = 100,
+	  .group = MP_GRP_PANEL, .flags = F_LEASE, .min = 0, .max = 100,
 	  .step = 1, .unit = U_PCT, .net = "PANEL_LED_PWM",
 	  .desc = "front-panel LED string dimmer, LPTIM2_CH2 (PE0)" },
 	{ .id = "ui.disp.bl", .kind = MP_KIND_PCT, .guard = MP_GUARD_G1,
