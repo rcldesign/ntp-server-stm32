@@ -133,6 +133,20 @@ extern "C" {
  */
 #define DISC_ADEV_CAP 512u
 
+/**
+ * Nominal spacing of the ADEV phase ring, in nanoseconds.
+ *
+ * The ring is fed one sample per accepted PPS second, and the runtime
+ * estimator is called with tau0 = 1.0 s. This constant is the same number
+ * spelled for consumers that must state the record's sample interval
+ * explicitly — @ref disc_phase_snapshot exports it so an offline analyser
+ * never has to assume it.
+ */
+#define DISC_ADEV_TAU0_NS 1000000000u
+
+/** Bytes in the per-sample gap bitmap that shadows the ADEV ring. */
+#define DISC_ADEV_GAPMAP_BYTES (DISC_ADEV_CAP / 8u)
+
 /* ------------------------------------------------------------------ states */
 
 /**
@@ -363,6 +377,16 @@ typedef struct {
 	float adev_buf[DISC_ADEV_CAP];
 	uint16_t adev_n;
 	uint16_t adev_head;
+	/**
+	 * Per-sample "this sample was appended after a non-uniform interval"
+	 * bitmap, one bit per adev_buf[] slot (LSB-first: sample i is bit i&7
+	 * of byte i>>3). It shadows adev_buf exactly, including the shift-down
+	 * eviction, so a gap scrolls out of the window with the sample that
+	 * carried it.
+	 */
+	uint8_t adev_gapmap[DISC_ADEV_GAPMAP_BYTES];
+	/** Population count of adev_gapmap over the live window [0, adev_n). */
+	uint16_t adev_gaps;
 	float adev_1s;
 	float adev_10s;
 	float adev_100s;
@@ -777,6 +801,62 @@ bool disc_name_pulse(const disc_pvt_obs_t *pvt, size_t n_pvt,
  * answer, and the caller has no other way to keep the accumulator moving.
  */
 uint32_t disc_expected_advance_s(uint64_t prev_ms, uint64_t now_ms);
+
+/* ------------------------------------------------------- phase-record export */
+
+/**
+ * A coherent copy of the ADEV phase ring, for offline stability analysis.
+ *
+ * Why this exists, and why it carries @ref gaps
+ * --------------------------------------------
+ * The runtime estimator deliberately absorbs short sample gaps: the tick
+ * resets the ring only when the interval exceeds ADEV_MAX_GAP_S (3 s), so one
+ * or two missed PPS seconds are tolerated rather than throwing away a window
+ * that takes 201 samples to refill. That trade is right for telemetry — see
+ * the ADEV_MAX_GAP_S banner in disc.c — and it is wrong for validation.
+ *
+ * An offline estimator (core/stats) takes a bare phase array and a single
+ * tau0. It has no way to see that sample 313 arrived two seconds after sample
+ * 312, so an absorbed gap silently mis-times every later second difference and
+ * the resulting plot is wrong in a way that looks perfectly plausible.
+ *
+ * So the record states it. @ref gaps is the number of samples in the exported
+ * window that were appended after a non-uniform interval; @ref gapmap says
+ * which ones. A record with gaps != 0 is NOT fit for ADEV as a whole, and a
+ * consumer that ignores the field is producing a wrong answer confidently.
+ * The bitmap additionally lets a consumer recover the longest uniformly
+ * spaced run instead of discarding the record.
+ *
+ * The runtime behaviour is unchanged: nothing here alters what the loop
+ * absorbs, only what an exporter can see about it.
+ */
+typedef struct {
+	/** Samples in @ref x_ns, oldest first. 0 when the ring is empty. */
+	uint16_t n;
+	/** Non-uniform-interval samples within [0, n). 0 == fit for ADEV. */
+	uint16_t gaps;
+	/** Nominal sample interval; always DISC_ADEV_TAU0_NS. */
+	uint32_t tau0_ns;
+	/** True once the ring has been full and is evicting oldest samples. */
+	bool full;
+	/** Phase samples, nanoseconds, oldest first. */
+	float x_ns[DISC_ADEV_CAP];
+	/** Bit i set == x_ns[i] followed a non-uniform interval. LSB-first. */
+	uint8_t gapmap[DISC_ADEV_GAPMAP_BYTES];
+} disc_phase_snap_t;
+
+/**
+ * Copy the ADEV phase ring and its gap accounting into @p out.
+ *
+ * Pure read; the loop state is untouched. The caller is responsible for
+ * excluding a concurrent disc_tick_pps() — on the device the discipline
+ * thread owns disc_ctx_t, so the export runs under that thread's snapshot
+ * mutex.
+ *
+ * @retval 0        Success (including n == 0, an empty but valid record).
+ * @retval -EINVAL  NULL argument.
+ */
+int disc_phase_snapshot(const disc_ctx_t *ctx, disc_phase_snap_t *out);
 
 /* ------------------------------------------------------- offline utilities */
 

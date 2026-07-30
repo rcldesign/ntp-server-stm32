@@ -41,6 +41,40 @@
  */
 #define ADEV_MAX_GAP_S 3.0f
 
+/*
+ * Half-width of the band around tau0 that counts as "uniformly spaced".
+ *
+ * The ring's nominal spacing is one second. A sample whose measured interval
+ * lands outside 1.0 +/- this is not one PPS second after its predecessor —
+ * either a pulse was missed (dt near 2 s or 3 s) or an extra edge arrived
+ * early — and the phase array it lands in is no longer the uniformly sampled
+ * series that an ADEV estimator assumes.
+ *
+ * Half a tick is the right width: it is the largest tolerance that cannot
+ * confuse "one second" with "two seconds", and it is enormous compared with
+ * the millisecond quantisation of the monotonic timestamps the interval is
+ * computed from, so ordinary scheduling jitter never trips it.
+ *
+ * Absorbing such a sample is the runtime's deliberate availability trade
+ * (see ADEV_MAX_GAP_S above). Counting it is not a change to that trade —
+ * nothing below acts on the count. It exists so an exported record can say
+ * whether it is fit for offline analysis, which the phase array alone cannot.
+ */
+#define ADEV_UNIFORM_TOL_S 0.5f
+
+/*
+ * The ring's sample interval, in seconds.
+ *
+ * Derived from the exported DISC_ADEV_TAU0_NS rather than written twice: the
+ * estimator's assumed spacing and the spacing an exported record declares are
+ * the same physical fact, and a record whose stated tau0 disagrees with the
+ * series it describes is worse than no record — every point on the resulting
+ * plot is wrong by the ratio, with nothing to show for it.
+ *
+ * 1e9 is exactly representable in binary32, so this is exactly 1.0f.
+ */
+#define ADEV_TAU0_S ((float)DISC_ADEV_TAU0_NS / 1.0e9f)
+
 /* Averaging factors reported in the quality block (tau0 = 1 s). */
 #define ADEV_M_1 1u
 #define ADEV_M_10 10u
@@ -412,9 +446,51 @@ static void adev_reset(disc_ctx_t *ctx)
 {
 	ctx->adev_n = 0u;
 	ctx->adev_head = 0u;
+	/*
+	 * The gap accounting describes the ring's current contents, not the
+	 * unit's history. Discarding the samples discards their gaps with
+	 * them, so a series that restarts after a real discontinuity is clean
+	 * from its first sample — which is the truth, and is what lets a bench
+	 * operator ever obtain a usable record on a noisy antenna.
+	 */
+	memset(ctx->adev_gapmap, 0, sizeof(ctx->adev_gapmap));
+	ctx->adev_gaps = 0u;
 	ctx->adev_1s = 0.0f;
 	ctx->adev_10s = 0.0f;
 	ctx->adev_100s = 0.0f;
+}
+
+static void adev_gapmap_put(disc_ctx_t *ctx, uint16_t i, bool gap)
+{
+	uint8_t mask = (uint8_t)(1u << (i & 7u));
+
+	if (gap) {
+		ctx->adev_gapmap[i >> 3] |= mask;
+	} else {
+		ctx->adev_gapmap[i >> 3] &= (uint8_t)~mask;
+	}
+}
+
+/*
+ * Shift the gap bitmap down one bit, mirroring the buffer's shift-down
+ * eviction: every sample's index drops by one and sample 0 falls off the end.
+ * The evicted bit leaves the window, so the count follows it out — otherwise a
+ * unit that has been up for an hour reports gaps that scrolled out of the
+ * 512-sample window long ago and no record ever looks clean.
+ */
+static void adev_gapmap_shift(disc_ctx_t *ctx)
+{
+	size_t i;
+
+	if ((ctx->adev_gapmap[0] & 0x01u) != 0u) {
+		ctx->adev_gaps--;
+	}
+	for (i = 0u; (i + 1u) < sizeof(ctx->adev_gapmap); i++) {
+		ctx->adev_gapmap[i] =
+			(uint8_t)((ctx->adev_gapmap[i] >> 1) |
+				  (uint8_t)(ctx->adev_gapmap[i + 1u] << 7));
+	}
+	ctx->adev_gapmap[sizeof(ctx->adev_gapmap) - 1u] >>= 1;
 }
 
 /*
@@ -422,16 +498,31 @@ static void adev_reset(disc_ctx_t *ctx)
  * is full the whole thing shifts down by one. That is 2 KB of memmove once a
  * second, which is cheaper than the alternative of copying a wrapped ring into
  * a scratch array every time the estimator runs (and would need a second 2 KB).
+ *
+ * @p gap marks the sample as having arrived after a non-uniform interval. It
+ * is recorded, never acted on: the estimator still consumes the sample exactly
+ * as before.
  */
-static void adev_push(disc_ctx_t *ctx, float e_ns)
+static void adev_push(disc_ctx_t *ctx, float e_ns, bool gap)
 {
+	uint16_t slot;
+
 	if (ctx->adev_n < DISC_ADEV_CAP) {
-		ctx->adev_buf[ctx->adev_n] = e_ns;
+		slot = ctx->adev_n;
+		ctx->adev_buf[slot] = e_ns;
 		ctx->adev_n++;
 	} else {
 		memmove(&ctx->adev_buf[0], &ctx->adev_buf[1],
 			(DISC_ADEV_CAP - 1u) * sizeof(ctx->adev_buf[0]));
 		ctx->adev_buf[DISC_ADEV_CAP - 1u] = e_ns;
+		adev_gapmap_shift(ctx);
+		slot = (uint16_t)(DISC_ADEV_CAP - 1u);
+	}
+
+	adev_gapmap_put(ctx, slot, gap);
+	if (gap) {
+		/* Bounded by DISC_ADEV_CAP: one bit per live slot. */
+		ctx->adev_gaps++;
 	}
 }
 
@@ -439,16 +530,16 @@ static void adev_update(disc_ctx_t *ctx)
 {
 	float v;
 
-	if (disc_adev_overlapping(ctx->adev_buf, ctx->adev_n, ADEV_M_1, 1.0f,
-				  &v) == 0) {
+	if (disc_adev_overlapping(ctx->adev_buf, ctx->adev_n, ADEV_M_1,
+				  ADEV_TAU0_S, &v) == 0) {
 		ctx->adev_1s = v;
 	}
-	if (disc_adev_overlapping(ctx->adev_buf, ctx->adev_n, ADEV_M_10, 1.0f,
-				  &v) == 0) {
+	if (disc_adev_overlapping(ctx->adev_buf, ctx->adev_n, ADEV_M_10,
+				  ADEV_TAU0_S, &v) == 0) {
 		ctx->adev_10s = v;
 	}
-	if (disc_adev_overlapping(ctx->adev_buf, ctx->adev_n, ADEV_M_100, 1.0f,
-				  &v) == 0) {
+	if (disc_adev_overlapping(ctx->adev_buf, ctx->adev_n, ADEV_M_100,
+				  ADEV_TAU0_S, &v) == 0) {
 		ctx->adev_100s = v;
 	}
 }
@@ -937,6 +1028,35 @@ uint32_t disc_expected_advance_s(uint64_t prev_ms, uint64_t now_ms)
 		secs = 1u;
 	}
 	return (secs > (uint64_t)UINT32_MAX) ? UINT32_MAX : (uint32_t)secs;
+}
+
+/* --------------------------------------------------------- phase-record export */
+
+int disc_phase_snapshot(const disc_ctx_t *ctx, disc_phase_snap_t *out)
+{
+	if ((ctx == NULL) || (out == NULL)) {
+		return -EINVAL;
+	}
+
+	memset(out, 0, sizeof(*out));
+	out->n = ctx->adev_n;
+	out->gaps = ctx->adev_gaps;
+	/*
+	 * Reported from the constant the estimator is actually driven with, so
+	 * a record can never claim a spacing the samples were not taken at.
+	 * adev_update() calls disc_adev_overlapping() with tau0_s = 1.0, and
+	 * the static assert below is what keeps the two spellings identical.
+	 */
+	out->tau0_ns = DISC_ADEV_TAU0_NS;
+	out->full = (ctx->adev_n >= DISC_ADEV_CAP);
+
+	if (ctx->adev_n > 0u) {
+		memcpy(out->x_ns, ctx->adev_buf,
+		       (size_t)ctx->adev_n * sizeof(ctx->adev_buf[0]));
+	}
+	memcpy(out->gapmap, ctx->adev_gapmap, sizeof(out->gapmap));
+
+	return 0;
 }
 
 /* --------------------------------------------------------------- actuator */
@@ -1644,7 +1764,23 @@ int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
 	if (!freq_ok || dt > ADEV_MAX_GAP_S) {
 		adev_reset(ctx);
 	}
-	adev_push(ctx, e);
+	/*
+	 * Classify the interval AFTER the reset check, and only against a
+	 * predecessor that is still in the ring.
+	 *
+	 * adev_n == 0 here means the series starts at this sample — either the
+	 * branch above just discarded it, or something outside the tick did
+	 * (holdover entry, disc_init). A first sample has no interval, so it
+	 * cannot be a gap; counting one would permanently taint every record
+	 * taken after a holdover.
+	 *
+	 * Everything reaching this point with adev_n > 0 had freq_ok true (the
+	 * branch above resets otherwise), so dt is a real measured interval
+	 * between this sample and the ring's last one.
+	 */
+	adev_push(ctx, e,
+		  (ctx->adev_n > 0u) &&
+			  (f_abs(dt - ADEV_TAU0_S) > ADEV_UNIFORM_TOL_S));
 	adev_update(ctx);
 
 	/* ---- §3.3 / §3.6 state machine ---- */

@@ -17,6 +17,7 @@ has to run on a laptop in a rack room.
     meridian_ctl.py cfg-get tim.tau.s
     meridian_ctl.py --password s3cret cfg-set tim.tau.s 300
     meridian_ctl.py cfg-export backup.mcf
+    meridian_ctl.py phase-export run1.phr   # then: meridian_phase run1.phr
     meridian_ctl.py cfg-import backup.mcf
     meridian_ctl.py log-tail --follow
     meridian_ctl.py --password s3cret fw-upload zephyr.signed.bin
@@ -72,6 +73,7 @@ CMD = {
     "CFG_COMMIT": 0x13,
     "CFG_REVERT": 0x14,
     "CFG_EXPORT": 0x15,
+    "PHASE_EXPORT": 0x24,
     "CFG_IMPORT": 0x16,
     "FACTORY_RESET": 0x17,
     "STATUS_GET": 0x20,
@@ -692,6 +694,34 @@ class Client:
                 break
         return bytes(blob)
 
+    def phase_export(self) -> bytes:
+        """Fetch one phase record (mcp_wire.h PHASE_EXPORT 0x24).
+
+        The offset contract is CFG_EXPORT's: 0 restarts and snapshots, then
+        each request names the byte offset the previous chunk ended at. The
+        device serves every chunk from the one snapshot, so the record is a
+        coherent window on the discipline loop's phase ring rather than a
+        splice of several.
+
+        Returns the raw record. This tool deliberately does NOT decode or
+        analyse it: the estimators live in core/stats and are exercised
+        through tools/meridian_phase.c, so that there is exactly one
+        implementation of the arithmetic and it is the one the firmware's own
+        test suite pins against closed forms.
+        """
+        blob = bytearray()
+        while True:
+            p = self.link.request(CMD["PHASE_EXPORT"],
+                                  struct.pack("<I", len(blob)))
+            offset, more = struct.unpack_from("<IB", p, 1)
+            if offset != len(blob):
+                raise ProtocolError("phase export offset %d, expected %d"
+                                    % (offset, len(blob)))
+            blob += p[6:]
+            if not more:
+                break
+        return bytes(blob)
+
     def cfg_import(self, blob: bytes, strict: bool = True,
                    chunk: int = 512) -> Dict[str, Any]:
         off = 0
@@ -938,6 +968,26 @@ def cmd_cfg_export(cli: Client, out: Out, args: argparse.Namespace) -> int:
         fh.write(blob)
     out.obj({"file": args.file, "bytes": len(blob),
              "secrets": bool(args.secrets)})
+    return 0
+
+
+def cmd_phase_export(cli: Client, out: Out, args: argparse.Namespace) -> int:
+    blob = cli.phase_export()
+    if len(blob) < 24 or blob[:4] != b"PHR1":
+        raise SystemExit("meridian_ctl: device did not return a phase record")
+
+    n, tau0_ns, gaps = struct.unpack_from("<HII", blob, 6)
+    with open(args.file, "wb") as fh:
+        fh.write(blob)
+
+    # Reported, not interpreted. A non-zero count means the discipline loop
+    # absorbed a short PPS gap into the ring, so the samples are not uniformly
+    # spaced and the record is not fit for ADEV as a whole. Deciding what to do
+    # about that belongs to meridian_phase, which is where the estimators are.
+    out.obj({"file": args.file, "bytes": len(blob), "samples": n,
+             "tau0_ns": tau0_ns, "absorbed_gaps": gaps,
+             "fit_for_adev": gaps == 0,
+             "analyse_with": "meridian_phase %s" % args.file})
     return 0
 
 
@@ -1194,6 +1244,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("file")
     p.add_argument("--secrets", action="store_true",
                    help="include secret keys (needs an authenticated session)")
+
+    p = add("phase-export", cmd_phase_export,
+            "save the discipline loop's phase record for offline analysis")
+    p.add_argument("file")
 
     p = add("cfg-import", cmd_cfg_import, "restore a configuration file")
     p.add_argument("file")

@@ -1089,6 +1089,122 @@ static int h_cfg_export(mcp_ctx_t *c, const mcp_frame_t *f)
 	return mcp__reply(c, f->cmd, f->seq, (uint16_t)(6U + n));
 }
 
+/*
+ * PHASE_EXPORT — offset-chunked read of one core/stats phase record.
+ *
+ * Mirrors h_cfg_export()'s offset contract exactly (restart at 0, forward
+ * advance, retransmit of the previous chunk) because the failure it guards
+ * against is the same: a lost response on a serial link must not force the
+ * operator to start a 4 KB fetch over.
+ *
+ * It differs in where the snapshot lives. cfg owns its export cursor and can
+ * re-walk a registry that is not moving; the phase ring moves once a second, so
+ * the port takes a copy at offset 0 and every chunk is served from that copy.
+ * Without it a multi-chunk record would contain samples from two different
+ * windows, spliced at a chunk boundary, and nothing downstream could tell.
+ */
+static int h_phase_export(mcp_ctx_t *c, const mcp_frame_t *f)
+{
+	uint8_t *p = mcp__rsp_buf(c);
+	uint32_t off;
+	uint32_t start;
+	uint32_t n = 0U;
+	uint32_t remain;
+	uint32_t want;
+	int rc;
+
+	if ((c->w.phase == NULL) || (c->w.phase->begin == NULL) ||
+	    (c->w.phase->read == NULL)) {
+		return mcp__reply_status(c, f->cmd, f->seq,
+					 (uint8_t)MCP_ERR_NOTSUP);
+	}
+	if (f->len != 4U) {
+		return mcp__reply_status(c, f->cmd, f->seq,
+					 (uint8_t)MCP_ERR_ARG);
+	}
+	off = bytes_get_le32(f->payload);
+
+	if (off == 0U) {
+		uint32_t len = 0U;
+
+		rc = c->w.phase->begin(c->w.phase->user, &len);
+		if (rc != 0) {
+			c->phase_active = false;
+			c->phase_prev_valid = false;
+			return mcp__reply_status(c, f->cmd, f->seq,
+						 mcp__port_err(rc));
+		}
+		c->phase_len = len;
+		c->phase_off = 0U;
+		c->phase_active = true;
+		c->phase_prev_valid = false;
+	} else if (c->phase_active && (off == c->phase_off)) {
+		/* Normal forward advance. */
+	} else if (c->phase_prev_valid && (off == c->phase_prev_off)) {
+		/*
+		 * Retransmit of the last emitted chunk. Deliberately NOT gated
+		 * on phase_active, for h_cfg_export()'s reason: the final chunk
+		 * clears it, and the final chunk is exactly the one whose
+		 * response is most likely to be lost.
+		 */
+		c->phase_off = c->phase_prev_off;
+	} else {
+		return mcp__reply_status(c, f->cmd, f->seq,
+					 (uint8_t)MCP_ERR_OFFSET);
+	}
+
+	if (c->phase_off > c->phase_len) {
+		/* Cannot happen: every advance below is clamped to phase_len.
+		 * Refusing rather than trusting it keeps a corrupted cursor from
+		 * becoming an out-of-range read in the port. */
+		c->phase_active = false;
+		return mcp__reply_status(c, f->cmd, f->seq,
+					 (uint8_t)MCP_ERR_OFFSET);
+	}
+
+	start = c->phase_off;
+	c->phase_prev_off = start;
+	c->phase_prev_valid = true;
+
+	remain = c->phase_len - start;
+	want = (remain > (uint32_t)MCP_PHASE_EXPORT_CHUNK)
+		       ? (uint32_t)MCP_PHASE_EXPORT_CHUNK
+		       : remain;
+
+	if (want > 0U) {
+		rc = c->w.phase->read(c->w.phase->user, start, &p[6], want, &n);
+		if (rc != 0) {
+			c->phase_active = false;
+			return mcp__reply_status(c, f->cmd, f->seq,
+						 mcp__port_err(rc));
+		}
+		if (n > want) {
+			c->phase_active = false;
+			return mcp__reply_status(c, f->cmd, f->seq,
+						 (uint8_t)MCP_ERR_INTERNAL);
+		}
+		if (n == 0U) {
+			/* The port promised bytes and delivered none, so the
+			 * transfer cannot progress. Ending it silently would
+			 * hand the tool a truncated record it would analyse as
+			 * complete. */
+			c->phase_active = false;
+			return mcp__reply_status(c, f->cmd, f->seq,
+						 (uint8_t)MCP_ERR_INTERNAL);
+		}
+	}
+
+	c->phase_off = start + n;
+	if (c->phase_off >= c->phase_len) {
+		c->phase_active = false;
+	}
+
+	p[0] = (uint8_t)MCP_OK;
+	bytes_put_le32(&p[1], start);
+	p[5] = (c->phase_off < c->phase_len) ? 1U : 0U;
+	return mcp__reply(c, f->cmd, f->seq, (uint16_t)(6U + n));
+}
+
 static int h_cfg_import(mcp_ctx_t *c, const mcp_frame_t *f)
 {
 	uint8_t *p = mcp__rsp_buf(c);
@@ -1584,6 +1700,8 @@ static int dispatch(mcp_ctx_t *c, const mcp_frame_t *f)
 		return h_telem_sub(c, f);
 	case MCP_CMD_TELEM_UNSUB:
 		return h_telem_unsub(c, f);
+	case MCP_CMD_PHASE_EXPORT:
+		return h_phase_export(c, f);
 
 	case MCP_CMD_LOG_TAIL:
 		return h_log_tail(c, f);
@@ -1791,6 +1909,10 @@ int mcp_init(mcp_ctx_t *c, const mcp_wiring_t *w)
 	if (w->diag_cb != NULL) {
 		c->caps |= MCP_CAP_DIAG;
 	}
+	if ((w->phase != NULL) && (w->phase->begin != NULL) &&
+	    (w->phase->read != NULL)) {
+		c->caps |= MCP_CAP_PHASE;
+	}
 
 	mcp_dfu__reset(c);
 	c->dfu.erase_gran = (w->dfu_erase_gran != 0U) ? w->dfu_erase_gran
@@ -1814,6 +1936,13 @@ void mcp_reset_session(mcp_ctx_t *c)
 	c->log_cursor = 0U;
 	c->exp_active = false;
 	c->exp_prev_valid = false;
+	/* The phase snapshot is scoped to the connection for the same reason the
+	 * config export is: the next tool to attach must get a record of the
+	 * ring as it is now, not a stale window the previous one left mid-fetch. */
+	c->phase_active = false;
+	c->phase_prev_valid = false;
+	c->phase_off = 0U;
+	c->phase_len = 0U;
 	c->imp_active = false;
 	c->imp_prev_valid = false;
 	c->imp_done = false;

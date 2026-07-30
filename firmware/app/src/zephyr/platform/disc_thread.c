@@ -52,6 +52,7 @@
 
 #include "disc/disc.h"
 #include "gnssmgr/gnssmgr.h"
+#include "stats/phase_rec.h"
 #include "ubx/ubx.h"
 #include "quality/quality.h"
 #include "refsel/refsel.h"
@@ -1047,6 +1048,150 @@ static void disc_apply_qerr(disc_pps_t *pps, const sts_gnss_snap_t *g,
 	qerr_stats.applied++;
 }
 
+/* ---- phase-record export (MCP PHASE_EXPORT) ----------------------------- */
+
+/*
+ * The bench operator's window into the ADEV phase ring, encoded as a
+ * core/stats phase record (stats/phase_rec.h).
+ *
+ * WHY IT IS PRODUCED BY THIS THREAD AND NOT THE CONSOLE'S
+ *
+ * disc_ctx_t is owned by the discipline thread. Reading its 2 KB phase ring
+ * from the console thread would race disc_tick_pps() — the ring shifts down by
+ * one every second — and the obvious fix, a mutex over the loop state, is
+ * exactly what ARCHITECTURE.md 10 and the firmware CLAUDE.md forbid: no
+ * console/web/SNMP/UI thread may hold a lock on timing state.
+ *
+ * So the console asks and this thread answers. A request sets `phase_req`; the
+ * bottom of the per-second pass notices it, encodes the record into
+ * `phase_blob` and posts `phase_done`. Nothing is encoded when nobody is
+ * asking, so the steady-state cost on the timing path is one atomic read per
+ * second.
+ *
+ * The consequence the caller must live with is latency: an export waits up to
+ * one PPS period (plus the missed-PPS timeout) for the next pass. That is the
+ * right trade for a bench capture, and it is bounded below by the fact that
+ * this thread keeps ticking through holdover and missed pulses.
+ */
+#define PHASE_BLOB_CAP 4200u
+#define PHASE_WAIT_MS  4000u
+
+static K_MUTEX_DEFINE(phase_mutex);
+static K_SEM_DEFINE(phase_done, 0, 1);
+static atomic_t phase_req;
+
+static uint8_t phase_blob[PHASE_BLOB_CAP];
+static uint32_t phase_blob_len;
+static int phase_blob_rc = -ENODATA;
+
+BUILD_ASSERT(PHASE_BLOB_CAP >= (24u + (DISC_ADEV_CAP / 8u) +
+				(DISC_ADEV_CAP * 8u)),
+	     "phase_blob too small for a full DISC_ADEV_CAP record");
+
+/* Runs on the discipline thread. Encodes the ring into phase_blob. */
+static void disc_publish_phase(void)
+{
+	static disc_phase_snap_t snap;
+	static int64_t x_ps[DISC_ADEV_CAP];
+	phase_rec_meta_t meta;
+	size_t len = 0u;
+	size_t i;
+	int rc;
+
+	rc = disc_phase_snapshot(&disc, &snap);
+	if (rc == 0) {
+		for (i = 0u; i < (size_t)snap.n; i++) {
+			x_ps[i] = phase_rec_ns_f_to_ps(snap.x_ns[i]);
+		}
+
+		meta.ver = PHASE_REC_VER;
+		meta.flags = snap.full ? PHASE_REC_F_FULL : 0u;
+		meta.n = snap.n;
+		meta.tau0_ns = snap.tau0_ns;
+		meta.gaps = snap.gaps;
+		meta.mono_ms = sts_mono_ms();
+
+		rc = phase_rec_encode(&meta, x_ps, snap.gapmap, phase_blob,
+				      sizeof(phase_blob), &len);
+	}
+
+	(void)k_mutex_lock(&phase_mutex, K_FOREVER);
+	phase_blob_rc = rc;
+	phase_blob_len = (rc == 0) ? (uint32_t)len : 0u;
+	(void)k_mutex_unlock(&phase_mutex);
+}
+
+/* Runs on the discipline thread, once per pass. */
+static void disc_service_phase_req(void)
+{
+	if (atomic_cas(&phase_req, 1, 0)) {
+		disc_publish_phase();
+		k_sem_give(&phase_done);
+	}
+}
+
+int sts_disc_phase_begin(uint32_t *out_len)
+{
+	int rc;
+
+	if (out_len == NULL) {
+		return -EINVAL;
+	}
+	if (!dt_state.started) {
+		return -ENODEV;
+	}
+
+	/* Drop any completion left by an abandoned request so the wait below
+	 * cannot be satisfied by a stale post and hand out the previous
+	 * snapshot as if it were fresh. */
+	k_sem_reset(&phase_done);
+	atomic_set(&phase_req, 1);
+
+	if (k_sem_take(&phase_done, K_MSEC(PHASE_WAIT_MS)) != 0) {
+		atomic_set(&phase_req, 0);
+		return -ETIMEDOUT;
+	}
+
+	(void)k_mutex_lock(&phase_mutex, K_FOREVER);
+	rc = phase_blob_rc;
+	*out_len = (rc == 0) ? phase_blob_len : 0u;
+	(void)k_mutex_unlock(&phase_mutex);
+
+	return rc;
+}
+
+int sts_disc_phase_read(uint32_t off, uint8_t *buf, uint32_t cap,
+			uint32_t *out_n)
+{
+	uint32_t n;
+
+	if ((buf == NULL) || (out_n == NULL)) {
+		return -EINVAL;
+	}
+
+	(void)k_mutex_lock(&phase_mutex, K_FOREVER);
+	if (phase_blob_rc != 0) {
+		(void)k_mutex_unlock(&phase_mutex);
+		return -ENODATA;
+	}
+	if (off > phase_blob_len) {
+		(void)k_mutex_unlock(&phase_mutex);
+		return -EINVAL;
+	}
+
+	n = phase_blob_len - off;
+	if (n > cap) {
+		n = cap;
+	}
+	if (n > 0u) {
+		memcpy(buf, &phase_blob[off], n);
+	}
+	(void)k_mutex_unlock(&phase_mutex);
+
+	*out_n = n;
+	return 0;
+}
+
 static void disc_entry(void *p1, void *p2, void *p3)
 {
 	ARG_UNUSED(p1);
@@ -1135,6 +1280,12 @@ static void disc_entry(void *p1, void *p2, void *p3)
 				    gnss.leap_valid);
 
 		disc_step_refsel(mono_ms, css);
+
+		/*
+		 * Last, so an exported record reflects the ring as it stands
+		 * after this second's push rather than before it.
+		 */
+		disc_service_phase_req();
 
 		sts_liveness_feed(dt_state.liveness_id);
 	}

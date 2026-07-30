@@ -334,6 +334,33 @@ uint8_t sts_ref_override_get(void);
  */
 bool sts_disc_dac_state(uint16_t *out_code, int32_t *out_mv, bool *out_ovr);
 
+/**
+ * Phase-record export, served to MCP PHASE_EXPORT through mcp_phase_port_t.
+ *
+ * sts_disc_phase_begin() asks the discipline thread — the owner of disc_ctx_t —
+ * to encode its ADEV phase ring into a core/stats phase record and reports the
+ * encoded length. It BLOCKS for up to one PPS period plus margin while that
+ * thread reaches the end of its current pass; it must not be called from an
+ * ISR, from the discipline thread itself, or with any timing lock held.
+ *
+ * sts_disc_phase_read() then serves bytes out of that snapshot, repeatably, so
+ * a lost response can be re-answered with identical bytes. A new
+ * sts_disc_phase_begin() replaces the snapshot.
+ *
+ * The record carries the count of samples the runtime absorbed after a
+ * non-uniform interval (core/disc's ADEV_MAX_GAP_S trade). A record reporting a
+ * non-zero count is not fit for offline ADEV; see stats/phase_rec.h.
+ *
+ * @retval 0           Success.
+ * @retval -EINVAL     NULL argument, or an offset past the snapshot.
+ * @retval -ENODEV     The discipline thread is not running.
+ * @retval -ETIMEDOUT  It did not answer within the wait window.
+ * @retval -ENODATA    No valid snapshot (read before a successful begin).
+ */
+int sts_disc_phase_begin(uint32_t *out_len);
+int sts_disc_phase_read(uint32_t off, uint8_t *buf, uint32_t cap,
+			uint32_t *out_n);
+
 /* ---- bench calibration procedures ---------------------------------------- */
 /*
  * One entry point, one genuinely automatable procedure. See core/cal/cal.h for

@@ -109,6 +109,22 @@ module_deps(stats)
 # (ina228_shunt_cal_trim); core/cal owns the plausibility policy on top of it,
 # and reusing the codec keeps one implementation of the formula.
 module_deps(cal      ina228 util)
+# `phase_rec` is a second focused suite over core/stats: the bench phase-record
+# container (stats/phase_rec.c) that gives the estimators an input path. It
+# names `stats` because that is the module the file lives in, and it adds no
+# edge of its own — the codec is byte layout and bounds arithmetic over
+# caller-supplied arrays, nothing more. That is what lets the suite assert the
+# format's one safety property, a gap count that cannot disagree with the
+# bitmap it summarises, without a device in the picture.
+module_deps(phase_rec stats)
+# `phase_export` is the seam between them, and it is the only place the whole
+# device-side path is exercised in one process: drive the real disc_tick_pps()
+# at real intervals, take the real disc_phase_snapshot(), encode the real
+# record, decode it as a bench tool would. It links BOTH modules on purpose —
+# the defect it exists to catch (an absorbed gap that the record does not
+# report) lives in neither module alone but in the number crossing between
+# them. `disc` carries util and quality with it.
+module_deps(phase_export disc stats util quality)
 # `mp` (the Maintenance Protocol, FMT device side) adds two edges to the
 # ARCHITECTURE.md §4 map. `ina228`, for the nine-monitor rail table the
 # capability manifest publishes (name, designator, address, shunt) rather than
@@ -648,6 +664,33 @@ foreach(test_src IN LISTS TEST_SOURCES)
   endif()
   message(STATUS "  ${suite_name} <- ${_mods_pretty}")
 endforeach()
+
+# ---------------------------------------------------------------------------
+# meridian_phase — the bench stability analyser (tools/meridian_phase.c)
+#
+# Built here rather than from its own project because the host test tree
+# already compiles core/ for the suites, and the ONE thing this tool must not do
+# is carry a second implementation of the estimators: it links the same
+# app/src/core/stats the `stats` and `phase_rec` suites pin against closed
+# forms. A separate build would be a second place for the include path, the
+# warning flags and the source list to drift.
+#
+# It is a plain executable, not a test binary — no Unity, no support/ sources,
+# no main() but its own. The `phase_cli` CTest entry below runs its --self-test,
+# which analyses a synthetic exactly-linear phase record end to end (encode ->
+# decode -> stats_adev) and requires ADEV to come back EXACTLY 0.0. That is the
+# same sharp check test_stats.c makes of the estimator, repeated here at the
+# tool level, where it additionally covers the record container, the file
+# format and the argument plumbing.
+# ---------------------------------------------------------------------------
+module_sources(PHASE_CLI_SRCS PHASE_CLI_MODS "phase_rec")
+add_executable(meridian_phase "${FW_ROOT}/tools/meridian_phase.c"
+               ${PHASE_CLI_SRCS})
+target_include_directories(meridian_phase PRIVATE "${CORE_DIR}" "${APP_SRC_DIR}")
+target_link_libraries(meridian_phase PRIVATE sts_warnings sts_coverage)
+
+add_test(NAME phase_cli COMMAND meridian_phase --self-test)
+set_tests_properties(phase_cli PROPERTIES TIMEOUT 120)
 
 # ---------------------------------------------------------------------------
 # Coverage-gate visibility

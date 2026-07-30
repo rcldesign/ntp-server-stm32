@@ -84,6 +84,7 @@ typedef enum {
 	MCP_CMD_STATUS_GET    = 0x20,
 	MCP_CMD_TELEM_SUB     = 0x21,
 	MCP_CMD_TELEM_UNSUB   = 0x22,
+	MCP_CMD_PHASE_EXPORT  = 0x24,
 	MCP_CMD_LOG_TAIL      = 0x30,
 	MCP_CMD_LOG_LEVEL     = 0x31,
 	MCP_CMD_FW_INFO       = 0x40,
@@ -125,6 +126,7 @@ typedef enum {
 #define MCP_CAP_CFG    0x00000008U /* CFG_* bound to a registry */
 #define MCP_CAP_AUTH   0x00000010U /* AUTH can be evaluated (crypto wired) */
 #define MCP_CAP_DIAG   0x00000020U /* DIAG sub-functions 1..4 available */
+#define MCP_CAP_PHASE  0x00000040U /* PHASE_EXPORT has a phase-record source */
 
 /* -------------------------------------------------------------- sub-ids */
 
@@ -324,6 +326,33 @@ int mcp_wire_build(uint8_t type, uint8_t cmd, uint8_t flags, uint16_t seq,
  *
  * TELEM_UNSUB 0x22
  *   REQ: (empty)   RSP: (status only)
+ *
+ * PHASE_EXPORT 0x24
+ *   REQ: u32 offset
+ *   RSP: u32 offset, u8 more, u8 data[...]   (data is the rest of the payload)
+ *        Offset semantics are CFG_EXPORT's exactly, and for the same reasons:
+ *        offset 0 restarts the export and takes a fresh snapshot; any other
+ *        value must equal either the byte offset the previous chunk ended at
+ *        (the normal advance) or the offset of the previous chunk (a retransmit
+ *        after a lost response, in which case the identical chunk is re-emitted);
+ *        anything else is MCP_ERR_OFFSET.
+ *
+ *        The payload is one core/stats phase record (stats/phase_rec.h): the
+ *        discipline loop's phase-sample ring, its sample interval, and the count
+ *        of samples that were appended after a NON-UNIFORM interval. That last
+ *        field is the point of the command. The runtime deliberately absorbs
+ *        short PPS gaps rather than resetting its ring (core/disc's
+ *        ADEV_MAX_GAP_S), which is right for telemetry and wrong for offline
+ *        stability analysis — an estimator over a bare phase array cannot see an
+ *        absorbed gap and returns a plausible wrong answer. A record reporting
+ *        gaps != 0 is not fit for ADEV.
+ *
+ *        The snapshot is taken once, at offset 0, and chunks are served from it:
+ *        the source ring advances once a second, so re-reading it per chunk
+ *        would splice samples from different windows into one record.
+ *
+ *        Unauthenticated: the record is phase-error telemetry, the same class of
+ *        data STATUS_GET already serves without a session.
  *
  * LOG_TAIL 0x30
  *   REQ: u32 cursor, u8 follow, u8 max_records, u8 max_level, u16 sub_mask

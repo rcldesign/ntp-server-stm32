@@ -533,6 +533,32 @@ void sts_mcp_link_stats(sts_mcp_link_stats_t *out)
 	}
 }
 
+/*
+ * Phase-record source for PHASE_EXPORT. Both hops land in the discipline
+ * thread's exporter (sts_app.h): it owns disc_ctx_t, so the ring is never read
+ * from this thread. mcp_phase_begin() therefore BLOCKS for up to a PPS period,
+ * which is safe here — the MCP thread is priority 12 and holds no timing lock.
+ */
+static int mcp_phase_begin(void *user, uint32_t *out_len)
+{
+	ARG_UNUSED(user);
+	return sts_disc_phase_begin(out_len);
+}
+
+static int mcp_phase_read(void *user, uint32_t off, uint8_t *buf, uint32_t cap,
+			  uint32_t *out_n)
+{
+	ARG_UNUSED(user);
+	return sts_disc_phase_read(off, buf, cap, out_n);
+}
+
+static const mcp_phase_port_t mcp_phase_port = {
+	.begin = mcp_phase_begin,
+	.read = mcp_phase_read,
+	.user = NULL,
+};
+
+
 int sts_mcp_start(void)
 {
 	mcp_wiring_t w;
@@ -576,6 +602,7 @@ int sts_mcp_start(void)
 	w.log = sts_logring();
 	w.status_cb = mcp_status_cb;
 	w.diag_cb = sts_diag_encode;
+	w.phase = &mcp_phase_port;
 	w.tx = mcp_tx;
 	w.dfu_erase_gran = sts_dfu_erase_granularity();
 	/* Report the true flash write-block (16 B on STM32H5). Core keeps every

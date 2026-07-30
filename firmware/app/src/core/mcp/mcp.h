@@ -208,6 +208,19 @@ extern "C" {
 #define MCP_CFG_EXPORT_CHUNK 256U
 #endif
 
+/**
+ * Bytes of record payload PHASE_EXPORT emits per chunk.
+ *
+ * Larger than the config export's because the shapes differ: a phase record is
+ * a single fixed 4 KB-ish blob a bench operator fetches once, not a
+ * configuration a tool may need to resume mid-stream, so round trips cost more
+ * here than restart granularity buys. Must leave room for the 6-byte response
+ * header inside MCP_MAX_PAYLOAD.
+ */
+#ifndef MCP_PHASE_EXPORT_CHUNK
+#define MCP_PHASE_EXPORT_CHUNK 1024U
+#endif
+
 /** Stored admin credential size: salt[16] || HMAC-SHA-256[32]. */
 #define MCP_PW_SALT_LEN 16U
 #define MCP_PW_MAC_LEN  32U
@@ -274,6 +287,45 @@ typedef int (*mcp_status_fn)(void *user, uint8_t group, uint8_t *buf,
  * @retval -ENOTSUP  Unimplemented sub-function.
  */
 typedef int (*mcp_diag_fn)(void *user, uint8_t sub, uint8_t *buf, size_t cap);
+
+/**
+ * Phase-record source for PHASE_EXPORT (mcp_wire.h 0x24).
+ *
+ * Split into begin/read for one reason: coherence. The record describes the
+ * discipline loop's phase ring, which advances once a second, so a multi-chunk
+ * read that re-sampled the ring per chunk would splice two different windows
+ * into a single array and report the join as data. @ref begin therefore takes a
+ * snapshot and states its length; @ref read serves bytes out of that snapshot
+ * until the next @ref begin replaces it.
+ *
+ * The engine never inspects the bytes. Encoding is core/stats' phase_rec.h,
+ * produced by whoever owns the ring.
+ */
+typedef struct {
+	/**
+	 * Take a fresh snapshot and report its total length.
+	 *
+	 * @retval 0        Success; @p out_len set (0 is legal — an empty ring
+	 *                  still encodes to a valid, empty record).
+	 * @retval -ENOTSUP No phase source on this build.
+	 * @retval <0       Any other error, reported as MCP_ERR_INTERNAL.
+	 */
+	int (*begin)(void *user, uint32_t *out_len);
+
+	/**
+	 * Copy up to @p cap bytes of the current snapshot from byte @p off.
+	 *
+	 * Must be repeatable: the retransmit path re-reads a range it has
+	 * already served and requires the identical bytes back.
+	 *
+	 * @retval 0   Success; @p out_n set (0 at end of record).
+	 * @retval <0  Reported as MCP_ERR_INTERNAL.
+	 */
+	int (*read)(void *user, uint32_t off, uint8_t *buf, uint32_t cap,
+		    uint32_t *out_n);
+
+	void *user;
+} mcp_phase_port_t;
 
 /**
  * Enter / leave the glue's mutual exclusion over the wired cfg_ctx_t.
@@ -362,6 +414,12 @@ typedef struct {
 	void         *status_user;
 	mcp_diag_fn   diag_cb;
 	void         *diag_user;
+
+	/**
+	 * Phase-record source. Optional; gates MCP_CAP_PHASE. Both function
+	 * pointers must be supplied or the port is ignored.
+	 */
+	const mcp_phase_port_t *phase;
 
 	/**
 	 * Mutual exclusion over @ref cfg. Optional as a pair — supply both or
@@ -523,6 +581,18 @@ typedef struct {
 	bool         exp_active;
 	cfg_export_t exp_prev;      /* cursor at the start of the last chunk */
 	bool         exp_prev_valid;
+
+	/* PHASE_EXPORT streaming state. Byte offsets rather than a cursor
+	 * struct, because the source is a flat snapshot the port owns: `off` is
+	 * the next expected offset, `prev_off` the start of the last emitted
+	 * chunk so a lost response can be re-answered with identical bytes, and
+	 * `len` the snapshot's total length. Same outliving rule as
+	 * exp_prev_valid — the final chunk stays re-emittable. */
+	uint32_t phase_off;
+	uint32_t phase_len;
+	uint32_t phase_prev_off;
+	bool     phase_active;
+	bool     phase_prev_valid;
 
 	cfg_import_t imp;
 	bool         imp_active;

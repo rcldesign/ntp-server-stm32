@@ -222,6 +222,22 @@ stats_max_m                            # no-caller: reached only from stats_m_oc
 stats_hist                             # no-caller: §14 PPS residual histogram. The device streams pulse records over MP and the host bins them; binning on-device would discard the residual series that is the actual evidence
 stats_sqrt                             # no-caller: core/ has no libm (see quality.h), so the module carries its own double square root. Public rather than static so test_stats.c can assert its accuracy against an independent Newton reference directly instead of inferring it. Its only callers are stats_adev/stats_mdev/stats_hist, all absent
 #
+# core/stats' phase-record codec (stats/phase_rec.h) splits across the boundary,
+# and the split is the whole point of the module: the DEVICE encodes and the HOST
+# decodes. phase_rec_encode / phase_rec_size / phase_rec_ns_f_to_ps are therefore
+# NOT in this file — they have a real caller in the image (disc_publish_phase()
+# in the discipline thread, serving MCP PHASE_EXPORT 0x24). The four below are
+# the reader half. Binding them would mean inventing an on-device consumer of a
+# record the device itself produced, which is a fake caller by construction.
+#
+# Their real caller is tools/meridian_phase.c, built by tests/host/CMakeLists.txt
+# and exercised by the `phase_cli` CTest entry — the same C the device encodes
+# with, which is the reason the format has one implementation rather than two.
+phase_rec_decode_hdr                   # no-caller: host-side reader. Validates magic/version/length and cross-checks the gap count against the bitmap; the device wrote those fields and has nothing to validate them for
+phase_rec_decode_samples               # no-caller: host-side reader, pulls the int64 ps series out for stats_adev/stats_mdev — both themselves absent for the reasons above
+phase_rec_gap_at                       # no-caller: host-side reader, per-sample gap query behind the CLI's gap listing
+phase_rec_longest_clean                # no-caller: host-side reader. Finds the longest uniformly spaced run in a record the runtime absorbed gaps into, so a bench operator can salvage a usable window instead of discarding the capture
+#
 # INA228 next. The old reason claimed "the device writes, the host interprets";
 # the opposite is true. hk_read_ina() converts on-board (hk.c:590-615) using
 # ina228_raw16/raw20_unsigned/raw24 with ina228_current_lsb_pa() and
