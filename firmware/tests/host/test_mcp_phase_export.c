@@ -118,7 +118,35 @@ static const uint8_t *rsp_data(void)
 /* Fake phase-record port                                                    */
 /* ------------------------------------------------------------------------- */
 
-#define REC_MAX  4096U
+/*
+ * The size a real record actually is, and the buffer it is produced in.
+ *
+ * Both are literals here on purpose. This suite deliberately does not link
+ * `stats` (see the dependency map in CMakeLists.txt), so it cannot call
+ * phase_rec_size_flags(), and it should not: the transport is length-driven and
+ * the record's content is opaque to it. What keeps the literals honest is
+ * test_phase_e2e.c, which links both sides and pins exactly these two numbers
+ * — phase_rec_size_flags(512, FULL|RAW|IDENT) == 8292 against a
+ * PHASE_BLOB_CAP of 8300 — in
+ * test_the_blob_cap_headroom_is_eight_bytes(). A format change therefore fails
+ * there, naming the arithmetic, before it can quietly make these cases test a
+ * size the device no longer produces.
+ *
+ * The derivation, for reading here:
+ *   header 24 + gap bitmap 512/8 = 64 + corrected series 512*8 = 4096
+ *   + uncorrected series 4096 (PHASE_REC_F_RAW) + identity 12
+ *     (PHASE_REC_F_IDENT)                                        = 8292
+ *
+ * At MCP_PHASE_EXPORT_CHUNK = 1024 that is 8 full chunks and a 100-byte tail at
+ * offset 8192 — nine responses, not the four the ~4 KB single-series record
+ * this suite was originally written against needed.
+ */
+#define PHASE_REC_V3_LEN 8292U
+#define PHASE_BLOB_CAP   8300U
+
+/* Sized to hold a record at the device's blob cap, so the boundary cases below
+ * can be driven at the size the hardware can actually reach. */
+#define REC_MAX  PHASE_BLOB_CAP
 #define CHUNK    ((uint32_t)MCP_PHASE_EXPORT_CHUNK)
 
 /*
@@ -568,6 +596,143 @@ static void test_the_final_chunk_stays_re_emittable_after_completion(void)
 }
 
 /* ------------------------------------------------------------------------- */
+/* The size a record actually is                                             */
+/*                                                                           */
+/* Everything above is driven at sizes chosen to isolate one property, which  */
+/* is right for the property but leaves the transport unexercised at the      */
+/* length it will really carry. These cases drive the v3 record the device    */
+/* produces — 8292 bytes, nine chunks — and the blob cap eight bytes above    */
+/* it, because a chunk count that roughly doubled moved every boundary this   */
+/* suite cares about.                                                         */
+/* ------------------------------------------------------------------------- */
+
+/* A full v3 record streams whole, in the chunk count its real length implies. */
+static void test_a_full_v3_record_streams_at_its_real_size(void)
+{
+	uint8_t got[REC_MAX];
+	unsigned int chunks = 0U;
+
+	live_set(PHASE_REC_V3_LEN, 0x5A17C0DEU);
+
+	TEST_ASSERT_EQUAL_UINT32(PHASE_REC_V3_LEN,
+				 stream_all(got, sizeof(got), &chunks));
+	TEST_ASSERT_EQUAL_UINT(9U, chunks);
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(g_snap, got, PHASE_REC_V3_LEN);
+	TEST_ASSERT_EQUAL_UINT(1U, g_begin_calls); /* one snapshot, nine reads */
+	TEST_ASSERT_EQUAL_UINT(9U, g_read_calls);
+	assert_no_overread();
+}
+
+/*
+ * The eight full chunks and the 100-byte tail, walked one at a time.
+ *
+ * The tail is the interesting part: 8292 is 100 past a chunk boundary, so the
+ * final response is short and sits at offset 8192. A `more` flag that lied at
+ * chunk 8, or a final chunk padded back to 1024, would hand the operator a
+ * record that is the right length and wrong at the end — and the end of the
+ * record is the identity block a join depends on.
+ */
+static void test_the_v3_final_chunk_is_short_and_at_the_real_boundary(void)
+{
+	const uint32_t last_off = 8U * CHUNK;
+	unsigned int i;
+
+	live_set(PHASE_REC_V3_LEN, 0xFEEDBEEFU);
+	TEST_ASSERT_EQUAL_UINT32(100U, PHASE_REC_V3_LEN - last_off);
+
+	for (i = 0U; i < 8U; i++) {
+		ask_ok((uint32_t)i * CHUNK);
+		TEST_ASSERT_EQUAL_UINT16((uint16_t)CHUNK, rsp_data_len());
+		TEST_ASSERT_EQUAL_UINT8(1U, rsp_more());
+	}
+
+	ask_ok(last_off);
+	TEST_ASSERT_EQUAL_UINT16(100U, rsp_data_len());
+	TEST_ASSERT_EQUAL_UINT8(0U, rsp_more());
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(&g_snap[last_off], rsp_data(), 100U);
+	assert_no_overread();
+}
+
+/*
+ * The retransmit rule at the real size, on the chunk that needs it most.
+ *
+ * The last response of a nine-frame transfer is the one with nothing after it
+ * to reveal its loss, and re-fetching an 8 KB record because 100 bytes went
+ * missing is exactly what the rule exists to avoid.
+ */
+static void test_the_v3_final_chunk_retransmits_after_completion(void)
+{
+	const uint32_t last_off = 8U * CHUNK;
+	uint8_t saved[CHUNK];
+	uint16_t saved_len;
+	unsigned int i;
+
+	live_set(PHASE_REC_V3_LEN, 0x0C0FFEE0U);
+
+	for (i = 0U; i < 8U; i++) {
+		ask_ok((uint32_t)i * CHUNK);
+	}
+
+	ask_ok(last_off);
+	TEST_ASSERT_EQUAL_UINT8(0U, rsp_more()); /* transfer complete */
+	saved_len = rsp_data_len();
+	TEST_ASSERT_EQUAL_UINT16(100U, saved_len);
+	memcpy(saved, rsp_data(), saved_len);
+
+	ask_ok(last_off);
+	TEST_ASSERT_EQUAL_UINT16(saved_len, rsp_data_len());
+	TEST_ASSERT_EQUAL_UINT8(0U, rsp_more());
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(saved, rsp_data(), saved_len);
+
+	/* Twice, and still from the one snapshot. */
+	ask_ok(last_off);
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(saved, rsp_data(), saved_len);
+	TEST_ASSERT_EQUAL_UINT(1U, g_begin_calls);
+	assert_no_overread();
+}
+
+/*
+ * A record filling the device's export buffer completely.
+ *
+ * PHASE_BLOB_CAP is 8300 and the record is 8292, so there are eight bytes of
+ * slack — the encoder refuses anything larger rather than truncating it
+ * (phase_rec.c's `cap < need` check; proved end to end in test_phase_e2e.c).
+ * That makes 8300 the largest length this transport can ever be handed, and it
+ * lands 108 bytes past the same chunk boundary, so the boundary is exercised
+ * at the ceiling as well as at the real size.
+ */
+static void test_a_record_at_the_blob_cap_streams_whole(void)
+{
+	const uint32_t last_off = 8U * CHUNK;
+	uint8_t got[REC_MAX];
+	unsigned int chunks = 0U;
+
+	live_set(PHASE_BLOB_CAP, 0xDEADC0DEU);
+
+	TEST_ASSERT_EQUAL_UINT32(PHASE_BLOB_CAP,
+				 stream_all(got, sizeof(got), &chunks));
+	TEST_ASSERT_EQUAL_UINT(9U, chunks);
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(g_snap, got, PHASE_BLOB_CAP);
+
+	/* And the tail is 108, not the 100 of the record that fits inside it. */
+	ask_ok(0U);
+	TEST_ASSERT_EQUAL_UINT16((uint16_t)CHUNK, rsp_data_len());
+	{
+		unsigned int i;
+
+		for (i = 1U; i < 8U; i++) {
+			ask_ok((uint32_t)i * CHUNK);
+			TEST_ASSERT_EQUAL_UINT8(1U, rsp_more());
+		}
+	}
+	ask_ok(last_off);
+	TEST_ASSERT_EQUAL_UINT16(108U, rsp_data_len());
+	TEST_ASSERT_EQUAL_UINT8(0U, rsp_more());
+	TEST_ASSERT_EQUAL_HEX8_ARRAY(&g_snap[last_off], rsp_data(), 108U);
+	assert_no_overread();
+}
+
+/* ------------------------------------------------------------------------- */
 /* Offsets the contract refuses                                              */
 /* ------------------------------------------------------------------------- */
 
@@ -1000,6 +1165,11 @@ int main(void)
 
 	RUN_TEST(test_a_repeated_offset_re_emits_the_same_chunk);
 	RUN_TEST(test_the_final_chunk_stays_re_emittable_after_completion);
+
+	RUN_TEST(test_a_full_v3_record_streams_at_its_real_size);
+	RUN_TEST(test_the_v3_final_chunk_is_short_and_at_the_real_boundary);
+	RUN_TEST(test_the_v3_final_chunk_retransmits_after_completion);
+	RUN_TEST(test_a_record_at_the_blob_cap_streams_whole);
 
 	RUN_TEST(test_a_non_boundary_offset_is_refused_without_disturbing_state);
 	RUN_TEST(test_an_offset_past_the_end_is_refused);
