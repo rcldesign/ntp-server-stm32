@@ -468,6 +468,19 @@ typedef struct {
 	int (*ldap_ca_info)(void *u, rest_trust_t *out);
 	int (*ldap_ca_install)(void *u, const char *pem, size_t len);
 
+	/*
+	 * The TLS-syslog collector's trust anchor (spec §5.4/§5.5). Same error
+	 * contract as ldap_ca_install() above, and deliberately a SEPARATE
+	 * anchor: the CA that vouches for a log sink is not the CA that vouches
+	 * for the directory naming this box's administrators.
+	 *
+	 * Without it `log.syslog.tls` REFUSES — it does not fall back to
+	 * cleartext — so this route is what turns the config key from a
+	 * refusal into a working transport.
+	 */
+	int (*syslog_ca_present)(void *u, bool *out);
+	int (*syslog_ca_install)(void *u, const char *pem, size_t len);
+
 	void *u;
 } rest_providers_t;
 

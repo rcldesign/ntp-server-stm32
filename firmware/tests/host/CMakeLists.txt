@@ -311,6 +311,22 @@ module_deps(secops_policy)
 # the previous operator's CA still installed.
 module_deps(ldap_ca)
 
+# `syslog_tls` (app/src/zephyr/net/sts_syslog_tls_policy.h) is the same idea for
+# the remote-log transport: which socket `log.syslog.tls` opens, what happens
+# when it cannot be opened, how a record is framed on a stream, and how fast a
+# dropped session is retried. Zephyr-free and compiling no core module, hence
+# the empty dependency list — it includes sts_ldap_ca.h and sts_web.h only for
+# their sec-tag literals, to prove the three anchors do not collide.
+#
+# It exists because `log.syslog.tls` used to be a switch that turned encryption
+# ON in the config and OFF on the wire: the sender logged one local warning and
+# then emitted RFC 5424 datagrams in the clear. sts_syslog.c is k_thread/zsock
+# glue that no suite links, so that branch was untestable where it lived. The
+# fail-closed rule, the RFC 5425 octet count and the reconnect backoff are all
+# decisions whose wrong answer is invisible at runtime — a short MSG-LEN
+# desynchronises the collector permanently and reports nothing at the sender.
+module_deps(syslog_tls)
+
 # `ptp_profile_policy` (app/src/zephyr/net/sts_ptp_profile_policy.h) is the
 # precedence rule between a PTP profile's parameter set and the operator's cfg
 # keys. Zephyr-free and compiling no core module — it takes PTP_PROFILE_COUNT

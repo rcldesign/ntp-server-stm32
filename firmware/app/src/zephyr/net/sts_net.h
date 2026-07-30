@@ -357,7 +357,7 @@ int sts_netmgmt_start(void);
 void sts_netmgmt_reapply(void);
 
 /* ------------------------------------------------------------------------- */
-/* sts_syslog.c — RFC 5424 sender over UDP (logger priority band, 16)         */
+/* sts_syslog.c — RFC 5424 over UDP, or RFC 5425 over TCP+TLS (prio band 16)  */
 /* ------------------------------------------------------------------------- */
 
 int sts_syslog_start(void);
@@ -367,11 +367,40 @@ typedef struct {
 	uint32_t sent;
 	uint32_t dropped;   /* send() failures */
 	uint32_t gaps;      /* records overwritten before this reader saw them */
+	uint32_t reconnects;      /* TLS sessions successfully established */
+	uint32_t handshake_fails; /* TLS connect/handshake attempts that failed */
 	bool enabled;
 	bool resolved;
+	bool tls;        /* the transport in force is RFC 5425 over TLS */
+	bool refused;    /* TLS was asked for and REFUSED — nothing is being
+			  * sent, and nothing is being sent in the clear */
+	bool connected;  /* a TLS session is up */
+	bool ca_present; /* a collector trust anchor is installed */
 } sts_syslog_stats_t;
 
 void sts_syslog_stats(sts_syslog_stats_t *out);
+
+/**
+ * Install the syslog collector's trust anchor (one or more PEM certificates).
+ *
+ * Without it `log.syslog.tls` REFUSES rather than downgrading — see
+ * net/sts_syslog_tls_policy.h. Screened by sts_ldap_ca_check() before it can
+ * displace a working anchor.
+ *
+ * @retval 0        Installed, live and persisted.
+ * @retval -EBADMSG Not a usable PEM certificate.
+ * @retval -EFBIG   Larger than STS_SYSLOG_CA_PEM_MAX.
+ * @retval -EPERM   The blob carries private-key material.
+ * @retval -EROFS   Accepted and live, but not persisted.
+ * @retval -ENOTSUP This build has no TLS socket layer.
+ */
+int sts_syslog_ca_install(const char *pem, size_t len);
+
+/** Retract the anchor, from /lfs and from the credential store. */
+int sts_syslog_ca_erase(void);
+
+/** Is an anchor installed and registered? */
+bool sts_syslog_ca_present(void);
 
 /* ------------------------------------------------------------------------- */
 /* sts_snmp.c — SNMPv2c/v3 agent + traps (priority 12)                        */

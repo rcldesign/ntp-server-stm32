@@ -68,8 +68,13 @@ extern "C" {
  * Mirrors FAULT_ALARM_COUNT. Stated as a plain number rather than by including
  * fault.h so this header stays a statement of policy that the suite checks
  * AGAINST core/fault, instead of one that agrees with it by construction.
+ *
+ * 50 since FAULT_ALARM_SYSLOG_DOWN — the alarm net/sts_syslog.c raises when
+ * `log.syslog.tls` is set and the transport cannot be established, which that
+ * path deliberately does NOT resolve by falling back to cleartext. It must be
+ * nameable here or a technician could not acknowledge it from the console.
  */
-#define STS_ALARM_ID_COUNT 49U
+#define STS_ALARM_ID_COUNT 50U
 
 /** First software-raised alarm id; below this the ids mirror scanned pins. */
 #define STS_ALARM_FIRST_SOFTWARE 32U

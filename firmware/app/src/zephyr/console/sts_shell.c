@@ -527,6 +527,7 @@ static const char *alarm_name(unsigned int id)
 		[FAULT_ALARM_DISPLAY_FAULT - 32] = "display-fault",
 		[FAULT_ALARM_PFI - 32] = "power-fail",
 		[FAULT_ALARM_TAMPER - 32] = "tamper",
+		[FAULT_ALARM_SYSLOG_DOWN - 32] = "syslog-down",
 	};
 
 	if ((id < 32U) || ((id - 32U) >= ARRAY_SIZE(names))) {

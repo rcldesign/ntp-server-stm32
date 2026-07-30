@@ -744,11 +744,19 @@ int sts_sec_factory_wipe(void)
 	if (sts_aaa_ldap_ca_erase() != 0) {
 		rc = -EIO;
 	}
+	/* And the syslog collector's anchor, for the same reason and with the
+	 * same non-secret status: it is the operator's answer to "which host
+	 * may receive this box's audit trail". Leaving it behind would have a
+	 * wiped unit keep opening an encrypted session to the previous
+	 * operator's log collector as soon as `log.syslog.*` was set again. */
+	if (sts_syslog_ca_erase() != 0) {
+		rc = -EIO;
+	}
 
 	sts_log((uint8_t)LOGR_SUB_SEC, (uint8_t)LOGR_ALERT,
 		"factory reset: key material zeroized (credentials, sessions, "
-		"TLS identity, LDAPS trust anchor); rebooting to clear RAM-only "
-		"keys");
+		"TLS identity, LDAPS and syslog trust anchors); rebooting to "
+		"clear RAM-only keys");
 	return rc;
 }
 
@@ -1087,6 +1095,22 @@ static int pv_ldap_ca_install(void *u, const char *pem, size_t len)
 	return sts_aaa_ldap_ca_install(pem, len);
 }
 
+static int pv_syslog_ca_present(void *u, bool *out)
+{
+	ARG_UNUSED(u);
+	if (out == NULL) {
+		return -EINVAL;
+	}
+	*out = sts_syslog_ca_present();
+	return 0;
+}
+
+static int pv_syslog_ca_install(void *u, const char *pem, size_t len)
+{
+	ARG_UNUSED(u);
+	return sts_syslog_ca_install(pem, len);
+}
+
 static void providers_bind(void)
 {
 	memset(&providers, 0, sizeof(providers));
@@ -1111,6 +1135,8 @@ static void providers_bind(void)
 	providers.csr_make = pv_csr;
 	providers.ldap_ca_info = pv_ldap_ca_info;
 	providers.ldap_ca_install = pv_ldap_ca_install;
+	providers.syslog_ca_present = pv_syslog_ca_present;
+	providers.syslog_ca_install = pv_syslog_ca_install;
 	if (sts_dfu_port != NULL) {
 		providers.fw_info = pv_fw_info;
 		providers.fw_begin = pv_fw_begin;

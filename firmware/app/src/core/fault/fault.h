@@ -208,8 +208,21 @@ typedef enum {
 	FAULT_ALARM_DISPLAY_FAULT,
 	FAULT_ALARM_PFI, /* power-fail early warning asserted */
 	FAULT_ALARM_TAMPER,
+	/*
+	 * Remote syslog is not delivering. Raised by net/sts_syslog.c when
+	 * `log.syslog.tls` is set and the transport cannot be established —
+	 * no trust anchor, or no session — because that path deliberately
+	 * refuses to fall back to cleartext, so the ONLY outward sign that the
+	 * operator's audit trail has stopped leaving the box is this bit. A
+	 * LOG_WRN would be written into the very ring that is not draining.
+	 */
+	FAULT_ALARM_SYSLOG_DOWN,
 	FAULT_ALARM_COUNT,
 } fault_alarm_id_t;
+
+/* The alarm mask is a uint64_t (FAULT_ALARM_BIT). */
+_Static_assert(FAULT_ALARM_COUNT <= 64,
+	       "alarm ids no longer fit the 64-bit alarm mask");
 
 /** Bit for @p id in a 64-bit alarm mask. */
 #define FAULT_ALARM_BIT(id) (UINT64_C(1) << (unsigned int)(id))

@@ -2840,6 +2840,107 @@ static int h_sec_ldap_ca_post(rest_ctx_t *c, const http_req_t *req,
 	return ok_json(c, r, &w);
 }
 
+/*
+ * The TLS-syslog collector's trust anchor.
+ *
+ * Deliberately thinner than the LDAPS anchor route above: presence only, no
+ * subject/expiry/fingerprint. Those cost a per-anchor descriptor in a plane
+ * that is already at 91 % of SRAM, and the question this endpoint has to
+ * answer is the one that changes behaviour — with no anchor `log.syslog.tls`
+ * REFUSES to send at all rather than downgrading to cleartext, so "is one
+ * installed" is the difference between a working transport and a raised alarm.
+ */
+static int h_log_syslog_ca_get(rest_ctx_t *c, const http_req_t *req,
+			       const rest_authctx_t *a, const char *body,
+			       size_t body_len, web_resp_t *r, const char *tail,
+			       size_t tail_len)
+{
+	web_jw_t w;
+	bool present = false;
+	int rc;
+
+	(void)req;
+	(void)a;
+	(void)body;
+	(void)body_len;
+	(void)tail;
+	(void)tail_len;
+
+	if (!have_pv(c) || PV(c)->syslog_ca_present == NULL) {
+		return fail(c, r, 501, "no_provider", NULL);
+	}
+	rc = PV(c)->syslog_ca_present(PV(c)->u, &present);
+	if (rc == -ENOTSUP) {
+		return fail(c, r, 501, "no_tls",
+			    "this build has no TLS socket layer, so TLS "
+			    "syslog cannot be used");
+	}
+	if (rc != 0) {
+		return fail(c, r, 503, "unavailable", NULL);
+	}
+	web_jw_init(&w, r->body, r->body_cap);
+	web_jw_obj_begin(&w);
+	web_jw_kbool(&w, "present", present);
+	web_jw_obj_end(&w);
+	r->no_store = true;
+	return ok_json(c, r, &w);
+}
+
+static int h_log_syslog_ca_post(rest_ctx_t *c, const http_req_t *req,
+				const rest_authctx_t *a, const char *body,
+				size_t body_len, web_resp_t *r,
+				const char *tail, size_t tail_len)
+{
+	web_jw_t w;
+	int rc;
+
+	(void)tail;
+	(void)tail_len;
+
+	if (!have_pv(c) || PV(c)->syslog_ca_install == NULL) {
+		return fail(c, r, 501, "no_provider", NULL);
+	}
+	if (body == NULL || body_len == 0U) {
+		return fail(c, r, 400, "empty_body", NULL);
+	}
+	rc = PV(c)->syslog_ca_install(PV(c)->u, body, body_len);
+	audit_action(c, a, req, "syslog-ca-install", rc);
+	if (rc == -ENOTSUP) {
+		return fail(c, r, 501, "no_tls",
+			    "this build has no TLS socket layer, so TLS "
+			    "syslog cannot be used");
+	}
+	if (rc == -EBADMSG) {
+		return fail(c, r, 422, "bad_pem",
+			    "expected one or more PEM CERTIFICATE blocks");
+	}
+	if (rc == -EFBIG) {
+		return fail(c, r, 413, "too_large",
+			    "the anchor is larger than the device's buffer");
+	}
+	if (rc == -EPERM) {
+		return fail(c, r, 422, "not_an_anchor",
+			    "the blob contains a private key; install the "
+			    "issuer certificate only");
+	}
+	if (rc != 0 && rc != -EROFS) {
+		return fail(c, r, 500, "install_failed", NULL);
+	}
+	web_jw_init(&w, r->body, r->body_cap);
+	web_jw_obj_begin(&w);
+	web_jw_kbool(&w, "installed", true);
+	web_jw_kbool(&w, "persisted", rc == 0);
+	web_jw_kstr(&w, "note",
+		    (rc == 0)
+			    ? "the anchor is live; TLS syslog connects to the "
+			      "collector on the next poll"
+			    : "the anchor is live but could not be written to "
+			      "flash, so it is lost at the next reboot");
+	web_jw_obj_end(&w);
+	r->no_store = true;
+	return ok_json(c, r, &w);
+}
+
 static int h_sec_csr(rest_ctx_t *c, const http_req_t *req,
 		     const rest_authctx_t *a, const char *body, size_t body_len,
 		     web_resp_t *r, const char *tail, size_t tail_len)
@@ -3222,6 +3323,10 @@ static const rest_route_t routes[] = {
 	  h_sec_ldap_ca_get },
 	{ "security/ldap-ca", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U,
 	  h_sec_ldap_ca_post },
+	{ "security/syslog-ca", WEB_METHOD_GET, WEB_ROLE_ADMIN, 0U,
+	  h_log_syslog_ca_get },
+	{ "security/syslog-ca", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U,
+	  h_log_syslog_ca_post },
 
 	/* --- system (admin only) --------------------------------------- */
 	{ "reboot", WEB_METHOD_POST, WEB_ROLE_ADMIN, 0U, h_reboot },
