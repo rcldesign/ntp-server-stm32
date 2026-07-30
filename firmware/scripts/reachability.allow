@@ -184,7 +184,45 @@ fwupd_comp_desc                        # inlined(b): fwupd_comp_name() @0x080271
 ntske_exporter_context                 # inlined(b): nts.c:904/911 via static ntske_derive() inside ntske_handle() @0x08030fc8; only .debug_* relocs name it
 
 # --- no production caller -------------------------------------------
-# INA228 first. The old reason claimed "the device writes, the host interprets";
+#
+# core/stats first, because it is the one block here that is absent by *design
+# decision* rather than by drift, and the decision should be legible without
+# reading the module.
+#
+# core/stats is the spec §14 stability-analysis core: overlapping ADEV, MDEV, and
+# the PPS residual histogram, over a phase or residual record exported from the
+# device and analysed on a host. It is deliberately not bound into the image, and
+# the alternative was considered rather than assumed:
+#
+#   * The runtime already has the stability telemetry it needs, and it is not
+#     this. core/disc's disc_adev_overlapping() runs on the 1 Hz discipline
+#     thread in float over a bounded ring and publishes adev_1s/10s/100s into the
+#     quality block. That is present in the image and reached by adev_update().
+#     core/stats is the offline counterpart, not a replacement — different
+#     precision, different tau set, different caller.
+#
+#   * Binding core/stats would put double-precision arithmetic on this part. The
+#     STM32H563's FPU is FPv5-*SP*: every double operation is a soft-float call.
+#     A multi-decade ADEV+MDEV sweep over a long record in soft double, to
+#     produce numbers no on-board consumer reads, is the wrong trade — and the
+#     double is not negotiable, because the estimator's dynamic range is what
+#     makes it correct (see the arithmetic rationale in stats/adev.h).
+#
+#   * So the reachable-by-construction options were both worse than absence: a
+#     fake caller, or a smaller/wronger estimator. The honest entry is this one.
+#
+# If a future §14 deliverable does want on-device ADEV/MDEV vs tau — a TFT
+# stability page, or an MCP telemetry key — the fix is a real caller and these
+# seven lines come out, not a wider reason here.
+stats_adev                             # no-caller: §14 bench analysis, host-side. test_stats.c only
+stats_mdev                             # no-caller: §14 bench analysis, host-side. test_stats.c only. The runtime has no MDEV at all and needs none — MDEV separates white PM from flicker PM, which is a diagnosis made at the bench, not a servo input
+stats_dev_sweep                        # no-caller: the tau-axis wrapper over stats_adev/stats_mdev; nothing on-target plots a sweep
+stats_m_octaves                        # no-caller: generates the octave tau axis for stats_dev_sweep(), itself absent
+stats_max_m                            # no-caller: reached only from stats_m_octaves(), itself absent
+stats_hist                             # no-caller: §14 PPS residual histogram. The device streams pulse records over MP and the host bins them; binning on-device would discard the residual series that is the actual evidence
+stats_sqrt                             # no-caller: core/ has no libm (see quality.h), so the module carries its own double square root. Public rather than static so test_stats.c can assert its accuracy against an independent Newton reference directly instead of inferring it. Its only callers are stats_adev/stats_mdev/stats_hist, all absent
+#
+# INA228 next. The old reason claimed "the device writes, the host interprets";
 # the opposite is true. hk_read_ina() converts on-board (hk.c:590-615) using
 # ina228_raw16/raw20_unsigned/raw24 with ina228_current_lsb_pa() and
 # ina228_power_lsb_nw(). These entries are the *alternative* one-shot unit

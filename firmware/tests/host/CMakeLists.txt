@@ -96,6 +96,14 @@ module_deps(snmp     util quality)
 module_deps(ui       util quality)
 module_deps(atecc    util)
 module_deps(auth     util)
+# `stats` is the spec §14 stability-analysis core (ADEV/MDEV vs tau, PPS
+# residual histograms). Its dependency list is empty and that is correct, not an
+# omission: it is closed arithmetic over a caller-supplied phase or residual
+# array, it carries its own square root because core/ has no libm, and it shares
+# nothing with core/disc's runtime adev_1s/10s/100s telemetry. Keeping the edge
+# set empty is what lets the suite's closed-form assertions be about the
+# estimator and nothing else.
+module_deps(stats)
 # `cal` adds one edge to the ARCHITECTURE.md §4 map: `ina228`. The trim's
 # arithmetic and the register's own 15-bit clamp belong to core/ina228
 # (ina228_shunt_cal_trim); core/cal owns the plausibility policy on top of it,
