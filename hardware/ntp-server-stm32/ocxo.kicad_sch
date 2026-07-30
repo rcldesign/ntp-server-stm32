@@ -4879,7 +4879,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 251.1552 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -5239,7 +5239,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:C_1206_3216Metric"
 			(at 300.6852 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -5476,7 +5476,7 @@
 				)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 128.27 131.572 90)
 			(hide yes)
 			(show_name no)
@@ -5635,7 +5635,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 249.8852 177.8 0)
 			(hide yes)
 			(show_name no)
@@ -5784,7 +5784,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1210 (3225 Metric)"
+		(property "Footprint" "copy_ref:C_1210_3225Metric"
 			(at 133.6548 140.97 0)
 			(hide yes)
 			(show_name no)
@@ -6100,7 +6100,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:C_1206_3216Metric"
 			(at 190.8048 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -6260,7 +6260,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:C_1206_3216Metric"
 			(at 347.0148 157.48 0)
 			(hide yes)
 			(show_name no)
@@ -6575,7 +6575,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "copy_ref:C_0805_2012Metric"
 			(at 259.3848 129.54 0)
 			(hide yes)
 			(show_name no)
@@ -6735,7 +6735,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 193.548 55.88 90)
 			(hide yes)
 			(show_name no)
@@ -6971,7 +6971,7 @@
 				)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 198.12 53.848 90)
 			(hide yes)
 			(show_name no)
@@ -7210,7 +7210,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 124.7648 107.95 0)
 			(hide yes)
 			(show_name no)
@@ -7449,7 +7449,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "copy_ref:C_0805_2012Metric"
 			(at 368.6048 152.4 0)
 			(hide yes)
 			(show_name no)
@@ -7609,7 +7609,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 45.212 107.95 90)
 			(hide yes)
 			(show_name no)
@@ -7848,7 +7848,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:C_1206_3216Metric"
 			(at 202.2348 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -8258,7 +8258,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1210 (3225 Metric)"
+		(property "Footprint" "copy_ref:C_1210_3225Metric"
 			(at 54.9148 110.49 0)
 			(hide yes)
 			(show_name no)
@@ -8415,7 +8415,7 @@
 				)
 			)
 		)
-		(property "Footprint" "8-UFDFN (Exposed Pad)"
+		(property "Footprint" "dowload:AP3441SHE-7B_DIO-M"
 			(at 223.52 78.74 0)
 			(hide yes)
 			(show_name no)
@@ -8561,7 +8561,7 @@
 				)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 184.15 131.572 90)
 			(hide yes)
 			(show_name no)
@@ -8954,7 +8954,7 @@
 				)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 48.26 131.572 90)
 			(hide yes)
 			(show_name no)
@@ -9269,7 +9269,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 270.8148 129.54 0)
 			(hide yes)
 			(show_name no)
@@ -9429,7 +9429,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:C_1206_3216Metric"
 			(at 179.3748 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -9589,7 +9589,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 293.878 113.03 90)
 			(hide yes)
 			(show_name no)
@@ -10140,7 +10140,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 259.842 76.2 90)
 			(hide yes)
 			(show_name no)
@@ -10299,7 +10299,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "SOD-323F"
+		(property "Footprint" "Diode_SMD:D_SOD-323F"
 			(at 358.775 133.35 0)
 			(hide yes)
 			(show_name no)
@@ -10425,7 +10425,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:C_1206_3216Metric"
 			(at 276.5552 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -10724,7 +10724,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:C_1206_3216Metric"
 			(at 213.6648 133.35 0)
 			(hide yes)
 			(show_name no)
@@ -11118,7 +11118,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:R_1206_3216Metric"
 			(at 247.65 120.142 90)
 			(hide yes)
 			(show_name no)
@@ -11275,7 +11275,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "dowload:DR73-2R2-R"
 			(at 242.57 71.12 0)
 			(hide yes)
 			(show_name no)
@@ -11657,7 +11657,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 228.9048 133.35 0)
 			(hide yes)
 			(show_name no)
@@ -11817,7 +11817,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "1210 (3225 Metric)"
+		(property "Footprint" "copy_ref:C_1210_3225Metric"
 			(at 53.6448 142.24 0)
 			(hide yes)
 			(show_name no)
@@ -12053,7 +12053,7 @@
 				)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 39.37 99.822 90)
 			(hide yes)
 			(show_name no)
@@ -12213,7 +12213,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 358.4448 157.48 0)
 			(hide yes)
 			(show_name no)
@@ -12451,7 +12451,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 259.842 86.36 90)
 			(hide yes)
 			(show_name no)
@@ -12610,7 +12610,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:C_1206_3216Metric"
 			(at 312.1152 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -12770,7 +12770,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 380.0348 152.4 0)
 			(hide yes)
 			(show_name no)
@@ -13086,7 +13086,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0603 (1608 Metric)"
+		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
 			(at 284.988 125.73 90)
 			(hide yes)
 			(show_name no)
@@ -13244,7 +13244,7 @@
 				)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 63.5 99.822 90)
 			(hide yes)
 			(show_name no)
@@ -13716,7 +13716,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:C_1206_3216Metric"
 			(at 287.9852 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -13875,7 +13875,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0603 (1608 Metric)"
+		(property "Footprint" "Resistor_SMD:R_0603_1608Metric"
 			(at 284.988 135.89 90)
 			(hide yes)
 			(show_name no)
@@ -14190,7 +14190,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Oscillator:Oscillator_SMD_OCXO_ConnorWinfield_OH300"
+		(property "Footprint" "copy_ref:Oscillator_SMD_OCXO_ConnorWinfield_OH300"
 			(at 162.56 142.24 0)
 			(hide yes)
 			(show_name no)

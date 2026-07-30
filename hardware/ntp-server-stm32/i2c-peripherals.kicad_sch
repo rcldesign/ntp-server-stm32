@@ -3266,7 +3266,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 86.0552 224.79 0)
 			(hide yes)
 			(show_name no)
@@ -3648,7 +3648,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 227.0252 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -4029,7 +4029,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 86.0552 133.35 0)
 			(hide yes)
 			(show_name no)
@@ -4177,7 +4177,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 275.8948 123.19 0)
 			(hide yes)
 			(show_name no)
@@ -4324,7 +4324,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 362.9152 90.17 0)
 			(hide yes)
 			(show_name no)
@@ -4912,7 +4912,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 376.8852 90.17 0)
 			(hide yes)
 			(show_name no)
@@ -5997,7 +5997,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 240.9952 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -6979,7 +6979,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 79.7052 53.34 0)
 			(hide yes)
 			(show_name no)
@@ -7126,7 +7126,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 154.6352 208.28 0)
 			(hide yes)
 			(show_name no)

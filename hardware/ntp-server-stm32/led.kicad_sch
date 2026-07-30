@@ -4142,7 +4142,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 352.298 62.23 90)
 			(hide yes)
 			(show_name no)
@@ -4291,7 +4291,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 79.248 43.18 90)
 			(hide yes)
 			(show_name no)
@@ -4450,7 +4450,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 376.428 118.11 90)
 			(hide yes)
 			(show_name no)
@@ -4597,7 +4597,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 109.982 177.8 90)
 			(hide yes)
 			(show_name no)
@@ -5147,7 +5147,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 318.77 140.208 90)
 			(hide yes)
 			(show_name no)
@@ -5529,7 +5529,7 @@
 				)
 			)
 		)
-		(property "Footprint" "TSOT-23-5"
+		(property "Footprint" "Package_TO_SOT_SMD:TSOT-23-5"
 			(at 66.04 67.31 0)
 			(hide yes)
 			(show_name no)
@@ -5663,7 +5663,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 143.002 156.21 90)
 			(hide yes)
 			(show_name no)
@@ -5822,7 +5822,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "copy_ref:R_0805_2012Metric"
 			(at 132.08 238.252 90)
 			(hide yes)
 			(show_name no)
@@ -6060,7 +6060,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "copy_ref:R_0805_2012Metric"
 			(at 132.08 233.172 90)
 			(hide yes)
 			(show_name no)
@@ -6219,7 +6219,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 128.5748 66.04 0)
 			(hide yes)
 			(show_name no)
@@ -6445,7 +6445,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 331.978 146.05 90)
 			(hide yes)
 			(show_name no)
@@ -6593,7 +6593,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "SOT-323"
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-323_SC-70"
 			(at 344.17 140.335 0)
 			(hide yes)
 			(show_name no)
@@ -6826,7 +6826,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "copy_ref:R_0805_2012Metric"
 			(at 99.06 169.672 90)
 			(hide yes)
 			(show_name no)
@@ -7063,7 +7063,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "copy_ref:R_0805_2012Metric"
 			(at 132.08 243.332 90)
 			(hide yes)
 			(show_name no)
@@ -7378,7 +7378,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 316.738 118.11 90)
 			(hide yes)
 			(show_name no)
@@ -7526,7 +7526,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "copy_ref:R_0805_2012Metric"
 			(at 132.08 223.012 90)
 			(hide yes)
 			(show_name no)
@@ -7686,7 +7686,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 57.658 67.31 90)
 			(hide yes)
 			(show_name no)
@@ -7924,7 +7924,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "SOT-323"
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-323_SC-70"
 			(at 388.62 112.395 0)
 			(hide yes)
 			(show_name no)
@@ -8078,7 +8078,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "SOT-323"
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-323_SC-70"
 			(at 328.93 112.395 0)
 			(hide yes)
 			(show_name no)
@@ -8229,7 +8229,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Library:LED_IN-P55TATRGB"
+		(property "Footprint" "copy_ref:LED_IN-P55TATRGB"
 			(at 333.502 76.2 0)
 			(hide yes)
 			(show_name no)
@@ -8380,7 +8380,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 334.518 62.23 90)
 			(hide yes)
 			(show_name no)
@@ -8824,7 +8824,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "SOT-223 (TO-261)"
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-223"
 			(at 160.02 160.655 0)
 			(hide yes)
 			(show_name no)
@@ -9056,7 +9056,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "copy_ref:R_0805_2012Metric"
 			(at 133.35 160.782 90)
 			(hide yes)
 			(show_name no)
@@ -9293,7 +9293,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 140.0048 66.04 0)
 			(hide yes)
 			(show_name no)
@@ -9441,7 +9441,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 112.7252 111.76 0)
 			(hide yes)
 			(show_name no)
@@ -9589,7 +9589,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "SOT-323"
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-323_SC-70"
 			(at 125.73 173.355 0)
 			(hide yes)
 			(show_name no)
@@ -9821,7 +9821,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "copy_ref:R_0805_2012Metric"
 			(at 132.08 212.852 90)
 			(hide yes)
 			(show_name no)
@@ -9980,7 +9980,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 303.53 112.268 90)
 			(hide yes)
 			(show_name no)
@@ -10285,7 +10285,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "copy_ref:R_0805_2012Metric"
 			(at 132.08 228.092 90)
 			(hide yes)
 			(show_name no)
@@ -10600,7 +10600,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 343.408 62.23 90)
 			(hide yes)
 			(show_name no)
@@ -10748,7 +10748,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0805 (2012 Metric)"
+		(property "Footprint" "copy_ref:R_0805_2012Metric"
 			(at 132.08 217.932 90)
 			(hide yes)
 			(show_name no)
@@ -10907,7 +10907,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 363.22 112.268 90)
 			(hide yes)
 			(show_name no)
@@ -11055,7 +11055,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:R_1206_3216Metric"
 			(at 110.49 55.372 90)
 			(hide yes)
 			(show_name no)
@@ -11212,7 +11212,7 @@
 				)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:1206"
 			(at 121.92 55.372 90)
 			(hide yes)
 			(show_name no)
@@ -11349,7 +11349,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1206 (3216 Metric)"
+		(property "Footprint" "copy_ref:C_1206_3216Metric"
 			(at 95.5548 66.04 0)
 			(hide yes)
 			(show_name no)

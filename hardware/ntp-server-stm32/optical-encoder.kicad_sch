@@ -932,7 +932,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 171.1452 121.92 0)
 			(hide yes)
 			(show_name no)
@@ -1237,7 +1237,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "6-TSSOP"
+		(property "Footprint" "dowload:74LVC2G17GW,125"
 			(at 146.05 123.19 0)
 			(hide yes)
 			(show_name no)
@@ -1441,7 +1441,7 @@
 				)
 			)
 		)
-		(property "Footprint" "6-TSSOP"
+		(property "Footprint" "dowload:74LVC2G17GW,125"
 			(at 158.75 82.55 0)
 			(hide yes)
 			(show_name no)
@@ -1566,7 +1566,7 @@
 				)
 			)
 		)
-		(property "Footprint" "6-TSSOP"
+		(property "Footprint" "dowload:74LVC2G17GW,125"
 			(at 158.75 62.23 0)
 			(hide yes)
 			(show_name no)

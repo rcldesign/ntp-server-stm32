@@ -11057,7 +11057,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "dowload:SAMTEC_SMA-J-P-X-RA-TH1"
 			(at 63.5 234.95 0)
 			(hide yes)
 			(show_name no)
@@ -11409,7 +11409,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "DO-214AC"
+		(property "Footprint" "dowload:DO-214AC"
 			(at 52.07 95.25 0)
 			(hide yes)
 			(show_name no)
@@ -11779,7 +11779,7 @@
 				)
 			)
 		)
-		(property "Footprint" "10-USON"
+		(property "Footprint" "dowload:TPD4E02B04DQAR"
 			(at 292.1 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -11919,7 +11919,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1812 (4532 Metric)"
+		(property "Footprint" "Capacitor_SMD:C_1812_4532Metric"
 			(at 102.5652 119.38 0)
 			(hide yes)
 			(show_name no)
@@ -12146,7 +12146,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "dowload:SAMTEC_SMA-J-P-X-RA-TH1"
 			(at 63.5 201.93 0)
 			(hide yes)
 			(show_name no)
@@ -12261,7 +12261,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "2-XDFN"
+		(property "Footprint" "dowload:2-XDFN"
 			(at 57.15 254 0)
 			(hide yes)
 			(show_name no)
@@ -12384,7 +12384,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "dowload:CONN_OSTVN06A150_OST"
 			(at 356.87 210.82 0)
 			(hide yes)
 			(show_name no)
@@ -12588,7 +12588,7 @@
 				)
 			)
 		)
-		(property "Footprint" "10-USON"
+		(property "Footprint" "copy_ref:USON-10_2.5x1.0mm_P0.5mm"
 			(at 292.1 125.73 0)
 			(hide yes)
 			(show_name no)
@@ -12807,7 +12807,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0603 (1608 Metric)"
+		(property "Footprint" "Inductor_SMD:L_0603_1608Metric"
 			(at 49.53 218.44 0)
 			(hide yes)
 			(show_name no)
@@ -12933,7 +12933,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "dowload:PHOENIX_1787179"
 			(at 172.72 217.17 0)
 			(hide yes)
 			(show_name no)
@@ -13148,7 +13148,7 @@
 				)
 			)
 		)
-		(property "Footprint" "10-USON"
+		(property "Footprint" "copy_ref:USON-10_2.5x1.0mm_P0.5mm"
 			(at 217.17 151.13 0)
 			(hide yes)
 			(show_name no)
@@ -13897,7 +13897,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "DO-219AB (SMF)"
+		(property "Footprint" "Diode_SMD:D_SMF"
 			(at 111.76 240.03 0)
 			(hide yes)
 			(show_name no)
@@ -14177,7 +14177,7 @@
 				)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 163.83 24.638 90)
 			(hide yes)
 			(show_name no)
@@ -14325,7 +14325,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 95.758 115.57 90)
 			(hide yes)
 			(show_name no)
@@ -14473,7 +14473,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 141.478 69.85 90)
 			(hide yes)
 			(show_name no)
@@ -14777,7 +14777,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "dowload:CONN_OSTVN02A150_OST"
 			(at 265.43 236.22 0)
 			(hide yes)
 			(show_name no)
@@ -14892,7 +14892,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "DO-214AB (SMC)"
+		(property "Footprint" "Diode_SMD:D_SMC"
 			(at 76.2 80.01 0)
 			(hide yes)
 			(show_name no)
@@ -15016,7 +15016,7 @@
 				)
 			)
 		)
-		(property "Footprint" "10-USON"
+		(property "Footprint" "copy_ref:USON-10_2.5x1.0mm_P0.5mm"
 			(at 292.1 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -15313,7 +15313,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0603 (1608 Metric)"
+		(property "Footprint" "copy_ref:C_0603_1608Metric"
 			(at 118.4148 243.84 0)
 			(hide yes)
 			(show_name no)
@@ -15774,7 +15774,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 173.228 29.21 90)
 			(hide yes)
 			(show_name no)
@@ -15922,7 +15922,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "copy_ref:DB9_Socket"
 			(at 93.98 88.9 0)
 			(hide yes)
 			(show_name no)
@@ -16060,7 +16060,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 219.4052 228.6 0)
 			(hide yes)
 			(show_name no)
@@ -16206,7 +16206,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "dowload:CONN_OSTVN04A150_OST"
 			(at 76.2 36.83 0)
 			(hide yes)
 			(show_name no)
@@ -16484,7 +16484,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "2-XDFN"
+		(property "Footprint" "dowload:2-XDFN"
 			(at 57.15 190.5 0)
 			(hide yes)
 			(show_name no)
@@ -16607,7 +16607,7 @@
 				)
 			)
 		)
-		(property "Footprint" "10-USON"
+		(property "Footprint" "dowload:TPD4E02B04DQAR"
 			(at 374.65 125.73 0)
 			(hide yes)
 			(show_name no)
@@ -17295,7 +17295,7 @@
 				)
 			)
 		)
-		(property "Footprint" "10-USON"
+		(property "Footprint" "copy_ref:USON-10_2.5x1.0mm_P0.5mm"
 			(at 374.65 40.64 0)
 			(hide yes)
 			(show_name no)
@@ -17435,7 +17435,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 205.232 78.74 90)
 			(hide yes)
 			(show_name no)
@@ -17581,7 +17581,7 @@
 				)
 			)
 		)
-		(property "Footprint" "10-USON"
+		(property "Footprint" "dowload:TPD4E02B04DQAR"
 			(at 374.65 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -17720,7 +17720,7 @@
 				)
 			)
 		)
-		(property "Footprint" "10-USON"
+		(property "Footprint" "dowload:TPD4E02B04DQAR"
 			(at 153.67 151.13 0)
 			(hide yes)
 			(show_name no)
@@ -17940,7 +17940,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 150.368 104.14 90)
 			(hide yes)
 			(show_name no)
@@ -18088,7 +18088,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "2-XDFN"
+		(property "Footprint" "dowload:2-XDFN"
 			(at 57.15 165.1 0)
 			(hide yes)
 			(show_name no)
@@ -18212,7 +18212,7 @@
 				)
 			)
 		)
-		(property "Footprint" "10-USON"
+		(property "Footprint" "dowload:TPD4E02B04DQAR"
 			(at 374.65 81.28 0)
 			(hide yes)
 			(show_name no)
@@ -18352,7 +18352,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 126.6952 243.84 0)
 			(hide yes)
 			(show_name no)
@@ -18500,7 +18500,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "dowload:SAMTEC_SMA-J-P-X-RA-TH1"
 			(at 63.5 171.45 0)
 			(hide yes)
 			(show_name no)
@@ -18694,7 +18694,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "dowload:SAMTEC_SMA-J-P-X-RA-TH1"
 			(at 63.5 146.05 0)
 			(hide yes)
 			(show_name no)
@@ -18884,7 +18884,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Library:GCT_BG055-06A-1-0450-0530-0350-L-D"
+		(property "Footprint" "dowload:GCT_BG055-06A-1-0450-0530-0350-L-D"
 			(at 27.94 40.64 0)
 			(hide yes)
 			(show_name no)
@@ -19021,7 +19021,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 182.5752 33.02 0)
 			(hide yes)
 			(show_name no)
@@ -19167,7 +19167,7 @@
 				)
 			)
 		)
-		(property "Footprint" "10-USON"
+		(property "Footprint" "dowload:TPD4E02B04DQAR"
 			(at 290.83 40.64 0)
 			(hide yes)
 			(show_name no)
@@ -19308,7 +19308,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "DO-219AB (SMF)"
+		(property "Footprint" "dowload:DO-219AB (SMF)"
 			(at 217.17 224.79 0)
 			(hide yes)
 			(show_name no)
@@ -19590,7 +19590,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "1812 (4532 Metric)"
+		(property "Footprint" "Capacitor_SMD:C_1812_4532Metric"
 			(at 157.1752 107.95 0)
 			(hide yes)
 			(show_name no)

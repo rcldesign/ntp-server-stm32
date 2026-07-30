@@ -2920,7 +2920,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 143.002 118.11 90)
 			(hide yes)
 			(show_name no)
@@ -3146,7 +3146,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 129.2352 66.04 0)
 			(hide yes)
 			(show_name no)
@@ -3371,7 +3371,7 @@
 				)
 			)
 		)
-		(property "Footprint" "SOD-323F"
+		(property "Footprint" "Diode_SMD:D_SOD-323F"
 			(at 295.91 89.535 0)
 			(hide yes)
 			(show_name no)
@@ -3497,7 +3497,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "SOT-323"
+		(property "Footprint" "Package_TO_SOT_SMD:SOT-323_SC-70"
 			(at 317.5 93.345 0)
 			(hide yes)
 			(show_name no)
@@ -3727,7 +3727,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "dowload:G6K-2F-Y DC3"
 			(at 295.91 109.22 0)
 			(hide yes)
 			(show_name no)
@@ -4096,7 +4096,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 338.328 95.25 90)
 			(hide yes)
 			(show_name no)
@@ -4322,7 +4322,7 @@
 				(justify right)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:R_0402_1005Metric"
 			(at 329.692 96.52 90)
 			(hide yes)
 			(show_name no)
@@ -4469,7 +4469,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "0402 (1005 Metric)"
+		(property "Footprint" "copy_ref:C_0402_1005Metric"
 			(at 113.9952 66.04 0)
 			(hide yes)
 			(show_name no)

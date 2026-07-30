@@ -9,4 +9,6 @@
 	(lib (name "TPS61094DSSR") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "Legacy per-part nickname (U34, U35)"))
 	(lib (name "USB4120-03-C_REVA6") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "Legacy per-part nickname (J5)"))
 	(lib (name "ZED-F9T-00B") (type "KiCad") (uri "${KIPRJMOD}/../libraries/sts1000.pretty") (options "") (descr "Legacy per-part nickname (U21)"))
+	(lib (name "copy_ref") (type "KiCad") (uri "${KIPRJMOD}/../libraries/copy_ref.pretty") (options "") (descr ""))
+	(lib (name "dowload") (type "KiCad") (uri "${KIPRJMOD}/../libraries/dowload.pretty") (options "") (descr ""))
 )
