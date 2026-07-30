@@ -1,13 +1,14 @@
 # STS1000 Firmware — Implementation Status
 
 Point-in-time record, firmware scope only. Branch `claude/stm32-firmware-impl-aool3z`
-at `9d9bd3b`. This is **not** an authoritative reference — `docs/ntp_server_software_spec.md`
+at `5b5a6eb`. This is **not** an authoritative reference — `docs/ntp_server_software_spec.md`
 owns firmware behaviour and `ARCHITECTURE.md` owns structure. This file answers one
 question: what is done and verified, and what is not.
 
 **Summary:** every implementable requirement in the spec is built, reviewed and
-verified. What remains is spec §14 bench validation, which is measurement of a
-physical board against reference equipment, and is gated on fab.
+verified — including all of spec §14 that does not require a physical board. What
+remains is §14 **bench measurement**, which produces a dataset rather than a firmware
+artifact, and is gated on fab.
 
 ---
 
@@ -15,18 +16,19 @@ physical board against reference equipment, and is gated on fab.
 
 | Check | Result |
 |---|---|
-| Host test suites | **76/76 passing**, 76 test files |
+| Host test suites | **84/84 passing**, 83 test files |
 | Target build | clean, signed images produced (app + MCUboot) |
-| FLASH | 84.1 % of 900 970 B slot |
-| RAM | 86.4 % of 640 KB |
-| Reachability gate | **1310 defined, 204 absent, all 204 accounted for** |
-| Coverage gate | `core/` ≥ 80 % enforced by `scripts/coverage.sh` |
-| Source size | ~133 k lines across `app/src/core` + `app/src/zephyr` |
+| FLASH | 760 195 B — 84.4 % of the 900 970 B slot |
+| RAM | 580 868 B — 88.6 % of 640 KB (~74 KB free) |
+| Reachability gate | **1339 defined, 226 absent, all 226 accounted for** |
+| Coverage gate | `core/` ≥ 80 % enforced; actual **96 %** |
+| Source size | ~136 k lines across `app/src/core` + `app/src/zephyr` |
 
-The reachability gate is load-bearing on this project: `--gc-sections` silently drops
-a function whose only reference is its own prototype, and host tests cannot see it
-because they link `core/` directly. Every "absent" symbol is either audited or asserted
-in `scripts/reachability.allow`.
+The reachability gate is load-bearing here: `--gc-sections` silently drops a function
+whose only reference is its own prototype, and host tests cannot see it because they
+link `core/` directly. Every "absent" symbol is audited or asserted in
+`scripts/reachability.allow` — and entries **leave** it when a real caller appears
+(`disc_state` did, when stage 4c wired it).
 
 ---
 
@@ -55,10 +57,11 @@ in `scripts/reachability.allow`.
 | Power sequencing, fault scan, INA228 monitoring | built + tested |
 | UI — display, buttons, encoder, RGB, skyplot | built + tested |
 | Secure boot, key zeroization, factory reset | built + tested |
+| **§14 stability-analysis chain** — see below | built + tested |
 
-### Spec §14 — the implementable half is done
+### Spec §14 — everything implementable is done
 
-§14's **CI** bullet is host-side and satisfied:
+**CI bullet** — host-side, satisfied:
 
 | §14 CI requirement | Covering suite |
 |---|---|
@@ -67,80 +70,69 @@ in `scripts/reachability.allow`.
 | holdover estimator | `test_quality.c` — 5 dedicated tests |
 | config schema + migration | `test_cfg.c` incl. `test_import_runs_the_registered_migration` |
 
-§14's **security** bullet, host-testable parts: `test_fwupd.c`,
-`test_fwupd_seam_policy.c` (signed-image enforcement, downgrade rejection),
-`test_nts.c`, `test_snmpv3.c`, plus the AAA suites.
+**Security bullet**, host-testable parts: `test_fwupd.c`, `test_fwupd_seam_policy.c`
+(signed-image enforcement, downgrade rejection), `test_nts.c`, `test_snmpv3.c`, AAA suites.
+
+**Analysis chain** — the arithmetic and plumbing §14's measurements feed, built so it is
+trustworthy *before* bench time rather than written under it:
+
+| Piece | What it is | Proof |
+|---|---|---|
+| `core/stats/adev.c` | overlapping ADEV, MDEV, residual histogram | closed forms: frequency offset → ADEV **exactly 0**; drift → D·τ/√2; white PM → MDEV τ^−3/2 vs ADEV τ^−1 |
+| `core/stats/saw.c` | with/without sawtooth verdict | z = (var(c)−var(r))/var(s) → −1 correct, +1 mispaired, **+3 sign-inverted** |
+| `core/stats/phase_rec.c` | versioned record (v3), gap bitmap, identity | version / length-vs-flags / unknown-bit guards; count cross-checked against bitmap |
+| `core/stats/phase_join.c` | multi-poll join | epoch, contiguity, overlap-agreement, union bitmap |
+| `core/mcp` `PHASE_EXPORT` | offset-chunked export | transport, encoder, and **composed** end-to-end suites |
+| `tools/meridian_phase.c` | bench CLI | links the same proved C; refuses records it cannot trust |
+
+### What τ a bench operator reaches
+
+The ring is `DISC_ADEV_CAP` = 512 at τ₀ = 1 s, so one export covers 8 min 32 s and the
+octave axis stops at **τ = 128 s** — short of the region §14 asks about.
+
+**The ring is not enlarged, and cannot be.** ~32 B per sample across two rings, the
+exporter's staging snapshot and the export blob: a 2048-sample ring reaches τ = 1024 s
+*and nothing further* for ~65 KB against ~74 KB free (98.9 % SRAM), and quadruples the
+per-second `memmove` on the timing thread. τ = 8192 s is not expressible on the part.
+
+Instead the record carries a capture `epoch` and the monotonic index `seq0`
+(`PHASE_REC_F_IDENT`, v3, **+48 B**), and the bench joins polls it can prove:
+
+| polls at 240 s | polling time | joined n | largest m | τ reached |
+|---|---|---|---|---|
+| 1 | 0 | 512 | 128 | 128 s |
+| 12 | 44 min | 3152 | 1024 | **1024 s** |
+| 35 | 2.3 h | 8672 | 4096 | 4096 s |
+| 273 | 18.1 h | 65535 | 16384 | 16384 s |
+
+The last row is the format ceiling (`n` is `uint16`); `phase_join_meta()` returns
+`-EOVERFLOW` rather than truncating.
 
 ---
 
 ## 3. Not done — hardware-gated
 
-Every remaining item is a **measurement**, not a firmware artifact. No code completes
-them; the deliverable is a dataset from a bench.
+Every remaining item is a **measurement**. No code completes them; the deliverable is a
+dataset from a bench.
 
 | §14 requirement | Needs |
 |---|---|
 | Served accuracy vs a reference grandmaster / UTC source | board + reference clock |
-| ADEV/MDEV vs τ, OCXO and Rb, locked and holdover | board + counter, long runs (see the τ note below) |
-| PPS residual histograms with/without sawtooth correction | board + time-interval counter |
+| ADEV/MDEV vs τ, OCXO and Rb, locked and holdover | board + a reference 3–5× more stable than the DUT at every τ |
+| PPS residual histograms with/without sawtooth correction | board + GNSS signal |
 | Holdover drift vs the characterized model | board + temperature chamber |
-| Protocol interop — chrony/ntpd/w32time, ntpsec NTS, `ptp4l`/`phc2sys`, Zabbix | board + live network peers |
+| Protocol interop — chrony/ntpd/w32time, ntpsec NTS, `ptp4l`/`phc2sys`, Zabbix | board + live peers |
 | PoE class negotiation, staggered warm-up in budget | board + PSE |
 | Brownout/PFI save-restore, wedge recovery, GNSS spoof/jam | board |
 | 10k+ NTP req/s soak proving the timing path is unperturbed | board + load generator |
 | HIL rig — PPS injection, fault simulation | rig |
 | TLS cipher/cert scan, debug-auth lockout, secure-erase | board |
 
-**In progress:** a Zephyr-free `core/stats` module computing overlapping ADEV, MDEV and
-PPS residual histograms, verified against closed-form results (pure frequency offset →
-ADEV exactly 0; drift → D·τ/√2; white PM → MDEV τ^−3/2 where ADEV is τ^−1). This is the
-*analysis* the above measurements feed. Building it now means it is trustworthy before
-bench time rather than written under bench-time pressure.
-
-### What τ a bench operator can actually reach
-
-The ADEV phase ring is `DISC_ADEV_CAP` = **512 samples at τ₀ = 1 s**, so one
-`PHASE_EXPORT` covers 8 min 32 s. Overlapping ADEV needs n ≥ 2m+1, so m ≤ 255, and the
-octave axis `meridian_phase` prints therefore **stops at τ = 128 s**. That is short of the
-region §14 is asking about for an OCXO and a rubidium.
-
-**The ring is not enlarged to fix this, and cannot be.** Each extra sample costs 4 B in
-`disc_ctx_t`'s corrected ring, 4 B in its uncorrected ring, the same again in the
-`disc_phase_snap_t` the exporter stages through, and 16 B in the export blob — ~32 B per
-sample plus two bitmaps. A 2048-sample ring reaches τ = 1024 s and nothing further, for
-about **65 KB** against the **~73 KB** of SRAM this build has left (88.62 % of 640 KB used),
-and it quadruples the per-second `memmove` on the timing thread. τ = 8192 s is not
-expressible on the part at all.
-
-Instead the record carries **sample identity** — a capture `epoch` and the monotonic index
-`seq0` of its first sample (`PHASE_REC_F_IDENT`, format v3) — and the bench joins successive
-polls:
-
-```
-meridian_ctl.py phase-export run.phr --repeat 12    # 44 min of polling, 240 s apart
-meridian_phase run.*.phr                            # τ axis to 1024 s
-```
-
-`stats/phase_join.c` refuses any join it cannot prove: a differing epoch (a ring reset,
-holdover entry, `disc_restart()` or a reboot), a hole between records, or an overlap whose
-samples disagree. Overlap is the *mechanism*, not a nuisance — polls taken faster than the
-ring empties share samples, and those shared samples are what verify the splice.
-
-| polls at 240 s | polling time | joined n | record span | largest octave m | τ reached |
-|---|---|---|---|---|---|
-| 1 | 0 | 512 | 8.5 min | 128 | 128 s |
-| 4 | 12 min | 1232 | 20.5 min | 512 | 512 s |
-| 12 | 44 min | 3152 | 52.5 min | 1024 | 1024 s |
-| 35 | 2.27 h | 8672 | 2.41 h | 4096 | 4096 s |
-| 273 | 18.1 h | 65535 | 18.2 h | 16384 | 16384 s |
-
-Polling time is `(polls − 1) × 240 s`; the span is longer because the first poll already
-carries the 512 s the ring held when the operator started. n = 512 + (polls − 1) × 240,
-and the largest octave is the greatest power of two with 2m + 1 ≤ n.
-
-The last row is the format's own ceiling: `n` is a `uint16`, so 65535 samples is the
-longest series a single record can express, and `phase_join_meta()` refuses to describe a
-larger join rather than truncate one.
+**First-session preconditions** (task #74). The one that matters most:
+`disc_cfg_t::qerr_sign` defaults to `+1` on the gpsd/chrony convention, which is
+**asserted, never measured**. The first capture *is* that measurement — a `SIGN-INVERTED`
+verdict there is the feature working, not a fault. Expected good result: sdev uncorrected
+~1605 ps, corrected ~61 ps, ratio ~0.04, z = −1.000, verdict `CORRECTED`.
 
 ---
 
@@ -148,16 +140,16 @@ larger join rather than truncate one.
 
 Relevant because several defects on this branch were invisible to a green suite.
 
-- **Mutation testing on every change.** Break the fix, confirm a named test fails,
+- **Mutation testing on every change.** Break the fix, confirm a *named* test fails,
   restore byte-identically under `sha256sum`, confirm green. A fix without a
   mutation-verified test was treated as unverified.
-- **First-pass + adversarial review** per change, with findings adjudicated rather than
+- **First-pass + adversarial review** per change, findings adjudicated rather than
   accepted or dropped.
-- **Ten separate guards were found green for the wrong reason** — a test mirroring
-  production logic instead of exercising it, a fake that never refused, a scan counting
-  lock *calls* when the defect was lock *scope*, a comment asserting a property the code
-  did not have and the test did not check, and a numeric floor that started refusing the
-  outcome the work was for.
+- **Eleven guards were found green for the wrong reason** — a test mirroring production
+  logic instead of exercising it, a fake that never refused, a scan counting lock *calls*
+  when the defect was lock *scope*, a comment asserting a property the code did not have
+  and the test did not check, a numeric floor that started refusing the outcome the work
+  was for, and an assertion anchored on identifiers that do not move with the code.
 
 ### The structural lesson
 
@@ -167,7 +159,7 @@ correct implementation from a plausible wrong one. Three fail-safes were found t
 by mutation rather than by reading:
 
 - the fan's release-to-full-airflow (deletable with every test green);
-- the K1 RS-232/CMOS relay's deferred restore (structurally scanned, not executed);
+- the K1 RS-232/CMOS relay's deferred restore (scanned, not executed);
 - the watchdog's unknown-state report.
 
 Each was fixed by lifting the decision into a Zephyr-free policy header
@@ -178,16 +170,16 @@ suite. **That is the house pattern for any new decision in glue.**
 
 ## 5. Residual risks and known limits
 
-Carried deliberately, each with a stated reason.
-
 | Item | Status |
 |---|---|
-| `prov_ilk()` hardcodes `liveness_ok = false` | `sys.wdt.en` cannot be re-armed *through its interlock* while a lease is held; the route back is releasing the lease, whose restore path is not interlock-evaluated. Publishing the liveness gate is a platform change. |
-| pwrseq stage 9 can override a held `sys.wdt.en` lease | Fail-safe direction (watchdog on), window is seconds of bring-up behind a G3 typed-phrase ceremony. Closing it needs a new veto subject. |
+| `prov_ilk()` hardcodes `liveness_ok = false` | `sys.wdt.en` cannot be re-armed *through its interlock* while a lease is held; the route back is releasing the lease, whose restore path is not interlock-evaluated. |
+| pwrseq stage 9 can override a held `sys.wdt.en` lease | Fail-safe direction, window is seconds of bring-up behind a G3 ceremony. Closing it needs a new veto subject. |
 | `sts_disc_dac_state()` false until the discipline thread starts | `obj_read` answers `-EIO` for the two Vc objects in a window where the manifest advertises them wired. |
-| A Vc lease held across a PFI park | The power-fail fast-save records the override, not the loop's last good Vc. Arguably correct — it is what the oven sees — but nobody explicitly decided it. |
+| A Vc lease held across a PFI park | The fast-save records the override, not the loop's last good Vc. Arguably correct; nobody explicitly decided it. |
 | `g_writable_objects[]` named half | Judgement-maintained. No test can decide whether a *newly* writable object is safe; the roll-call only refuses to let one become writable silently. |
-| Glue-level source scans | `mp_glue.c`, `pwrseq_exec.c`, `disc_thread.c`, `supervisor.c` link into no host suite, so assertions about them read text rather than execute it. Mutation-verified, but shape not behaviour. |
+| Glue-level source scans | `mp_glue.c`, `pwrseq_exec.c`, `disc_thread.c`, `supervisor.c` link into no host suite; assertions about them read text rather than execute it. |
+| `sys_csrand_get()` at `disc_thread` init | Compile-verified only. A failed draw leaves the epoch seed 0 — loud (`LOG_WRN`, `identity: none`) and exports become un-joinable rather than wrongly joinable — but only observable on a board. |
+| `PHASE_BLOB_CAP` headroom | 8300 B against a real record's 8292. A `BUILD_ASSERT` ties the buffer to the record's parts, so outgrowing it fails the build rather than truncating silently. |
 | Never run on hardware | All validation is host tests, disassembly and static analysis. |
 
 ---
@@ -199,8 +191,7 @@ Recorded so they are not re-litigated. Full argument in each commit message.
 - **PA4 has one writer and two paths.** The DAC single-writer rule holds; a maintenance
   override is posted from the console and drained *by* the discipline thread.
 - **Two independent park latches** (PFI, maintenance) — the loop resumes only when both
-  are clear, so neither direction can defeat the other. refsel's bracket is a third,
-  transient, park.
+  are clear. refsel's bracket is a third, transient, park.
 - **An async actuator is `F_LEASE`, never writable.** `obj.set` has no field that can
   admit a write landing a sequencer pass later.
 - **A refused move *to* a fail-safe position is owed; a refused move *away* is just
@@ -210,3 +201,9 @@ Recorded so they are not re-litigated. Full argument in each commit message.
 - **A console WDI edge is only safe with the watchdog disabled** (`MP_ILK_WDT_OFF`).
 - **An object is guarded by default**: the writable set is enumerated by name, so making
   one writable requires saying what puts it back.
+- **The runtime absorbs short sample gaps; the bench must not.** `ADEV_MAX_GAP_S` trades
+  purity for availability so the τ = 100 s estimate exists on a real antenna. The export
+  therefore carries an absorbed-gap count and a bitmap, and the CLI refuses by default.
+- **The capture epoch seed is random, and that is load-bearing.** With a constant seed a
+  reboot restarts both epoch and index, so records either side present as perfectly
+  abutting with no overlap to check — the silent splice the scheme exists to stop.
