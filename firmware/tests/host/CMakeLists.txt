@@ -172,6 +172,19 @@ module_deps(mcp_dfu  mcp util cfg logring quality)
 # silently alter what the transport tests believe they are transferring.
 module_deps(mcp_phase_export mcp util cfg logring quality)
 
+# `phase_e2e` is the one suite that composes them. Every other suite on this
+# path proves a layer against a stand-in for its neighbour — `mcp_phase_export`
+# transfers opaque bytes, `phase_export` decodes in the same process it encoded
+# in — so a disagreement BETWEEN two layers was invisible to all of them at
+# once. It therefore links BOTH sides on purpose: the real disc_tick_pps() ->
+# disc_phase_snapshot() -> phase_rec_encode_f() producer, the real
+# h_phase_export() chunker over real COBS+CRC frames, and the real
+# phase_rec_decode_*() / stats_adev() consumer. That is deliberately the widest
+# dependency set in the file and it is the point of the suite, not an
+# omission — narrowing it would put a fake back in the middle and give back
+# exactly the coverage this exists to add.
+module_deps(phase_e2e disc stats mcp util cfg logring quality)
+
 # `glue_policy` covers the Zephyr glue's decision logic — the §8.3 self-confirm
 # gate, the MCUboot staging-slot ceiling, the config-applier registry — which
 # lives in dependency-free headers under app/src/zephyr precisely so it can be
