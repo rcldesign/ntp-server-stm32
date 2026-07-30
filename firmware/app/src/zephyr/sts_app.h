@@ -351,6 +351,15 @@ bool sts_disc_dac_state(uint16_t *out_code, int32_t *out_mv, bool *out_ovr);
  * non-uniform interval (core/disc's ADEV_MAX_GAP_S trade). A record reporting a
  * non-zero count is not fit for offline ADEV; see stats/phase_rec.h.
  *
+ * It carries TWO phase series, not one: the sawtooth-corrected residual and the
+ * same samples as they were before the qErr term was applied
+ * (PHASE_REC_F_RAW). Spec §14's sawtooth proof is the comparison of their
+ * histograms, and it is not a comparison that can be made from the corrected
+ * series alone — a qErr path with an inverted sign produces a perfectly
+ * plausible single histogram, roughly twice as wide as it should be, with
+ * nothing to be twice as wide *than*. The record is therefore ~16 bytes per
+ * sample rather than 8.
+ *
  * @retval 0           Success.
  * @retval -EINVAL     NULL argument, or an offset past the snapshot.
  * @retval -ENODEV     The discipline thread is not running.

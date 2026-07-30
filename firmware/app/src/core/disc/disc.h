@@ -375,6 +375,24 @@ typedef struct {
 
 	/* ADEV */
 	float adev_buf[DISC_ADEV_CAP];
+	/**
+	 * The same samples as adev_buf, captured immediately BEFORE the §3.2
+	 * sawtooth term was added — spec §14's "without sawtooth correction"
+	 * series.
+	 *
+	 * It is a second ring rather than a per-sample qErr the exporter
+	 * re-adds, because re-adding is not the inverse of what the loop did:
+	 * the correction is gated on qerr_valid and applied in float, so a
+	 * reconstruction would differ from the real uncorrected series exactly
+	 * where §14's proof is made — and would agree with a sign-inverted
+	 * qErr path by construction, which is the one defect the pair exists
+	 * to catch.
+	 *
+	 * Written only by adev_push(), in the same slot and under the same
+	 * eviction as adev_buf, so the two rings cannot desynchronise and
+	 * adev_n/adev_gapmap describe both.
+	 */
+	float adev_raw_buf[DISC_ADEV_CAP];
 	uint16_t adev_n;
 	uint16_t adev_head;
 	/**
@@ -839,8 +857,21 @@ typedef struct {
 	uint32_t tau0_ns;
 	/** True once the ring has been full and is evicting oldest samples. */
 	bool full;
-	/** Phase samples, nanoseconds, oldest first. */
+	/** Phase samples, nanoseconds, oldest first. Sawtooth-CORRECTED. */
 	float x_ns[DISC_ADEV_CAP];
+	/**
+	 * The same @ref n samples in the same order, as they were immediately
+	 * before the §3.2 sawtooth term was applied — spec §14's "without
+	 * sawtooth correction" series.
+	 *
+	 * Both series carry the identical cable and board delay, and both come
+	 * from the identical set of accepted pulses (the median/MAD gate runs
+	 * on the corrected value, so it decides membership for both). The ONLY
+	 * difference between x_ns[i] and x_raw_ns[i] is the sawtooth term —
+	 * which is what makes the difference of the two histograms attributable
+	 * to the qErr path and nothing else.
+	 */
+	float x_raw_ns[DISC_ADEV_CAP];
 	/** Bit i set == x_ns[i] followed a non-uniform interval. LSB-first. */
 	uint8_t gapmap[DISC_ADEV_GAPMAP_BYTES];
 } disc_phase_snap_t;

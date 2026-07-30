@@ -224,19 +224,45 @@ stats_sqrt                             # no-caller: core/ has no libm (see quali
 #
 # core/stats' phase-record codec (stats/phase_rec.h) splits across the boundary,
 # and the split is the whole point of the module: the DEVICE encodes and the HOST
-# decodes. phase_rec_encode / phase_rec_size / phase_rec_ns_f_to_ps are therefore
-# NOT in this file — they have a real caller in the image (disc_publish_phase()
-# in the discipline thread, serving MCP PHASE_EXPORT 0x24). The four below are
-# the reader half. Binding them would mean inventing an on-device consumer of a
-# record the device itself produced, which is a fake caller by construction.
+# decodes. phase_rec_encode_f / phase_rec_size / phase_rec_size_flags /
+# phase_rec_ns_f_to_ps are therefore NOT in this file — they have a real caller in
+# the image (disc_publish_phase() in the discipline thread, serving MCP
+# PHASE_EXPORT 0x24). The rest are the reader half, plus the two encoder entry
+# points the device does not use. Binding the readers would mean inventing an
+# on-device consumer of a record the device itself produced, which is a fake
+# caller by construction.
 #
 # Their real caller is tools/meridian_phase.c, built by tests/host/CMakeLists.txt
 # and exercised by the `phase_cli` CTest entry — the same C the device encodes
 # with, which is the reason the format has one implementation rather than two.
+#
+# NOTE: phase_rec_encode was in the image until the record gained its second
+# (uncorrected) series. The exporter now calls phase_rec_encode_f(), which takes
+# the discipline loop's float rings directly and converts inside the encoder —
+# that is what let the paired record cost 4 KiB of RAM instead of 8, by deleting
+# the int64 staging array the old call needed. phase_rec_encode is the
+# single-series entry point and is now host-only.
+phase_rec_encode                       # no-caller: single-series encoder. The device writes PAIRED records (spec §14 needs the with/without histograms from one export), so disc_publish_phase() calls phase_rec_encode_f() instead. Kept because the host tool and the suites build single-series records to prove the decoder refuses one that CLAIMS the pair
+phase_rec_encode_pair                  # no-caller: the int64 pair encoder. The device holds its rings as float nanoseconds and goes through phase_rec_encode_f(); this is the form the host tool's self-test and test_saw.c build synthetic paired records with
 phase_rec_decode_hdr                   # no-caller: host-side reader. Validates magic/version/length and cross-checks the gap count against the bitmap; the device wrote those fields and has nothing to validate them for
 phase_rec_decode_samples               # no-caller: host-side reader, pulls the int64 ps series out for stats_adev/stats_mdev — both themselves absent for the reasons above
+phase_rec_decode_raw                   # no-caller: host-side reader for the UNCORRECTED series (PHASE_REC_F_RAW). The device wrote it; the half of §14's sawtooth proof that reads it back runs on the bench
 phase_rec_gap_at                       # no-caller: host-side reader, per-sample gap query behind the CLI's gap listing
 phase_rec_longest_clean                # no-caller: host-side reader. Finds the longest uniformly spaced run in a record the runtime absorbed gaps into, so a bench operator can salvage a usable window instead of discarding the capture
+#
+# stats/saw.h is spec §14's sawtooth verdict: given the corrected and uncorrected
+# residual series out of one phase record, decide whether the qErr path collapsed
+# the spread (working), roughly doubled it (sign inverted) or did nothing. It sits
+# in core/ rather than in the tool for the reason the estimators do — one proved
+# implementation, not a second one in the analyser that is free to disagree.
+#
+# It is host-side for the same reason stats_hist is: the device HAS both series,
+# but judging them on-target would mean shipping the verdict instead of the
+# evidence, and the evidence is what a bench operator needs when the verdict is
+# SIGN-INVERTED. Its caller is tools/meridian_phase.c (`phase_cli`), with
+# tests/host/test_saw.c pinning the three signatures against their closed forms.
+stats_saw_verdict                      # no-caller: §14 with/without sawtooth comparison, host-side. Nothing on-target consumes a verdict about its own qErr path — it would have no action to take on one, and the record the bench reads is strictly more informative
+stats_saw_str                          # no-caller: names the verdict for CLI output; reached only from the analyser, alongside stats_saw_verdict itself
 #
 # INA228 next. The old reason claimed "the device writes, the host interprets";
 # the opposite is true. hk_read_ina() converts on-board (hk.c:590-615) using

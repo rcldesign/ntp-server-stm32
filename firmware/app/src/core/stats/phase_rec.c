@@ -84,6 +84,22 @@ size_t phase_rec_size(uint16_t n)
 	       ((size_t)n * sizeof(int64_t));
 }
 
+size_t phase_rec_size_flags(uint16_t n, uint8_t flags)
+{
+	size_t len = phase_rec_size(n);
+
+	if ((flags & PHASE_REC_F_RAW) != 0u) {
+		len += (size_t)n * sizeof(int64_t);
+	}
+	return len;
+}
+
+/** Byte offset of the corrected series within a record of @p n samples. */
+static size_t series_off(uint16_t n)
+{
+	return (size_t)PHASE_REC_HDR_LEN + gapmap_bytes(n);
+}
+
 static size_t popcount_bits(const uint8_t *map, size_t nbits)
 {
 	size_t i;
@@ -99,19 +115,29 @@ static size_t popcount_bits(const uint8_t *map, size_t nbits)
 
 /* ---------------------------------------------------------------- encoding */
 
-int phase_rec_encode(const phase_rec_meta_t *m, const int64_t *x_ps,
-		     const uint8_t *gapmap, uint8_t *buf, size_t cap,
-		     size_t *out_len)
+/*
+ * Everything both encoders share: argument validation, the header and the
+ * bitmap. On success @p out_series receives the start of the series area and
+ * @p out_need the record's total length.
+ *
+ * @p have_raw is passed rather than read out of m->flags because the flag
+ * describes what the encoder is about to write, and only the encoder knows
+ * that. A caller cannot assert the raw series into existence by setting a bit.
+ */
+static int encode_prologue(const phase_rec_meta_t *m, bool have_x, bool have_raw,
+			   const uint8_t *gapmap, uint8_t *buf, size_t cap,
+			   uint8_t **out_series, size_t *out_need)
 {
 	size_t gb;
 	size_t need;
-	size_t i;
+	uint8_t flags;
 	uint8_t *p;
 
-	if ((m == NULL) || (buf == NULL) || (out_len == NULL)) {
+	if ((m == NULL) || (buf == NULL) || (out_series == NULL) ||
+	    (out_need == NULL)) {
 		return -EINVAL;
 	}
-	if ((m->n > 0u) && (x_ps == NULL)) {
+	if ((m->n > 0u) && !have_x) {
 		return -EINVAL;
 	}
 	if (m->tau0_ns == 0u) {
@@ -129,9 +155,22 @@ int phase_rec_encode(const phase_rec_meta_t *m, const int64_t *x_ps,
 	if ((m->gaps > 0u) && (gapmap == NULL)) {
 		return -EINVAL;
 	}
+	/*
+	 * Refuse to write a flag this build's decoder would refuse to read.
+	 * Encoding an unknown bit produces a record nothing can open, which is
+	 * a worse outcome than the caller finding out here.
+	 */
+	if ((m->flags & (uint8_t)~(uint8_t)PHASE_REC_F_KNOWN) != 0u) {
+		return -EINVAL;
+	}
+
+	flags = (uint8_t)(m->flags & (uint8_t)~(uint8_t)PHASE_REC_F_RAW);
+	if (have_raw) {
+		flags |= (uint8_t)PHASE_REC_F_RAW;
+	}
 
 	gb = gapmap_bytes(m->n);
-	need = phase_rec_size(m->n);
+	need = phase_rec_size_flags(m->n, flags);
 	if (cap < need) {
 		return -EMSGSIZE;
 	}
@@ -139,7 +178,7 @@ int phase_rec_encode(const phase_rec_meta_t *m, const int64_t *x_ps,
 	p = buf;
 	put_u32(&p[0], PHASE_REC_MAGIC);
 	p[4] = (uint8_t)PHASE_REC_VER;
-	p[5] = m->flags;
+	p[5] = flags;
 	put_u16(&p[6], m->n);
 	put_u32(&p[8], m->tau0_ns);
 	put_u32(&p[12], m->gaps);
@@ -167,9 +206,80 @@ int phase_rec_encode(const phase_rec_meta_t *m, const int64_t *x_ps,
 		}
 	}
 
-	p = &buf[PHASE_REC_HDR_LEN + gb];
+	*out_series = &buf[series_off(m->n)];
+	*out_need = need;
+	return 0;
+}
+
+int phase_rec_encode(const phase_rec_meta_t *m, const int64_t *x_ps,
+		     const uint8_t *gapmap, uint8_t *buf, size_t cap,
+		     size_t *out_len)
+{
+	return phase_rec_encode_pair(m, x_ps, NULL, gapmap, buf, cap, out_len);
+}
+
+int phase_rec_encode_pair(const phase_rec_meta_t *m, const int64_t *x_ps,
+			  const int64_t *x_raw_ps, const uint8_t *gapmap,
+			  uint8_t *buf, size_t cap, size_t *out_len)
+{
+	size_t need = 0u;
+	size_t i;
+	uint8_t *p = NULL;
+	int rc;
+
+	if (out_len == NULL) {
+		return -EINVAL;
+	}
+	rc = encode_prologue(m, x_ps != NULL, x_raw_ps != NULL, gapmap, buf,
+			     cap, &p, &need);
+	if (rc != 0) {
+		return rc;
+	}
+
 	for (i = 0u; i < (size_t)m->n; i++) {
 		put_i64(&p[i * sizeof(int64_t)], x_ps[i]);
+	}
+	if (x_raw_ps != NULL) {
+		uint8_t *q = &p[(size_t)m->n * sizeof(int64_t)];
+
+		for (i = 0u; i < (size_t)m->n; i++) {
+			put_i64(&q[i * sizeof(int64_t)], x_raw_ps[i]);
+		}
+	}
+
+	*out_len = need;
+	return 0;
+}
+
+int phase_rec_encode_f(const phase_rec_meta_t *m, const float *x_ns,
+		       const float *x_raw_ns, const uint8_t *gapmap,
+		       uint8_t *buf, size_t cap, size_t *out_len)
+{
+	size_t need = 0u;
+	size_t i;
+	uint8_t *p = NULL;
+	int rc;
+
+	if (out_len == NULL) {
+		return -EINVAL;
+	}
+	rc = encode_prologue(m, x_ns != NULL, x_raw_ns != NULL, gapmap, buf,
+			     cap, &p, &need);
+	if (rc != 0) {
+		return rc;
+	}
+
+	for (i = 0u; i < (size_t)m->n; i++) {
+		put_i64(&p[i * sizeof(int64_t)],
+			phase_rec_ns_f_to_ps(x_ns[i]));
+	}
+	if (x_raw_ns != NULL) {
+		uint8_t *q = &p[(size_t)m->n * sizeof(int64_t)];
+
+		for (i = 0u; i < (size_t)m->n; i++) {
+			put_i64(&q[i * sizeof(int64_t)],
+				phase_rec_ns_f_to_ps(x_raw_ns[i]));
+		}
 	}
 
 	*out_len = need;
@@ -200,7 +310,25 @@ int phase_rec_decode_hdr(const uint8_t *buf, size_t len, phase_rec_meta_t *out)
 	m.gaps = get_u32(&buf[12]);
 	m.mono_ms = get_u64(&buf[16]);
 
-	if (m.ver != (uint8_t)PHASE_REC_VER) {
+	if ((m.ver < (uint8_t)PHASE_REC_VER_MIN) ||
+	    (m.ver > (uint8_t)PHASE_REC_VER)) {
+		return -EBADMSG;
+	}
+	/*
+	 * An unknown flag bit declares content of unknown length. Refusing is
+	 * the only answer that cannot be wrong: accepting means computing the
+	 * record's length from a layout this build does not know.
+	 */
+	if ((m.flags & (uint8_t)~(uint8_t)PHASE_REC_F_KNOWN) != 0u) {
+		return -EBADMSG;
+	}
+	/*
+	 * F_RAW did not exist before v2, so a v1 record asserting it is either
+	 * corrupt or forged. Either way its length would be computed from a
+	 * claim its own version says it cannot make.
+	 */
+	if (((m.flags & PHASE_REC_F_RAW) != 0u) &&
+	    (m.ver < 2u)) {
 		return -EBADMSG;
 	}
 	if (m.tau0_ns == 0u) {
@@ -210,7 +338,14 @@ int phase_rec_decode_hdr(const uint8_t *buf, size_t len, phase_rec_meta_t *out)
 		return -EBADMSG;
 	}
 
-	need = phase_rec_size(m.n);
+	/*
+	 * The length must satisfy what the FLAGS claim, not just the base
+	 * layout. A record that sets F_RAW but carries only the corrected
+	 * series is exactly long enough to pass the base check, and a consumer
+	 * that trusted the flag would read the gap bitmap and the header back
+	 * as if they were the uncorrected samples.
+	 */
+	need = phase_rec_size_flags(m.n, m.flags);
 	if (len < need) {
 		return -EMSGSIZE;
 	}
@@ -230,8 +365,9 @@ int phase_rec_decode_hdr(const uint8_t *buf, size_t len, phase_rec_meta_t *out)
 	return 0;
 }
 
-int phase_rec_decode_samples(const uint8_t *buf, size_t len, int64_t *out_x,
-			     size_t cap, size_t *out_n)
+/* Shared body of the two series readers; @p which is 0 corrected, 1 raw. */
+static int decode_series(const uint8_t *buf, size_t len, unsigned int which,
+			 int64_t *out_x, size_t cap, size_t *out_n)
 {
 	phase_rec_meta_t m;
 	const uint8_t *p;
@@ -245,17 +381,33 @@ int phase_rec_decode_samples(const uint8_t *buf, size_t len, int64_t *out_x,
 	if (rc != 0) {
 		return rc;
 	}
+	if ((which == 1u) && ((m.flags & PHASE_REC_F_RAW) == 0u)) {
+		return -ENOENT;
+	}
 	if (cap < (size_t)m.n) {
 		return -EMSGSIZE;
 	}
 
-	p = &buf[(size_t)PHASE_REC_HDR_LEN + gapmap_bytes(m.n)];
+	p = &buf[series_off(m.n) +
+		 ((size_t)which * (size_t)m.n * sizeof(int64_t))];
 	for (i = 0u; i < (size_t)m.n; i++) {
 		out_x[i] = get_i64(&p[i * sizeof(int64_t)]);
 	}
 
 	*out_n = (size_t)m.n;
 	return 0;
+}
+
+int phase_rec_decode_samples(const uint8_t *buf, size_t len, int64_t *out_x,
+			     size_t cap, size_t *out_n)
+{
+	return decode_series(buf, len, 0u, out_x, cap, out_n);
+}
+
+int phase_rec_decode_raw(const uint8_t *buf, size_t len, int64_t *out_x,
+			 size_t cap, size_t *out_n)
+{
+	return decode_series(buf, len, 1u, out_x, cap, out_n);
 }
 
 bool phase_rec_gap_at(const uint8_t *buf, size_t len, size_t i)

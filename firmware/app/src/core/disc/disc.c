@@ -502,19 +502,29 @@ static void adev_gapmap_shift(disc_ctx_t *ctx)
  * @p gap marks the sample as having arrived after a non-uniform interval. It
  * is recorded, never acted on: the estimator still consumes the sample exactly
  * as before.
+ *
+ * @p e_raw_ns is the same sample before the §3.2 sawtooth term was applied
+ * (spec §14). It rides in the same slot, shifts with the same memmove and is
+ * evicted by the same eviction — done here, in one function, precisely so the
+ * two series cannot drift apart by a sample. Only adev_buf drives the loop's
+ * own estimator; the raw ring is export-only.
  */
-static void adev_push(disc_ctx_t *ctx, float e_ns, bool gap)
+static void adev_push(disc_ctx_t *ctx, float e_ns, float e_raw_ns, bool gap)
 {
 	uint16_t slot;
 
 	if (ctx->adev_n < DISC_ADEV_CAP) {
 		slot = ctx->adev_n;
 		ctx->adev_buf[slot] = e_ns;
+		ctx->adev_raw_buf[slot] = e_raw_ns;
 		ctx->adev_n++;
 	} else {
 		memmove(&ctx->adev_buf[0], &ctx->adev_buf[1],
 			(DISC_ADEV_CAP - 1u) * sizeof(ctx->adev_buf[0]));
 		ctx->adev_buf[DISC_ADEV_CAP - 1u] = e_ns;
+		memmove(&ctx->adev_raw_buf[0], &ctx->adev_raw_buf[1],
+			(DISC_ADEV_CAP - 1u) * sizeof(ctx->adev_raw_buf[0]));
+		ctx->adev_raw_buf[DISC_ADEV_CAP - 1u] = e_raw_ns;
 		adev_gapmap_shift(ctx);
 		slot = (uint16_t)(DISC_ADEV_CAP - 1u);
 	}
@@ -1053,6 +1063,8 @@ int disc_phase_snapshot(const disc_ctx_t *ctx, disc_phase_snap_t *out)
 	if (ctx->adev_n > 0u) {
 		memcpy(out->x_ns, ctx->adev_buf,
 		       (size_t)ctx->adev_n * sizeof(ctx->adev_buf[0]));
+		memcpy(out->x_raw_ns, ctx->adev_raw_buf,
+		       (size_t)ctx->adev_n * sizeof(ctx->adev_raw_buf[0]));
 	}
 	memcpy(out->gapmap, ctx->adev_gapmap, sizeof(out->gapmap));
 
@@ -1411,15 +1423,26 @@ static void tick_no_sample(disc_ctx_t *ctx, const disc_env_t *env,
  * cfg.xcheck_tol_ns. The sample is not dropped on divergence — PA0 is the
  * primary and a disagreeing PC6 is more likely a secondary-channel problem —
  * but the flag is published and the median/MAD gate still gets its say.
+ *
+ * `out_e_raw` receives the same conditioned sample with step 2 — the sawtooth —
+ * OMITTED, and nothing else changed: same channel selection, same averaging,
+ * same cable and board delay. That is spec §14's "without sawtooth correction"
+ * residual, and this is the only place in the firmware where it exists, because
+ * one line later it has been added to and is unrecoverable. Capturing it here
+ * rather than re-deriving it downstream is deliberate: the correction is gated
+ * (qerr_valid) and applied in float, so a downstream reconstruction would not
+ * be the uncorrected series, and — worse — it would track a sign-inverted
+ * correction instead of exposing it.
  */
 static bool condition_sample(const disc_ctx_t *ctx, const disc_pps_t *p,
-			     float *out_e, bool *diverge)
+			     float *out_e, float *out_e_raw, bool *diverge)
 {
 	float e_pri = 0.0f;
 	float e_sec = 0.0f;
 	bool have_pri = false;
 	bool have_sec = false;
 	float e;
+	float e_raw;
 
 	*diverge = false;
 
@@ -1455,17 +1478,24 @@ static bool condition_sample(const disc_ctx_t *ctx, const disc_pps_t *p,
 
 	/* §3.2 step 2: sawtooth. §3.2 step 3: cable and board delay. Both
 	 * refer the measured edge backwards in time, so both add to e. */
+	e_raw = e;
 	if (p->qerr_valid) {
 		e += (float)ctx->cfg.qerr_sign * ((float)p->qerr_ps * 0.001f);
 	}
 	e += (float)ctx->cfg.cable_delay_ns;
 	e += (float)ctx->cfg.board_delay_ns;
+	/* The fixed delays go on BOTH series. They are a common offset, not
+	 * part of the sawtooth, and leaving them off the raw one would show up
+	 * in §14's comparison as a mean shift the qErr path did not cause. */
+	e_raw += (float)ctx->cfg.cable_delay_ns;
+	e_raw += (float)ctx->cfg.board_delay_ns;
 
-	if (!isfinite(e)) {
+	if (!isfinite(e) || !isfinite(e_raw)) {
 		return false;
 	}
 
 	*out_e = e;
+	*out_e_raw = e_raw;
 	return true;
 }
 
@@ -1514,6 +1544,7 @@ int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
 	disc_out_t o;
 	const disc_env_t *env;
 	float e = 0.0f;
+	float e_raw = 0.0f;
 	bool diverge = false;
 	float dt = 1.0f;
 	bool freq_ok = false;
@@ -1568,7 +1599,7 @@ int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
 		return 0;
 	}
 
-	if (!condition_sample(ctx, &in->pps, &e, &diverge)) {
+	if (!condition_sample(ctx, &in->pps, &e, &e_raw, &diverge)) {
 		ctx->n_miss++;
 		tick_no_sample(ctx, env, QUALITY_FLAG_NO_PPS, qs, out);
 		return 0;
@@ -1778,7 +1809,7 @@ int disc_tick_pps(disc_ctx_t *ctx, const disc_in_t *in, quality_state_t *qs,
 	 * branch above resets otherwise), so dt is a real measured interval
 	 * between this sample and the ring's last one.
 	 */
-	adev_push(ctx, e,
+	adev_push(ctx, e, e_raw,
 		  (ctx->adev_n > 0u) &&
 			  (f_abs(dt - ADEV_TAU0_S) > ADEV_UNIFORM_TOL_S));
 	adev_update(ctx);

@@ -1073,7 +1073,17 @@ static void disc_apply_qerr(disc_pps_t *pps, const sts_gnss_snap_t *g,
  * right trade for a bench capture, and it is bounded below by the fact that
  * this thread keeps ticking through holdover and missed pulses.
  */
-#define PHASE_BLOB_CAP 4200u
+/*
+ * Sized for a PAIRED record: header + gap bitmap + the corrected series + the
+ * uncorrected one (spec §14 wants both histograms, so one export must carry
+ * both — see stats/phase_rec.h). 24 + 64 + 4096 + 4096 = 8280 for the full
+ * 512-sample ring.
+ *
+ * The 4 KiB this adds is paid for by the int64 staging array that used to sit
+ * next to it: the encoder now converts the float rings itself
+ * (phase_rec_encode_f), so nothing here holds a second copy of the samples.
+ */
+#define PHASE_BLOB_CAP 8300u
 #define PHASE_WAIT_MS  4000u
 
 static K_MUTEX_DEFINE(phase_mutex);
@@ -1085,25 +1095,19 @@ static uint32_t phase_blob_len;
 static int phase_blob_rc = -ENODATA;
 
 BUILD_ASSERT(PHASE_BLOB_CAP >= (24u + (DISC_ADEV_CAP / 8u) +
-				(DISC_ADEV_CAP * 8u)),
-	     "phase_blob too small for a full DISC_ADEV_CAP record");
+				(2u * DISC_ADEV_CAP * 8u)),
+	     "phase_blob too small for a full paired DISC_ADEV_CAP record");
 
 /* Runs on the discipline thread. Encodes the ring into phase_blob. */
 static void disc_publish_phase(void)
 {
 	static disc_phase_snap_t snap;
-	static int64_t x_ps[DISC_ADEV_CAP];
 	phase_rec_meta_t meta;
 	size_t len = 0u;
-	size_t i;
 	int rc;
 
 	rc = disc_phase_snapshot(&disc, &snap);
 	if (rc == 0) {
-		for (i = 0u; i < (size_t)snap.n; i++) {
-			x_ps[i] = phase_rec_ns_f_to_ps(snap.x_ns[i]);
-		}
-
 		meta.ver = PHASE_REC_VER;
 		meta.flags = snap.full ? PHASE_REC_F_FULL : 0u;
 		meta.n = snap.n;
@@ -1111,8 +1115,17 @@ static void disc_publish_phase(void)
 		meta.gaps = snap.gaps;
 		meta.mono_ms = sts_mono_ms();
 
-		rc = phase_rec_encode(&meta, x_ps, snap.gapmap, phase_blob,
-				      sizeof(phase_blob), &len);
+		/*
+		 * Both series, always. §14's sawtooth proof is a comparison,
+		 * and an export that carried only the corrected residual would
+		 * let a bench operator see a tidy histogram from a qErr path
+		 * whose sign is inverted. PHASE_REC_F_RAW is set by the
+		 * encoder because x_raw_ns is non-NULL — the flag records what
+		 * was written, not what was asked for.
+		 */
+		rc = phase_rec_encode_f(&meta, snap.x_ns, snap.x_raw_ns,
+					snap.gapmap, phase_blob,
+					sizeof(phase_blob), &len);
 	}
 
 	(void)k_mutex_lock(&phase_mutex, K_FOREVER);

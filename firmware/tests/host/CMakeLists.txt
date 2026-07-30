@@ -125,6 +125,16 @@ module_deps(phase_rec stats)
 # report) lives in neither module alone but in the number crossing between
 # them. `disc` carries util and quality with it.
 module_deps(phase_export disc stats util quality)
+# `saw` is spec §14's sawtooth proof, and it spans the same seam for the same
+# reason: the uncorrected residual is CAPTURED inside core/disc's
+# condition_sample() and judged by core/stats' stats_saw_verdict(), and the
+# defect it exists to catch — a sign inversion in the qErr path, which roughly
+# doubles the residual spread instead of collapsing it — is invisible in either
+# module alone. It is a separate suite from `phase_export` because that one
+# asserts the record reports absorbed gaps honestly and this one asserts the
+# record carries two series that actually differ; a single suite would make
+# either failure look like the other.
+module_deps(saw disc stats util quality)
 # `mp` (the Maintenance Protocol, FMT device side) adds two edges to the
 # ARCHITECTURE.md §4 map. `ina228`, for the nine-monitor rail table the
 # capability manifest publishes (name, designator, address, shunt) rather than
