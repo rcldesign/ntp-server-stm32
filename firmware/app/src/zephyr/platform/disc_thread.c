@@ -45,6 +45,7 @@
 #include <zephyr/drivers/dac.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 #include <zephyr/sys/atomic.h>
 
 #include "zephyr/platform/platform.h"
@@ -1074,14 +1075,16 @@ static void disc_apply_qerr(disc_pps_t *pps, const sts_gnss_snap_t *g,
  * this thread keeps ticking through holdover and missed pulses.
  */
 /*
- * Sized for a PAIRED record: header + gap bitmap + the corrected series + the
- * uncorrected one (spec §14 wants both histograms, so one export must carry
- * both — see stats/phase_rec.h). 24 + 64 + 4096 + 4096 = 8280 for the full
- * 512-sample ring.
+ * Sized for a PAIRED record WITH IDENTITY: header + gap bitmap + the corrected
+ * series + the uncorrected one (spec §14 wants both histograms, so one export
+ * must carry both — see stats/phase_rec.h) + the 12-byte epoch/seq0 block that
+ * lets a host join successive exports (stats/phase_join.h).
+ * 24 + 64 + 4096 + 4096 + 12 = 8292 for the full 512-sample ring.
  *
- * The 4 KiB this adds is paid for by the int64 staging array that used to sit
- * next to it: the encoder now converts the float rings itself
- * (phase_rec_encode_f), so nothing here holds a second copy of the samples.
+ * The 4 KiB the second series added is paid for by the int64 staging array that
+ * used to sit next to it: the encoder converts the float rings itself
+ * (phase_rec_encode_f), so nothing here holds a second copy of the samples. The
+ * identity block fits inside the slack that sizing already left.
  */
 #define PHASE_BLOB_CAP 8300u
 #define PHASE_WAIT_MS  4000u
@@ -1094,9 +1097,10 @@ static uint8_t phase_blob[PHASE_BLOB_CAP];
 static uint32_t phase_blob_len;
 static int phase_blob_rc = -ENODATA;
 
-BUILD_ASSERT(PHASE_BLOB_CAP >= (24u + (DISC_ADEV_CAP / 8u) +
-				(2u * DISC_ADEV_CAP * 8u)),
-	     "phase_blob too small for a full paired DISC_ADEV_CAP record");
+BUILD_ASSERT(PHASE_BLOB_CAP >= (PHASE_REC_HDR_LEN + (DISC_ADEV_CAP / 8u) +
+				(2u * DISC_ADEV_CAP * 8u) +
+				PHASE_REC_IDENT_LEN),
+	     "phase_blob too small for a full paired+identified DISC_ADEV_CAP record");
 
 /* Runs on the discipline thread. Encodes the ring into phase_blob. */
 static void disc_publish_phase(void)
@@ -1114,6 +1118,20 @@ static void disc_publish_phase(void)
 		meta.tau0_ns = snap.tau0_ns;
 		meta.gaps = snap.gaps;
 		meta.mono_ms = sts_mono_ms();
+
+		/*
+		 * Sample identity. This is what lets a bench operator poll
+		 * repeatedly and concatenate the windows into a record long
+		 * enough for the tau axis §14 needs — the ring is 512 samples,
+		 * so one export tops out at tau = 128 s, and the part cannot
+		 * afford a ring big enough to do better. snap.has_ident is
+		 * false only when the platform could not seed an epoch, and the
+		 * encoder then omits PHASE_REC_F_IDENT so the host refuses the
+		 * join rather than guessing at it.
+		 */
+		meta.has_ident = snap.has_ident;
+		meta.epoch = snap.epoch;
+		meta.seq0 = snap.seq0;
 
 		/*
 		 * Both series, always. §14's sawtooth proof is a comparison,
@@ -1340,6 +1358,41 @@ int sts_discipline_start(void)
 		return rc;
 	}
 	cfg.dac_vref_mv = vc_sense.vref_mv;
+
+	/*
+	 * Seed the phase-record sample-numbering epoch (disc_cfg_t
+	 * ::adev_epoch_seed). It has to be RANDOM, not a constant and not
+	 * derived from uptime: its whole job is to make records taken either
+	 * side of a reboot un-joinable, and a value this boot could reproduce
+	 * from the last one would let a pre-reboot window and a post-reboot
+	 * window abut with no overlap to check — a splice across a
+	 * discontinuity that the host cannot see (stats/phase_join.h).
+	 *
+	 * A failed draw leaves the seed 0, which is not a generation: the loop
+	 * then publishes no identity, PHASE_REC_F_IDENT stays clear, and the
+	 * host refuses to join the records. Refusing to join is a bench
+	 * inconvenience; joining across a reboot is a wrong stability plot, so
+	 * this failure is not fatal to the discipline loop and must not stop it
+	 * starting.
+	 */
+	{
+		uint32_t seed = 0u;
+
+		if (sys_csrand_get(&seed, sizeof(seed)) != 0) {
+			LOG_WRN("no entropy for the phase-record epoch; "
+				"exports will not be joinable");
+			seed = 0u;
+		} else if (seed == 0u) {
+			/* 0 is the reserved "no identity" value, so a draw that
+			 * lands on it must be nudged rather than published — a
+			 * 1-in-2^32 chance of silently disabling the feature is
+			 * a worse trade than a 2-in-2^32 value. */
+			seed = 1u;
+		} else {
+			/* nothing further */
+		}
+		cfg.adev_epoch_seed = seed;
+	}
 
 	rc = disc_init(&disc, &cfg);
 	if (rc != 0) {

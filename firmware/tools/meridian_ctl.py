@@ -18,6 +18,8 @@ has to run on a laptop in a rack room.
     meridian_ctl.py --password s3cret cfg-set tim.tau.s 300
     meridian_ctl.py cfg-export backup.mcf
     meridian_ctl.py phase-export run1.phr   # then: meridian_phase run1.phr
+    meridian_ctl.py phase-export run.phr --repeat 12   # ~45 min, tau to 512 s
+                                            # then: meridian_phase run.*.phr
     meridian_ctl.py cfg-import backup.mcf
     meridian_ctl.py log-tail --follow
     meridian_ctl.py --password s3cret fw-upload zephyr.signed.bin
@@ -971,23 +973,91 @@ def cmd_cfg_export(cli: Client, out: Out, args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_phase_export(cli: Client, out: Out, args: argparse.Namespace) -> int:
-    blob = cli.phase_export()
-    if len(blob) < 24 or blob[:4] != b"PHR1":
+# Wire constants from core/stats/phase_rec.h. Duplicated here rather than
+# parsed, because this tool only ever reports what it fetched — the decoding
+# that matters is done by meridian_phase, which links the C codec itself.
+PHR_F_IDENT = 0x04
+PHR_HDR_LEN = 24
+
+
+def _phase_describe(blob: bytes, path: str) -> dict:
+    """Header fields of one fetched record, for the operator's log line."""
+    if len(blob) < PHR_HDR_LEN or blob[:4] != b"PHR1":
         raise SystemExit("meridian_ctl: device did not return a phase record")
 
+    ver, flags = blob[4], blob[5]
     n, tau0_ns, gaps = struct.unpack_from("<HII", blob, 6)
-    with open(args.file, "wb") as fh:
-        fh.write(blob)
+    d = {"file": path, "bytes": len(blob), "samples": n,
+         "tau0_ns": tau0_ns, "absorbed_gaps": gaps,
+         "fit_for_adev": gaps == 0}
 
-    # Reported, not interpreted. A non-zero count means the discipline loop
-    # absorbed a short PPS gap into the ring, so the samples are not uniformly
-    # spaced and the record is not fit for ADEV as a whole. Deciding what to do
-    # about that belongs to meridian_phase, which is where the estimators are.
-    out.obj({"file": args.file, "bytes": len(blob), "samples": n,
-             "tau0_ns": tau0_ns, "absorbed_gaps": gaps,
-             "fit_for_adev": gaps == 0,
-             "analyse_with": "meridian_phase %s" % args.file})
+    # The identity block is the last 12 bytes, appended past both series.
+    # Reported so an operator polling repeatedly can see the window sliding —
+    # if seq0 does not advance between polls the ring is not moving, and if the
+    # epoch changes the loop reset and the chain has to start over.
+    if ver >= 3 and (flags & PHR_F_IDENT):
+        epoch, seq0 = struct.unpack_from("<IQ", blob, len(blob) - 12)
+        d["epoch"] = "%08x" % epoch
+        d["seq0"] = seq0
+        d["seq_end"] = seq0 + n
+    else:
+        d["epoch"] = None
+    return d
+
+
+def cmd_phase_export(cli: Client, out: Out, args: argparse.Namespace) -> int:
+    # Reported, not interpreted. A non-zero absorbed-gap count means the
+    # discipline loop absorbed a short PPS gap into the ring, so the samples are
+    # not uniformly spaced and the record is not fit for ADEV as a whole.
+    # Deciding what to do about that belongs to meridian_phase, which is where
+    # the estimators are — and so does deciding whether a set of records is
+    # joinable, which is why --repeat only fetches and names the files.
+    if args.repeat <= 1:
+        blob = cli.phase_export()
+        with open(args.file, "wb") as fh:
+            fh.write(blob)
+        d = _phase_describe(blob, args.file)
+        d["analyse_with"] = "meridian_phase %s" % args.file
+        out.obj(d)
+        return 0
+
+    # Repeat poll. The device ring is 512 samples at 1 Hz, so a capture is
+    # 8 min 32 s and one record's tau axis stops at 128 s. Polling faster than
+    # the ring empties makes successive records OVERLAP, and the overlap is what
+    # lets meridian_phase prove the concatenation is contiguous rather than
+    # assuming it. The default interval is deliberately well under the ring's
+    # 512 s so a slow link or a missed poll still leaves samples in common.
+    base, dot, ext = args.file.rpartition(".")
+    if not dot:
+        base, ext = args.file, "phr"
+    files = []
+    records = []
+    for i in range(args.repeat):
+        if i > 0:
+            time.sleep(args.interval)
+        path = "%s.%03d.%s" % (base, i, ext)
+        blob = cli.phase_export()
+        with open(path, "wb") as fh:
+            fh.write(blob)
+        d = _phase_describe(blob, path)
+        files.append(path)
+        records.append(d)
+        out.obj(d)
+
+    unident = [r["file"] for r in records if r["epoch"] is None]
+    epochs = sorted({r["epoch"] for r in records if r["epoch"] is not None})
+    summary = {"records": len(files), "epochs": epochs,
+               "analyse_with": "meridian_phase " + " ".join(files)}
+    if unident:
+        summary["not_joinable"] = unident
+    if len(epochs) > 1:
+        # Say it here too. The join will refuse, but an operator watching a
+        # long capture wants to know at the moment it happened that the loop
+        # reset under them, not an hour later when the analysis fails.
+        summary["warning"] = ("the capture epoch changed mid-poll: the "
+                              "discipline loop reset, and records from either "
+                              "side of that cannot be joined")
+    out.obj(summary)
     return 0
 
 
@@ -1248,6 +1318,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("phase-export", cmd_phase_export,
             "save the discipline loop's phase record for offline analysis")
     p.add_argument("file")
+    p.add_argument("--repeat", type=int, default=1, metavar="N",
+                   help="poll N times, writing FILE.000.phr .. FILE.NNN.phr; "
+                        "meridian_phase joins them into one long record")
+    p.add_argument("--interval", type=float, default=240.0, metavar="S",
+                   help="seconds between polls with --repeat (default 240). "
+                        "Must stay under the ring's 512 s so consecutive "
+                        "records overlap and the join can be verified")
 
     p = add("cfg-import", cmd_cfg_import, "restore a configuration file")
     p.add_argument("file")

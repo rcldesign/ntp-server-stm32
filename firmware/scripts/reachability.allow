@@ -249,6 +249,37 @@ phase_rec_decode_samples               # no-caller: host-side reader, pulls the 
 phase_rec_decode_raw                   # no-caller: host-side reader for the UNCORRECTED series (PHASE_REC_F_RAW). The device wrote it; the half of §14's sawtooth proof that reads it back runs on the bench
 phase_rec_gap_at                       # no-caller: host-side reader, per-sample gap query behind the CLI's gap listing
 phase_rec_longest_clean                # no-caller: host-side reader. Finds the longest uniformly spaced run in a record the runtime absorbed gaps into, so a bench operator can salvage a usable window instead of discarding the capture
+phase_rec_series                       # no-caller: host-side reader. Returns a pointer INTO the encoded record so stats/phase_join.c can compare two records sample by sample without a staging array the size of each; the device writes records and never reads one back
+phase_rec_sample                       # no-caller: host-side reader, the little-endian int64 accessor for a phase_rec_series() pointer. Public rather than duplicated inside the joiner so the byte order has one definition
+#
+# core/stats' record JOINER (stats/phase_join.h) is host-only in its entirety,
+# and unlike the codec above there is no half of it that runs on the device.
+#
+# WHY IT EXISTS AT ALL. The ADEV ring is DISC_ADEV_CAP = 512 samples at tau0 =
+# 1 s, so one export supports m up to (n-1)/2 = 255 and its octave axis stops at
+# tau = 128 s. Spec §14's question about the OCXO and the rubidium is answered at
+# tau of hundreds to thousands of seconds. A ring long enough is not affordable:
+# each sample costs ~32 B across disc_ctx_t's two rings, the disc_phase_snap_t
+# the exporter stages through and the export blob, so tau = 1024 s alone would be
+# ~65 KB against the ~73 KB of SRAM this build has left. So the long record is
+# built on the BENCH, by polling repeatedly and concatenating, and this module is
+# the part that refuses a concatenation it cannot prove contiguous.
+#
+# WHY IT IS IN core/ RATHER THAN IN tools/. Its inputs are records the device
+# encoded, and the property it enforces (same epoch, verified overlap, no hole,
+# union gap bitmap) is a property of that format. Putting it beside phase_rec.c
+# is what gives it the zero-touch test suite (tests/host/test_phase_join.c) and
+# the coverage gate; a copy under tools/ would be a second place for the format's
+# invariants to live. It costs no flash — --gc-sections drops all four — and the
+# device has no use for a joiner: it produces one window at a time and has
+# nothing to join it to.
+#
+# Its real callers are tools/meridian_phase.c (multi-record analysis, and the
+# four join cases in its --self-test) and tests/host/test_phase_join.c.
+phase_join_init                        # no-caller: host-side joiner. Binds the caller's destination arrays; the device never joins records, and a 65535-sample join is 512 KB per series besides
+phase_join_add                         # no-caller: host-side joiner. The whole safety argument for a multi-record capture — epoch match, overlap verification, hole refusal, gap-bitmap union — none of which the device has an input to run against
+phase_join_meta                        # no-caller: host-side joiner. Describes the joined series so meridian_phase --join-out can write it back as one record
+phase_join_strerror                    # no-caller: host-side joiner. Turns a refusal into a sentence for a bench operator looking at two files; the device never refuses a join because it never attempts one
 #
 # stats/saw.h is spec §14's sawtooth verdict: given the corrected and uncorrected
 # residual series out of one phase record, decide whether the qErr path collapsed

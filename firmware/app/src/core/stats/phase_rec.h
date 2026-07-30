@@ -54,6 +54,51 @@
  * from the real uncorrected series exactly where the proof is being made, and
  * would agree with a broken qErr path by construction.
  *
+ * THE THIRD THING: SAMPLE IDENTITY (`epoch`, `seq0`)
+ *
+ * The producing ring is 512 samples at tau0 = 1 s (DISC_ADEV_CAP), so one
+ * record is 8.5 minutes and the largest averaging factor it supports is
+ * m = (n-1)/2 = 255 — a tau axis that stops at 128 s. Spec §14's interesting
+ * region for an OCXO and a rubidium runs to tau of many hundreds or thousands
+ * of seconds, which the ring cannot hold and the part cannot afford to enlarge
+ * (a 2048-sample ring costs ~65 KB across the ring, the snapshot and the export
+ * blob, against ~73 KB free).
+ *
+ * The record is therefore a WINDOW on a longer series, and the way to a longer
+ * tau is to poll repeatedly and concatenate. That is only safe if the host can
+ * PROVE the pieces are contiguous, and a record carrying nothing but samples
+ * cannot be proved anything about: two polls that overlap, or that straddle a
+ * dropped stretch, splice into a series with a wrong time axis and the plot
+ * looks entirely ordinary. So the record numbers its samples.
+ *
+ *   `seq0`  is the monotonic index of x_ps[0] within the current epoch, so
+ *           sample i is index seq0 + i. Two records overlap where their index
+ *           ranges intersect, abut when one ends where the other starts, and
+ *           are separated by a hole otherwise — all three distinguishable.
+ *
+ *   `epoch` is the numbering GENERATION. It changes on every event that
+ *           restarts the numbering: a ring reset (a PPS gap beyond
+ *           ADEV_MAX_GAP_S, entry to holdover, disc_restart()) and a reboot.
+ *           Records from either side of one are not joinable at all, whatever
+ *           their indices say, and a differing epoch is what says so.
+ *
+ * The epoch's initial value is a random 32-bit draw supplied by the platform,
+ * not a constant, and that is load-bearing rather than decorative: with a
+ * constant seed a reboot would restart BOTH the epoch and the index, so a
+ * pre-reboot record covering [512, 1024) and a post-reboot record covering
+ * [0, 512) would present as a perfectly abutting pair with no overlap to check
+ * — a silent splice across a discontinuity, which is the exact failure this
+ * field exists to stop. A platform that cannot draw one supplies 0, and the
+ * loop then reports NO epoch: the records carry no identity and refuse to join
+ * rather than joining wrongly.
+ *
+ * Overlap is normal and useful. The ring slides one sample a second, so polls
+ * taken faster than it empties always overlap, and the overlap is where a join
+ * is VERIFIED: the shared samples must be identical. They come from the same
+ * ring slots, so they are bit-identical or something is wrong — a mismatch
+ * means the epoch is being reused or a record is corrupt, and it is a hard
+ * failure. See stats/phase_join.h for the joiner.
+ *
  * WIRE FORMAT (little-endian throughout, no padding, no alignment requirement)
  *
  *   off  size  field
@@ -73,33 +118,48 @@
  *   24+gb+8n  8n   x_raw_ps  n * int64 UNCORRECTED phase samples, same units,
  *                            same order, same samples — present if and only if
  *                            PHASE_REC_F_RAW is set in `flags`
+ *   ...+12    12   ident     u32 epoch, u64 seq0 — present if and only if
+ *                            PHASE_REC_F_IDENT is set in `flags`. Appended,
+ *                            like the raw series, so the leading bytes stay
+ *                            byte-identical to the older record of the same
+ *                            samples and the gapmap/series offsets do not move
+ *                            with the version.
  *
  * Picoseconds because that is exactly what stats_adev()/stats_mdev() take: a
  * decoded record is handed to the estimator with no conversion step that could
  * introduce a scale error between the two sides.
  *
- * VERSIONING, AND WHY A STALE DECODER CANNOT MISREAD A PAIRED RECORD
+ * VERSIONING, AND WHY A STALE DECODER CANNOT MISREAD A LATER RECORD
  *
- * The second series is appended, so the leading bytes of a v2 record are
- * byte-identical to the v1 record of the same samples. That is exactly the
- * shape a decoder can get wrong: a v1 reader would find its expected length
- * satisfied, read the corrected series, and report a single-series analysis
- * from a record whose whole purpose is the pair. Two independent guards stop
- * that:
+ * Every addition is APPENDED, so the leading bytes of a v3 record are
+ * byte-identical to the v2 record of the same samples, which are in turn
+ * byte-identical to the v1 record. That is exactly the shape a decoder can get
+ * wrong: an older reader would find its expected length satisfied, read what it
+ * knows, and report an analysis from a record whose whole purpose is the part
+ * it skipped — a single-series analysis of a paired record, or an unverifiable
+ * join of records whose identity it never saw. Two independent guards stop
+ * that, and each addition arms both:
  *
- *   1. `ver` is 2. The v1 decoder tests `ver != 1` and refuses outright, so it
- *      cannot silently analyse half of a paired record.
- *   2. `flags` declares the contents and the length must match the declaration:
- *      PHASE_REC_F_RAW is what makes the extra 8n bytes REQUIRED, and
- *      phase_rec_decode_hdr() rejects a record that claims the raw series but
- *      is not long enough to hold it. Unknown flag bits are refused for the
- *      same reason — an unrecognised bit means unrecognised content, and a
- *      decoder that ignores it is guessing at the layout.
+ *   1. `ver` is 3. A v1 decoder tests `ver != 1` and a v2 decoder tests
+ *      `ver > 2`; both refuse outright, so neither can silently analyse the
+ *      part of a v3 record it happens to understand.
+ *   2. `flags` declares the contents and the length must match the declaration.
+ *      PHASE_REC_F_RAW is what makes the second series' 8n bytes REQUIRED and
+ *      PHASE_REC_F_IDENT what makes the identity block's 12 bytes required;
+ *      phase_rec_decode_hdr() rejects a record that claims either and is not
+ *      long enough to hold it. Unknown flag bits are refused for the same
+ *      reason — an unrecognised bit means unrecognised content, and a decoder
+ *      that ignores it is guessing at the layout. A v2 decoder therefore
+ *      refuses a v3 record on the unknown F_IDENT bit even if its version test
+ *      were somehow bypassed.
  *
- * This decoder still reads v1 records: their layout is a strict prefix, they
- * cannot set F_RAW (guard 3 below), and a capture taken before the pair existed
- * is still a valid single-series capture. What it will not do is treat one as
- * if it carried the pair.
+ * This decoder still reads v1 and v2 records: their layouts are strict
+ * prefixes, they cannot set the flags their versions predate (the version/flag
+ * cross-checks below), and a capture taken before the pair or the identity
+ * existed is still a valid capture of what it does hold. What it will not do is
+ * treat one as if it carried more than it does — in particular a v1/v2 record
+ * has no identity, so stats/phase_join.h refuses to join it rather than
+ * assuming its samples abut anything.
  */
 
 #ifndef STS1000_CORE_STATS_PHASE_REC_H_
@@ -119,17 +179,21 @@ extern "C" {
 /**
  * Format version written by this build.
  *
- * 2 adds the appended uncorrected series (PHASE_REC_F_RAW). The bump is what
- * stops a v1 decoder from reading a paired record as a single-series one; see
+ * 2 adds the appended uncorrected series (PHASE_REC_F_RAW). 3 adds the appended
+ * sample-identity block (PHASE_REC_F_IDENT). Each bump is what stops the
+ * previous build's decoder from reading a later record as one of its own; see
  * the versioning note in the banner.
  */
-#define PHASE_REC_VER 2u
+#define PHASE_REC_VER 3u
 
 /** Oldest format version this decoder accepts. */
 #define PHASE_REC_VER_MIN 1u
 
 /** Fixed header length, in bytes. */
 #define PHASE_REC_HDR_LEN 24u
+
+/** Length of the appended identity block: u32 epoch + u64 seq0. */
+#define PHASE_REC_IDENT_LEN 12u
 
 /**
  * The producing ring was full, so samples older than x_ps[0] were evicted.
@@ -149,12 +213,25 @@ extern "C" {
 #define PHASE_REC_F_RAW 0x02u
 
 /**
+ * The record carries the 12-byte sample-identity block after the series, so its
+ * samples can be located within a longer capture. Requires ver >= 3.
+ *
+ * Load-bearing in the same way F_RAW is: it makes the trailing 12 bytes
+ * mandatory, and phase_rec_decode_hdr() refuses a record that sets it without
+ * the length to back it. Its absence is not an error — a v1/v2 capture is a
+ * valid record — but stats/phase_join.h will not join a record that lacks it,
+ * because there is then nothing to prove contiguity with.
+ */
+#define PHASE_REC_F_IDENT 0x04u
+
+/**
  * Every flag bit this build understands. A record setting anything outside this
  * mask is refused — an unknown bit may declare content whose length this
  * decoder cannot account for, and guessing is how a truncated record gets
  * analysed as a whole one.
  */
-#define PHASE_REC_F_KNOWN (PHASE_REC_F_FULL | PHASE_REC_F_RAW)
+#define PHASE_REC_F_KNOWN \
+	(PHASE_REC_F_FULL | PHASE_REC_F_RAW | PHASE_REC_F_IDENT)
 
 /** Header fields, host-side. */
 typedef struct {
@@ -174,6 +251,22 @@ typedef struct {
 	uint32_t gaps;
 	/** Device monotonic milliseconds at capture. Provenance only. */
 	uint64_t mono_ms;
+	/**
+	 * @ref epoch and @ref seq0 are present and meaningful.
+	 *
+	 * On encode this is the caller's assertion that it has identity to
+	 * write, and it is what sets PHASE_REC_F_IDENT. On decode it mirrors
+	 * that flag; the two fields read back 0 when it is false, and a
+	 * consumer must not read them as "epoch 0, sample 0".
+	 */
+	bool has_ident;
+	/**
+	 * Sample-numbering generation. Records with different epochs describe
+	 * different, unrelated numberings and can never be joined.
+	 */
+	uint32_t epoch;
+	/** Monotonic index of sample 0 within @ref epoch; sample i is seq0+i. */
+	uint64_t seq0;
 } phase_rec_meta_t;
 
 /**
@@ -187,10 +280,11 @@ size_t phase_rec_size(uint16_t n);
 /**
  * Encoded size of a record holding @p n samples with @p flags, in bytes.
  *
- * The only flag that changes the length is PHASE_REC_F_RAW, which appends a
- * second series of the same shape. This is the function that ties the header's
- * declaration to the record's length, and it is what phase_rec_decode_hdr()
- * validates against — so a record cannot claim contents it does not carry.
+ * Two flags change the length: PHASE_REC_F_RAW appends a second series of the
+ * same shape, and PHASE_REC_F_IDENT appends PHASE_REC_IDENT_LEN bytes after it.
+ * This is the function that ties the header's declaration to the record's
+ * length, and it is what phase_rec_decode_hdr() validates against — so a record
+ * cannot claim contents it does not carry.
  */
 size_t phase_rec_size_flags(uint16_t n, uint8_t flags);
 
@@ -199,6 +293,9 @@ size_t phase_rec_size_flags(uint16_t n, uint8_t flags);
  *
  * @param m        Header fields. @p m->n is the sample count; ver is written
  *                 as PHASE_REC_VER regardless of what the caller set.
+ *                 PHASE_REC_F_IDENT is written if and only if @p m->has_ident,
+ *                 whatever @p m->flags says — the flag records what was
+ *                 written, and only the encoder knows that.
  * @param x_ps     @p m->n phase samples, picoseconds, oldest first.
  * @param gapmap   (@p m->n + 7) / 8 bytes of LSB-first per-sample gap bits, or
  *                 NULL for a record with no gap information — permitted only
@@ -268,12 +365,12 @@ int phase_rec_encode_f(const phase_rec_meta_t *m, const float *x_ns,
  * @retval 0         Success.
  * @retval -EINVAL   NULL argument.
  * @retval -EBADMSG  Bad magic, unsupported version, an unknown flag bit,
- *                   PHASE_REC_F_RAW on a pre-v2 record, tau0_ns == 0,
- *                   gaps > n, or gaps disagreeing with the bitmap's
- *                   population count.
+ *                   PHASE_REC_F_RAW on a pre-v2 record, PHASE_REC_F_IDENT on a
+ *                   pre-v3 record, tau0_ns == 0, gaps > n, or gaps disagreeing
+ *                   with the bitmap's population count.
  * @retval -EMSGSIZE @p len is shorter than the record the header declares —
- *                   including when the shortfall is only the raw series the
- *                   flags claim.
+ *                   including when the shortfall is only the raw series or the
+ *                   identity block the flags claim.
  */
 int phase_rec_decode_hdr(const uint8_t *buf, size_t len, phase_rec_meta_t *out);
 
@@ -311,6 +408,28 @@ int phase_rec_decode_samples(const uint8_t *buf, size_t len, int64_t *out_x,
  */
 int phase_rec_decode_raw(const uint8_t *buf, size_t len, int64_t *out_x,
 			 size_t cap, size_t *out_n);
+
+/**
+ * Pointer to series @p which inside a record whose header @p m came from a
+ * successful phase_rec_decode_hdr() over @p buf.
+ *
+ * @param which  0 corrected, 1 uncorrected.
+ * @return       Start of the series, or NULL for a record that does not carry
+ *               @p which (F_RAW clear) or for a NULL argument.
+ *
+ * This exists so that a consumer which must compare two records SAMPLE BY
+ * SAMPLE — stats/phase_join.c, verifying that an overlap agrees — can do it
+ * without a staging array the size of the record. phase_rec_decode_samples()
+ * would need up to 512 KB of caller buffer per record for that, on top of the
+ * joined series itself. The returned bytes are raw little-endian int64;
+ * phase_rec_sample() is the reader, so no consumer re-implements the byte
+ * order.
+ */
+const uint8_t *phase_rec_series(const uint8_t *buf, const phase_rec_meta_t *m,
+				unsigned int which);
+
+/** Read sample @p i from a pointer returned by phase_rec_series(). */
+int64_t phase_rec_sample(const uint8_t *series, size_t i);
 
 /** True when sample @p i of a validated record followed a non-uniform interval. */
 bool phase_rec_gap_at(const uint8_t *buf, size_t len, size_t i);

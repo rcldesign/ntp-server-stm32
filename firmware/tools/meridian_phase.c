@@ -9,6 +9,25 @@
  * and MDEV against tau, and the PPS residual histograms with and without
  * sawtooth correction, with a verdict on the qErr path.
  *
+ * MORE THAN ONE RECORD: THE TAU AXIS IS BOUNDED BY THE RING, NOT BY THE MATHS
+ *
+ * The device ring is 512 samples at tau0 = 1 s, so a single export covers
+ * 8 min 32 s and supports m up to (n-1)/2 = 255 — an octave axis that stops at
+ * tau = 128 s. §14's question about an OCXO and a rubidium is answered at tau of
+ * hundreds to thousands of seconds, and the part has no RAM for a ring that
+ * long (see stats/phase_join.h for the arithmetic).
+ *
+ * So this tool takes SEVERAL records and joins them. `meridian_ctl.py
+ * phase-export --repeat` polls faster than the ring empties, which makes
+ * successive captures overlap; the overlap is not waste, it is the evidence —
+ * the joiner proves the pieces belong to the same capture epoch and that the
+ * samples they share are identical before it splices them. Records from either
+ * side of a ring reset or a reboot carry different epochs and are refused;
+ * records with a hole between them are refused; records whose overlap disagrees
+ * are refused. What comes out is one long uniformly spaced series with a gap
+ * bitmap that is the union of the parts', which is the only kind of
+ * concatenation the estimators may be handed.
+ *
  * IT CALLS core/stats DIRECTLY, AND THAT IS THE POINT
  *
  * The arithmetic here is not reimplemented. This file links app/src/core/stats
@@ -55,7 +74,7 @@
  * (core/stats/saw.h) is the arithmetic; this file prints it.
  *
  * Usage:
- *   meridian_phase [options] <record.phr>
+ *   meridian_phase [options] <record.phr> [more.phr ...]
  *   meridian_phase --self-test
  *
  * Options:
@@ -64,12 +83,15 @@
  *   --hist-bin <ps>   histogram bin width, picoseconds (default 1000 = 1 ns)
  *   --hist-bins <n>   number of histogram bins, odd, centred (default 41)
  *   --no-hist         skip the histograms (the verdict is still printed)
+ *   --join-out <file> write the joined series back out as one record
  *   --require-sawtooth
  *                     exit non-zero unless the verdict is CORRECTED, for a
  *                     bench script that wants the proof to gate something
  *   --self-test       analyse a synthetic exactly-linear record and check that
  *                     ADEV is exactly 0, then check that the three sawtooth
- *                     signatures produce the three verdicts, then exit. Proves
+ *                     signatures produce the three verdicts, then check that
+ *                     the join accepts a verified overlap and refuses a wrong
+ *                     epoch, a hole and a mismatched overlap, then exit. Proves
  *                     the analysis chain on this machine before it is trusted
  *                     on real data.
  */
@@ -82,29 +104,46 @@
 #include <string.h>
 
 #include "stats/adev.h"
+#include "stats/phase_join.h"
 #include "stats/phase_rec.h"
 #include "stats/saw.h"
 
-/* The device ring is 512 samples; allow well beyond it so a concatenated or
- * future longer record still loads rather than being silently truncated. The
- * byte budget carries TWO series per sample, because a paired record does. */
-#define MAX_SAMPLES 262144u
-#define MAX_FILE_BYTES (32u + (MAX_SAMPLES / 8u) + (2u * MAX_SAMPLES * 8u))
+/*
+ * A record's sample count is a uint16, so 65535 is the largest series any
+ * single record can express and the largest a join can be written back out as.
+ * Sizing the arrays to exactly that bounds the tool by the format rather than
+ * by a guess, and 65535 samples at tau0 = 1 s is an 18.2-hour capture whose
+ * octave axis reaches tau = 16384 s — far past anything §14 asks about.
+ */
+#define MAX_SAMPLES 65535u
+#define MAX_FILE_BYTES                                          \
+	(PHASE_REC_HDR_LEN + PHASE_REC_IDENT_LEN + (MAX_SAMPLES / 8u) + 1u + \
+	 (2u * MAX_SAMPLES * 8u))
 
 #define MAX_OCTAVES 64u
 #define MAX_BINS 1024u
+#define MAX_PARTS 512u
 
 static int64_t g_x[MAX_SAMPLES];
 static int64_t g_raw[MAX_SAMPLES];
+static uint8_t g_gapmap[(MAX_SAMPLES + 7u) / 8u];
 static uint8_t g_buf[MAX_FILE_BYTES];
 static uint32_t g_m[MAX_OCTAVES];
 static double g_adev[MAX_OCTAVES];
 static double g_mdev[MAX_OCTAVES];
 static uint32_t g_bins[MAX_BINS];
 
+/*
+ * The joined record, rebuilt from the accumulator so that everything downstream
+ * — the gap listing, --clean-run, --join-out — runs against exactly one code
+ * path whether the operator passed one file or twenty. A join of one record is
+ * that record.
+ */
+static uint8_t g_join[MAX_FILE_BYTES];
+
 /* ------------------------------------------------------------------- io */
 
-static int read_file(const char *path, size_t *out_len)
+static int read_into(const char *path, uint8_t *dst, size_t cap, size_t *out_len)
 {
 	FILE *f = fopen(path, "rb");
 	size_t n;
@@ -115,7 +154,7 @@ static int read_file(const char *path, size_t *out_len)
 		return -1;
 	}
 
-	n = fread(g_buf, 1u, sizeof(g_buf), f);
+	n = fread(dst, 1u, cap, f);
 	if (ferror(f) != 0) {
 		fprintf(stderr, "meridian_phase: %s: read error\n", path);
 		(void)fclose(f);
@@ -124,16 +163,203 @@ static int read_file(const char *path, size_t *out_len)
 	/* A file that exactly fills the buffer is indistinguishable from one
 	 * that overflowed it, and analysing a truncated record is the failure
 	 * this whole tool exists to avoid. */
-	if (n == sizeof(g_buf)) {
+	if (n == cap) {
 		fprintf(stderr,
 			"meridian_phase: %s: larger than the %zu-byte limit\n",
-			path, sizeof(g_buf));
+			path, cap);
 		(void)fclose(f);
 		return -1;
 	}
 	(void)fclose(f);
 
 	*out_len = n;
+	return 0;
+}
+
+static int read_file(const char *path, size_t *out_len)
+{
+	return read_into(path, g_buf, sizeof(g_buf), out_len);
+}
+
+static int write_file(const char *path, const uint8_t *buf, size_t len)
+{
+	FILE *f = fopen(path, "wb");
+
+	if (f == NULL) {
+		fprintf(stderr, "meridian_phase: %s: %s\n", path,
+			strerror(errno));
+		return -1;
+	}
+	if (fwrite(buf, 1u, len, f) != len) {
+		fprintf(stderr, "meridian_phase: %s: write error\n", path);
+		(void)fclose(f);
+		return -1;
+	}
+	if (fclose(f) != 0) {
+		fprintf(stderr, "meridian_phase: %s: %s\n", path,
+			strerror(errno));
+		return -1;
+	}
+	return 0;
+}
+
+/* ----------------------------------------------------------------- joining */
+
+/*
+ * One input file, as seen by the ordering pass. The joiner extends forward only
+ * (stats/phase_join.h), so the files have to reach it oldest first — and an
+ * operator naming them on a command line has no reason to know or care what
+ * order the shell globbed them in. Sorting here costs one extra read of each
+ * header and removes the whole class of "it worked yesterday" ordering faults.
+ */
+struct part {
+	const char *path;
+	uint64_t seq0;
+	uint32_t epoch;
+	uint16_t n;
+	bool has_ident;
+};
+
+static struct part g_parts[MAX_PARTS];
+
+static void sort_parts(struct part *p, size_t n)
+{
+	size_t i;
+
+	/* Insertion sort: n is the number of files on a command line. Stable,
+	 * so two records with the same seq0 stay in the order given and the
+	 * refusal names the file the operator listed second. */
+	for (i = 1u; i < n; i++) {
+		struct part key = p[i];
+		size_t j = i;
+
+		while ((j > 0u) && (p[j - 1u].seq0 > key.seq0)) {
+			p[j] = p[j - 1u];
+			j--;
+		}
+		p[j] = key;
+	}
+}
+
+/*
+ * Join @p n_paths records into g_join. Returns 0 and sets @p out_len on
+ * success; prints the reason and returns -1 otherwise.
+ */
+static int join_records(char **paths, size_t n_paths, size_t *out_len)
+{
+	phase_join_t j;
+	phase_rec_meta_t jm;
+	size_t len = 0u;
+	size_t i;
+	int rc;
+
+	if (n_paths > MAX_PARTS) {
+		fprintf(stderr, "meridian_phase: at most %u records per join\n",
+			(unsigned int)MAX_PARTS);
+		return -1;
+	}
+
+	/* Pass 1: headers only, to establish the capture order. */
+	for (i = 0u; i < n_paths; i++) {
+		phase_rec_meta_t m;
+
+		if (read_file(paths[i], &len) != 0) {
+			return -1;
+		}
+		rc = phase_rec_decode_hdr(g_buf, len, &m);
+		if (rc != 0) {
+			fprintf(stderr,
+				"meridian_phase: %s is not a valid phase "
+				"record (%d)\n",
+				paths[i], rc);
+			return -1;
+		}
+		if (!m.has_ident) {
+			fprintf(stderr,
+				"meridian_phase: %s cannot be joined: %s\n",
+				paths[i], phase_join_strerror(-ENOENT));
+			return -1;
+		}
+		g_parts[i].path = paths[i];
+		g_parts[i].seq0 = m.seq0;
+		g_parts[i].epoch = m.epoch;
+		g_parts[i].n = m.n;
+		g_parts[i].has_ident = true;
+	}
+
+	sort_parts(g_parts, n_paths);
+
+	rc = phase_join_init(&j, g_x, g_raw, g_gapmap, MAX_SAMPLES);
+	if (rc != 0) {
+		fprintf(stderr, "meridian_phase: join init failed (%d)\n", rc);
+		return -1;
+	}
+
+	/* Pass 2: in order, and this time the joiner decides. */
+	for (i = 0u; i < n_paths; i++) {
+		if (read_file(g_parts[i].path, &len) != 0) {
+			return -1;
+		}
+		rc = phase_join_add(&j, g_buf, len);
+		if (rc != 0) {
+			fprintf(stderr,
+				"\nmeridian_phase: refusing to join %s: %s\n",
+				g_parts[i].path, phase_join_strerror(rc));
+			if (rc == -EPROTO) {
+				fprintf(stderr,
+					"  epoch %08x here, %08x in the "
+					"records already joined. Analyse the "
+					"two runs separately.\n",
+					(unsigned int)g_parts[i].epoch,
+					(unsigned int)j.epoch);
+			} else if (rc == -ERANGE) {
+				fprintf(stderr,
+					"  joined samples end at index %llu; "
+					"this record starts at %llu, so %llu "
+					"are missing.\n"
+					"  Poll more often than the ring "
+					"empties (512 s) so consecutive "
+					"captures overlap.\n",
+					(unsigned long long)(j.seq0 + j.n),
+					(unsigned long long)g_parts[i].seq0,
+					(unsigned long long)(g_parts[i].seq0 -
+							     (j.seq0 + j.n)));
+			} else if (rc == -EILSEQ) {
+				fprintf(stderr,
+					"  the records claim the same samples "
+					"and disagree about their values. "
+					"Nothing here can\n"
+					"  tell which is right, and joining "
+					"either version would be a guess.\n");
+			} else {
+				/* the one-line reason above is the whole
+				 * story for the remaining codes */
+			}
+			return -1;
+		}
+	}
+
+	rc = phase_join_meta(&j, &jm);
+	if (rc != 0) {
+		fprintf(stderr, "meridian_phase: cannot describe the join: %s\n",
+			phase_join_strerror(rc));
+		return -1;
+	}
+
+	rc = phase_rec_encode_pair(&jm, g_x, j.have_raw ? g_raw : NULL,
+				   g_gapmap, g_join, sizeof(g_join), out_len);
+	if (rc != 0) {
+		fprintf(stderr, "meridian_phase: cannot encode the join (%d)\n",
+			rc);
+		return -1;
+	}
+
+	printf("joined       : %zu records, %zu samples "
+	       "(%zu verified in overlap)\n",
+	       j.parts, j.n, j.overlap);
+	printf("epoch        : %08x, samples [%llu, %llu)\n",
+	       (unsigned int)j.epoch, (unsigned long long)j.seq0,
+	       (unsigned long long)(j.seq0 + j.n));
 	return 0;
 }
 
@@ -151,6 +377,20 @@ static void print_header(const phase_rec_meta_t *m, const char *path)
 		       ? "yes (older samples were evicted)"
 		       : "no");
 	printf("absorbed gaps: %u\n", (unsigned int)m->gaps);
+	if (m->has_ident) {
+		printf("identity     : epoch %08x, samples [%llu, %llu)\n",
+		       (unsigned int)m->epoch, (unsigned long long)m->seq0,
+		       (unsigned long long)(m->seq0 + (uint64_t)m->n));
+	} else {
+		/*
+		 * Say so rather than staying silent: without identity this
+		 * record cannot be joined to another, which is the only way to
+		 * reach a tau axis past 128 s, and an operator who does not
+		 * know that will keep polling and wonder why.
+		 */
+		printf("identity     : none (pre-v3 export or no device "
+		       "epoch) — cannot be joined\n");
+	}
 }
 
 static void print_dev_table(const int64_t *x, size_t n, uint64_t tau0_ns)
@@ -508,6 +748,160 @@ static int saw_self_test(void)
 	return fails;
 }
 
+/* ------------------------------------------------------- join self-test */
+
+/*
+ * Build one window [seq0, seq0+n) of a synthetic capture into @p buf. Sample
+ * values are a function of the ABSOLUTE index, so two windows carry identical
+ * bytes wherever they overlap — exactly as two polls of the real ring do, which
+ * is what makes the overlap a proof rather than a formality.
+ */
+static size_t join_window(uint8_t *buf, size_t cap, uint32_t epoch,
+			  uint64_t seq0, uint16_t n)
+{
+	phase_rec_meta_t m;
+	size_t len = 0u;
+	size_t i;
+
+	for (i = 0u; i < (size_t)n; i++) {
+		uint64_t k = seq0 + (uint64_t)i;
+
+		g_x[i] = (int64_t)(k * UINT64_C(7919)) - INT64_C(31337);
+		g_raw[i] = g_x[i] + INT64_C(500);
+	}
+
+	memset(&m, 0, sizeof(m));
+	m.n = n;
+	m.tau0_ns = 1000000000u;
+	m.mono_ms = 1000u + seq0;
+	m.has_ident = true;
+	m.epoch = epoch;
+	m.seq0 = seq0;
+
+	if (phase_rec_encode_pair(&m, g_x, g_raw, NULL, buf, cap, &len) != 0) {
+		return 0u;
+	}
+	return len;
+}
+
+/*
+ * The join, end to end and on this machine: it must accept a verified overlap
+ * and refuse a wrong epoch, a hole and a disagreeing overlap. These four are
+ * the whole safety argument for a multi-record capture, so the tool proves them
+ * before an operator trusts a tau axis built out of one.
+ */
+static int join_self_test(void)
+{
+	static uint8_t wa[32768];
+	static uint8_t wb[32768];
+	phase_join_t j;
+	size_t la;
+	size_t lb;
+	size_t i;
+	int fails = 0;
+	int rc;
+
+	la = join_window(wa, sizeof(wa), 0x5EEDu, 0u, 512u);
+	lb = join_window(wb, sizeof(wb), 0x5EEDu, 256u, 512u);
+	if ((la == 0u) || (lb == 0u)) {
+		printf("self-test: join encode failed\n");
+		return 1;
+	}
+
+	/* 1. Overlapping windows of one epoch join, and the result is the
+	 *    capture — not the capture with 256 seconds counted twice. */
+	if (phase_join_init(&j, g_x, g_raw, g_gapmap, MAX_SAMPLES) != 0) {
+		printf("self-test: join init failed\n");
+		return 1;
+	}
+	rc = phase_join_add(&j, wa, la);
+	if (rc == 0) {
+		rc = phase_join_add(&j, wb, lb);
+	}
+	if ((rc != 0) || (j.n != 768u) || (j.overlap != 256u)) {
+		printf("self-test: join FAIL overlap case (%d, n=%zu, ov=%zu)\n",
+		       rc, j.n, j.overlap);
+		fails++;
+	} else {
+		for (i = 0u; i < 768u; i++) {
+			int64_t want = (int64_t)((uint64_t)i * UINT64_C(7919)) -
+				       INT64_C(31337);
+
+			if (g_x[i] != want) {
+				printf("self-test: join FAIL sample %zu\n", i);
+				fails++;
+				break;
+			}
+		}
+		printf("self-test: join     768 samples from 2 records, "
+		       "256 verified in overlap\n");
+	}
+
+	/* 2. A different epoch is a different series, whatever the indices
+	 *    say — this pair would abut perfectly. */
+	lb = join_window(wb, sizeof(wb), 0x5EEEu, 512u, 512u);
+	(void)phase_join_init(&j, g_x, g_raw, g_gapmap, MAX_SAMPLES);
+	rc = phase_join_add(&j, wa, la);
+	if (rc == 0) {
+		rc = phase_join_add(&j, wb, lb);
+	}
+	if (rc != -EPROTO) {
+		printf("self-test: join FAIL a different epoch joined (%d)\n",
+		       rc);
+		fails++;
+	} else {
+		printf("self-test: join     wrong epoch refused: %s\n",
+		       phase_join_strerror(rc));
+	}
+
+	/* 3. A hole is refused, not papered over with a gap bit. */
+	lb = join_window(wb, sizeof(wb), 0x5EEDu, 513u, 512u);
+	(void)phase_join_init(&j, g_x, g_raw, g_gapmap, MAX_SAMPLES);
+	rc = phase_join_add(&j, wa, la);
+	if (rc == 0) {
+		rc = phase_join_add(&j, wb, lb);
+	}
+	if (rc != -ERANGE) {
+		printf("self-test: join FAIL a hole joined (%d)\n", rc);
+		fails++;
+	} else if (j.gaps != 0u) {
+		printf("self-test: join FAIL the hole became a gap bit\n");
+		fails++;
+	} else {
+		printf("self-test: join     hole refused: %s\n",
+		       phase_join_strerror(rc));
+	}
+
+	/* 4. A disagreeing overlap is a hard failure: one byte, one sample. */
+	lb = join_window(wb, sizeof(wb), 0x5EEDu, 256u, 512u);
+	{
+		phase_rec_meta_t m;
+		const uint8_t *s;
+
+		if (phase_rec_decode_hdr(wb, lb, &m) != 0) {
+			printf("self-test: join FAIL cannot re-read window\n");
+			return fails + 1;
+		}
+		s = phase_rec_series(wb, &m, 0u);
+		wb[(size_t)(s - wb) + (44u * 8u)] ^= 0x01u;
+	}
+	(void)phase_join_init(&j, g_x, g_raw, g_gapmap, MAX_SAMPLES);
+	rc = phase_join_add(&j, wa, la);
+	if (rc == 0) {
+		rc = phase_join_add(&j, wb, lb);
+	}
+	if (rc != -EILSEQ) {
+		printf("self-test: join FAIL a disagreeing overlap joined "
+		       "(%d)\n", rc);
+		fails++;
+	} else {
+		printf("self-test: join     overlap mismatch refused: %s\n",
+		       phase_join_strerror(rc));
+	}
+
+	return fails;
+}
+
 static int self_test(void)
 {
 	const size_t n = 512u;
@@ -627,6 +1021,7 @@ static int self_test(void)
 	}
 
 	fails += saw_self_test();
+	fails += join_self_test();
 
 	printf("self-test: %s\n", (fails == 0) ? "PASS" : "FAIL");
 	return (fails == 0) ? 0 : 1;
@@ -637,14 +1032,23 @@ static int self_test(void)
 static void usage(void)
 {
 	fprintf(stderr,
-		"usage: meridian_phase [options] <record.phr>\n"
+		"usage: meridian_phase [options] <record.phr> [more.phr ...]\n"
 		"       meridian_phase --self-test\n"
+		"\n"
+		"  Several records are JOINED into one series, in capture "
+		"order, after the\n"
+		"  joiner has proved they share a capture epoch, leave no hole "
+		"between them,\n"
+		"  and agree on every sample they both hold. One 512-sample "
+		"export reaches\n"
+		"  tau = 128 s; joining is how the tau axis gets past that.\n"
 		"\n"
 		"  --clean-run       analyse the longest gap-free run\n"
 		"  --allow-gaps      analyse the whole record anyway\n"
 		"  --hist-bin <ps>   histogram bin width (default 1000)\n"
 		"  --hist-bins <n>   histogram bins, odd (default 41)\n"
 		"  --no-hist         skip the histograms (verdict still shown)\n"
+		"  --join-out <file> write the joined series out as one record\n"
 		"  --require-sawtooth\n"
 		"                    exit non-zero unless the §14 sawtooth "
 		"verdict is CORRECTED\n"
@@ -653,7 +1057,11 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-	const char *path = NULL;
+	char *paths[MAX_PARTS];
+	size_t n_paths = 0u;
+	const char *label = NULL;
+	const char *join_out = NULL;
+	const uint8_t *rec = g_buf;
 	bool clean_run = false;
 	bool allow_gaps = false;
 	bool want_hist = true;
@@ -687,6 +1095,9 @@ int main(int argc, char **argv)
 		} else if ((strcmp(argv[i], "--hist-bins") == 0) &&
 			   ((i + 1) < argc)) {
 			n_bins = (size_t)strtoull(argv[++i], NULL, 10);
+		} else if ((strcmp(argv[i], "--join-out") == 0) &&
+			   ((i + 1) < argc)) {
+			join_out = argv[++i];
 		} else if ((strcmp(argv[i], "-h") == 0) ||
 			   (strcmp(argv[i], "--help") == 0)) {
 			usage();
@@ -696,15 +1107,17 @@ int main(int argc, char **argv)
 				argv[i]);
 			usage();
 			return 2;
-		} else if (path == NULL) {
-			path = argv[i];
+		} else if (n_paths < MAX_PARTS) {
+			paths[n_paths++] = argv[i];
 		} else {
-			fprintf(stderr, "meridian_phase: one record at a time\n");
+			fprintf(stderr,
+				"meridian_phase: at most %u records\n",
+				(unsigned int)MAX_PARTS);
 			return 2;
 		}
 	}
 
-	if (path == NULL) {
+	if (n_paths == 0u) {
 		usage();
 		return 2;
 	}
@@ -713,15 +1126,33 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	if (read_file(path, &len) != 0) {
-		return 1;
+	if (n_paths == 1u) {
+		/*
+		 * One record is analysed as it stands, WITHOUT going through
+		 * the joiner. A v1/v2 capture carries no identity and the
+		 * joiner would refuse it — correctly, because it cannot be
+		 * joined to anything — but it is still a perfectly good single
+		 * record and refusing to analyse it would be a regression for
+		 * every capture taken before the identity block existed.
+		 */
+		label = paths[0];
+		if (read_file(paths[0], &len) != 0) {
+			return 1;
+		}
+		rec = g_buf;
+	} else {
+		label = "<joined>";
+		if (join_records(paths, n_paths, &len) != 0) {
+			return 1;
+		}
+		rec = g_join;
 	}
 
-	rc = phase_rec_decode_hdr(g_buf, len, &m);
+	rc = phase_rec_decode_hdr(rec, len, &m);
 	if (rc != 0) {
 		fprintf(stderr,
 			"meridian_phase: %s is not a valid phase record (%d)\n",
-			path, rc);
+			label, rc);
 		if (rc == -EBADMSG) {
 			fprintf(stderr,
 				"  (bad magic/version, or the gap count "
@@ -730,7 +1161,14 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	print_header(&m, path);
+	if (join_out != NULL) {
+		if (write_file(join_out, rec, len) != 0) {
+			return 1;
+		}
+		printf("written      : %s (%zu bytes)\n", join_out, len);
+	}
+
+	print_header(&m, label);
 
 	if (m.n == 0u) {
 		fprintf(stderr,
@@ -739,7 +1177,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	rc = phase_rec_decode_samples(g_buf, len, g_x, MAX_SAMPLES, &n_out);
+	rc = phase_rec_decode_samples(rec, len, g_x, MAX_SAMPLES, &n_out);
 	if (rc != 0) {
 		fprintf(stderr, "meridian_phase: cannot read samples (%d)\n",
 			rc);
@@ -752,7 +1190,7 @@ int main(int argc, char **argv)
 		size_t run;
 		size_t start = 0u;
 
-		run = phase_rec_longest_clean(g_buf, len, &start);
+		run = phase_rec_longest_clean(rec, len, &start);
 
 		fprintf(stderr,
 			"\nmeridian_phase: WARNING — this record contains %u "
@@ -781,7 +1219,7 @@ int main(int argc, char **argv)
 
 			fprintf(stderr, "  gap at sample:");
 			for (i = 0u; i < n_out; i++) {
-				if (!phase_rec_gap_at(g_buf, len, i)) {
+				if (!phase_rec_gap_at(rec, len, i)) {
 					continue;
 				}
 				if (shown == 16u) {
@@ -848,7 +1286,7 @@ int main(int argc, char **argv)
 		return require_saw ? 1 : 0;
 	}
 
-	rc = phase_rec_decode_raw(g_buf, len, g_raw, MAX_SAMPLES, &n_raw);
+	rc = phase_rec_decode_raw(rec, len, g_raw, MAX_SAMPLES, &n_raw);
 	if ((rc != 0) || (n_raw != n_out)) {
 		fprintf(stderr,
 			"meridian_phase: cannot read the uncorrected series "

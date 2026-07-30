@@ -91,7 +91,23 @@ size_t phase_rec_size_flags(uint16_t n, uint8_t flags)
 	if ((flags & PHASE_REC_F_RAW) != 0u) {
 		len += (size_t)n * sizeof(int64_t);
 	}
+	if ((flags & PHASE_REC_F_IDENT) != 0u) {
+		len += (size_t)PHASE_REC_IDENT_LEN;
+	}
 	return len;
+}
+
+/**
+ * Byte offset of the identity block: past the header, the bitmap and whichever
+ * series @p flags declares. Meaningful only when F_IDENT is set, and computed
+ * from the same declaration phase_rec_size_flags() uses so the two cannot
+ * disagree about where the record ends.
+ */
+static size_t ident_off(uint16_t n, uint8_t flags)
+{
+	return phase_rec_size_flags(n, (uint8_t)(flags &
+						 (uint8_t)~(uint8_t)
+							 PHASE_REC_F_IDENT));
 }
 
 /** Byte offset of the corrected series within a record of @p n samples. */
@@ -164,9 +180,18 @@ static int encode_prologue(const phase_rec_meta_t *m, bool have_x, bool have_raw
 		return -EINVAL;
 	}
 
-	flags = (uint8_t)(m->flags & (uint8_t)~(uint8_t)PHASE_REC_F_RAW);
+	flags = (uint8_t)(m->flags & (uint8_t)~(uint8_t)(PHASE_REC_F_RAW |
+							 PHASE_REC_F_IDENT));
 	if (have_raw) {
 		flags |= (uint8_t)PHASE_REC_F_RAW;
+	}
+	/*
+	 * Same rule as F_RAW: the flag says what this call is about to write.
+	 * A caller cannot assert identity into existence by setting the bit,
+	 * and cannot suppress it by clearing one it has supplied values for.
+	 */
+	if (m->has_ident) {
+		flags |= (uint8_t)PHASE_REC_F_IDENT;
 	}
 
 	gb = gapmap_bytes(m->n);
@@ -204,6 +229,13 @@ static int encode_prologue(const phase_rec_meta_t *m, bool have_x, bool have_raw
 		} else {
 			memset(p, 0, gb);
 		}
+	}
+
+	if (m->has_ident) {
+		uint8_t *id = &buf[ident_off(m->n, flags)];
+
+		put_u32(&id[0], m->epoch);
+		put_u64(&id[4], m->seq0);
 	}
 
 	*out_series = &buf[series_off(m->n)];
@@ -331,6 +363,11 @@ int phase_rec_decode_hdr(const uint8_t *buf, size_t len, phase_rec_meta_t *out)
 	    (m.ver < 2u)) {
 		return -EBADMSG;
 	}
+	/* F_IDENT did not exist before v3; same reasoning as F_RAW above. */
+	if (((m.flags & PHASE_REC_F_IDENT) != 0u) &&
+	    (m.ver < 3u)) {
+		return -EBADMSG;
+	}
 	if (m.tau0_ns == 0u) {
 		return -EBADMSG;
 	}
@@ -359,6 +396,23 @@ int phase_rec_decode_hdr(const uint8_t *buf, size_t len, phase_rec_meta_t *out)
 	if (popcount_bits(&buf[PHASE_REC_HDR_LEN], (size_t)m.n) !=
 	    (size_t)m.gaps) {
 		return -EBADMSG;
+	}
+
+	m.has_ident = ((m.flags & PHASE_REC_F_IDENT) != 0u);
+	if (m.has_ident) {
+		const uint8_t *id = &buf[ident_off(m.n, m.flags)];
+
+		m.epoch = get_u32(&id[0]);
+		m.seq0 = get_u64(&id[4]);
+	} else {
+		/*
+		 * Zeroed rather than left indeterminate, but has_ident is what
+		 * a consumer must gate on: "epoch 0, sample 0" is a legitimate
+		 * identity and must not be inferred from a record that carries
+		 * none.
+		 */
+		m.epoch = 0u;
+		m.seq0 = 0u;
 	}
 
 	*out = m;
@@ -408,6 +462,24 @@ int phase_rec_decode_raw(const uint8_t *buf, size_t len, int64_t *out_x,
 			 size_t cap, size_t *out_n)
 {
 	return decode_series(buf, len, 1u, out_x, cap, out_n);
+}
+
+const uint8_t *phase_rec_series(const uint8_t *buf, const phase_rec_meta_t *m,
+				unsigned int which)
+{
+	if ((buf == NULL) || (m == NULL) || (which > 1u)) {
+		return NULL;
+	}
+	if ((which == 1u) && ((m->flags & PHASE_REC_F_RAW) == 0u)) {
+		return NULL;
+	}
+	return &buf[series_off(m->n) +
+		    ((size_t)which * (size_t)m->n * sizeof(int64_t))];
+}
+
+int64_t phase_rec_sample(const uint8_t *series, size_t i)
+{
+	return get_i64(&series[i * sizeof(int64_t)]);
 }
 
 bool phase_rec_gap_at(const uint8_t *buf, size_t len, size_t i)

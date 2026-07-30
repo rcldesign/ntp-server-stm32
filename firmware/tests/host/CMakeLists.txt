@@ -117,6 +117,15 @@ module_deps(cal      ina228 util)
 # format's one safety property, a gap count that cannot disagree with the
 # bitmap it summarises, without a device in the picture.
 module_deps(phase_rec stats)
+# `phase_join` is a third suite over core/stats: stats/phase_join.c, which
+# concatenates successive exports into one series long enough for the tau axis
+# §14 actually needs (one 512-sample record stops at tau = 128 s). Same empty
+# edge set as `phase_rec` and for the same reason — it is index arithmetic and
+# bitmap composition over encoded records, with no device in the picture. It is
+# a separate suite from `phase_rec` because the two assert different safety
+# properties: that suite says a record cannot misdescribe its own gaps, this one
+# says two records cannot be spliced unless they provably abut.
+module_deps(phase_join stats)
 # `phase_export` is the seam between them, and it is the only place the whole
 # device-side path is exercised in one process: drive the real disc_tick_pps()
 # at real intervals, take the real disc_phase_snapshot(), encode the real

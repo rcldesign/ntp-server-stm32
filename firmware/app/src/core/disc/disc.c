@@ -388,6 +388,14 @@ int disc_init(disc_ctx_t *ctx, const disc_cfg_t *cfg)
 		ctx->y_range_hi = (y_at_zero < y_at_max) ? y_at_max : y_at_zero;
 	}
 
+	/*
+	 * The first generation of this run. Non-zero only if the platform drew
+	 * a random seed; see disc_cfg_t::adev_epoch_seed for why a constant
+	 * would defeat the whole scheme across a reboot.
+	 */
+	ctx->adev_epoch = cfg->adev_epoch_seed;
+	ctx->adev_seq = 0u;
+
 	ctx->state = DISC_STATE_ACQUIRING;
 	ctx->dac_code = cfg->dac_center_code;
 	ctx->vc_cmd_mv = disc_code_to_mv(cfg->dac_vref_mv, cfg->dac_max_code,
@@ -455,6 +463,26 @@ static void adev_reset(disc_ctx_t *ctx)
 	 */
 	memset(ctx->adev_gapmap, 0, sizeof(ctx->adev_gapmap));
 	ctx->adev_gaps = 0u;
+	/*
+	 * A reset restarts the numbering, so it starts a new GENERATION. This
+	 * is what makes the discontinuity impossible for a host to miss: the
+	 * sample indices restart at 0 and would otherwise abut, or overlap, a
+	 * record taken before the reset perfectly plausibly. Records either
+	 * side of this line describe different series and must never join
+	 * (stats/phase_join.h), and a differing epoch is what says so.
+	 *
+	 * 0 is the "no seed, no identity" state and is sticky: incrementing out
+	 * of it would manufacture a generation the platform could not make
+	 * unique across a reboot, which is precisely the case the export
+	 * declines to claim identity for.
+	 */
+	if (ctx->adev_epoch != 0u) {
+		ctx->adev_epoch++;
+		if (ctx->adev_epoch == 0u) {
+			ctx->adev_epoch = 1u;
+		}
+	}
+	ctx->adev_seq = 0u;
 	ctx->adev_1s = 0.0f;
 	ctx->adev_10s = 0.0f;
 	ctx->adev_100s = 0.0f;
@@ -534,6 +562,14 @@ static void adev_push(disc_ctx_t *ctx, float e_ns, float e_raw_ns, bool gap)
 		/* Bounded by DISC_ADEV_CAP: one bit per live slot. */
 		ctx->adev_gaps++;
 	}
+
+	/*
+	 * The sample's number within the epoch. Counted here — in the one
+	 * function that appends — so it cannot drift from what the ring holds:
+	 * the oldest live sample is always adev_seq - adev_n, whether the ring
+	 * is still filling or evicting.
+	 */
+	ctx->adev_seq++;
 }
 
 static void adev_update(disc_ctx_t *ctx)
@@ -1067,6 +1103,16 @@ int disc_phase_snapshot(const disc_ctx_t *ctx, disc_phase_snap_t *out)
 		       (size_t)ctx->adev_n * sizeof(ctx->adev_raw_buf[0]));
 	}
 	memcpy(out->gapmap, ctx->adev_gapmap, sizeof(out->gapmap));
+
+	/*
+	 * Identity of the window, not of the ring: x_ns[0] is the oldest sample
+	 * still held, which is adev_seq - adev_n. Derived here rather than
+	 * tracked separately so it cannot disagree with the samples actually
+	 * copied above.
+	 */
+	out->has_ident = (ctx->adev_epoch != 0u);
+	out->epoch = ctx->adev_epoch;
+	out->seq0 = ctx->adev_seq - (uint64_t)ctx->adev_n;
 
 	return 0;
 }

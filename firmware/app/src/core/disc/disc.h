@@ -329,6 +329,31 @@ typedef struct {
 
 	/* ---- served dispersion ---- */
 	float base_disp_ns;        /**< dispersion floor while locked (1000) */
+
+	/* ---- phase-record sample identity ---- */
+	/**
+	 * Initial value of the ADEV ring's sample-numbering epoch.
+	 *
+	 * The epoch is what tells a host that two exported phase records belong
+	 * to the same numbering and may be joined (stats/phase_join.h). It
+	 * increments on every ring reset, so within one run the generations are
+	 * distinct by construction. Across a REBOOT they are not: a constant
+	 * seed would restart both the epoch and the sample index, so a record
+	 * covering samples [512, 1024) taken before a reboot and one covering
+	 * [0, 512) taken after would present as an abutting pair with no
+	 * overlap to check — a silent splice across a discontinuity, which is
+	 * the one failure the whole scheme exists to stop.
+	 *
+	 * So the platform seeds it with a RANDOM 32-bit draw. A platform that
+	 * cannot supply one leaves this 0, which is not a valid epoch: the loop
+	 * then reports no identity at all (disc_phase_snap_t::has_ident false),
+	 * the export carries no PHASE_REC_F_IDENT, and the host refuses to join
+	 * its records rather than joining them wrongly.
+	 *
+	 * disc_cfg_defaults() leaves it 0 — a default that cannot be unique is
+	 * worse than none, for exactly the reason above.
+	 */
+	uint32_t adev_epoch_seed;
 } disc_cfg_t;
 
 /* ----------------------------------------------------------------- context */
@@ -405,6 +430,26 @@ typedef struct {
 	uint8_t adev_gapmap[DISC_ADEV_GAPMAP_BYTES];
 	/** Population count of adev_gapmap over the live window [0, adev_n). */
 	uint16_t adev_gaps;
+	/**
+	 * Sample-numbering generation. Seeded from cfg.adev_epoch_seed and
+	 * incremented by every adev_reset(), so a record exported before a ring
+	 * reset and one exported after carry different values and a host
+	 * refuses to join them. 0 is not a generation: it means the platform
+	 * supplied no seed and this device publishes no sample identity.
+	 */
+	uint32_t adev_epoch;
+	/**
+	 * Samples pushed since @ref adev_epoch began. The oldest sample still
+	 * in the ring is therefore numbered adev_seq - adev_n, which is the
+	 * `seq0` an exported record carries.
+	 *
+	 * 64-bit so it cannot wrap within an epoch under any deployment. At
+	 * 1 Hz a 32-bit counter lasts 136 years, which is long enough — but a
+	 * wrap would silently make a later record look older than an earlier
+	 * one, and the join has no way to detect that. Eight bytes buys the
+	 * absence of that whole class of reasoning.
+	 */
+	uint64_t adev_seq;
 	float adev_1s;
 	float adev_10s;
 	float adev_100s;
@@ -874,6 +919,29 @@ typedef struct {
 	float x_raw_ns[DISC_ADEV_CAP];
 	/** Bit i set == x_ns[i] followed a non-uniform interval. LSB-first. */
 	uint8_t gapmap[DISC_ADEV_GAPMAP_BYTES];
+	/**
+	 * @ref epoch and @ref seq0 are meaningful.
+	 *
+	 * False when the platform supplied no cfg.adev_epoch_seed. The export
+	 * then omits PHASE_REC_F_IDENT and the record is un-joinable — which is
+	 * the safe answer, because the alternative is an identity that repeats
+	 * across a reboot and lets two unrelated captures splice.
+	 */
+	bool has_ident;
+	/**
+	 * Sample-numbering generation (disc_ctx_t::adev_epoch). Changes on
+	 * every ring reset, so records either side of one never join.
+	 */
+	uint32_t epoch;
+	/**
+	 * Absolute index of x_ns[0] within @ref epoch; sample i is seq0 + i.
+	 *
+	 * This is what lets a host concatenate successive exports into a record
+	 * long enough for the tau axis §14 actually needs: it can tell overlap
+	 * from abutment from a hole, and it can verify a join against the
+	 * samples the two captures share. See stats/phase_join.h.
+	 */
+	uint64_t seq0;
 } disc_phase_snap_t;
 
 /**

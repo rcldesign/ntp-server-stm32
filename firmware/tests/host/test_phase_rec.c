@@ -362,6 +362,241 @@ static void test_ns_float_to_ps_conversion(void)
 	}
 }
 
+/* ------------------------------------------------------------- identity */
+
+static void test_identity_round_trips_and_sets_the_flag(void)
+{
+	phase_rec_meta_t m;
+	phase_rec_meta_t got;
+	size_t len = 0u;
+
+	memset(x_in, 0, sizeof(x_in));
+	meta_defaults(&m, 10u);
+	m.has_ident = true;
+	m.epoch = 0xDEADBEEFu;
+	m.seq0 = UINT64_C(0x0102030405060708);
+
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_encode(&m, x_in, NULL, buf, BUF_CAP,
+						  &len));
+	/* The identity block is 12 bytes appended past the single series. */
+	TEST_ASSERT_EQUAL_UINT32((uint32_t)(phase_rec_size(10u) + 12u),
+				 (uint32_t)len);
+
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_hdr(buf, len, &got));
+	TEST_ASSERT_TRUE((got.flags & PHASE_REC_F_IDENT) != 0u);
+	TEST_ASSERT_TRUE(got.has_ident);
+	TEST_ASSERT_EQUAL_UINT32(0xDEADBEEFu, got.epoch);
+	TEST_ASSERT_TRUE(got.seq0 == UINT64_C(0x0102030405060708));
+
+	/*
+	 * And a record WITHOUT identity reads back has_ident false with the
+	 * fields zeroed — not "epoch 0, sample 0", which is a legitimate
+	 * identity a consumer must not be able to infer from its absence.
+	 */
+	meta_defaults(&m, 10u);
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_encode(&m, x_in, NULL, buf, BUF_CAP,
+						  &len));
+	TEST_ASSERT_EQUAL_UINT32((uint32_t)phase_rec_size(10u), (uint32_t)len);
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_hdr(buf, len, &got));
+	TEST_ASSERT_FALSE(got.has_ident);
+	TEST_ASSERT_EQUAL_UINT32(0u, got.epoch);
+	TEST_ASSERT_TRUE(got.seq0 == 0u);
+}
+
+static void test_identity_sits_past_both_series_when_paired(void)
+{
+	phase_rec_meta_t m;
+	phase_rec_meta_t got;
+	size_t len = 0u;
+	size_t n_out = 0u;
+
+	memset(x_in, 0, sizeof(x_in));
+	meta_defaults(&m, 16u);
+	m.has_ident = true;
+	m.epoch = 7u;
+	m.seq0 = 4096u;
+
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_encode_pair(&m, x_in, x_in, NULL,
+						       buf, BUF_CAP, &len));
+	/* header + bitmap + two series + identity. */
+	TEST_ASSERT_EQUAL_UINT32(24u + 2u + 128u + 128u + 12u, (uint32_t)len);
+	TEST_ASSERT_EQUAL_UINT32((uint32_t)len,
+				 (uint32_t)phase_rec_size_flags(
+					 16u, (uint8_t)(PHASE_REC_F_RAW |
+							PHASE_REC_F_IDENT)));
+
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_hdr(buf, len, &got));
+	TEST_ASSERT_EQUAL_UINT32(7u, got.epoch);
+	TEST_ASSERT_TRUE(got.seq0 == 4096u);
+	/*
+	 * Both series still decode: the identity is appended, so it cannot
+	 * have displaced anything the older layout put in front of it.
+	 */
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_samples(buf, len, x_out,
+							  512u, &n_out));
+	TEST_ASSERT_EQUAL_UINT32(16u, (uint32_t)n_out);
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_raw(buf, len, x_out, 512u,
+						      &n_out));
+	TEST_ASSERT_EQUAL_UINT32(16u, (uint32_t)n_out);
+}
+
+/*
+ * The stale-decoder property, stated at the format's own level: a record that
+ * DECLARES the identity block must be long enough to hold it, and a version
+ * that predates the block cannot declare it. These are the same two guards
+ * v2 armed for the raw series, which is the whole point of following the
+ * pattern rather than inventing a new one.
+ */
+static void test_a_pre_v3_record_cannot_claim_the_identity_block(void)
+{
+	phase_rec_meta_t m;
+	phase_rec_meta_t got;
+	size_t len = 0u;
+
+	memset(x_in, 0, sizeof(x_in));
+	meta_defaults(&m, 10u);
+	m.has_ident = true;
+	m.epoch = 5u;
+	m.seq0 = 99u;
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_encode(&m, x_in, NULL, buf, BUF_CAP,
+						  &len));
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_hdr(buf, len, &got));
+	TEST_ASSERT_EQUAL_UINT8(PHASE_REC_VER, got.ver);
+	TEST_ASSERT_TRUE(got.ver >= 3u);
+
+	/* Say it is v2 and the claim becomes impossible: F_IDENT did not exist,
+	 * exactly as F_RAW did not exist at v1. */
+	buf[4] = 2u;
+	TEST_ASSERT_EQUAL_INT(-EBADMSG, phase_rec_decode_hdr(buf, len, &got));
+	buf[4] = 1u;
+	TEST_ASSERT_EQUAL_INT(-EBADMSG, phase_rec_decode_hdr(buf, len, &got));
+	buf[4] = (uint8_t)PHASE_REC_VER;
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_hdr(buf, len, &got));
+
+	/* And the length must back the claim: strip the block and keep the
+	 * flag, and the record must be refused, not read 12 bytes short. */
+	TEST_ASSERT_EQUAL_INT(-EMSGSIZE,
+			      phase_rec_decode_hdr(buf, len - 12u, &got));
+	TEST_ASSERT_EQUAL_INT(-EMSGSIZE,
+			      phase_rec_decode_hdr(buf, len - 1u, &got));
+}
+
+/*
+ * The other direction, and the one a stale build actually hits: THIS decoder
+ * is v3, so it must refuse the v4 record it cannot lay out — the same refusal a
+ * v2 build makes when handed one of ours. Proven by construction: a record
+ * whose only change is a version this build does not know, and a record with an
+ * unknown flag bit, are both rejected rather than read as far as they parse.
+ */
+static void test_an_unknown_version_or_flag_is_refused_not_partly_read(void)
+{
+	phase_rec_meta_t m;
+	phase_rec_meta_t got;
+	size_t len = 0u;
+
+	memset(x_in, 0, sizeof(x_in));
+	meta_defaults(&m, 10u);
+	m.has_ident = true;
+	m.epoch = 5u;
+	m.seq0 = 99u;
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_encode(&m, x_in, NULL, buf, BUF_CAP,
+						  &len));
+
+	buf[4] = (uint8_t)(PHASE_REC_VER + 1u);
+	TEST_ASSERT_EQUAL_INT(-EBADMSG, phase_rec_decode_hdr(buf, len, &got));
+	buf[4] = (uint8_t)PHASE_REC_VER;
+
+	/* An unknown flag declares content of unknown length. 0x08 is the next
+	 * bit a v4 would spend; this build must not guess at its layout. */
+	buf[5] |= 0x08u;
+	TEST_ASSERT_EQUAL_INT(-EBADMSG, phase_rec_decode_hdr(buf, len, &got));
+	buf[5] &= (uint8_t)~0x08u;
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_hdr(buf, len, &got));
+
+	/* An encoder must not write one either: a record nothing can open is a
+	 * worse outcome than the caller finding out at the call site. */
+	meta_defaults(&m, 10u);
+	m.flags = 0x08u;
+	TEST_ASSERT_EQUAL_INT(-EINVAL, phase_rec_encode(&m, x_in, NULL, buf,
+							BUF_CAP, &len));
+}
+
+/*
+ * The encoder decides the flag from what it wrote, not from what the caller
+ * asked for — the same rule F_RAW follows. A caller cannot conjure an identity
+ * block by setting the bit, and cannot suppress one it supplied values for.
+ */
+static void test_the_ident_flag_records_what_was_written(void)
+{
+	phase_rec_meta_t m;
+	phase_rec_meta_t got;
+	size_t len = 0u;
+
+	memset(x_in, 0, sizeof(x_in));
+
+	/* Bit set, has_ident false: no block, no flag, base length. */
+	meta_defaults(&m, 10u);
+	m.flags = PHASE_REC_F_IDENT;
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_encode(&m, x_in, NULL, buf, BUF_CAP,
+						  &len));
+	TEST_ASSERT_EQUAL_UINT32((uint32_t)phase_rec_size(10u), (uint32_t)len);
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_hdr(buf, len, &got));
+	TEST_ASSERT_FALSE(got.has_ident);
+
+	/* Bit clear, has_ident true: the block is written and the flag set. */
+	meta_defaults(&m, 10u);
+	m.flags = 0u;
+	m.has_ident = true;
+	m.epoch = 42u;
+	m.seq0 = 17u;
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_encode(&m, x_in, NULL, buf, BUF_CAP,
+						  &len));
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_hdr(buf, len, &got));
+	TEST_ASSERT_TRUE(got.has_ident);
+	TEST_ASSERT_EQUAL_UINT32(42u, got.epoch);
+	TEST_ASSERT_TRUE(got.seq0 == 17u);
+}
+
+static void test_series_pointer_reads_the_same_samples_as_the_decoder(void)
+{
+	phase_rec_meta_t m;
+	phase_rec_meta_t got;
+	size_t len = 0u;
+	size_t i;
+
+	for (i = 0u; i < 32u; i++) {
+		x_in[i] = ((int64_t)i * INT64_C(-7919)) + INT64_C(11);
+		x_out[i] = (int64_t)i * INT64_C(1000);
+	}
+	meta_defaults(&m, 32u);
+	m.has_ident = true;
+	m.epoch = 3u;
+	m.seq0 = 1000u;
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_encode_pair(&m, x_in, x_out, NULL,
+						       buf, BUF_CAP, &len));
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_hdr(buf, len, &got));
+
+	{
+		const uint8_t *sc = phase_rec_series(buf, &got, 0u);
+		const uint8_t *sr = phase_rec_series(buf, &got, 1u);
+
+		TEST_ASSERT_NOT_NULL(sc);
+		TEST_ASSERT_NOT_NULL(sr);
+		for (i = 0u; i < 32u; i++) {
+			TEST_ASSERT_TRUE(phase_rec_sample(sc, i) == x_in[i]);
+			TEST_ASSERT_TRUE(phase_rec_sample(sr, i) == x_out[i]);
+		}
+	}
+
+	/* A single-series record has no second series to point at. */
+	meta_defaults(&m, 32u);
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_encode(&m, x_in, NULL, buf, BUF_CAP,
+						  &len));
+	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_hdr(buf, len, &got));
+	TEST_ASSERT_NULL(phase_rec_series(buf, &got, 1u));
+	TEST_ASSERT_NOT_NULL(phase_rec_series(buf, &got, 0u));
+}
+
 int main(void)
 {
 	UNITY_BEGIN();
@@ -378,6 +613,13 @@ int main(void)
 	RUN_TEST(test_malformed_records_are_rejected);
 	RUN_TEST(test_encode_argument_errors);
 	RUN_TEST(test_ns_float_to_ps_conversion);
+
+	RUN_TEST(test_identity_round_trips_and_sets_the_flag);
+	RUN_TEST(test_identity_sits_past_both_series_when_paired);
+	RUN_TEST(test_a_pre_v3_record_cannot_claim_the_identity_block);
+	RUN_TEST(test_an_unknown_version_or_flag_is_refused_not_partly_read);
+	RUN_TEST(test_the_ident_flag_records_what_was_written);
+	RUN_TEST(test_series_pointer_reads_the_same_samples_as_the_decoder);
 
 	return UNITY_END();
 }

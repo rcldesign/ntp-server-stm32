@@ -582,9 +582,17 @@ static void test_a_v1_record_cannot_claim_the_raw_series(void)
 	TEST_ASSERT_EQUAL_INT(0, phase_rec_encode_pair(&m, g_corr, g_raw, NULL,
 						       rec, sizeof(rec), &len));
 
-	/* A well-formed v2 pair. */
+	/*
+	 * A well-formed pair, at whatever version this build writes. The
+	 * precondition the rest of the test needs is not "version 2" but "a
+	 * version at which F_RAW is legal", so that is what is asserted —
+	 * pinning the literal made this test fail on the v3 bump for a reason
+	 * that had nothing to do with the property it exists to prove.
+	 */
 	TEST_ASSERT_EQUAL_INT(0, phase_rec_decode_hdr(rec, len, &got));
-	TEST_ASSERT_EQUAL_UINT8(2u, got.ver);
+	TEST_ASSERT_EQUAL_UINT8(PHASE_REC_VER, got.ver);
+	TEST_ASSERT_TRUE(got.ver >= 2u);
+	TEST_ASSERT_TRUE((got.flags & PHASE_REC_F_RAW) != 0u);
 
 	/* Say it is v1 and the claim becomes impossible: F_RAW did not exist. */
 	rec[4] = 1u;

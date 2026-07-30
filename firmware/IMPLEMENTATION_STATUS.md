@@ -81,7 +81,7 @@ them; the deliverable is a dataset from a bench.
 | §14 requirement | Needs |
 |---|---|
 | Served accuracy vs a reference grandmaster / UTC source | board + reference clock |
-| ADEV/MDEV vs τ, OCXO and Rb, locked and holdover | board + counter, long runs |
+| ADEV/MDEV vs τ, OCXO and Rb, locked and holdover | board + counter, long runs (see the τ note below) |
 | PPS residual histograms with/without sawtooth correction | board + time-interval counter |
 | Holdover drift vs the characterized model | board + temperature chamber |
 | Protocol interop — chrony/ntpd/w32time, ntpsec NTS, `ptp4l`/`phc2sys`, Zabbix | board + live network peers |
@@ -96,6 +96,51 @@ PPS residual histograms, verified against closed-form results (pure frequency of
 ADEV exactly 0; drift → D·τ/√2; white PM → MDEV τ^−3/2 where ADEV is τ^−1). This is the
 *analysis* the above measurements feed. Building it now means it is trustworthy before
 bench time rather than written under bench-time pressure.
+
+### What τ a bench operator can actually reach
+
+The ADEV phase ring is `DISC_ADEV_CAP` = **512 samples at τ₀ = 1 s**, so one
+`PHASE_EXPORT` covers 8 min 32 s. Overlapping ADEV needs n ≥ 2m+1, so m ≤ 255, and the
+octave axis `meridian_phase` prints therefore **stops at τ = 128 s**. That is short of the
+region §14 is asking about for an OCXO and a rubidium.
+
+**The ring is not enlarged to fix this, and cannot be.** Each extra sample costs 4 B in
+`disc_ctx_t`'s corrected ring, 4 B in its uncorrected ring, the same again in the
+`disc_phase_snap_t` the exporter stages through, and 16 B in the export blob — ~32 B per
+sample plus two bitmaps. A 2048-sample ring reaches τ = 1024 s and nothing further, for
+about **65 KB** against the **~73 KB** of SRAM this build has left (88.62 % of 640 KB used),
+and it quadruples the per-second `memmove` on the timing thread. τ = 8192 s is not
+expressible on the part at all.
+
+Instead the record carries **sample identity** — a capture `epoch` and the monotonic index
+`seq0` of its first sample (`PHASE_REC_F_IDENT`, format v3) — and the bench joins successive
+polls:
+
+```
+meridian_ctl.py phase-export run.phr --repeat 12    # 44 min of polling, 240 s apart
+meridian_phase run.*.phr                            # τ axis to 1024 s
+```
+
+`stats/phase_join.c` refuses any join it cannot prove: a differing epoch (a ring reset,
+holdover entry, `disc_restart()` or a reboot), a hole between records, or an overlap whose
+samples disagree. Overlap is the *mechanism*, not a nuisance — polls taken faster than the
+ring empties share samples, and those shared samples are what verify the splice.
+
+| polls at 240 s | polling time | joined n | record span | largest octave m | τ reached |
+|---|---|---|---|---|---|
+| 1 | 0 | 512 | 8.5 min | 128 | 128 s |
+| 4 | 12 min | 1232 | 20.5 min | 512 | 512 s |
+| 12 | 44 min | 3152 | 52.5 min | 1024 | 1024 s |
+| 35 | 2.27 h | 8672 | 2.41 h | 4096 | 4096 s |
+| 273 | 18.1 h | 65535 | 18.2 h | 16384 | 16384 s |
+
+Polling time is `(polls − 1) × 240 s`; the span is longer because the first poll already
+carries the 512 s the ring held when the operator started. n = 512 + (polls − 1) × 240,
+and the largest octave is the greatest power of two with 2m + 1 ≤ n.
+
+The last row is the format's own ceiling: `n` is a `uint16`, so 65535 samples is the
+longest series a single record can express, and `phase_join_meta()` refuses to describe a
+larger join rather than truncate one.
 
 ---
 
