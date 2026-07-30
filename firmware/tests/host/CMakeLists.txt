@@ -146,6 +146,12 @@ module_deps(ring     util)
 module_deps(bytes    util)
 module_deps(aes_siv  nts)
 module_deps(mcp_dfu  mcp util cfg logring quality)
+# PHASE_EXPORT's chunking contract, driven against a fake mcp_phase_port_t. The
+# record's bytes are opaque to the engine, so this suite deliberately does NOT
+# depend on `stats` — the phase_rec encoding it would carry is covered by
+# `phase_export`, and keeping the two apart means an encoder change cannot
+# silently alter what the transport tests believe they are transferring.
+module_deps(mcp_phase_export mcp util cfg logring quality)
 
 # `glue_policy` covers the Zephyr glue's decision logic — the §8.3 self-confirm
 # gate, the MCUboot staging-slot ceiling, the config-applier registry — which
