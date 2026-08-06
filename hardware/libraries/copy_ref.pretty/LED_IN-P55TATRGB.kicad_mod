@@ -1,0 +1,282 @@
+(footprint "LED_IN-P55TATRGB"
+	(version 20260206)
+	(generator "pcbnew")
+	(generator_version "10.0")
+	(layer "F.Cu")
+	(property "Reference" "REF**"
+		(at -1.36 -3.508 0)
+		(layer "F.SilkS")
+		(uuid "d5eb5baa-5b94-4a0f-9a83-e7e3de439db2")
+		(effects
+			(font
+				(size 0.8 0.8)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "IN-P55TATRGB"
+		(at 4.228 3.508 0)
+		(layer "F.Fab")
+		(uuid "4225fbaf-c3a3-46dc-a449-9de2fa4d55e3")
+		(effects
+			(font
+				(size 0.8 0.8)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" "https://www.inolux-corp.com/datasheet/SMDLED/RGB%20Top%20View/IN-P55TATRGB.pdf"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "080e72fd-eeb6-4d71-b4de-8232d666859e")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "Inolux RGB LED, PLCC-6"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "3a376494-86cb-477f-ae92-82d1a08480c1")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "DIGIKEY_PART_NUMBER" "1830-1098-1-ND"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "08f816e1-06dc-4c74-b348-15429a717c4c")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(property "DESCRIPTION" "LED RGB CLEAR 6PLCC SMD"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "c7f5366a-f65f-4c74-ac35-862621c6aada")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(property "MANUFACTURER_NAME" "Inolux"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "c5f96f4d-b3ef-414d-8e77-25670b780f7a")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(property "MANUFACTURER_PART_NUMBER" "IN-P55TATRGB"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "aabdb03b-b36d-43d3-8577-be67a13348d4")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(attr smd)
+	(duplicate_pad_numbers_are_jumpers no)
+	(fp_line
+		(start -0.88 -2.5)
+		(end 0.88 -2.5)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "441cb153-8af2-4258-9f5f-e815bd3fde93")
+	)
+	(fp_line
+		(start -0.88 2.5)
+		(end 0.88 2.5)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "58f7abc8-0bc4-4f9d-8c29-07371858b0c3")
+	)
+	(fp_circle
+		(center -3.9 -1.8)
+		(end -3.8 -1.8)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.SilkS")
+		(uuid "03f58383-e915-4e6f-a4ca-04fa733065b4")
+	)
+	(fp_line
+		(start -3.45 -2.75)
+		(end -3.45 2.75)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "bead002e-5b51-4f21-a50c-0fc6ac534355")
+	)
+	(fp_line
+		(start -3.45 -2.75)
+		(end 3.45 -2.75)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "0a9ec22c-b98e-43aa-a011-5f3f8f709331")
+	)
+	(fp_line
+		(start -3.45 2.75)
+		(end 3.45 2.75)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "bdd4a332-4d5b-4ff6-a7dc-4872e73f92a7")
+	)
+	(fp_line
+		(start 3.45 -2.75)
+		(end 3.45 2.75)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "a699838c-b13d-42e6-877a-178b9b0bbdc1")
+	)
+	(fp_line
+		(start -2.75 -2.5)
+		(end -2.75 2.5)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "dbc3c058-c7f4-421a-aec7-bf4483b35c0e")
+	)
+	(fp_line
+		(start -2.75 -2.5)
+		(end 2.75 -2.5)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "6b26f481-c8c8-4332-ba5d-39564a6dea18")
+	)
+	(fp_line
+		(start -2.75 2.5)
+		(end 2.75 2.5)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "c844b017-6d97-488a-b7f7-780ba3a9a43e")
+	)
+	(fp_line
+		(start 2.75 -2.5)
+		(end 2.75 2.5)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "b07ec91d-b681-4454-995a-9e4e39b21f64")
+	)
+	(fp_circle
+		(center -3.9 -1.8)
+		(end -3.8 -1.8)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "585c2dcb-d8ad-45ec-856e-303018b2d7d5")
+	)
+	(pad "1" smd rect
+		(at -2.2 -1.8)
+		(size 2 1.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "b013bb6c-638e-4f68-b314-391bc66d0f64")
+	)
+	(pad "2" smd rect
+		(at -2.2 0)
+		(size 2 1)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "d696a3cb-bb49-4089-b4e6-21f3d10b5c64")
+	)
+	(pad "3" smd rect
+		(at -2.2 1.8)
+		(size 2 1.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "f0c34f16-be5d-4563-8124-d48a9d746c1b")
+	)
+	(pad "4" smd rect
+		(at 2.2 1.8)
+		(size 2 1.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "a94a41ed-f774-404c-a6e9-035b51999bfd")
+	)
+	(pad "5" smd rect
+		(at 2.2 0)
+		(size 2 1)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "262df129-71d0-4d12-91a7-c175b3fda5f1")
+	)
+	(pad "6" smd rect
+		(at 2.2 -1.8)
+		(size 2 1.4)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "9688e6ce-ebde-4220-b26e-149a1b7902e0")
+	)
+	(embedded_fonts no)
+	(model "${KIPRJMOD}/../libraries/3d/IN-P55TATRGB.STEP"
+		(offset
+			(xyz 0 0 0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz -90 -0 90)
+		)
+	)
+)

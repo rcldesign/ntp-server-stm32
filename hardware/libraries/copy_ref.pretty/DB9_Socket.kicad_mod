@@ -1,0 +1,428 @@
+(footprint "DB9_Socket"
+	(version 20260206)
+	(generator "pcbnew")
+	(generator_version "10.0")
+	(layer "F.Cu")
+	(property "Reference" "REF**"
+		(at -12.025 -4.245 0)
+		(layer "F.SilkS")
+		(uuid "11f72990-1812-4c27-a2c0-9d282134f961")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "DB9 Socket"
+		(at -7.62 16.92 0)
+		(layer "F.Fab")
+		(uuid "74911b44-cfb9-49fe-b647-cc7f6146aebf")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" "https://files.edac.net/edac/content/series/og/English/EDAC%20621%20622%20Series%20D-sub%20Connectors%20English%20Ordering%20Guide.pdf"
+		(at 0 3.3 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "7bb97986-cd8a-427e-8b66-51748933a266")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "9-pin D-SUB connector, socket (female), Mounting Hole"
+		(at 0 3.3 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "85e3226a-3163-4ceb-98a5-3e0738a7ef6e")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "DIGIKEY_PART_NUMBER" "151-622-009-260-033-ND"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "f643a156-627c-4564-8744-bf5e1cf1392a")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(property "DESCRIPTION" "CONN D-SUB RCPT 9POS R/A SOLDER"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "12178986-7dfa-43e0-a5b5-b9878a2e8e53")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(property "MANUFACTURER_NAME" "EDAC Inc."
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "c8917fea-8f3f-4e69-a2f6-e14eb199d50e")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(property "MANUFACTURER_PART_NUMBER" "622-009-260-033"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "aebd83eb-9b7b-42cb-a269-e2377f27450e")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(attr through_hole)
+	(duplicate_pad_numbers_are_jumpers no)
+	(fp_line
+		(start -15.4 -2.9)
+		(end 15.4 -2.9)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "1be18737-de17-4f87-b8eb-b805aa86b1f2")
+	)
+	(fp_line
+		(start -15.4 9.5)
+		(end -15.4 -2.9)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "7eb0c3e8-b307-4415-9b98-c2c1b77be892")
+	)
+	(fp_line
+		(start 15.4 9.5)
+		(end -15.4 9.5)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "3ef9dd4f-eb11-42d1-87f0-5665511c819a")
+	)
+	(fp_line
+		(start 15.405 -2.9)
+		(end 15.405 9.5)
+		(stroke
+			(width 0.15)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "32d3474e-3193-41c7-bbdb-e5ab82df42d1")
+	)
+	(fp_line
+		(start -15.695 -2.9)
+		(end 15.695 -2.9)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "056b662b-ae83-4573-806d-b576fa133820")
+	)
+	(fp_line
+		(start -15.695 10)
+		(end -15.695 -2.9)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "34e28203-f3c9-46c3-b2f9-6ff677779232")
+	)
+	(fp_line
+		(start 15.695 -2.9)
+		(end 15.695 10)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "87e48c90-2d2d-4a97-9b92-61b4afc9d0a4")
+	)
+	(fp_line
+		(start 15.695 10)
+		(end -15.695 10)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "f48cb1f5-9dfa-4f1d-9cbc-70c2790bbf28")
+	)
+	(fp_line
+		(start -15.405 -2.9)
+		(end 15.405 -2.9)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "f3d754bb-7043-4d91-8b02-e95114b76154")
+	)
+	(fp_line
+		(start -15.405 15.5)
+		(end -15.405 -2.9)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "b720b81e-bd4e-4a9c-bee7-e8b389755967")
+	)
+	(fp_line
+		(start -15.4 9.5)
+		(end 23 9.5)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "ffb0d5e7-6f0a-4783-bd89-97c7561c1f98")
+	)
+	(fp_line
+		(start 15.405 -2.9)
+		(end 15.405 15.5)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "3b5d28f0-1ebb-4c8d-82c8-13a6ca377e0c")
+	)
+	(fp_line
+		(start 15.405 15.5)
+		(end -15.405 15.5)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "6c53da49-3d24-436a-b60f-c1773d27a835")
+	)
+	(fp_text user "5"
+		(at -17.3 -0.7 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "44fbd960-a732-4f03-9bf9-32d3fea12e16")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.2)
+				(bold yes)
+			)
+			(justify left bottom)
+		)
+	)
+	(fp_text user "9"
+		(at -17.3 1.9 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "aa63a733-782f-4fd1-9098-6079f65e6f2c")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.2)
+				(bold yes)
+			)
+			(justify left bottom)
+		)
+	)
+	(fp_text user "1"
+		(at 16 -0.8 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "62f2d2b9-dea6-4b3c-8b72-63d9f4d21bc8")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.2)
+				(bold yes)
+			)
+			(justify left bottom)
+		)
+	)
+	(fp_text user "6"
+		(at 16.1 2 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "c5a4a02e-d04e-4d99-b1ee-316da076aa22")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.2)
+				(bold yes)
+			)
+			(justify left bottom)
+		)
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 0 90)
+		(layer "F.Fab")
+		(uuid "f9b33e0a-39da-449a-b231-385390b2fd21")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(fp_text user "P.C.B EDGE"
+		(at 15.8 9.3 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "18a64ffc-a019-4cc6-a187-4812fc425396")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.2)
+				(bold yes)
+			)
+			(justify left bottom)
+		)
+	)
+	(pad "1" thru_hole rect
+		(at 5.54 -1.42)
+		(size 1.8 1.56)
+		(drill 1.1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.102)
+		(uuid "327e9b21-3afd-417e-90c8-0f7c66d9addd")
+	)
+	(pad "2" thru_hole circle
+		(at 2.77 -1.42)
+		(size 1.8 1.8)
+		(drill 1.1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.102)
+		(uuid "b4ce9fbb-316b-4168-bd08-4e51520fffde")
+	)
+	(pad "3" thru_hole circle
+		(at 0 -1.42)
+		(size 1.8 1.8)
+		(drill 1.1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.102)
+		(uuid "bbe85cf9-4ca3-44ea-a4b2-b649e9ccc346")
+	)
+	(pad "4" thru_hole circle
+		(at -2.77 -1.42)
+		(size 1.8 1.8)
+		(drill 1.1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.102)
+		(uuid "4aa1af5b-2d89-4353-a41b-3ce67f936955")
+	)
+	(pad "5" thru_hole circle
+		(at -5.54 -1.42)
+		(size 1.8 1.8)
+		(drill 1.1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.102)
+		(uuid "c8807e1b-65b7-4bf6-abad-6fd8f5767466")
+	)
+	(pad "6" thru_hole circle
+		(at 4.155 1.42)
+		(size 1.8 1.8)
+		(drill 1.1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.102)
+		(uuid "231ff868-bceb-4448-ab6a-82dc94061ab5")
+	)
+	(pad "7" thru_hole circle
+		(at 1.385 1.42)
+		(size 1.8 1.8)
+		(drill 1.1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.102)
+		(uuid "cab477de-b7d6-43e5-960b-3ac9341cc83f")
+	)
+	(pad "8" thru_hole circle
+		(at -1.385 1.42)
+		(size 1.8 1.8)
+		(drill 1.1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.102)
+		(uuid "f2c50767-3a74-4bf3-a472-3bfa8ad51c23")
+	)
+	(pad "9" thru_hole circle
+		(at -4.155 1.42)
+		(size 1.8 1.8)
+		(drill 1.1)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.102)
+		(uuid "2f7c202e-b714-4cb2-aa56-584627f09958")
+	)
+	(pad "SH" thru_hole circle
+		(at -12.495 0)
+		(size 4 4)
+		(drill 3.2)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.102)
+		(uuid "d883c05f-dbc8-4395-b6d8-3a706f9aafd1")
+	)
+	(pad "SH" thru_hole circle
+		(at 12.495 0)
+		(size 4 4)
+		(drill 3.2)
+		(layers "*.Cu" "*.Mask")
+		(remove_unused_layers no)
+		(solder_mask_margin 0.102)
+		(uuid "600548a4-f4f0-4c68-964c-590140b80d54")
+	)
+	(embedded_fonts no)
+	(model "${KIPRJMOD}/../libraries/3d/622-009-260-033 - EDAC D-Sub Connector.STEP"
+		(offset
+			(xyz -12.5 -9 6)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz 90 180 180)
+		)
+	)
+)

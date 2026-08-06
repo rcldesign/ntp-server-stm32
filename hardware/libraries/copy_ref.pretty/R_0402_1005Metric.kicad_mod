@@ -1,0 +1,269 @@
+(footprint "R_0402_1005Metric"
+	(version 20260206)
+	(generator "pcbnew")
+	(generator_version "10.0")
+	(layer "F.Cu")
+	(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC_7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf), generated with kicad-footprint-generator")
+	(tags "resistor")
+	(property "Reference" "REF**"
+		(at 2.9725 0.4625 0)
+		(layer "F.SilkS")
+		(uuid "95522249-f48d-4de3-9034-519e38f27074")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.21)
+			)
+		)
+	)
+	(property "Value" "10k"
+		(at 0 1.17 0)
+		(layer "F.Fab")
+		(uuid "a5e95245-494a-4764-be13-b9981be63dc5")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Datasheet" "https://industrial.panasonic.com/cdbs/www-data/pdf/RDA0000/AOA0000C304.pdf"
+		(at 0 0 180)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "46ffe637-1e4e-489e-a955-d198785d183c")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "Resistor"
+		(at 0 0 180)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "9f93e03e-b20d-489b-9fc4-8de48ee8390a")
+		(effects
+			(font
+				(size 1.27 1.27)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "DIGIKEY_PART_NUMBER" "P10.0KLTR-ND"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "b127c806-8542-4ead-a5ce-62f4fdb7d20e")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(property "DESCRIPTION" "RES SMD 10K OHM 1% 1/10W 0402"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "e93b63e2-1d05-41f8-9eea-ceb3dab75ec7")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(property "MANUFACTURER_NAME" "Panasonic Electronic Components"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "8a9bc4d3-cc1d-4bc1-a515-54bf7247ca9c")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(property "MANUFACTURER_PART_NUMBER" "ERJ-2RKF1002X"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "6d14f992-4cfe-4738-920c-b87ab629d08a")
+		(effects
+			(font
+				(size 1.2 0.84)
+				(thickness 0.01)
+			)
+		)
+	)
+	(attr smd)
+	(duplicate_pad_numbers_are_jumpers no)
+	(fp_line
+		(start 0.153641 -0.38)
+		(end -0.153641 -0.38)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "afa1fc2b-7951-4d5f-ac7c-98594eaeafce")
+	)
+	(fp_line
+		(start 0.153641 0.38)
+		(end -0.153641 0.38)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "6e86dd7d-86fa-4c6a-b33b-d895bae4fe05")
+	)
+	(fp_line
+		(start -0.93 -0.47)
+		(end -0.93 0.47)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "5c879149-4bf2-46bd-adca-924c9057b39d")
+	)
+	(fp_line
+		(start -0.93 0.47)
+		(end 0.93 0.47)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "d3a1771d-d1fb-49f0-b6a0-1a7ed61585e9")
+	)
+	(fp_line
+		(start 0.93 -0.47)
+		(end -0.93 -0.47)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "67c06282-75f1-4c2c-bebc-43583f65e1b6")
+	)
+	(fp_line
+		(start 0.93 0.47)
+		(end 0.93 -0.47)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "433c4a9d-fa9c-4c81-8dc0-6e7227c81c98")
+	)
+	(fp_line
+		(start -0.525 -0.27)
+		(end -0.525 0.27)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "8ab59b8e-99f8-49e8-9c61-5589e9f2d489")
+	)
+	(fp_line
+		(start -0.525 0.27)
+		(end 0.525 0.27)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "8f0504bc-76e4-40d1-a1db-8d08bb0b8003")
+	)
+	(fp_line
+		(start 0.525 -0.27)
+		(end -0.525 -0.27)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "9f18a19f-5673-4a73-903d-2986386521d3")
+	)
+	(fp_line
+		(start 0.525 0.27)
+		(end 0.525 -0.27)
+		(stroke
+			(width 0.2)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "7d76b53b-ba07-454b-8fa9-5b103cfd7b93")
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(uuid "3809b2a0-13ee-400d-aa5f-73c330fa8050")
+		(effects
+			(font
+				(size 0.26 0.26)
+				(thickness 0.04)
+			)
+		)
+	)
+	(pad "1" smd roundrect
+		(at -0.51 0 180)
+		(size 0.54 0.64)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.25)
+		(teardrops
+			(best_length_ratio 0.5)
+			(max_length 1)
+			(best_width_ratio 1)
+			(max_width 2)
+			(curved_edges yes)
+			(filter_ratio 0.9)
+			(enabled yes)
+			(allow_two_segments yes)
+			(prefer_zone_connections yes)
+		)
+		(uuid "e67f5276-7c4a-4065-9808-c270cb6c59cf")
+	)
+	(pad "2" smd roundrect
+		(at 0.51 0 180)
+		(size 0.54 0.64)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(roundrect_rratio 0.25)
+		(teardrops
+			(best_length_ratio 0.5)
+			(max_length 1)
+			(best_width_ratio 1)
+			(max_width 2)
+			(curved_edges yes)
+			(filter_ratio 0.9)
+			(enabled yes)
+			(allow_two_segments yes)
+			(prefer_zone_connections yes)
+		)
+		(uuid "3b7b0748-a9af-4338-8d53-32cd7d7538b5")
+	)
+	(embedded_fonts no)
+	(model "${KICAD10_3DMODEL_DIR}/Resistor_SMD.3dshapes/R_0402_1005Metric.step"
+		(offset
+			(xyz 0 0 0)
+		)
+		(scale
+			(xyz 1 1 1)
+		)
+		(rotate
+			(xyz 0 0 0)
+		)
+	)
+)
