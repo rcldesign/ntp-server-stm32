@@ -1,1 +1,15 @@
 (version 1)
+(rule "via to pad Clearance"
+			(constraint clearance (min 0.3mm))
+			(condition "A.Type == 'Pad' && B.Type == 'Via'"))
+(rule "via to via Clearance"
+			(constraint clearance (min 0.3mm))
+			(condition "A.Type == 'Via' && B.Type == 'Via'"))
+(rule "Vias under SMD 1"
+	(constraint disallow via)
+	(condition "A.Pad_Type == 'SMD'")
+)
+(rule "Absolute length 1"
+	(constraint length (min 54.4mm) (opt 56.4mm) (max 58.4mm))
+	(condition "A.hasNetclass('RMII')")
+)

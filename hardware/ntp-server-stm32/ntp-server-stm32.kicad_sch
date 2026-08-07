@@ -3292,7 +3292,7 @@
 	)
 	(symbol
 		(lib_id "Mechanical:MountingHole")
-		(at 22.86 220.98 0)
+		(at 22.86 218.44 0)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -3303,7 +3303,7 @@
 		(fields_autoplaced yes)
 		(uuid "2246cb72-48c3-4f9e-a51e-bfa4a2bfed25")
 		(property "Reference" "H1"
-			(at 25.4 219.7099 0)
+			(at 25.4 217.1699 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3314,7 +3314,7 @@
 			)
 		)
 		(property "Value" "0.125\" Mounting Hole"
-			(at 25.4 222.2499 0)
+			(at 25.4 219.7099 0)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -3324,8 +3324,8 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
-			(at 22.86 220.98 0)
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
+			(at 22.86 218.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3336,7 +3336,7 @@
 			)
 		)
 		(property "Datasheet" ""
-			(at 22.86 220.98 0)
+			(at 22.86 218.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3347,7 +3347,7 @@
 			)
 		)
 		(property "Description" "Mounting Hole without connection"
-			(at 22.86 220.98 0)
+			(at 22.86 218.44 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -3400,7 +3400,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 22.86 241.3 0)
 			(hide yes)
 			(show_name no)
@@ -3476,7 +3476,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 52.07 236.22 0)
 			(hide yes)
 			(show_name no)
@@ -3552,7 +3552,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 52.07 231.14 0)
 			(hide yes)
 			(show_name no)
@@ -3628,7 +3628,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 52.07 241.3 0)
 			(hide yes)
 			(show_name no)
@@ -3704,7 +3704,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 22.86 256.54 0)
 			(hide yes)
 			(show_name no)
@@ -3780,7 +3780,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 22.86 236.22 0)
 			(hide yes)
 			(show_name no)
@@ -3856,7 +3856,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 52.07 220.98 0)
 			(hide yes)
 			(show_name no)
@@ -3932,7 +3932,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 22.86 231.14 0)
 			(hide yes)
 			(show_name no)
@@ -4008,7 +4008,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 52.07 246.38 0)
 			(hide yes)
 			(show_name no)
@@ -4084,7 +4084,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 22.86 226.06 0)
 			(hide yes)
 			(show_name no)
@@ -4160,7 +4160,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 22.86 251.46 0)
 			(hide yes)
 			(show_name no)
@@ -4236,7 +4236,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 52.07 226.06 0)
 			(hide yes)
 			(show_name no)
@@ -4312,7 +4312,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "copy_ref:MountingHole_3.2mm_M3"
+		(property "Footprint" "MountingHole:MountingHole_3.2mm_M3_Pad"
 			(at 22.86 246.38 0)
 			(hide yes)
 			(show_name no)
